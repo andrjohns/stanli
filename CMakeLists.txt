@@ -44,7 +44,9 @@ enable_testing()
 function(stanrt_add_test NAME)
   add_executable(${NAME} tests/${NAME}.cpp tests/tbb_stub.cpp)
   target_link_libraries(${NAME} PRIVATE stanrt)
-  add_test(NAME ${NAME} COMMAND ${NAME})
+  # Tests run from the repo root so fixture paths are stable.
+  add_test(NAME ${NAME} COMMAND ${NAME}
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endfunction()
 
 stanrt_add_test(test_smoke)
