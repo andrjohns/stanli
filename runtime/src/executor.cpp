@@ -100,6 +100,7 @@ KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
     const Slot& s2 = graph_.slots[op.out2];
     ctx.out2 = Desc{values_.data() + s2.offset, s2.len};
   }
+  ctx.variant = op.variant;
   ctx.scratch = scratch_.data() + op.scratch_off;
   ctx.idata = op.idata;
   ctx.n_idata = op.n_idata;

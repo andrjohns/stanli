@@ -13,17 +13,18 @@ per leapfrog.
 
 | engine | semantics | ns/eval | vs stanrt |
 | --- | --- | --- | --- |
-| stanrt | full lpdf + jacobian | 526 | 1.00x |
-| CmdStan | full lpdf + jacobian (log_prob_jacobian) | 518 | 0.98x |
-| CmdStan | propto + jacobian (sampling path) | 344 | 0.65x |
+| stanrt | propto + jacobian (sampling semantics) | 273 | 1.00x |
+| CmdStan | propto + jacobian (sampling path) | 344 | 1.26x slower |
+| CmdStan | full lpdf + jacobian | 518 | |
+| stanrt (pre-propto, all-active kernels) | full lpdf + jacobian | 526 | |
 
-At matched semantics stanrt is at parity with the compiled model (the op
-graph replaces the var tape: no per-node allocation, no tape teardown,
-which pays for the interpretive dispatch). CmdStan's sampling path is 1.53x
-faster than stanrt today because `~` statements drop parameter-constant
-terms (propto=true); stanrt lowers everything propto=false. Propto kernel
-variants close that gap and are planned (gradients are unaffected; only
-dropped constant terms differ).
+stanrt lowers `~` statements exactly as CmdStan's generated C++
+instantiates them: propto=true with per-argument data/parameter activity
+taken from the MIR's adlevel analysis. With the tape gone (the op graph is
+the tape; steady-state gradients allocate nothing) and data-argument
+partials skipped, stanrt's sampling gradient is 1.26x faster than the
+compiled model's. lp and gradients remain differentially verified against
+CmdStan's log_prob_propto_jacobian across the posteriordb passing set.
 
 ## End to end: model.stan + data.json -> 1000 warmup + 1000 draws
 

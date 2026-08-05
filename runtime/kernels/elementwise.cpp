@@ -107,6 +107,37 @@ void set_index_bwd(KernelCtx& ctx) {
   if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += ctx.out_adj_vec.data[f];
 }
 
+// OP_SLICE: out = in[start .. start+out.len), idata = {start}.
+void slice_fwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0];
+  for (int64_t i = 0; i < ctx.out.len; ++i)
+    ctx.out.data[i] = ctx.in[0].data[start + i];
+}
+void slice_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  const int64_t start = ctx.idata[0];
+  for (int64_t i = 0; i < ctx.out.len; ++i)
+    ctx.in_adj[0].data[start + i] += ctx.out_adj_vec.data[i];
+}
+
+// OP_SET_SLICE: out = copy(in[0]) with out[start..start+in[1].len) = in[1].
+void set_slice_fwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0];
+  for (int64_t i = 0; i < ctx.out.len; ++i) ctx.out.data[i] = ctx.in[0].data[i];
+  for (int64_t i = 0; i < ctx.in[1].len; ++i)
+    ctx.out.data[start + i] = ctx.in[1].data[i];
+}
+void set_slice_bwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0], len = ctx.in[1].len;
+  if (ctx.in_adj[0].data)
+    for (int64_t i = 0; i < ctx.out.len; ++i)
+      if (i < start || i >= start + len)
+        ctx.in_adj[0].data[i] += ctx.out_adj_vec.data[i];
+  if (ctx.in_adj[1].data)
+    for (int64_t i = 0; i < len; ++i)
+      ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[start + i];
+}
+
 }  // namespace
 
 // Called from Executor's constructor path; a static registrar object in a
@@ -119,6 +150,8 @@ void register_elementwise_kernels() {
   register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
   register_kernel(OP_INDEX, Kernel{index_fwd, index_bwd, nullptr});
   register_kernel(OP_SET_INDEX, Kernel{set_index_fwd, set_index_bwd, nullptr});
+  register_kernel(OP_SLICE, Kernel{slice_fwd, slice_bwd, nullptr});
+  register_kernel(OP_SET_SLICE, Kernel{set_slice_fwd, set_slice_bwd, nullptr});
 }
 
 }  // namespace stanrt

@@ -564,7 +564,6 @@ struct Lowering {
         // All-Single indices with compile-time values -> element read.
         Val base = lower_expr(e.args[0]);
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
-        int64_t flat = 0;
         bool all_single = true;
         for (size_t k = 1; k < e.args.size(); ++k)
           if (e.args[k].name != "IndexSingle") all_single = false;
@@ -574,15 +573,26 @@ struct Lowering {
           if (dd != decl_dims.end() && !dd->second.empty())
             bdims = &dd->second;
         }
+        const size_t n_idx = e.args.size() - 1;
+        // Params/locals with recorded dims use array-major layout (outer
+        // index slowest, inner contiguous), matching stanc's read order.
+        if (all_single && bdims && n_idx <= bdims->size()) {
+          const auto& D = *bdims;
+          int64_t inner = 1;
+          for (size_t d = n_idx; d < D.size(); ++d) inner *= D[d];
+          int64_t off = 0;
+          for (size_t d = 0; d < n_idx; ++d) {
+            int64_t stride = inner;
+            for (size_t d2 = d + 1; d2 < n_idx; ++d2) stride *= D[d2];
+            off += (eval_int(e.args[1 + d].args[0]) - 1) * stride;
+          }
+          if (inner == 1)
+            return emit(OP_INDEX, {base.slot}, 1, {}, {(int)off});
+          return emit(OP_SLICE, {base.slot}, inner, {}, {(int)off});
+        }
+        int64_t flat = 0;
         if (all_single && e.args.size() == 2) {
           flat = eval_int(e.args[1].args[0]) - 1;
-        } else if (all_single && bdims &&
-                   e.args.size() == bdims->size() + 1) {
-          int64_t stride = 1;
-          for (size_t d = 0; d < bdims->size(); ++d) {
-            flat += (eval_int(e.args[1 + d].args[0]) - 1) * stride;
-            stride *= (*bdims)[d];
-          }
         } else if (all_single && e.args.size() == 3 && base.si.rows > 0) {
           flat = (eval_int(e.args[2].args[0]) - 1) * base.si.rows +
                  (eval_int(e.args[1].args[0]) - 1);
@@ -682,8 +692,12 @@ struct Lowering {
         idata.insert(idata.end(), g2.begin(), g2.end());
       }
       std::vector<int> ins;
-      for (size_t i = d.n_int; i < e.args.size(); ++i)
+      uint8_t variant = 0;
+      for (size_t i = d.n_int; i < e.args.size(); ++i) {
         ins.push_back(lower_expr(e.args[i]).slot);
+        if (!e.args[i].data_only) variant |= (uint8_t)(1u << (i - d.n_int));
+      }
+      if (e.fn_propto) variant |= 0x80u;
       if (d.glm) {
         // X must be a data matrix; append its dims to idata.
         const SlotInfo& xsi = info[ins[0]];
@@ -692,7 +706,9 @@ struct Lowering {
         idata.push_back((int)xsi.rows);
         idata.push_back((int)xsi.cols);
       }
-      return emit(d.op, ins, 1, {}, idata);
+      Val dv = emit(d.op, ins, 1, {}, idata);
+      if (!d.glm) g.ops.back().variant = variant;
+      return dv;
     }
 
     // Elementwise binaries.
@@ -786,6 +802,11 @@ struct Lowering {
     const mir::Transform& tr = *s.read_transform;
     int64_t raw_len = con_len;
     if (tr.kind == mir::Transform::Simplex) raw_len = con_len - 1;
+    if (s.read_dims.size() > 1) {
+      std::vector<int64_t> dims;
+      for (const auto& d : s.read_dims) dims.push_back(eval_int(d));
+      decl_dims[s.decl_id] = dims;
+    }
     const int raw = add_slot(raw_len, /*is_param=*/true);
     out.param_names.push_back(s.decl_id);
     out.n_unconstrained += raw_len;
@@ -876,20 +897,37 @@ struct Lowering {
             out.fills.emplace_back(
                 prev, std::vector<double>(dl->second.len, 0.0));
           }
-          int64_t flat = 0;
           bool all_single = true;
           for (const auto& ix : s.lhs_idx)
             if (ix.name != "IndexSingle") all_single = false;
           auto dd = decl_dims.find(s.lhs);
+          const int rhs = lower_expr(s.rhs).slot;
+          if (all_single && dd != decl_dims.end() &&
+              s.lhs_idx.size() <= dd->second.size()) {
+            // Array-major offset; sub-array writes become SET_SLICE.
+            const auto& D = dd->second;
+            const size_t n_idx = s.lhs_idx.size();
+            int64_t inner = 1;
+            for (size_t d = n_idx; d < D.size(); ++d) inner *= D[d];
+            int64_t off = 0;
+            for (size_t d = 0; d < n_idx; ++d) {
+              int64_t stride = inner;
+              for (size_t d2 = d + 1; d2 < n_idx; ++d2) stride *= D[d2];
+              off += (eval_int(s.lhs_idx[d].args[0]) - 1) * stride;
+            }
+            if (inner != info[rhs].len && inner != 1)
+              fail("indexed assignment size mismatch for " + s.lhs);
+            Val nv = inner == 1
+                         ? emit(OP_SET_INDEX, {prev, rhs}, info[prev].len,
+                                info[prev], {(int)off})
+                         : emit(OP_SET_SLICE, {prev, rhs}, info[prev].len,
+                                info[prev], {(int)off});
+            scope[s.lhs] = nv.slot;
+            return;
+          }
+          int64_t flat = 0;
           if (all_single && s.lhs_idx.size() == 1) {
             flat = eval_int(s.lhs_idx[0].args[0]) - 1;
-          } else if (all_single && dd != decl_dims.end() &&
-                     s.lhs_idx.size() == dd->second.size()) {
-            int64_t stride = 1;
-            for (size_t d = 0; d < dd->second.size(); ++d) {
-              flat += (eval_int(s.lhs_idx[d].args[0]) - 1) * stride;
-              stride *= dd->second[d];
-            }
           } else if (all_single && s.lhs_idx.size() == 2 &&
                      info[prev].rows > 0) {
             flat = (eval_int(s.lhs_idx[1].args[0]) - 1) * info[prev].rows +
@@ -897,7 +935,6 @@ struct Lowering {
           } else {
             fail("unsupported indexed assignment", s.raw);
           }
-          const int rhs = lower_expr(s.rhs).slot;
           Val nv = emit(OP_SET_INDEX, {prev, rhs}, info[prev].len, info[prev],
                         {(int)flat});
           scope[s.lhs] = nv.slot;

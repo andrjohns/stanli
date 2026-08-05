@@ -201,6 +201,13 @@ CMAKE_TAPI:FILEPATH=/Library/Developer/CommandLineTools/usr/bin/tapi
 // Studio IDE projects all commands are done without /nologo.
 CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
 
+//OCaml stdlib dir (opam switch lib/ocaml) for caml/*.h
+STANRT_OCAML_STDLIB:PATH=
+
+//stanc_embed.o built by tools/stanc_embed/build.sh; enables in-process
+// stanc
+STANRT_STANC_EMBED_OBJ:FILEPATH=
+
 //Value Computed by CMake
 stanrt_BINARY_DIR:STATIC=/Users/xitrium/claud/stanrt/build-rel
 

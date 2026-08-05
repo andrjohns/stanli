@@ -19,20 +19,69 @@
 namespace stanrt {
 namespace {
 
-template <int NArgs, typename F, typename... Bound>
-void bind_args(KernelCtx& ctx, F&& f, const Bound&... bound) {
+// Compile-time recursion over per-arg ACTIVITY (Mask bit: 1 = autodiff
+// rvar, 0 = plain double) with runtime shape branching inside. Matching the
+// data/parameter instantiation CmdStan's generated code uses is what makes
+// propto term-dropping and evaluation order line up exactly.
+template <int NArgs, unsigned Mask, typename F, typename... Bound>
+void bind_args_m(KernelCtx& ctx, F&& f, const Bound&... bound) {
   if constexpr (sizeof...(Bound) == NArgs) {
     f(bound...);
   } else {
     constexpr int i = sizeof...(Bound);
+    constexpr bool active = ((Mask >> i) & 1u) != 0;
     if (ctx.in[i].len == 1) {
-      bind_args<NArgs>(ctx, f, bound..., rvar(ctx.in[i].data[0]));
+      if constexpr (active) {
+        bind_args_m<NArgs, Mask>(ctx, f, bound..., rvar(ctx.in[i].data[0]));
+      } else {
+        bind_args_m<NArgs, Mask>(ctx, f, bound..., ctx.in[i].data[0]);
+      }
     } else {
-      bind_args<NArgs>(ctx, f, bound..., as_rvar(ctx.in[i]));
+      if constexpr (active) {
+        bind_args_m<NArgs, Mask>(ctx, f, bound..., as_rvar(ctx.in[i]));
+      } else {
+        bind_args_m<NArgs, Mask>(
+            ctx, f, bound...,
+            Eigen::Map<const Eigen::VectorXd>(ctx.in[i].data, ctx.in[i].len));
+      }
     }
   }
 }
 
+// Runtime mask -> compile-time Mask instantiation.
+template <int NArgs, typename F, unsigned M = 0>
+void mask_dispatch(unsigned mask, KernelCtx& ctx, F&& f) {
+  if (mask == M) {
+    bind_args_m<NArgs, M>(ctx, f);
+    return;
+  }
+  if constexpr (M + 1 < (1u << NArgs)) {
+    mask_dispatch<NArgs, F, M + 1>(mask, ctx, std::forward<F>(f));
+  }
+}
+
+template <int NArgs, typename FProp, typename FFull>
+void density_fwd_v(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
+  sink s;
+  int64_t off = 0;
+  for (int k = 0; k < NArgs; ++k) {
+    s.buf[k] = ctx.scratch + off;
+    off += ctx.in[k].len;
+  }
+  const unsigned mask = ctx.variant == 0
+                            ? (1u << NArgs) - 1  // default: all active
+                            : (ctx.variant & 0x3fu);
+  active_sink() = &s;
+  if (ctx.variant & 0x80u) {
+    mask_dispatch<NArgs>(mask, ctx, fp);
+  } else {
+    mask_dispatch<NArgs>(mask, ctx, ff);
+  }
+  active_sink() = nullptr;
+  ctx.out.data[0] = s.value;
+}
+
+// Back-compat shim for kernels not yet variant-aware.
 template <int NArgs, typename F>
 void density_fwd(KernelCtx& ctx, F&& f) {
   sink s;
@@ -42,7 +91,7 @@ void density_fwd(KernelCtx& ctx, F&& f) {
     off += ctx.in[k].len;
   }
   active_sink() = &s;
-  bind_args<NArgs>(ctx, f);
+  bind_args_m<NArgs, (1u << NArgs) - 1>(ctx, f);
   active_sink() = nullptr;
   ctx.out.data[0] = s.value;
 }
@@ -51,9 +100,11 @@ void density_fwd(KernelCtx& ctx, F&& f) {
 // argument paired with vector ones holds the already-summed partial.
 template <int NArgs>
 void density_bwd(KernelCtx& ctx) {
+  const unsigned mask = ctx.variant == 0 ? (1u << NArgs) - 1
+                                         : (ctx.variant & 0x3fu);
   int64_t off = 0;
   for (int k = 0; k < NArgs; ++k) {
-    if (ctx.in_adj[k].data != nullptr) {
+    if (((mask >> k) & 1u) != 0 && ctx.in_adj[k].data != nullptr) {
       for (int64_t i = 0; i < ctx.in[k].len; ++i)
         ctx.in_adj[k].data[i] += ctx.out_adj * ctx.scratch[off + i];
     }
@@ -69,98 +120,98 @@ int64_t sum_in_lens(const Op& op, const Slot* slots) {
 
 // ---- lpdfs: real args only -------------------------------------------------
 void normal_fwd(KernelCtx& ctx) {
-  density_fwd<3>(ctx, [](const auto&... a) {
-    stan::math::normal_lpdf<false>(a...);
-  });
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::normal_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::normal_lpdf<false>(a...); });
 }
 void cauchy_fwd(KernelCtx& ctx) {
-  density_fwd<3>(ctx, [](const auto&... a) {
-    stan::math::cauchy_lpdf<false>(a...);
-  });
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::cauchy_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::cauchy_lpdf<false>(a...); });
 }
 void student_t_fwd(KernelCtx& ctx) {
-  density_fwd<4>(ctx, [](const auto&... a) {
-    stan::math::student_t_lpdf<false>(a...);
-  });
+  density_fwd_v<4>(
+      ctx, [](const auto&... a) { stan::math::student_t_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::student_t_lpdf<false>(a...); });
 }
 void gamma_fwd(KernelCtx& ctx) {
-  density_fwd<3>(ctx, [](const auto&... a) {
-    stan::math::gamma_lpdf<false>(a...);
-  });
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::gamma_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::gamma_lpdf<false>(a...); });
 }
 void beta_fwd(KernelCtx& ctx) {
-  density_fwd<3>(ctx, [](const auto&... a) {
-    stan::math::beta_lpdf<false>(a...);
-  });
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::beta_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::beta_lpdf<false>(a...); });
 }
 
 void lognormal_fwd(KernelCtx& ctx) {
-  density_fwd<3>(ctx, [](const auto&... a) {
-    stan::math::lognormal_lpdf<false>(a...);
-  });
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::lognormal_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::lognormal_lpdf<false>(a...); });
 }
 void uniform_fwd(KernelCtx& ctx) {
-  density_fwd<3>(ctx, [](const auto&... a) {
-    stan::math::uniform_lpdf<false>(a...);
-  });
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::uniform_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::uniform_lpdf<false>(a...); });
 }
 void double_exp_fwd(KernelCtx& ctx) {
-  density_fwd<3>(ctx, [](const auto&... a) {
-    stan::math::double_exponential_lpdf<false>(a...);
-  });
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::double_exponential_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::double_exponential_lpdf<false>(a...); });
 }
 void exponential_fwd(KernelCtx& ctx) {
-  density_fwd<2>(ctx, [](const auto&... a) {
-    stan::math::exponential_lpdf<false>(a...);
-  });
+  density_fwd_v<2>(
+      ctx, [](const auto&... a) { stan::math::exponential_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::exponential_lpdf<false>(a...); });
 }
 void inv_gamma_fwd(KernelCtx& ctx) {
-  density_fwd<3>(ctx, [](const auto&... a) {
-    stan::math::inv_gamma_lpdf<false>(a...);
-  });
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::inv_gamma_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::inv_gamma_lpdf<false>(a...); });
 }
 void std_normal_fwd(KernelCtx& ctx) {
-  density_fwd<1>(ctx, [](const auto&... a) {
-    stan::math::std_normal_lpdf<false>(a...);
-  });
+  density_fwd_v<1>(
+      ctx, [](const auto&... a) { stan::math::std_normal_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::std_normal_lpdf<false>(a...); });
 }
 
 // ---- lpmfs: integer outcome from idata, not a propagator edge --------------
 void poisson_log_fwd(KernelCtx& ctx) {
   Eigen::Map<const Eigen::VectorXi> n(ctx.idata,
                                       static_cast<Eigen::Index>(ctx.n_idata));
-  density_fwd<1>(ctx, [&](const auto& alpha) {
-    stan::math::poisson_log_lpmf<false>(n, alpha);
-  });
+  density_fwd_v<1>(
+      ctx, [&](const auto& alpha) { stan::math::poisson_log_lpmf<true>(n, alpha); },
+      [&](const auto& alpha) { stan::math::poisson_log_lpmf<false>(n, alpha); });
 }
 void bernoulli_logit_fwd(KernelCtx& ctx) {
   Eigen::Map<const Eigen::VectorXi> y(ctx.idata,
                                       static_cast<Eigen::Index>(ctx.n_idata));
-  density_fwd<1>(ctx, [&](const auto& alpha) {
-    stan::math::bernoulli_logit_lpmf<false>(y, alpha);
-  });
+  density_fwd_v<1>(
+      ctx, [&](const auto& alpha) { stan::math::bernoulli_logit_lpmf<true>(y, alpha); },
+      [&](const auto& alpha) { stan::math::bernoulli_logit_lpmf<false>(y, alpha); });
 }
 
 void bernoulli_fwd(KernelCtx& ctx) {
   Eigen::Map<const Eigen::VectorXi> y(ctx.idata,
                                       static_cast<Eigen::Index>(ctx.n_idata));
-  density_fwd<1>(ctx, [&](const auto& theta) {
-    stan::math::bernoulli_lpmf<false>(y, theta);
-  });
+  density_fwd_v<1>(
+      ctx, [&](const auto& theta) { stan::math::bernoulli_lpmf<true>(y, theta); },
+      [&](const auto& theta) { stan::math::bernoulli_lpmf<false>(y, theta); });
 }
 void poisson_fwd(KernelCtx& ctx) {
   Eigen::Map<const Eigen::VectorXi> n(ctx.idata,
                                       static_cast<Eigen::Index>(ctx.n_idata));
-  density_fwd<1>(ctx, [&](const auto& lambda) {
-    stan::math::poisson_lpmf<false>(n, lambda);
-  });
+  density_fwd_v<1>(
+      ctx, [&](const auto& lambda) { stan::math::poisson_lpmf<true>(n, lambda); },
+      [&](const auto& lambda) { stan::math::poisson_lpmf<false>(n, lambda); });
 }
 void neg_binomial_2_fwd(KernelCtx& ctx) {
   Eigen::Map<const Eigen::VectorXi> n(ctx.idata,
                                       static_cast<Eigen::Index>(ctx.n_idata));
-  density_fwd<2>(ctx, [&](const auto&... a) {
-    stan::math::neg_binomial_2_lpmf<false>(n, a...);
-  });
+  density_fwd_v<2>(
+      ctx, [&](const auto&... a) { stan::math::neg_binomial_2_lpmf<true>(n, a...); },
+      [&](const auto&... a) { stan::math::neg_binomial_2_lpmf<false>(n, a...); });
 }
 // Binomials carry two int groups; idata = [len_n, n..., len_N, N...].
 void binomial_fwd(KernelCtx& ctx) {
@@ -168,18 +219,18 @@ void binomial_fwd(KernelCtx& ctx) {
   Eigen::Map<const Eigen::VectorXi> n(ctx.idata + 1, ln);
   const int lN = static_cast<int>(ctx.idata[1 + ln]);
   Eigen::Map<const Eigen::VectorXi> N(ctx.idata + 2 + ln, lN);
-  density_fwd<1>(ctx, [&](const auto& theta) {
-    stan::math::binomial_lpmf<false>(n, N, theta);
-  });
+  density_fwd_v<1>(
+      ctx, [&](const auto& theta) { stan::math::binomial_lpmf<true>(n, N, theta); },
+      [&](const auto& theta) { stan::math::binomial_lpmf<false>(n, N, theta); });
 }
 void binomial_logit_fwd(KernelCtx& ctx) {
   const int ln = static_cast<int>(ctx.idata[0]);
   Eigen::Map<const Eigen::VectorXi> n(ctx.idata + 1, ln);
   const int lN = static_cast<int>(ctx.idata[1 + ln]);
   Eigen::Map<const Eigen::VectorXi> N(ctx.idata + 2 + ln, lN);
-  density_fwd<1>(ctx, [&](const auto& alpha) {
-    stan::math::binomial_logit_lpmf<false>(n, N, alpha);
-  });
+  density_fwd_v<1>(
+      ctx, [&](const auto& alpha) { stan::math::binomial_logit_lpmf<true>(n, N, alpha); },
+      [&](const auto& alpha) { stan::math::binomial_logit_lpmf<false>(n, N, alpha); });
 }
 // bernoulli_logit_glm(y | X, alpha, beta): X data matrix (row-major slot),
 // idata = [y..., rows, cols]. Edges are (x, alpha, beta); X is arg 0.
