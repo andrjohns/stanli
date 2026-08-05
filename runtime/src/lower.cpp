@@ -791,9 +791,42 @@ struct Lowering {
             bdims = &dd->second;
         }
         const size_t n_idx = e.args.size() - 1;
+        // Between subrange read on a 1-D value: v[a:b] is contiguous.
+        if (e.args.size() == 2 && e.args[1].name == "IndexBetween") {
+          const int64_t lo = eval_int(e.args[1].args[0]);
+          const int64_t hi = eval_int(e.args[1].args[1]);
+          return emit(OP_SLICE, {base.slot}, hi - lo + 1, {}, {(int)(lo - 1)});
+        }
+        // Gather by a data int array: v[idx].
+        if (e.args.size() == 2 && e.args[1].name == "IndexMulti") {
+          DataMap::Entry iv = td_eval(e.args[1].args[0]);
+          if (!iv.is_int || iv.i.empty())
+            fail("gather index must be int data", e.raw);
+          std::vector<int> idata;
+          idata.reserve(iv.i.size());
+          for (int x : iv.i) idata.push_back(x - 1);
+          return emit(OP_GATHER, {base.slot}, (int64_t)idata.size(), {},
+                      idata);
+        }
+        // Matrix row/column slices (col-major storage; rows>0 marks a
+        // matrix slot).
+        if (e.args.size() == 3 && base.si.rows > 0 &&
+            e.args[1].name == "IndexSingle" && e.args[2].name == "IndexAll") {
+          const int64_t i = eval_int(e.args[1].args[0]) - 1;
+          return emit(OP_SLICE_STRIDED, {base.slot}, base.si.cols, {},
+                      {(int)i, (int)base.si.rows});
+        }
+        if (e.args.size() == 3 && base.si.rows > 0 &&
+            e.args[1].name == "IndexAll" && e.args[2].name == "IndexSingle") {
+          const int64_t j = eval_int(e.args[2].args[0]) - 1;
+          return emit(OP_SLICE, {base.slot}, base.si.rows, {},
+                      {(int)(j * base.si.rows)});
+        }
         // Params/locals with recorded dims use array-major layout (outer
         // index slowest, inner contiguous), matching stanc's read order.
-        if (all_single && bdims && n_idx <= bdims->size()) {
+        // Matrix slots (rows>0) are col-major and never take this path.
+        if (all_single && bdims && n_idx <= bdims->size() &&
+            base.si.rows == 0) {
           const auto& D = *bdims;
           int64_t inner = 1;
           for (size_t d = n_idx; d < D.size(); ++d) inner *= D[d];
@@ -821,7 +854,15 @@ struct Lowering {
           flat = (eval_int(e.args[2].args[0]) - 1) * base.si.rows +
                  (eval_int(e.args[1].args[0]) - 1);
         } else {
-          fail("unsupported index expression", e.raw);
+          std::string desc = "unsupported index expression: base=" +
+                             (e.args[0].kind == mir::Expr::Var
+                                  ? e.args[0].name
+                                  : std::string("<expr>"));
+          for (size_t k = 1; k < e.args.size(); ++k)
+            desc += " [" +
+                    (e.args[k].name.empty() ? "?" : e.args[k].name) + "]";
+          desc += " type=" + e.type_;
+          fail(desc, e.raw);
         }
         return emit(OP_INDEX, {base.slot}, 1, {}, {(int)flat});
       }
@@ -1174,7 +1215,14 @@ struct Lowering {
       for (const auto& d : s.read_dims) dims.push_back(eval_int(d));
       decl_dims[s.decl_id] = dims;
     }
-    const int raw = add_slot(raw_len, /*is_param=*/true);
+    SlotInfo psi;
+    if (s.decl_type.base == "SMatrix" && s.read_dims.size() == 2) {
+      // Matrix params are column-major in the unconstrained vector; the
+      // slot advertises its shape so index lowering picks col-major paths.
+      psi.rows = eval_int(s.read_dims[0]);
+      psi.cols = eval_int(s.read_dims[1]);
+    }
+    const int raw = add_slot(raw_len, /*is_param=*/true, psi);
     out.param_names.push_back(s.decl_id);
     out.n_unconstrained += raw_len;
 
@@ -1273,8 +1321,30 @@ struct Lowering {
             if (ix.name != "IndexSingle") all_single = false;
           auto dd = decl_dims.find(s.lhs);
           const int rhs = lower_expr(s.rhs).slot;
+          // Between write w[a:b] = rhs (contiguous on 1-D values).
+          if (s.lhs_idx.size() == 1 &&
+              s.lhs_idx[0].name == "IndexBetween") {
+            const int64_t lo = eval_int(s.lhs_idx[0].args[0]);
+            const int64_t hi = eval_int(s.lhs_idx[0].args[1]);
+            if (info[rhs].len != hi - lo + 1)
+              fail("range assignment size mismatch for " + s.lhs);
+            Val nv = emit(OP_SET_SLICE, {prev, rhs}, info[prev].len,
+                          info[prev], {(int)(lo - 1)});
+            scope[s.lhs] = nv.slot;
+            return;
+          }
+          // Column write M[:, j] = rhs (contiguous in col-major storage).
+          if (s.lhs_idx.size() == 2 && s.lhs_idx[0].name == "IndexAll" &&
+              s.lhs_idx[1].name == "IndexSingle" && info[prev].rows > 0) {
+            const int64_t j = eval_int(s.lhs_idx[1].args[0]) - 1;
+            Val nv = emit(OP_SET_SLICE, {prev, rhs}, info[prev].len,
+                          info[prev], {(int)(j * info[prev].rows)});
+            scope[s.lhs] = nv.slot;
+            return;
+          }
           if (all_single && dd != decl_dims.end() &&
-              s.lhs_idx.size() <= dd->second.size()) {
+              s.lhs_idx.size() <= dd->second.size() &&
+              info[prev].rows == 0) {
             // Array-major offset; sub-array writes become SET_SLICE.
             const auto& D = dd->second;
             const size_t n_idx = s.lhs_idx.size();
@@ -1304,7 +1374,10 @@ struct Lowering {
             flat = (eval_int(s.lhs_idx[1].args[0]) - 1) * info[prev].rows +
                    (eval_int(s.lhs_idx[0].args[0]) - 1);
           } else {
-            fail("unsupported indexed assignment", s.raw);
+            std::string desc = "unsupported indexed assignment: lhs=" + s.lhs;
+            for (const auto& ix : s.lhs_idx)
+              desc += " [" + (ix.name.empty() ? "?" : ix.name) + "]";
+            fail(desc, s.raw);
           }
           Val nv = emit(OP_SET_INDEX, {prev, rhs}, info[prev].len, info[prev],
                         {(int)flat});

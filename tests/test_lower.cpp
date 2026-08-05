@@ -348,6 +348,51 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // Index forms on parameters: gather, Between read/write, matrix row and
+  // column slices, column writes.
+  {
+    DataMap d = DataMap::from_json(R"({"N": 4, "idx": [2, 1, 3, 2]})");
+    CompiledModel lm = compile_model(slurp("tests/fixtures/idx.tmir.sexp"), d);
+    check(lm.n_unconstrained == 9, "idx 9 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[9] = {0.5, -0.7, 1.2,           // v
+                         0.1, -0.3, 0.6, 0.9, -1.1, 0.2};  // M col-major
+    for (int i = 0; i < 9; ++i) lex.params_data()[i] = q[i];
+    double grad[9];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> v(3);
+    v << q[0], q[1], q[2];
+    Eigen::Matrix<var, -1, 1> M(6);  // col-major flat
+    for (int i = 0; i < 6; ++i) M(i) = q[3 + i];
+    const int idx[4] = {2, 1, 3, 2};
+    Eigen::Matrix<var, -1, 1> g(4);
+    for (int k = 0; k < 4; ++k) g(k) = v(idx[k] - 1);
+    Eigen::Matrix<var, -1, 1> w(2);
+    w << v(1), v(2);
+    Eigen::Matrix<var, -1, 1> row1(3), col3(2), lcol2(2), v12(2);
+    row1 << M(0), M(2), M(4);      // row 1 of 2x3 col-major: stride 2
+    col3 << M(4), M(5);            // column 3: offset 4
+    lcol2 = w;                     // L[:,2] = w
+    v12 << v(0), v(1);
+    var t1 = stan::math::normal_lpdf<false>(g, 0.0, 1.0);
+    var t2 = stan::math::normal_lpdf<false>(v12, 0.0, 2.0);
+    var t3 = stan::math::normal_lpdf<false>(row1, 0.0, 1.0);
+    var t4 = stan::math::normal_lpdf<false>(col3, 0.0, 3.0);
+    var t5 = stan::math::normal_lpdf<false>(lcol2, 0.0, 2.0);
+    var t6 = stan::math::normal_lpdf<false>(w, 1.0, 1.0);
+    var acc = (((((t1 + t2) + t3) + t4) + t5) + t6);
+    acc.grad();
+    expect_eq("idx lp", lp, acc.val());
+    for (int i = 0; i < 3; ++i)
+      expect_eq("idx gv" + std::to_string(i), grad[i], v(i).adj());
+    for (int i = 0; i < 6; ++i)
+      expect_eq("idx gM" + std::to_string(i), grad[3 + i], M(i).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

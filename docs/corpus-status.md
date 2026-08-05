@@ -1,7 +1,8 @@
 # Corpus status
 
-Passing: 89/120
+Passing: 96/120
 
+- OK `2pl_latent_reg_irt`
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
 - OK `GLM_Poisson_model`
@@ -9,6 +10,8 @@ Passing: 89/120
 - OK `Mb_model`
 - OK `Mh_model`
 - OK `Mt_model`
+- OK `Mtbh_model`
+- OK `Mth_model`
 - OK `Rate_1_model`
 - OK `Rate_2_model`
 - OK `Rate_3_model`
@@ -28,6 +31,8 @@ Passing: 89/120
 - OK `eight_schools_noncentered`
 - OK `election88_full`
 - OK `garch11`
+- OK `hmm_drive_0`
+- OK `hmm_drive_1`
 - OK `hmm_example`
 - OK `hmm_gaussian`
 - OK `iohmm_reg`
@@ -55,6 +60,7 @@ Passing: 89/120
 - OK `logmesquite_logvas`
 - OK `logmesquite_logvash`
 - OK `logmesquite_logvolume`
+- OK `losscurve_sislob`
 - OK `low_dim_gauss_mix`
 - OK `low_dim_gauss_mix_collapse`
 - OK `mesquite`
@@ -81,6 +87,7 @@ Passing: 89/120
 - OK `seeds_model`
 - OK `seeds_stanified_model`
 - OK `sesame_one_pred_a`
+- OK `state_space_stochastic_level_stochastic_seasonal`
 - OK `surgical_model`
 - OK `wells_daae_c_model`
 - OK `wells_dae_c_model`
@@ -94,10 +101,7 @@ Passing: 89/120
 
 ## Failures
 
-- `2pl_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
-- `Mtbh_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
-- `Mth_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Survey_model`: EVAL_FAIL binomial_lpmf: Successes variable has size = 5, but Population size parameter has size 1; and they must be the same size.
 - `accel_gp`: COMPILE_FAIL stanrt compile: unsupported function dims
 - `bym2_offset_only`: COMPILE_FAIL stanrt compile: unsupported function dot_self
@@ -110,11 +114,8 @@ Passing: 89/120
 - `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: size expression needs unknown int beta_free_1dim__
 - `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported function append_row
 - `hier_2pl`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
-- `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported index expression
-- `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported index expression
-- `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported index expression
+- `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
-- `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
 - `lsat_model`: COMPILE_FAIL stanrt compile: bernoulli_logit_lpmf: int argument must be int data in M2
 - `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported function multi_normal_lpdf
@@ -124,4 +125,3 @@ Passing: 89/120
 - `rats_model`: COMPILE_FAIL stanrt compile: size expression needs unknown int irat
 - `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
 - `soil_incubation`: COMPILE_FAIL stanrt compile: unknown variable x_r
-- `state_space_stochastic_level_stochastic_seasonal`: COMPILE_FAIL stanrt compile: unsupported index expression

@@ -134,6 +134,18 @@ void slice_strided_bwd(KernelCtx& ctx) {
     ctx.in_adj[0].data[start + i * stride] += ctx.out_adj_vec.data[i];
 }
 
+// OP_GATHER: out[k] = in[idata[k]] (0-based indices); adjoints scatter-add
+// in ascending k, matching the var path's edge order (duplicates included).
+void gather_fwd(KernelCtx& ctx) {
+  for (int64_t k = 0; k < ctx.out.len; ++k)
+    ctx.out.data[k] = ctx.in[0].data[ctx.idata[k]];
+}
+void gather_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  for (int64_t k = 0; k < ctx.out.len; ++k)
+    ctx.in_adj[0].data[ctx.idata[k]] += ctx.out_adj_vec.data[k];
+}
+
 // OP_SET_SLICE: out = copy(in[0]) with out[start..start+in[1].len) = in[1].
 void set_slice_fwd(KernelCtx& ctx) {
   const int64_t start = ctx.idata[0];
@@ -168,6 +180,7 @@ void register_elementwise_kernels() {
   register_kernel(OP_SET_SLICE, Kernel{set_slice_fwd, set_slice_bwd, nullptr});
   register_kernel(OP_SLICE_STRIDED,
                   Kernel{slice_strided_fwd, slice_strided_bwd, nullptr});
+  register_kernel(OP_GATHER, Kernel{gather_fwd, gather_bwd, nullptr});
 }
 
 }  // namespace stanrt

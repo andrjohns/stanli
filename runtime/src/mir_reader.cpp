@@ -33,6 +33,31 @@ const Node* field(const Node& n, const char* key) {
 
 Expr read_expr(const Node& n);
 
+Expr read_index(const Node& ix_n) {
+  Expr ix;
+  if (ix_n.is_atom() && ix_n.atom == "All") {
+    ix.kind = Expr::FunApp;
+    ix.name = "IndexAll";
+  } else if (!ix_n.is_atom() && ix_n.head_is("Single")) {
+    ix.kind = Expr::FunApp;
+    ix.name = "IndexSingle";
+    ix.args.push_back(read_expr(ix_n[1]));
+  } else if (!ix_n.is_atom() && ix_n.head_is("Between")) {
+    ix.kind = Expr::FunApp;
+    ix.name = "IndexBetween";
+    ix.args.push_back(read_expr(ix_n[1]));
+    ix.args.push_back(read_expr(ix_n[2]));
+  } else if (!ix_n.is_atom() && ix_n.head_is("MultiIndex")) {
+    ix.kind = Expr::FunApp;
+    ix.name = "IndexMulti";
+    ix.args.push_back(read_expr(ix_n[1]));
+  } else {
+    ix.kind = Expr::Unsupported;
+    ix.raw = dump(ix_n);
+  }
+  return ix;
+}
+
 // n is the `(pattern X)` payload X for an expression.
 Expr read_expr_pattern(const Node& p) {
   Expr e;
@@ -101,27 +126,8 @@ Expr read_expr_pattern(const Node& p) {
     e.args.push_back(read_expr(p[1]));
     for (size_t i = 2; i < p.size(); ++i) {
       const Node& idxs = p[i];
-      for (size_t a = 0; a < idxs.size(); ++a) {
-        const Node& ix_n = idxs[a];
-        Expr ix;
-        if (ix_n.is_atom() && ix_n.atom == "All") {
-          ix.kind = Expr::FunApp;
-          ix.name = "IndexAll";
-        } else if (!ix_n.is_atom() && ix_n.head_is("Single")) {
-          ix.kind = Expr::FunApp;
-          ix.name = "IndexSingle";
-          ix.args.push_back(read_expr(ix_n[1]));
-        } else if (!ix_n.is_atom() && ix_n.head_is("Between")) {
-          ix.kind = Expr::FunApp;
-          ix.name = "IndexBetween";
-          ix.args.push_back(read_expr(ix_n[1]));
-          ix.args.push_back(read_expr(ix_n[2]));
-        } else {
-          ix.kind = Expr::Unsupported;
-          ix.raw = dump(ix_n);
-        }
-        e.args.push_back(ix);
-      }
+      for (size_t a = 0; a < idxs.size(); ++a)
+        e.args.push_back(read_index(idxs[a]));
     }
   } else {
     e.kind = Expr::Unsupported;
@@ -261,22 +267,8 @@ Stmt read_stmt(const Node& n) {
       return s;
     }
     if (lhs.size() > 1) {
-      for (size_t i = 0; i < lhs[1].size(); ++i) {
-        const Node& ix_n = lhs[1][i];
-        Expr ix;
-        if (ix_n.is_atom() && ix_n.atom == "All") {
-          ix.kind = Expr::FunApp;
-          ix.name = "IndexAll";
-        } else if (!ix_n.is_atom() && ix_n.head_is("Single")) {
-          ix.kind = Expr::FunApp;
-          ix.name = "IndexSingle";
-          ix.args.push_back(read_expr(ix_n[1]));
-        } else {
-          ix.kind = Expr::Unsupported;
-          ix.raw = dump(ix_n);
-        }
-        s.lhs_idx.push_back(ix);
-      }
+      for (size_t i = 0; i < lhs[1].size(); ++i)
+        s.lhs_idx.push_back(read_index(lhs[1][i]));
     }
     s.rhs = read_expr(p[p.size() - 1]);
   } else if (head == "TargetPE") {
