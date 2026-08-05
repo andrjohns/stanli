@@ -126,7 +126,7 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 17/17 tests green; 105/120 posteriordb models
+macOS arm64 / clang: 16/16 tests green; 105/120 posteriordb models
 CmdStan-verified. Sampling-semantics gradients (propto with
 per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
 for the numbers.
