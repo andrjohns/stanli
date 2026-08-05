@@ -422,6 +422,42 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // rep_matrix on parameters (row-vector across rows, scalar fill) with
+  // to_vector flattening.
+  {
+    DataMap d;
+    d.set_int("R", 2);
+    CompiledModel lm = compile_model(slurp("tests/fixtures/repm.tmir.sexp"), d);
+    check(lm.n_unconstrained == 4, "repm 4 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[4] = {0.4, -0.2, 0.9, 0.1};
+    for (int i = 0; i < 4; ++i) lex.params_data()[i] = q[i];
+    double grad[4];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> a(3);
+    a << q[0], q[1], q[2];
+    var s = q[3];
+    // L[i, j] = a[j]; col-major flat: column j is R copies of a[j].
+    Eigen::Matrix<var, -1, 1> Lf(6), Sf(6);
+    for (int j = 0; j < 3; ++j)
+      for (int i = 0; i < 2; ++i) {
+        Lf(j * 2 + i) = a(j);
+        Sf(j * 2 + i) = s;
+      }
+    var t1 = stan::math::normal_lpdf<false>(Lf, 0.0, 1.0);
+    var t2 = stan::math::normal_lpdf<false>(Sf, 0.0, 2.0);
+    var acc = (t1 + t2);
+    acc.grad();
+    expect_eq("repm lp", lp, acc.val());
+    for (int i = 0; i < 3; ++i)
+      expect_eq("repm ga" + std::to_string(i), grad[i], a(i).adj());
+    expect_eq("repm gs", grad[3], s.adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

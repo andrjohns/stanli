@@ -131,6 +131,22 @@ passing, all CmdStan-verified (41 bitwise). Sampling-semantics gradients (propto
 per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
 for the numbers.
 
-In progress: the remaining corpus models (categorical/GLM densities,
-rep_matrix, cholesky transforms, GP covariance ops, ODE integrators),
-Linux wheels + CI, the CRAN shim.
+## Roadmap
+
+1. Corpus tail: GLM/multivariate densities, cholesky transforms, GP
+   covariance ops, ODE integrators (legacy nested replay), graph-level
+   loops for the unroll-bound models.
+2. Linux + x86 wheels with CI owning the opam + cmake build
+   (cibuildwheel); CRAN shim package.
+3. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
+   kernels mirror CmdStan's default AoS arithmetic, which is scalar for
+   transcendentals and reductions (strided var access defeats Eigen's
+   packet math). stan-math's `var_value<Matrix>` overloads compute over
+   contiguous doubles and vectorize, and `stanc --O1` already emits them
+   variable-by-variable where every use is varmat-compatible. The plan
+   follows the same shape: switch kernels to mirror the varmat
+   expressions function-by-function where the overload exists
+   (constrains, elementwise, matvec, the common densities), verify
+   differentially against `stanc --O1` CmdStan builds, and keep AoS
+   parity for the rest. Profile a large-N model first to size the win;
+   graph-level fusion of elementwise chains is the follow-on.

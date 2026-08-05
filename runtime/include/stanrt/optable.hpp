@@ -40,6 +40,7 @@ enum Opcode : uint16_t {
   OP_SLICE_STRIDED,
   OP_GATHER,
   OP_CONCAT2,
+  OP_REP_MAT,
   OP_LOG_SUM_EXP,
   OP_LSE2,
   OP_LOG_MIX,

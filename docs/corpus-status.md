@@ -1,8 +1,9 @@
 # Corpus status
 
-Passing: 102/120
+Passing: 103/120
 
 - OK `2pl_latent_reg_irt`
+- OK `GLMM1_model`
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
 - OK `GLM_Poisson_model`
@@ -107,10 +108,9 @@ Passing: 102/120
 
 ## Failures
 
-- `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
 - `accel_gp`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function dims
-- `covid19imperial_v2`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
-- `covid19imperial_v3`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
+- `covid19imperial_v2`: COMPILE_FAIL stanrt compile: unsupported indexed assignment: lhs=prediction [IndexBetween] [IndexSingle]
+- `covid19imperial_v3`: COMPILE_FAIL stanrt compile: unsupported indexed assignment: lhs=prediction [IndexBetween] [IndexSingle]
 - `diamonds`: COMPILE_FAIL stanrt compile: unsupported function normal_id_glm_lpdf
 - `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov

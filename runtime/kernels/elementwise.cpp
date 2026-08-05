@@ -163,6 +163,28 @@ void concat2_bwd(KernelCtx& ctx) {
       ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[ctx.in[0].len + i];
 }
 
+// OP_REP_MAT: idata = {R, C, mode}. mode 0: scalar fill; mode 1: vector
+// replicated as C columns (out[j*R+i] = v[i]); mode 2: row_vector across R
+// rows (out[j*R+i] = v[j]). AoS rep_matrix copies var handles, so each
+// source vari accumulates its consumers' adjoints in flat col-major order;
+// the backward loops preserve exactly that per-vari sequence.
+void rep_mat_fwd(KernelCtx& ctx) {
+  const int64_t R = ctx.idata[0], C = ctx.idata[1], mode = ctx.idata[2];
+  const double* v = ctx.in[0].data;
+  for (int64_t j = 0; j < C; ++j)
+    for (int64_t i = 0; i < R; ++i)
+      ctx.out.data[j * R + i] = mode == 0 ? v[0] : mode == 1 ? v[i] : v[j];
+}
+void rep_mat_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  const int64_t R = ctx.idata[0], C = ctx.idata[1], mode = ctx.idata[2];
+  const double* dout = ctx.out_adj_vec.data;
+  double* dv = ctx.in_adj[0].data;
+  for (int64_t j = 0; j < C; ++j)
+    for (int64_t i = 0; i < R; ++i)
+      dv[mode == 0 ? 0 : mode == 1 ? i : j] += dout[j * R + i];
+}
+
 // OP_SET_SLICE: out = copy(in[0]) with out[start..start+in[1].len) = in[1].
 void set_slice_fwd(KernelCtx& ctx) {
   const int64_t start = ctx.idata[0];
@@ -199,6 +221,7 @@ void register_elementwise_kernels() {
                   Kernel{slice_strided_fwd, slice_strided_bwd, nullptr});
   register_kernel(OP_GATHER, Kernel{gather_fwd, gather_bwd, nullptr});
   register_kernel(OP_CONCAT2, Kernel{concat2_fwd, concat2_bwd, nullptr});
+  register_kernel(OP_REP_MAT, Kernel{rep_mat_fwd, rep_mat_bwd, nullptr});
 }
 
 }  // namespace stanrt

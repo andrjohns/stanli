@@ -1238,6 +1238,43 @@ struct Lowering {
       Val ga = emit(OP_GATHER, {lg.slot}, (int64_t)idata.size(), {}, idata);
       return emit(OP_SUM_VEC, {ga.slot}, 1);
     }
+    if (e.name == "Transpose__" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      // Vector <-> row_vector transpose is a type change, not a layout one.
+      if (a.si.rows == 0) return a;
+      fail("matrix transpose unsupported in M2", e.raw);
+    }
+    if ((e.name == "to_vector" || e.name == "to_row_vector") &&
+        e.args.size() == 1) {
+      // Col-major flattening is the identity on our storage.
+      Val a = lower_expr(e.args[0]);
+      SlotInfo si = a.si;
+      si.rows = 0;
+      si.cols = 0;
+      return {a.slot, si};
+    }
+    if (e.name == "rep_matrix") {
+      SlotInfo si;
+      if (e.args.size() == 3) {
+        Val x = lower_expr(e.args[0]);  // scalar fill
+        const long R = eval_int(e.args[1]), C = eval_int(e.args[2]);
+        si.rows = R;
+        si.cols = C;
+        return emit(OP_REP_MAT, {x.slot}, R * C, si, {(int)R, (int)C, 0});
+      }
+      if (e.args.size() == 2) {
+        Val v = lower_expr(e.args[0]);
+        const long n = eval_int(e.args[1]);
+        const bool rowvec = e.args[0].type_ == "URowVector";
+        const long R = rowvec ? n : info[v.slot].len;
+        const long C = rowvec ? info[v.slot].len : n;
+        si.rows = R;
+        si.cols = C;
+        return emit(OP_REP_MAT, {v.slot}, R * C, si,
+                    {(int)R, (int)C, rowvec ? 2 : 1});
+      }
+      fail("rep_matrix arity", e.raw);
+    }
     if (e.name == "dot_self") {
       Val a = lower_expr(e.args[0]);
       return emit(OP_DOT, {a.slot, a.slot}, 1);
