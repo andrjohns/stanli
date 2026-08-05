@@ -78,7 +78,7 @@ struct LogisticGlm {
   int X;
   int zero, p25, five, one;       // constant slots
   static constexpr int N = 20, K = 3;
-  // Deterministic values, generated once with an LCG; treated as fixed data.
+  // Deterministic fixed data, column-major (Stan/Eigen convention).
   static const double kX[N * K];
   static const int kYint[N];
 };

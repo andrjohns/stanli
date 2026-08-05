@@ -26,10 +26,11 @@ static void reference(const double* q, double* lp_out, double* grad_out) {
   var zero = 0.0, p25 = 2.5, five = 5.0;
 
   // eta in the same order as OP_MATVEC then OP_BCAST_FMA (b = 1.0).
+  // kX is column-major (Stan/Eigen convention).
   Eigen::Matrix<var, -1, 1> eta(N);
   for (int r = 0; r < N; ++r) {
     var acc = 0.0;
-    for (int c = 0; c < K; ++c) acc += LogisticGlm::kX[r * K + c] * beta(c);
+    for (int c = 0; c < K; ++c) acc += LogisticGlm::kX[c * N + r] * beta(c);
     eta(r) = alpha + 1.0 * acc;
   }
   std::vector<int> y(LogisticGlm::kYint, LogisticGlm::kYint + N);

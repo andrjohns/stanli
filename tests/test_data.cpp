@@ -31,10 +31,11 @@ int main() {
   check(m.at("n").is_int, "n is int");
   check(!m.at("x").is_int && m.at("x").r[0] == 2.5, "x real");
   check(m.at("v").is_int && m.at("v").i.size() == 3, "int array stays int");
+  // Column-major: M = [[1,2],[3,4],[5,6]] stores as 1,3,5,2,4,6.
   check(m.at("M").dims.size() == 2 && m.at("M").dims[0] == 3 &&
             m.at("M").dims[1] == 2 && m.at("M").r.size() == 6 &&
-            m.at("M").r[2] == 3.0,
-        "matrix row-major with dims");
+            m.at("M").r[1] == 3.0 && m.at("M").r[3] == 2.0,
+        "matrix column-major with dims");
   check(m.at("yi").is_int && m.at("yi").i[2] == 1, "yi int array");
 
   bool threw = false;

@@ -147,7 +147,7 @@ struct Lowering {
             e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
           const long i = eval_int_td(e.args[1].args[0]);
           const long j = eval_int_td(e.args[2].args[0]);
-          r.r = {base.r.at((i - 1) * base.dims[1] + (j - 1))};
+          r.r = {base.r.at((j - 1) * base.dims[0] + (i - 1))};
           return r;
         }
         fail("prepare_data: unsupported index", e.raw);
@@ -270,6 +270,15 @@ struct Lowering {
             else o.is_int = false;
           }
           if (!o.is_int) o.i.clear();
+          if (rows_mode) {
+            // Rows arrived row-by-row; store column-major.
+            const int64_t R = (int64_t)e.args.size(), C = row_len;
+            std::vector<double> cm(R * C);
+            for (int64_t i = 0; i < R; ++i)
+              for (int64_t j = 0; j < C; ++j)
+                cm[j * R + i] = o.r[i * C + j];
+            o.r = std::move(cm);
+          }
           if (rows_mode)
             o.dims = {(int64_t)e.args.size(), row_len};
           else
@@ -282,9 +291,10 @@ struct Lowering {
           DataMap::Entry o;
           o.dims = {a.dims[1], a.dims[0]};
           o.r.resize(a.r.size());
+          // col-major: o(j,i) = a(i,j)
           for (int64_t i = 0; i < a.dims[0]; ++i)
             for (int64_t j = 0; j < a.dims[1]; ++j)
-              o.r[j * a.dims[0] + i] = a.r[i * a.dims[1] + j];
+              o.r[i * a.dims[1] + j] = a.r[j * a.dims[0] + i];
           return o;
         }
         if (e.name == "to_vector") {
@@ -376,7 +386,7 @@ struct Lowering {
             st.lhs_idx[1].name == "IndexSingle" && en->dims.size() == 2) {
           const long i = eval_int_td(st.lhs_idx[0].args[0]);
           const long j = eval_int_td(st.lhs_idx[1].args[0]);
-          const int64_t flat = (i - 1) * en->dims[1] + (j - 1);
+          const int64_t flat = (j - 1) * en->dims[0] + (i - 1);
           en->r.at(flat) = v.r.at(0);
           if (en->is_int) en->i.at(flat) = v.is_int && !v.i.empty()
                                                ? v.i[0]
@@ -473,8 +483,8 @@ struct Lowering {
           flat = eval_int(e.args[1].args[0]) - 1;
         } else if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
                    e.args[2].name == "IndexSingle" && base.si.rows > 0) {
-          flat = (eval_int(e.args[1].args[0]) - 1) * base.si.cols +
-                 (eval_int(e.args[2].args[0]) - 1);
+          flat = (eval_int(e.args[2].args[0]) - 1) * base.si.rows +
+                 (eval_int(e.args[1].args[0]) - 1);
         } else {
           fail("unsupported index expression", e.raw);
         }

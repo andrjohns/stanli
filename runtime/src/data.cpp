@@ -37,6 +37,16 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
         cur = &(*cur)[0];
       }
       e.dims = dims;
+      if (dims.size() == 2) {
+        // Column-major, the Stan/Eigen convention (and what stanc's data
+        // reconstruction loops assume for the flat read buffer).
+        const int64_t R = dims[0], C = dims[1];
+        e.r.resize(R * C);
+        for (int64_t i = 0; i < R; ++i)
+          for (int64_t j = 0; j < C; ++j)
+            e.r[j * R + i] = v[i][j].get<double>();
+        return e;
+      }
       std::function<void(const json&)> flat = [&](const json& node) {
         if (node.is_array()) {
           for (const auto& k : node) flat(k);

@@ -187,9 +187,7 @@ void bernoulli_logit_glm_fwd(KernelCtx& ctx) {
   const int64_t rows = ctx.idata[ctx.n_idata - 2];
   const int64_t cols = ctx.idata[ctx.n_idata - 1];
   Eigen::Map<const Eigen::VectorXi> y(ctx.idata, rows);
-  using RowMat =
-      Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-  Eigen::Map<const RowMat> X(ctx.in[0].data, rows, cols);
+  Eigen::Map<const Eigen::MatrixXd> X(ctx.in[0].data, rows, cols);
   sink s;
   int64_t off = 0;
   for (int k = 0; k < 3; ++k) {
@@ -197,12 +195,13 @@ void bernoulli_logit_glm_fwd(KernelCtx& ctx) {
     off += ctx.in[k].len;
   }
   active_sink() = &s;
-  if (ctx.in[1].len == 1 && ctx.in[2].len > 1) {
+  if (ctx.in[1].len == 1) {
+    // beta is a vector regardless of its length; alpha scalar.
     stan::math::bernoulli_logit_glm_lpmf<false>(
-        y, X.eval(), rvar(ctx.in[1].data[0]), as_rvar(ctx.in[2]));
+        y, X, rvar(ctx.in[1].data[0]), as_rvar(ctx.in[2]));
   } else {
     active_sink() = nullptr;
-    throw std::runtime_error("glm: unsupported shape combo");
+    throw std::runtime_error("glm: vector alpha unsupported in M2");
   }
   active_sink() = nullptr;
   ctx.out.data[0] = s.value;

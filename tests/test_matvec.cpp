@@ -19,9 +19,9 @@ int main() {
   using namespace stanrt;
   using stan::math::var;
   const int R = 5, C = 3;
-  // Row-major X, fixed values.
-  double X[R * C] = {0.5,  -1.2, 0.3,  2.0, -0.7, 1.1, -0.4, 0.9,
-                     -1.5, 0.2,  0.8,  -0.6, 1.3, -0.1, 0.7};
+  // Column-major X (Stan/Eigen convention), same logical matrix as before.
+  double X[R * C] = {0.5,  2.0,  -0.4, 0.2,  1.3,  -1.2, -0.7, 0.9,
+                     0.8,  -0.1, 0.3,  1.1,  -1.5, -0.6, 0.7};
   double yv[R] = {0.4, -1.0, 2.1, 0.3, -0.8};
   double betav[C] = {0.25, -0.5, 1.0};
 
@@ -45,8 +45,8 @@ int main() {
   double grad[C] = {0, 0, 0};
   const double v = ex.gradient(grad);
 
-  // Var reference: same shapes, same op order. Row-major map for X.
-  Eigen::Map<Eigen::Matrix<double, -1, -1, Eigen::RowMajor>> Xm(X, R, C);
+  // Var reference: same shapes, same op order. Column-major map for X.
+  Eigen::Map<Eigen::MatrixXd> Xm(X, R, C);
   Eigen::Matrix<var, -1, 1> vb(C);
   for (int i = 0; i < C; ++i) vb(i) = betav[i];
   Eigen::Matrix<var, -1, 1> veta = Xm * vb;

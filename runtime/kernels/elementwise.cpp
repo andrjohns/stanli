@@ -48,15 +48,15 @@ void fma_bwd(KernelCtx& ctx) {
   }
 }
 
-// OP_MATVEC: out = X * beta, X data laid out row-major, idata = {rows, cols}.
-// X as a parameter is out of scope in M1.
+// OP_MATVEC: out = X * beta, X data laid out COLUMN-major (Stan/Eigen
+// convention), idata = {rows, cols}. X as a parameter is out of scope.
 void matvec_fwd(KernelCtx& ctx) {
   const int64_t rows = ctx.idata[0], cols = ctx.idata[1];
   const double* X = ctx.in[0].data;
   const double* b = ctx.in[1].data;
   for (int64_t r = 0; r < rows; ++r) {
     double acc = 0;
-    for (int64_t c = 0; c < cols; ++c) acc += X[r * cols + c] * b[c];
+    for (int64_t c = 0; c < cols; ++c) acc += X[c * rows + r] * b[c];
     ctx.out.data[r] = acc;
   }
 }
@@ -70,7 +70,7 @@ void matvec_bwd(KernelCtx& ctx) {
     // with the reference bitwise.
     for (int64_t r = rows - 1; r >= 0; --r)
       for (int64_t c = 0; c < cols; ++c)
-        ctx.in_adj[1].data[c] += X[r * cols + c] * dout[r];
+        ctx.in_adj[1].data[c] += X[c * rows + r] * dout[r];
   }
 }
 
