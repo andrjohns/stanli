@@ -1,6 +1,6 @@
 # Corpus status
 
-Passing: 73/120
+Passing: 77/120
 
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
@@ -22,6 +22,7 @@ Passing: 73/120
 - OK `eight_schools_noncentered`
 - OK `election88_full`
 - OK `garch11`
+- OK `iohmm_reg`
 - OK `kidscore_interaction`
 - OK `kidscore_interaction_c`
 - OK `kidscore_interaction_c2`
@@ -43,9 +44,12 @@ Passing: 73/120
 - OK `logmesquite_logvas`
 - OK `logmesquite_logvash`
 - OK `logmesquite_logvolume`
+- OK `low_dim_gauss_mix`
+- OK `low_dim_gauss_mix_collapse`
 - OK `mesquite`
 - OK `nes`
 - OK `nes_logit_model`
+- OK `normal_mixture`
 - OK `normal_mixture_k`
 - OK `pilots`
 - OK `radon_county`
@@ -81,19 +85,19 @@ Passing: 73/120
 - `2pl_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
 - `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
 - `M0_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
-- `Mb_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `Mb_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
 - `Mh_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
 - `Mt_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
 - `Mtbh_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Mth_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Survey_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable n (type UInt)
-- `accel_gp`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `accel_gp`: COMPILE_FAIL stanrt compile: unsupported function kind for gpa
 - `accel_splines`: COMPILE_FAIL stanrt compile: unsupported function student_t_lccdf
-- `bones_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `bones_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
 - `bym2_offset_only`: COMPILE_FAIL stanrt compile: unsupported function dot_self
-- `covid19imperial_v2`: COMPILE_FAIL stanrt compile: prepare_data: unsupported indexed assignment
-- `covid19imperial_v3`: COMPILE_FAIL stanrt compile: prepare_data: unsupported indexed assignment
-- `diamonds`: COMPILE_FAIL stanrt compile: prepare_data: unsupported index
+- `covid19imperial_v2`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
+- `covid19imperial_v3`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
+- `diamonds`: COMPILE_FAIL stanrt compile: unsupported function student_t_lccdf
 - `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `gp_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
@@ -103,22 +107,18 @@ Passing: 73/120
 - `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported index expression
-- `hmm_example`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `hmm_example`: EVAL_FAIL nonfinite gradient
 - `hmm_gaussian`: COMPILE_FAIL stanrt compile: unsupported index expression
-- `iohmm_reg`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `irt_2pl`: EVAL_FAIL bernoulli_logit_lpmf: Random variable has size = 1, but Probability parameter has size 100; and they must be the same size.
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `ldaK2`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `ldaK5`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported expression | in: (TernaryIf ((pattern (FunApp (StanLib Equals__ FnPlain AoS) (((pattern (Var growthmodel_id)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))) ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))) (meta (...
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
-- `low_dim_gauss_mix`: COMPILE_FAIL stanrt compile: unsupported function log_mix
-- `low_dim_gauss_mix_collapse`: COMPILE_FAIL stanrt compile: unsupported function log_mix
 - `lsat_model`: COMPILE_FAIL stanrt compile: unsupported int index expression
-- `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported function multi_normal_lpdf
 - `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function append_col
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
-- `normal_mixture`: COMPILE_FAIL stanrt compile: unsupported function log_mix
 - `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
 - `prophet`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function get_changepoint_matrix
 - `rats_model`: COMPILE_FAIL stanrt compile: size expression needs unknown int irat

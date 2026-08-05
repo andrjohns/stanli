@@ -68,6 +68,22 @@ void lse2_bwd(KernelCtx& ctx) {
   if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += b.adj();
 }
 
+// log_mix(theta, a, b), all scalars, via nested replay.
+void log_mix_fwd(KernelCtx& ctx) {
+  ctx.out.data[0] = stan::math::log_mix(
+      ctx.in[0].data[0], ctx.in[1].data[0], ctx.in[2].data[0]);
+}
+void log_mix_bwd(KernelCtx& ctx) {
+  stan::math::nested_rev_autodiff nested;
+  using stan::math::var;
+  var t = ctx.in[0].data[0], a = ctx.in[1].data[0], b = ctx.in[2].data[0];
+  var j = stan::math::log_mix(t, a, b) * ctx.out_adj;
+  stan::math::grad(j.vi_);
+  if (ctx.in_adj[0].data) ctx.in_adj[0].data[0] += t.adj();
+  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += a.adj();
+  if (ctx.in_adj[2].data) ctx.in_adj[2].data[0] += b.adj();
+}
+
 }  // namespace
 
 void register_legacy_kernels() {
@@ -76,6 +92,7 @@ void register_legacy_kernels() {
   register_kernel(OP_DIRICHLET_LPDF,
                   Kernel{dirichlet_fwd, dirichlet_bwd, nullptr});
   register_kernel(OP_LSE2, Kernel{lse2_fwd, lse2_bwd, nullptr});
+  register_kernel(OP_LOG_MIX, Kernel{log_mix_fwd, log_mix_bwd, nullptr});
 }
 
 }  // namespace stanrt
