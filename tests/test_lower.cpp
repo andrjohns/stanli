@@ -142,9 +142,9 @@ int main() {
     y(1) = -0.8;
     var jac = 0.0;
     auto theta = stan::math::simplex_constrain(y, jac);
-    Eigen::Matrix<var, -1, 1> alpha(3);
+    Eigen::VectorXd alpha(3);
     for (int i = 0; i < 3; ++i) alpha(i) = 2.0;
-    var lp = stan::math::dirichlet_lpdf<false>(theta, alpha) + jac;
+    var lp = stan::math::dirichlet_lpdf<true>(theta, alpha) + jac;
     lp.grad();
     expect_eq("simplex lp", slp, lp.val());
     expect_eq("simplex g0", sg[0], y(0).adj());

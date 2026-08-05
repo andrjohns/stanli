@@ -31,27 +31,51 @@ void softmax_bwd(KernelCtx& ctx) {
 // Multivariate density via nested replay: dirichlet_lpdf(theta | alpha).
 // The recorder's vector edges do not model partials_vec_ (sequence-of-vector
 // partials), so this is a legacy op by design.
-void dirichlet_fwd(KernelCtx& ctx) {
-  Eigen::Map<const Eigen::VectorXd> theta(ctx.in[0].data, ctx.in[0].len);
-  Eigen::Map<const Eigen::VectorXd> alpha(ctx.in[1].data, ctx.in[1].len);
-  ctx.out.data[0] = stan::math::dirichlet_lpdf<false>(theta, alpha);
-}
-void dirichlet_bwd(KernelCtx& ctx) {
+//
+// Propto term-dropping in stan-math is decided by the ARGUMENT TYPES, so a
+// legacy propto op must bind each argument var-or-double per the activity
+// mask, exactly like the native kernels do; promoting an inactive argument
+// to var silently keeps terms CmdStan drops.
+template <bool Grad>
+double dirichlet_eval(KernelCtx& ctx) {
   stan::math::nested_rev_autodiff nested;
   using stan::math::var;
+  const bool propto = (ctx.variant & 0x80u) != 0;
+  const unsigned mask = ctx.variant == 0 ? 0x3u : (ctx.variant & 0x3fu);
   Eigen::Matrix<var, -1, 1> theta(ctx.in[0].len), alpha(ctx.in[1].len);
   for (int64_t i = 0; i < ctx.in[0].len; ++i) theta(i) = ctx.in[0].data[i];
   for (int64_t i = 0; i < ctx.in[1].len; ++i) alpha(i) = ctx.in[1].data[i];
-  var lp = stan::math::dirichlet_lpdf<false>(theta, alpha);
-  var j = lp * ctx.out_adj;
-  stan::math::grad(j.vi_);
-  if (ctx.in_adj[0].data)
-    for (int64_t i = 0; i < ctx.in[0].len; ++i)
-      ctx.in_adj[0].data[i] += theta(i).adj();
-  if (ctx.in_adj[1].data)
-    for (int64_t i = 0; i < ctx.in[1].len; ++i)
-      ctx.in_adj[1].data[i] += alpha(i).adj();
+  Eigen::Map<const Eigen::VectorXd> theta_d(ctx.in[0].data, ctx.in[0].len);
+  Eigen::Map<const Eigen::VectorXd> alpha_d(ctx.in[1].data, ctx.in[1].len);
+  var lp;
+  const bool a0 = (mask & 1u) != 0, a1 = (mask & 2u) != 0;
+  if (propto) {
+    if (a0 && a1) lp = stan::math::dirichlet_lpdf<true>(theta, alpha);
+    else if (a0) lp = stan::math::dirichlet_lpdf<true>(theta, alpha_d);
+    else if (a1) lp = stan::math::dirichlet_lpdf<true>(theta_d, alpha);
+    else lp = 0.0;
+  } else {
+    if (a0 && a1) lp = stan::math::dirichlet_lpdf<false>(theta, alpha);
+    else if (a0) lp = stan::math::dirichlet_lpdf<false>(theta, alpha_d);
+    else if (a1) lp = stan::math::dirichlet_lpdf<false>(theta_d, alpha);
+    else lp = stan::math::dirichlet_lpdf<false>(theta_d, alpha_d);
+  }
+  if constexpr (Grad) {
+    var j = lp * ctx.out_adj;
+    stan::math::grad(j.vi_);
+    if (ctx.in_adj[0].data)
+      for (int64_t i = 0; i < ctx.in[0].len; ++i)
+        ctx.in_adj[0].data[i] += theta(i).adj();
+    if (ctx.in_adj[1].data)
+      for (int64_t i = 0; i < ctx.in[1].len; ++i)
+        ctx.in_adj[1].data[i] += alpha(i).adj();
+  }
+  return lp.val();
 }
+void dirichlet_fwd(KernelCtx& ctx) {
+  ctx.out.data[0] = dirichlet_eval<false>(ctx);
+}
+void dirichlet_bwd(KernelCtx& ctx) { dirichlet_eval<true>(ctx); }
 
 // Binary scalar log_sum_exp via nested replay.
 void lse2_fwd(KernelCtx& ctx) {
