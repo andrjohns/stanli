@@ -37,13 +37,23 @@ void add_fwd(KernelCtx& ctx) {
   else
     out_a(ctx) = in_a(ctx, 0) + in_a(ctx, 1);
 }
+// Scalar-broadcast adjoints accumulate ascending, directly into the
+// accumulator: the rev overloads' reverse callbacks loop coefficients in
+// ascending order (measured against add(var, Matrix<var>); a local Eigen
+// sum added once differs by 1 ULP).
 void add_bwd(KernelCtx& ctx) {
   for (int k = 0; k < 2; ++k) {
     if (!ctx.in_adj[k].data) continue;
-    if (scal(ctx, k))
-      ctx.in_adj[k].data[0] += ctx.out.len == 1 ? ctx.out_adj : dout_a(ctx).sum();
-    else
+    if (scal(ctx, k)) {
+      if (ctx.out.len == 1) {
+        ctx.in_adj[k].data[0] += ctx.out_adj;
+      } else {
+        for (int64_t i = 0; i < ctx.out.len; ++i)
+          ctx.in_adj[k].data[0] += ctx.out_adj_vec.data[i];
+      }
+    } else {
       dx_a(ctx, k) += dout_a(ctx);
+    }
   }
 }
 
@@ -59,16 +69,28 @@ void sub_fwd(KernelCtx& ctx) {
 }
 void sub_bwd(KernelCtx& ctx) {
   if (ctx.in_adj[0].data) {
-    if (scal(ctx, 0))
-      ctx.in_adj[0].data[0] += ctx.out.len == 1 ? ctx.out_adj : dout_a(ctx).sum();
-    else
+    if (scal(ctx, 0)) {
+      if (ctx.out.len == 1) {
+        ctx.in_adj[0].data[0] += ctx.out_adj;
+      } else {
+        for (int64_t i = 0; i < ctx.out.len; ++i)
+          ctx.in_adj[0].data[0] += ctx.out_adj_vec.data[i];
+      }
+    } else {
       dx_a(ctx, 0) += dout_a(ctx);
+    }
   }
   if (ctx.in_adj[1].data) {
-    if (scal(ctx, 1))
-      ctx.in_adj[1].data[0] -= ctx.out.len == 1 ? ctx.out_adj : dout_a(ctx).sum();
-    else
+    if (scal(ctx, 1)) {
+      if (ctx.out.len == 1) {
+        ctx.in_adj[1].data[0] -= ctx.out_adj;
+      } else {
+        for (int64_t i = 0; i < ctx.out.len; ++i)
+          ctx.in_adj[1].data[0] -= ctx.out_adj_vec.data[i];
+      }
+    } else {
       dx_a(ctx, 1) -= dout_a(ctx);
+    }
   }
 }
 
@@ -92,20 +114,24 @@ void mul_bwd(KernelCtx& ctx) {
     return;
   }
   if (ctx.in_adj[0].data) {
-    if (s0)
-      ctx.in_adj[0].data[0] += (dout_a(ctx) * in_a(ctx, 1)).sum();
-    else if (s1)
+    if (s0) {
+      for (int64_t i = 0; i < ctx.out.len; ++i)
+        ctx.in_adj[0].data[0] += ctx.out_adj_vec.data[i] * ctx.in[1].data[i];
+    } else if (s1) {
       dx_a(ctx, 0) += dout_a(ctx) * ctx.in[1].data[0];
-    else
+    } else {
       dx_a(ctx, 0) += dout_a(ctx) * in_a(ctx, 1);
+    }
   }
   if (ctx.in_adj[1].data) {
-    if (s1)
-      ctx.in_adj[1].data[0] += (dout_a(ctx) * in_a(ctx, 0)).sum();
-    else if (s0)
+    if (s1) {
+      for (int64_t i = 0; i < ctx.out.len; ++i)
+        ctx.in_adj[1].data[0] += ctx.out_adj_vec.data[i] * ctx.in[0].data[i];
+    } else if (s0) {
       dx_a(ctx, 1) += dout_a(ctx) * ctx.in[0].data[0];
-    else
+    } else {
       dx_a(ctx, 1) += dout_a(ctx) * in_a(ctx, 0);
+    }
   }
 }
 
@@ -138,17 +164,21 @@ void div_bwd(KernelCtx& ctx) {
     return;
   }
   if (ctx.in_adj[0].data) {
-    if (s0)
-      ctx.in_adj[0].data[0] += (dout_a(ctx) / in_a(ctx, 1)).sum();
-    else
+    if (s0) {
+      for (int64_t i = 0; i < ctx.out.len; ++i)
+        ctx.in_adj[0].data[0] += ctx.out_adj_vec.data[i] / ctx.in[1].data[i];
+    } else {
       dx_a(ctx, 0) += dout_a(ctx) / ctx.in[1].data[0];
+    }
   }
   if (ctx.in_adj[1].data) {
-    if (s1)
-      ctx.in_adj[1].data[0] +=
-          -(dout_a(ctx) * out_v).sum() / ctx.in[1].data[0];
-    else
+    if (s1) {
+      for (int64_t i = 0; i < ctx.out.len; ++i)
+        ctx.in_adj[1].data[0] +=
+            -ctx.out_adj_vec.data[i] * ctx.out.data[i] / ctx.in[1].data[0];
+    } else {
       dx_a(ctx, 1) += -dout_a(ctx) * out_v / in_a(ctx, 1);
+    }
   }
 }
 
