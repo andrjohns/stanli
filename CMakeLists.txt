@@ -34,7 +34,8 @@ add_library(stanrt STATIC
   runtime/kernels/elementwise.cpp
   runtime/kernels/densities.cpp
   runtime/kernels/legacy_fns.cpp
-  runtime/src/nuts.cpp)
+  runtime/src/nuts.cpp
+  runtime/src/mir_reader.cpp)
 target_include_directories(stanrt PUBLIC runtime/include)
 target_link_libraries(stanrt PUBLIC stanmath)
 
@@ -56,3 +57,4 @@ stanrt_add_test(test_eight_schools)
 stanrt_add_test(test_glm)
 stanrt_add_test(test_nuts)
 stanrt_add_test(test_sexp)
+stanrt_add_test(test_mir)
