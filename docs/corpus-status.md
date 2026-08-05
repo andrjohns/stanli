@@ -1,6 +1,6 @@
 # Corpus status
 
-Passing: 67/120
+Passing: 69/120
 
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
@@ -42,6 +42,7 @@ Passing: 67/120
 - OK `logmesquite_logvolume`
 - OK `mesquite`
 - OK `nes`
+- OK `nes_logit_model`
 - OK `pilots`
 - OK `radon_county`
 - OK `radon_county_intercept`
@@ -66,6 +67,7 @@ Passing: 67/120
 - OK `wells_dae_inter_model`
 - OK `wells_dae_model`
 - OK `wells_dist`
+- OK `wells_dist100_model`
 - OK `wells_dist100ars_model`
 - OK `wells_interaction_c_model`
 - OK `wells_interaction_model`
@@ -113,7 +115,6 @@ Passing: 67/120
 - `low_dim_gauss_mix_collapse`: COMPILE_FAIL stanrt compile: unsupported function log_mix
 - `lsat_model`: COMPILE_FAIL stanrt compile: unsupported int index expression
 - `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
-- `nes_logit_model`: EVAL_FAIL glm: unsupported shape combo
 - `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function append_col
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `normal_mixture`: COMPILE_FAIL stanrt compile: unsupported function log_mix
@@ -124,4 +125,3 @@ Passing: 67/120
 - `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
 - `soil_incubation`: COMPILE_FAIL stanrt compile: unsupported function kind for evolved_CO2
 - `state_space_stochastic_level_stochastic_seasonal`: COMPILE_FAIL stanrt compile: unsupported function sd
-- `wells_dist100_model`: EVAL_FAIL glm: unsupported shape combo
