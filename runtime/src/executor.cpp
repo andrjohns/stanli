@@ -3,6 +3,8 @@
 
 #include <cassert>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace stanrt {
@@ -67,7 +69,9 @@ void Executor::bind_() {
   int64_t scratch = 0;
   for (auto& op : graph_.ops) {
     const Kernel& k = kernel(op.opcode);
-    assert(k.forward != nullptr && "opcode not registered");
+    if (k.forward == nullptr)
+      throw std::runtime_error("opcode not registered: " +
+                               std::to_string(op.opcode));
     op.scratch_off = scratch;
     op.scratch_len =
         k.scratch_size ? k.scratch_size(op, graph_.slots.data()) : 0;
