@@ -271,6 +271,7 @@ struct Lowering {
     const mir::Transform& tr = *s.read_transform;
     if (tr.kind == mir::Transform::Identity) {
       scope[s.decl_id] = raw;
+      out.views.push_back({s.decl_id, raw, len});
       return;
     }
     uint16_t opcode = 0;
@@ -296,6 +297,7 @@ struct Lowering {
     Val con = emit(opcode, ins, len, {}, {}, jac);
     jac_slots.push_back(jac);
     scope[s.decl_id] = con.slot;
+    out.views.push_back({s.decl_id, con.slot, len});
   }
 
   void lower_stmt(const mir::Stmt& s) {

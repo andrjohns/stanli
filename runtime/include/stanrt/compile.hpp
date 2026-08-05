@@ -28,6 +28,14 @@ struct CompileError : std::runtime_error {
 struct CompiledModel {
   Graph graph;
   std::vector<std::string> param_names;  // declaration order (flat)
+  // Constrained value of each parameter, readable from the executor after a
+  // forward pass (slot of the post-transform value).
+  struct ParamView {
+    std::string name;
+    int slot;
+    int64_t len;
+  };
+  std::vector<ParamView> views;
   int64_t n_unconstrained = 0;
   // Slot fills for data + constants, applied after Executor construction.
   std::vector<std::pair<int, std::vector<double>>> fills;
