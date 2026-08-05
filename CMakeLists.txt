@@ -76,6 +76,8 @@ add_executable(stanrt_run tools/stanrt_run.cpp tests/tbb_stub.cpp)
 target_link_libraries(stanrt_run PRIVATE stanrt)
 add_executable(stanrt_check tools/stanrt_check.cpp tests/tbb_stub.cpp)
 target_link_libraries(stanrt_check PRIVATE stanrt)
+add_executable(bench_grad tools/bench_grad.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_grad PRIVATE stanrt)
 
 stanrt_add_test(test_smoke)
 stanrt_add_test(test_executor)

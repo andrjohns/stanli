@@ -1,0 +1,2 @@
+/usr/bin/ar qc libstanrt.a CMakeFiles/stanrt.dir/runtime/src/executor.cpp.o CMakeFiles/stanrt.dir/runtime/kernels/elementwise.cpp.o CMakeFiles/stanrt.dir/runtime/kernels/densities.cpp.o CMakeFiles/stanrt.dir/runtime/kernels/legacy_fns.cpp.o CMakeFiles/stanrt.dir/runtime/kernels/constrain.cpp.o CMakeFiles/stanrt.dir/runtime/kernels/eltwise_expr.cpp.o CMakeFiles/stanrt.dir/runtime/src/nuts.cpp.o CMakeFiles/stanrt.dir/runtime/src/mir_reader.cpp.o CMakeFiles/stanrt.dir/runtime/src/lower.cpp.o CMakeFiles/stanrt.dir/runtime/src/data.cpp.o
+/usr/bin/ranlib libstanrt.a
