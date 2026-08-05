@@ -15,4 +15,30 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-Status: milestone 1 in progress.
+## Status
+
+Milestone 1 (spine) complete on macOS arm64 / clang. 9/9 tests green.
+
+| Proven | How |
+| --- | --- |
+| Recorder scalar reproduces stan-math gradients | Bitwise vs the var path across 7 densities, mixed data/parameter shapes (`test_densities`, `test_recorder`) |
+| Zero-copy promotion of double buffers to rvar views | Static layout asserts + bitwise equality of copied vs mapped inputs |
+| Graph executor forward/reverse | Bitwise vs closed form and var references (`test_executor`) |
+| Native ops with hand vjps (exp, add_n, bcast_fma, matvec) | Bitwise vs var tape, including accumulation-order matching |
+| Legacy op mechanism (nested var tape replay) | log_sum_exp and softmax bitwise vs var path (`test_legacy`) |
+| Whole-model parity | Eight schools (10-dim) and logistic GLM (4-dim): log_prob + full gradient bitwise vs all-var references at fixed points |
+| Sampling | stan::mcmc::adapt_diag_e_nuts over the executor gradient via a one-vari precomputed_gradients adapter; statistical checks on a 10-dim standard normal and eight schools (`test_nuts`) |
+
+Notes:
+
+- FP contraction is pinned off project-wide; clang otherwise forms FMAs
+  differently across template instantiations of the same math, which breaks
+  bitwise comparisons (measured 2 ULP before pinning).
+- All densities are instantiated propto=false (target += semantics).
+  propto variants arrive with the stanc3 backend in M2.
+- Kernels bind every argument as rvar; comparisons against mixed
+  data/parameter var instantiations can differ by ULPs through stan-math's
+  to_ref_if caching (bounded and tested; see test_densities).
+
+Next (M2): stanc3 MIR-to-graph backend, graph serialization + loader,
+posteriordb corpus differential testing.
