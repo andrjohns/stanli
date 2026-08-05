@@ -100,6 +100,27 @@ struct Lowering {
         if (e.name == "Plus__") return eval_int(e.args[0]) + eval_int(e.args[1]);
         if (e.name == "Minus__") return eval_int(e.args[0]) - eval_int(e.args[1]);
         if (e.name == "Times__") return eval_int(e.args[0]) * eval_int(e.args[1]);
+        // Shape queries on slot-bound values (e.g. rows(v) on an inlined
+        // UDF's vector argument) answer from the slot's SlotInfo.
+        if ((e.name == "rows" || e.name == "cols" || e.name == "size" ||
+             e.name == "num_elements") &&
+            e.args.size() == 1 && e.args[0].kind == mir::Expr::Var) {
+          auto sit = scope.find(e.args[0].name);
+          if (sit != scope.end()) {
+            const SlotInfo& si = info[sit->second];
+            if (e.name == "rows") return si.rows > 0 ? si.rows : si.len;
+            if (e.name == "cols") return si.rows > 0 ? si.cols : 1;
+            return si.len;
+          }
+          DataMap::Entry* en = env.find(e.args[0].name);
+          if (en) {
+            if (e.name == "rows")
+              return en->dims.size() == 2 ? en->dims[0]
+                                          : (long)en->r.size();
+            if (e.name == "cols") return en->dims.size() == 2 ? en->dims[1] : 1;
+            return (long)std::max(en->r.size(), en->i.size());
+          }
+        }
         fail("unsupported int size function " + e.name, e.raw);
       default:
         fail("unsupported size expression", e.raw);
@@ -619,6 +640,15 @@ struct Lowering {
         DataMap::Entry v = td_eval(st.rhs);
         if (st.lhs_idx.size() == 1 && st.lhs_idx[0].name == "IndexSingle") {
           const long ix = eval_int_td(st.lhs_idx[0].args[0]);
+          if (en->dims.size() == 2) {
+            // Row write into a matrix (A[i] = row_vector), col-major strided.
+            const int64_t R = en->dims[0], C = en->dims[1];
+            if ((int64_t)v.r.size() != C)
+              fail("prepare_data: row write size mismatch");
+            for (int64_t j = 0; j < C; ++j)
+              en->r.at(j * R + (ix - 1)) = v.r[j];
+            return;
+          }
           if ((size_t)ix > en->r.size()) en->r.resize(ix, 0.0);
           en->r[ix - 1] = v.r.at(0);
           if (en->is_int) {
@@ -871,7 +901,77 @@ struct Lowering {
     return true;
   }
 
+  // Thrown by a Return statement inside an inlined UDF body.
+  struct LpReturn {
+    Val v;
+  };
+
+  // Inline a user-defined function at its call site: arguments are lowered
+  // in the caller's scope, bound under the parameter names in a shadowed
+  // scope, and the body lowers like any other statements (loops unroll,
+  // data-only conditions resolve). Return throws the result value out.
+  Val lower_call_udf(const mir::Expr& e) {
+    auto it = fun_defs.find(e.name);
+    if (it == fun_defs.end()) fail("unknown function " + e.name, e.raw);
+    const mir::FunDef& f = *it->second;
+    if (e.args.size() != f.arg_names.size())
+      fail(e.name + ": arity mismatch");
+    if (++udf_depth > 64) fail("UDF recursion too deep in " + e.name);
+    struct Binding {
+      bool is_int = false;
+      long iv = 0;
+      Val v{-1, {}};
+    };
+    std::vector<Binding> binds(e.args.size());
+    for (size_t i = 0; i < e.args.size(); ++i) {
+      const mir::Expr& a = e.args[i];
+      if (a.data_only && a.type_ == "UInt") {
+        binds[i].is_int = true;
+        binds[i].iv = eval_int(const_cast<mir::Expr&>(a));
+      } else {
+        binds[i].v = lower_expr(a);
+      }
+    }
+    auto sc_saved = scope;
+    auto ie_saved = int_env;
+    auto dd_saved = decl_dims;
+    auto dl_saved = decl_lens;
+    for (size_t i = 0; i < binds.size(); ++i) {
+      const std::string& name = f.arg_names[i];
+      decl_dims.erase(name);
+      decl_lens.erase(name);
+      if (binds[i].is_int) {
+        int_env[name] = binds[i].iv;
+        scope.erase(name);
+      } else {
+        scope[name] = binds[i].v.slot;
+        int_env.erase(name);
+      }
+    }
+    Val ret{-1, {}};
+    bool returned = false;
+    try {
+      for (const auto& st : f.body) lower_stmt(st);
+    } catch (LpReturn& r) {
+      ret = r.v;
+      returned = true;
+    }
+    scope = std::move(sc_saved);
+    int_env = std::move(ie_saved);
+    decl_dims = std::move(dd_saved);
+    decl_lens = std::move(dl_saved);
+    --udf_depth;
+    if (!returned)
+      fail(e.name + ": no return value on the executed path");
+    return ret;
+  }
+
   Val lower_funapp(const mir::Expr& e) {
+    if (e.fn_lib == mir::Expr::Lib::UserDefined) {
+      Val v;
+      if (e.data_only && try_fold_const(e, &v)) return v;
+      return lower_call_udf(e);
+    }
     if (e.fn_lib != mir::Expr::Lib::StanLib) {
       Val v;
       if (try_fold_const(e, &v)) return v;
@@ -1245,6 +1345,11 @@ struct Lowering {
         if (!c && s.body.size() > 1) lower_stmt(s.body[1]);
         return;
       }
+      case mir::Stmt::Return:
+        // Only reachable inside an inlined UDF body (log_prob itself has no
+        // value returns); unwinds to lower_call_udf.
+        if (!s.has_init) fail("void return unsupported in UDF inlining");
+        throw LpReturn{lower_expr(s.rhs)};
       default:
         fail("unsupported statement", s.raw);
     }

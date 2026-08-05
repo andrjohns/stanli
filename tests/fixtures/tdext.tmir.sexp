@@ -130,6 +130,29 @@
       ((pattern (Lit Int 0)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
     (meta <opaque>))
    ((pattern
+     (NRFunApp (CompilerInternal FnValidateSize)
+      (((pattern (Lit Str A)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+       ((pattern (Lit Str N)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+       ((pattern (Var N)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+    (meta <opaque>))
+   ((pattern
+     (Decl (decl_adtype DataOnly) (decl_id A)
+      (decl_type
+       (Sized
+        (SMatrix AoS
+         ((pattern (Var N)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+      (initialize Default)))
+    (meta <opaque>))
+   ((pattern
+     (Decl (decl_adtype DataOnly) (decl_id ar)
+      (decl_type
+       (Sized
+        (SRowVector AoS
+         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+      (initialize Default)))
+    (meta <opaque>))
+   ((pattern
      (While
       ((pattern
         (EAnd
@@ -177,6 +200,48 @@
        (meta <opaque>))))
     (meta <opaque>))
    ((pattern
+     (Assignment ((LVariable ar) ()) URowVector
+      ((pattern
+        (FunApp (StanLib rep_row_vector FnPlain AoS)
+         (((pattern
+            (Promotion
+             ((pattern (Lit Int 1))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+             UReal DataOnly))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+          ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+       (meta ((type_ URowVector) (loc <opaque>) (adlevel DataOnly))))))
+    (meta <opaque>))
+   ((pattern
+     (For (loopvar j)
+      (lower
+       ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+      (upper ((pattern (Var N)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+      (body
+       ((pattern
+         (Block
+          (((pattern
+             (Assignment
+              ((LVariable A)
+               ((Single
+                 ((pattern (Var j))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              UMatrix
+              ((pattern
+                (FunApp (StanLib Times__ FnPlain AoS)
+                 (((pattern (Var ar))
+                   (meta ((type_ URowVector) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern
+                    (Promotion
+                     ((pattern (Var j))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                     UReal DataOnly))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+               (meta ((type_ URowVector) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>)))))
+        (meta <opaque>)))))
+    (meta <opaque>))
+   ((pattern
      (NRFunApp (CompilerInternal FnValidateSize)
       (((pattern (Lit Str yy)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
        ((pattern (Lit Str "2 * N"))
@@ -218,14 +283,30 @@
       ((pattern
         (FunApp (StanLib Plus__ FnPlain AoS)
          (((pattern
-            (FunApp (StanLib sum FnPlain AoS)
-             (((pattern (Var yy))
-               (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly)))))))
+            (FunApp (StanLib Plus__ FnPlain AoS)
+             (((pattern
+                (FunApp (StanLib sum FnPlain AoS)
+                 (((pattern (Var yy))
+                   (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+              ((pattern
+                (Promotion
+                 ((pattern (Var c))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                 UReal DataOnly))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
           ((pattern
-            (Promotion
-             ((pattern (Var c)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-             UReal DataOnly))
+            (FunApp (StanLib sum FnPlain AoS)
+             (((pattern
+                (Indexed
+                 ((pattern (Var A))
+                  (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly))))
+                 (All
+                  (Single
+                   ((pattern (Lit Int 1))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+               (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))))
     (meta <opaque>))))

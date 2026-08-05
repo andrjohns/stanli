@@ -1,6 +1,6 @@
 # Corpus status
 
-Passing: 88/120
+Passing: 89/120
 
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
@@ -63,6 +63,7 @@ Passing: 88/120
 - OK `normal_mixture`
 - OK `normal_mixture_k`
 - OK `pilots`
+- OK `prophet`
 - OK `radon_county`
 - OK `radon_county_intercept`
 - OK `radon_hierarchical_intercept_centered`
@@ -98,7 +99,7 @@ Passing: 88/120
 - `Mtbh_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Mth_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Survey_model`: EVAL_FAIL binomial_lpmf: Successes variable has size = 5, but Population size parameter has size 1; and they must be the same size.
-- `accel_gp`: COMPILE_FAIL stanrt compile: unsupported function kind for gpa
+- `accel_gp`: COMPILE_FAIL stanrt compile: unsupported function dims
 - `bym2_offset_only`: COMPILE_FAIL stanrt compile: unsupported function dot_self
 - `covid19imperial_v2`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
 - `covid19imperial_v3`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
@@ -113,15 +114,14 @@ Passing: 88/120
 - `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
-- `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported function kind for growth_factor_weibull
+- `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
 - `lsat_model`: COMPILE_FAIL stanrt compile: bernoulli_logit_lpmf: int argument must be int data in M2
 - `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported function multi_normal_lpdf
 - `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: unsupported function append_col
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
-- `prophet`: COMPILE_FAIL stanrt compile: unsupported function kind for linear_trend
 - `rats_model`: COMPILE_FAIL stanrt compile: size expression needs unknown int irat
 - `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
-- `soil_incubation`: COMPILE_FAIL stanrt compile: unsupported function kind for evolved_CO2
+- `soil_incubation`: COMPILE_FAIL stanrt compile: unknown variable x_r
 - `state_space_stochastic_level_stochastic_seasonal`: COMPILE_FAIL stanrt compile: unsupported index expression

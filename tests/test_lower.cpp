@@ -292,18 +292,59 @@ int main() {
     lex.params_data()[0] = 0.3;
     double g = 0, lp = lex.gradient(&g);
 
-    // c = 2 (first two positive), s = sum of y twice + c.
+    // c = 2 (first two positive), s = sum of y twice + c + sum of A col 1
+    // where A[j] = [j, j] (row writes into a matrix).
     double s = 0;
     const double yv[4] = {2.0, 1.5, -1.0, 3.0};
     for (int rep = 0; rep < 2; ++rep)
       for (double v : yv) s += v;
     s += 2.0;
+    double colsum = 0;
+    for (int j = 1; j <= 4; ++j) colsum += j;
+    s += colsum;
     using stan::math::var;
     var mu = 0.3;
     var acc = stan::math::normal_lpdf<false>(mu, s, 1.0);
     acc.grad();
     expect_eq("tdext lp", lp, acc.val());
     expect_eq("tdext dmu", g, mu.adj());
+    stan::math::recover_memory();
+  }
+
+  // Model-block UDFs on parameters, inlined: scalar chain, vector return,
+  // statement body with local accumulator + loop.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_real_array("y", {1.1, -0.4, 2.2});
+    CompiledModel lm = compile_model(slurp("tests/fixtures/udflp.tmir.sexp"), d);
+    check(lm.n_unconstrained == 4, "udflp 4 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[4] = {0.7, 0.2, -1.1, 0.9};
+    for (int i = 0; i < 4; ++i) lex.params_data()[i] = q[i];
+    double grad[4] = {0, 0, 0, 0};
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var mu = q[0];
+    Eigen::Matrix<var, -1, 1> dv(3);
+    dv << q[1], q[2], q[3];
+    const double yarr[3] = {1.1, -0.4, 2.2};
+    Eigen::Map<const Eigen::VectorXd> ym(yarr, 3);
+    var af = mu * 2.0 + 0.5;
+    var t1 = stan::math::normal_lpdf<false>(ym, af, 1.0);
+    Eigen::Matrix<var, -1, 1> hv = stan::math::divide(dv, 2.0);
+    var t2 = stan::math::normal_lpdf<false>(hv, 0.0, 1.0);
+    var s = 0.0;
+    for (int i = 0; i < 3; ++i) s = s + dv(i);
+    var t3 = stan::math::normal_lpdf<false>(s / 2.0, 0.0, 1.0);
+    var acc = ((t1 + t2) + t3);
+    acc.grad();
+    expect_eq("udflp lp", lp, acc.val());
+    expect_eq("udflp gmu", grad[0], mu.adj());
+    for (int i = 0; i < 3; ++i)
+      expect_eq("udflp gd" + std::to_string(i), grad[1 + i], dv(i).adj());
     stan::math::recover_memory();
   }
 
