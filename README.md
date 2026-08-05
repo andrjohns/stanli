@@ -6,9 +6,9 @@ kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
   (sampling gradient 1.26x faster, time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
-  (100/120 posteriordb models, every one differentially verified against
-  CmdStan's log_prob and gradients; 41 of 100 bitwise-identical, worst
-  relative deviation 9.2e-14)
+  (103/120 posteriordb models differentially verified against CmdStan's
+  log_prob and gradients; 2 more evaluate but do not yet match and are
+  not counted)
 - Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
 
 ## Architecture
@@ -126,8 +126,8 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 17/17 tests green; 100/120 posteriordb models
-passing, all CmdStan-verified (41 bitwise). Sampling-semantics gradients (propto with
+macOS arm64 / clang: 17/17 tests green; 103/120 posteriordb models
+CmdStan-verified. Sampling-semantics gradients (propto with
 per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
 for the numbers.
 

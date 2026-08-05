@@ -310,6 +310,23 @@ struct Lowering {
           }
           return r;
         }
+        // Leading-Single slice of an N-D entry (k > 2): first index fixed.
+        // Flat storage is Fortran (first index fastest), so the sub-tensor
+        // elements sit at (i-1) + d0 * t.
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
+            base.dims.size() > 2) {
+          const long i = eval_int_td(e.args[1].args[0]);
+          const int64_t d0 = base.dims[0];
+          int64_t rest = 1;
+          for (size_t d = 1; d < base.dims.size(); ++d) rest *= base.dims[d];
+          r.is_int = base.is_int;
+          r.dims.assign(base.dims.begin() + 1, base.dims.end());
+          for (int64_t k = 0; k < rest; ++k) {
+            r.r.push_back(base.r.at((i - 1) + d0 * k));
+            if (base.is_int) r.i.push_back(base.i.at((i - 1) + d0 * k));
+          }
+          return r;
+        }
         // Between subrange of a 1-D value: v[a:b].
         if (e.args.size() == 2 && e.args[1].name == "IndexBetween" &&
             base.dims.size() <= 1) {
@@ -323,16 +340,19 @@ struct Lowering {
           }
           return r;
         }
-        // X[a:b, j] on a matrix: rows a..b of column j (col-major).
+        // X[a:b, j] on a matrix / 2-D array: rows a..b of column j.
         if (e.args.size() == 3 && e.args[1].name == "IndexBetween" &&
             e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
           const long a = eval_int_td(e.args[1].args[0]);
           const long b = eval_int_td(e.args[1].args[1]);
           const long j = eval_int_td(e.args[2].args[0]);
           const int64_t R = base.dims[0];
+          r.is_int = base.is_int;
           r.dims = {b - a + 1};
-          for (long k = a; k <= b; ++k)
+          for (long k = a; k <= b; ++k) {
             r.r.push_back(base.r.at((j - 1) * R + (k - 1)));
+            if (base.is_int) r.i.push_back(base.i.at((j - 1) * R + (k - 1)));
+          }
           return r;
         }
         fail("prepare_data: unsupported index", e.raw);
@@ -845,6 +865,16 @@ struct Lowering {
           return emit(OP_SLICE, {base.slot}, base.si.rows, {},
                       {(int)(j * base.si.rows)});
         }
+        // Row-range column read M[a:b, j] (contiguous within the column).
+        if (e.args.size() == 3 && base.si.rows > 0 &&
+            e.args[1].name == "IndexBetween" &&
+            e.args[2].name == "IndexSingle") {
+          const int64_t lo = eval_int(e.args[1].args[0]);
+          const int64_t hi = eval_int(e.args[1].args[1]);
+          const int64_t j = eval_int(e.args[2].args[0]) - 1;
+          return emit(OP_SLICE, {base.slot}, hi - lo + 1, {},
+                      {(int)(j * base.si.rows + lo - 1)});
+        }
         // Params/locals with recorded dims use array-major layout (outer
         // index slowest, inner contiguous), matching stanc's read order.
         // Matrix slots (rows>0) are col-major and never take this path.
@@ -870,10 +900,18 @@ struct Lowering {
           return emit(OP_SLICE_STRIDED, {base.slot}, base.si.cols, {},
                       {(int)t, (int)base.si.rows});
         }
+        // Data-only slicing with no native path (e.g. one matrix out of a
+        // data array of matrices) evaluates at compile time.
+        if (e.data_only) {
+          Val v;
+          if (try_fold_const(e, &v)) return v;
+        }
         int64_t flat = 0;
-        if (all_single && e.args.size() == 2) {
+        if (all_single && e.args.size() == 2 &&
+            (e.type_ == "UReal" || e.type_ == "UInt")) {
           flat = eval_int(e.args[1].args[0]) - 1;
-        } else if (all_single && e.args.size() == 3 && base.si.rows > 0) {
+        } else if (all_single && e.args.size() == 3 && base.si.rows > 0 &&
+                   (e.type_ == "UReal" || e.type_ == "UInt")) {
           flat = (eval_int(e.args[2].args[0]) - 1) * base.si.rows +
                  (eval_int(e.args[1].args[0]) - 1);
         } else {
@@ -1305,6 +1343,36 @@ struct Lowering {
       const long cnt = eval_int(e.args[2]);
       return emit(OP_SLICE, {a.slot}, cnt, {}, {(int)(from - 1)});
     }
+    if (e.name == "sub_col" && e.args.size() == 4) {
+      // sub_col(M, i, j, n) = M[i .. i+n-1, j]: contiguous in col-major.
+      Val a = lower_expr(e.args[0]);
+      if (a.si.rows == 0) fail("sub_col on a slot without matrix shape");
+      const long i = eval_int(e.args[1]);
+      const long j = eval_int(e.args[2]);
+      const long n = eval_int(e.args[3]);
+      return emit(OP_SLICE, {a.slot}, n,
+                  {}, {(int)((j - 1) * a.si.rows + i - 1)});
+    }
+    if (e.name == "col" && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      if (a.si.rows == 0) fail("col on a slot without matrix shape");
+      const long j = eval_int(e.args[1]);
+      return emit(OP_SLICE, {a.slot}, a.si.rows,
+                  {}, {(int)((j - 1) * a.si.rows)});
+    }
+    if (e.name == "row" && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      if (a.si.rows == 0) fail("row on a slot without matrix shape");
+      const long i = eval_int(e.args[1]);
+      return emit(OP_SLICE_STRIDED, {a.slot}, a.si.cols, {},
+                  {(int)(i - 1), (int)a.si.rows});
+    }
+    if ((e.name == "head" || e.name == "tail") && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      const long n = eval_int(e.args[1]);
+      const long off = e.name == "head" ? 0 : info[a.slot].len - n;
+      return emit(OP_SLICE, {a.slot}, n, {}, {(int)off});
+    }
     {
       Val v;
       if (try_fold_const(e, &v)) return v;
@@ -1467,6 +1535,22 @@ struct Lowering {
             const int64_t j = eval_int(s.lhs_idx[1].args[0]) - 1;
             Val nv = emit(OP_SET_SLICE, {prev, rhs}, info[prev].len,
                           info[prev], {(int)(j * info[prev].rows)});
+            scope[s.lhs] = nv.slot;
+            return;
+          }
+          // Row-range column write M[a:b, j] = rhs (contiguous within the
+          // column).
+          if (s.lhs_idx.size() == 2 &&
+              s.lhs_idx[0].name == "IndexBetween" &&
+              s.lhs_idx[1].name == "IndexSingle" && info[prev].rows > 0) {
+            const int64_t lo = eval_int(s.lhs_idx[0].args[0]);
+            const int64_t hi = eval_int(s.lhs_idx[0].args[1]);
+            const int64_t j = eval_int(s.lhs_idx[1].args[0]) - 1;
+            if (info[rhs].len != hi - lo + 1)
+              fail("range assignment size mismatch for " + s.lhs);
+            Val nv = emit(OP_SET_SLICE, {prev, rhs}, info[prev].len,
+                          info[prev],
+                          {(int)(j * info[prev].rows + lo - 1)});
             scope[s.lhs] = nv.slot;
             return;
           }

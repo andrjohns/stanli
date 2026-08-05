@@ -18,6 +18,16 @@ import zipfile
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CHECK = REPO / "build" / "stanrt_check"
 
+# Models that compile and produce a finite gradient but do NOT match
+# CmdStan differentially. They are never counted as passing; entries leave
+# only when tools/verify_sample.py agrees.
+UNVERIFIED = {
+    "covid19imperial_v2": "lp and 49/51 gradients differ from CmdStan "
+                          "(~10%); under investigation",
+    "covid19imperial_v3": "lp and 49/51 gradients differ from CmdStan "
+                          "(~10%); under investigation",
+}
+
 
 def main():
     pdb = pathlib.Path(sys.argv[1]) / "posterior_database"
@@ -70,15 +80,29 @@ def main():
             reasons[key] += 1
 
     ok = sorted(m for m, (s, _) in results.items() if s == "OK")
-    print(f"\n== {len(ok)}/{len(results)} models pass ==")
+    verified = [m for m in ok if m not in UNVERIFIED]
+    print(f"\n== {len(ok)}/{len(results)} models evaluate "
+          f"({len(verified)} verified vs CmdStan) ==")
     for m in ok:
-        print(f"  OK {m}")
+        print(f"  {'OK ' if m not in UNVERIFIED else 'EVAL-ONLY'} {m}")
     print("\n== failure histogram ==")
     for k, c in reasons.most_common(30):
         print(f"  {c:3d}  {k}")
 
-    md = ["# Corpus status", "", f"Passing: {len(ok)}/{len(results)}", ""]
-    md += [f"- OK `{m}`" for m in ok]
+    md = ["# Corpus status", "",
+          f"Evaluating: {len(ok)}/{len(results)}",
+          f"Differentially verified against CmdStan: "
+          f"{len(verified)}/{len(results)}", "",
+          "A model counts as verified only when tools/verify_sample.py "
+          "matches CmdStan's log_prob and full gradient at the shared "
+          "deterministic point. Models that compile and evaluate but do "
+          "not yet match are listed as EVAL-ONLY and are not claimed as "
+          "passing.", ""]
+    md += [f"- OK `{m}`" for m in verified]
+    if UNVERIFIED:
+        md += ["", "## Evaluate but not verified", ""]
+        md += [f"- `{m}`: {why}" for m, why in sorted(UNVERIFIED.items())
+               if m in ok]
     md += ["", "## Failures", ""]
     for model, (s, msg) in sorted(results.items()):
         if s != "OK":
