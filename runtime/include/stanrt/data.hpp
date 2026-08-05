@@ -24,6 +24,7 @@ class DataMap {
     Entry e;
     e.is_int = true;
     e.i = {static_cast<int>(v)};
+    e.r = {static_cast<double>(v)};  // ints are also usable as reals
     m_[name] = std::move(e);
   }
   void set_real(const std::string& name, double v) {
@@ -35,6 +36,7 @@ class DataMap {
     Entry e;
     e.is_int = true;
     e.dims = {static_cast<int64_t>(v.size())};
+    e.r.assign(v.begin(), v.end());  // ints are also usable as reals
     e.i = std::move(v);
     m_[name] = std::move(e);
   }

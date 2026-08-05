@@ -123,6 +123,39 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // Static if inside an unrolled loop, condition indexing data by the loop
+  // variable (M0 capture-recapture pattern): the branch is resolved at
+  // compile time per iteration.
+  {
+    DataMap d;
+    d.set_int("M", 3);
+    d.set_int_array("s", {2, 0, 1});
+    CompiledModel lm = compile_model(slurp("tests/fixtures/staticif.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.3;
+    double g = 0, lp = lex.gradient(&g);
+
+    using stan::math::var;
+    var pu = 0.3;
+    // Mirror the lowering: model terms sum first, jacobians append last.
+    var lj = 0.0;
+    var pc = stan::math::lub_constrain(pu, 0.0, 1.0, lj);
+    var acc = 0.0;
+    const int sv[3] = {2, 0, 1};
+    for (int i = 0; i < 3; ++i) {
+      if (sv[i] > 0)
+        acc = acc + stan::math::binomial_lpmf<false>(sv[i], 5, pc);
+      else
+        acc = acc + stan::math::bernoulli_lpmf<false>(0, pc);
+    }
+    acc = acc + lj;
+    acc.grad();
+    expect_eq("staticif lp", lp, acc.val());
+    expect_eq("staticif dp", g, pu.adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

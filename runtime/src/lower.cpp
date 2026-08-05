@@ -134,10 +134,18 @@ struct Lowering {
         return r;
       case mir::Expr::Var: {
         DataMap::Entry* en = env.find(e.name);
-        if (!en)
-          fail("prepare_data: unknown variable " + e.name +
-               " (type " + e.type_ + ")", e.raw);
-        return *en;
+        if (en) return *en;
+        // Loop variables of unrolled log_prob loops live in int_env, and
+        // data-only conditions there are evaluated through td_eval.
+        auto it = int_env.find(e.name);
+        if (it != int_env.end()) {
+          r.is_int = true;
+          r.i = {(int)it->second};
+          r.r = {(double)it->second};
+          return r;
+        }
+        fail("prepare_data: unknown variable " + e.name +
+             " (type " + e.type_ + ")", e.raw);
       }
       case mir::Expr::Indexed: {
         DataMap::Entry base = td_eval(e.args[0]);

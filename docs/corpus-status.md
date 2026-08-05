@@ -1,10 +1,12 @@
 # Corpus status
 
-Passing: 81/120
+Passing: 84/120
 
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
 - OK `GLM_Poisson_model`
+- OK `M0_model`
+- OK `Mh_model`
 - OK `Rate_1_model`
 - OK `Rate_2_model`
 - OK `Rate_3_model`
@@ -13,6 +15,7 @@ Passing: 81/120
 - OK `arK`
 - OK `arma11`
 - OK `blr`
+- OK `bones_model`
 - OK `dogs`
 - OK `dogs_hierarchical`
 - OK `dogs_log`
@@ -88,16 +91,13 @@ Passing: 81/120
 
 - `2pl_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
 - `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
-- `M0_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
-- `Mb_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
-- `Mh_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
-- `Mt_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
+- `Mb_model`: EVAL_FAIL bernoulli_lpmf: Random variable has size = 1, but Probability parameter has size 5; and they must be the same size.
+- `Mt_model`: EVAL_FAIL bernoulli_lpmf: Random variable has size = 1, but Probability parameter has size 3; and they must be the same size.
 - `Mtbh_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Mth_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
-- `Survey_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable n (type UInt)
+- `Survey_model`: COMPILE_FAIL stanrt compile: unsupported function negative_infinity
 - `accel_gp`: COMPILE_FAIL stanrt compile: unsupported function kind for gpa
 - `accel_splines`: COMPILE_FAIL stanrt compile: unsupported function student_t_lccdf
-- `bones_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i (type UInt)
 - `bym2_offset_only`: COMPILE_FAIL stanrt compile: unsupported function dot_self
 - `covid19imperial_v2`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
 - `covid19imperial_v3`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
