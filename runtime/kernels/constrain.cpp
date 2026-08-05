@@ -30,11 +30,14 @@ void clower_fwd(KernelCtx& ctx) {
   ctx.out2.data[0] = x.sum();
 }
 void clower_bwd(KernelCtx& ctx) {
-  if (!ctx.in_adj[0].data) return;
   CMapA exp_x(ctx.scratch, ctx.in[0].len);
   CMapA dout(ctx.out_adj_vec.data, ctx.out_adj_vec.len);
-  MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
-  dx += dout * exp_x + ctx.out2_adj;
+  if (ctx.in_adj[0].data) {
+    MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
+    dx += dout * exp_x + ctx.out2_adj;
+  }
+  // Parameter-dependent bound: rev lb_constrain adds ret.adj().sum().
+  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += dout.sum();
 }
 
 // rev ub_constrain(matrix, scalar, lp):
@@ -49,11 +52,13 @@ void cupper_fwd(KernelCtx& ctx) {
   ctx.out2.data[0] = x.sum();
 }
 void cupper_bwd(KernelCtx& ctx) {
-  if (!ctx.in_adj[0].data) return;
   CMapA exp_x(ctx.scratch, ctx.in[0].len);
   CMapA dout(ctx.out_adj_vec.data, ctx.out_adj_vec.len);
-  MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
-  dx += -dout * exp_x + ctx.out2_adj;
+  if (ctx.in_adj[0].data) {
+    MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
+    dx += -dout * exp_x + ctx.out2_adj;
+  }
+  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += dout.sum();
 }
 
 // rev lub_constrain(matrix, scalar, scalar, lp):
@@ -75,13 +80,25 @@ void clu_fwd(KernelCtx& ctx) {
   out = diff * il + lb;
 }
 void clu_bwd(KernelCtx& ctx) {
-  if (!ctx.in_adj[0].data) return;
   CMapA il(ctx.scratch, ctx.in[0].len);
   CMapA dout(ctx.out_adj_vec.data, ctx.out_adj_vec.len);
-  MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
   const double lb = ctx.in[1].data[0], ub = ctx.in[2].data[0];
   const double diff = ub - lb;
-  dx += dout * diff * il * (1.0 - il) + ctx.out2_adj * (1.0 - 2.0 * il);
+  if (ctx.in_adj[0].data) {
+    MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
+    dx += dout * diff * il * (1.0 - il) + ctx.out2_adj * (1.0 - 2.0 * il);
+  }
+  // rev lub_constrain bound adjoints (matrix-with-lp form):
+  //   lb.adj += (ret.adj*(1-il)).sum() - (1/diff)*lp.adj*N
+  //   ub.adj += (ret.adj*il).sum() + (1/diff)*lp.adj*N
+  const double n = static_cast<double>(ctx.in[0].len);
+  const double one_over_diff = 1.0 / diff;
+  if (ctx.in_adj[1].data)
+    ctx.in_adj[1].data[0] += (dout * (1.0 - il)).sum() +
+                             -one_over_diff * ctx.out2_adj * n;
+  if (ctx.in_adj[2].data)
+    ctx.in_adj[2].data[0] +=
+        (dout * il).sum() + one_over_diff * ctx.out2_adj * n;
 }
 
 int64_t constrain_scratch(const Op& op, const Slot* slots) {
