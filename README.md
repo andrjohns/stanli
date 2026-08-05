@@ -3,8 +3,78 @@
 A portable Stan runtime: op-graph executor over precompiled stan-math
 kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
 
-Design: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
-Current plan: `docs/superpowers/plans/2026-08-04-m1-spine.md`
+- Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
+  (sampling gradient 1.26x faster, time-to-first-draw ~20x faster)
+- Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
+  (81/120 posteriordb models, every one differentially verified against
+  CmdStan's log_prob and gradients)
+- Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
+
+## Architecture
+
+The premise: a Stan model does not need machine code generated for it.
+Every model is a composition of a fixed vocabulary of operations
+(densities, constraint transforms, linear algebra, elementwise math), so
+stanrt ships those operations precompiled and turns each model into data:
+a static graph of ops over flat buffers, built at load time and executed
+by a small interpreter. There is no JIT and no C++ codegen; "compiling" a
+model takes milliseconds.
+
+```
+model.stan + data.json
+  |  stanc3 (official OCaml compiler, linked into the library)
+  v
+transformed MIR (s-expression)
+  |  lowering: runtime/src/lower.cpp
+  v
+op graph + preallocated value/adjoint arenas
+  |  executor: forward = log density, reverse = gradient
+  v
+NUTS (stan::mcmc::adapt_diag_e_nuts) -> draws
+```
+
+Stage by stage:
+
+1. **stanc3, in process.** The real Stan compiler (OCaml) is compiled to
+   a self-contained object (`-output-complete-obj`) and linked into the
+   shared library. It parses, typechecks, and optimizes the model, and
+   stanrt consumes its transformed MIR directly. Full language fidelity
+   without a subprocess or a vendored parser rewrite.
+
+2. **Lowering** (`runtime/src/lower.cpp`). A compile-time interpreter
+   walks the MIR against the actual data: transformed data is evaluated
+   eagerly, loops with data-known bounds are unrolled, and the model
+   block flattens into a linear sequence of ops reading and writing
+   preallocated arenas. `~` statements lower to the same propto +
+   per-argument-activity instantiations CmdStan's generated C++ uses, so
+   dropped constants and skipped data partials match exactly.
+
+3. **Execution** (`runtime/src/executor.cpp`). The op graph is the AD
+   tape. The forward sweep computes the log density and stashes each
+   op's partials in per-op scratch; the reverse sweep runs the ops
+   backward, contracting adjoints. Steady-state gradient evaluation
+   performs zero allocation, which is where the speedup over the
+   pointer-chasing var tape comes from.
+
+4. **Kernels** (`runtime/kernels/`). Two tiers behind one interface.
+   Native kernels are hand-written forward/backward pairs that mirror
+   the exact Eigen expressions of stan-math's rev overloads, so
+   gradients match CmdStan bitwise (FP contraction pinned off
+   project-wide). Everything else runs as a "legacy" op: a recorder
+   scalar (`rvar`, a registered stan-math scalar type) or a nested var
+   tape replay drives unmodified stan-math prim/prob templates and
+   deposits values and partials into the caller's buffers. Legacy ops
+   make the whole library expressible; native kernels make the hot path
+   fast. Both are compiled once, when the stanrt binary is built.
+
+5. **Sampling** (`runtime/src/nuts.cpp`). Stan's own NUTS with
+   diagonal-metric adaptation, driven through a thin model adapter that
+   returns one precomputed-gradients vari per evaluation.
+
+6. **Distribution.** Everything above sits behind a C ABI
+   (`runtime/include/stanrt/capi.h`) in one shared library; the Python
+   package is a ctypes wrapper around it. A platform wheel is one .whl
+   containing one dylib.
 
 ## Python
 
@@ -20,14 +90,21 @@ draws = m.sample(seed=1, warmup=1000, samples=1000)
 draws["mu"].mean()
 ```
 
-The wheel bundles one file: the stanrt shared library (C ABI in
-`runtime/include/stanrt/capi.h`) with stanc3 embedded in-process (OCaml
-compiled to a self-contained object via tools/stanc_embed/, linked in).
-Model compilation, lowering, and sampling all happen inside the library;
-no subprocess, nothing compiled on the user's machine. Builds without the
-embed object fall back to running a bundled stanc binary as a subprocess.
+Builds without the embedded stanc3 object fall back to running a bundled
+stanc binary as a subprocess.
 
 ## Build
+
+One-shot setup (fetches pinned deps, builds, runs tests):
+
+```
+./tools/dev_setup.sh            # core build + tests
+./tools/dev_setup.sh --embed    # + OCaml toolchain, in-process stanc3
+./tools/dev_setup.sh --corpus   # + posteriordb and the CmdStan verify rig
+./tools/dev_setup.sh --all
+```
+
+Or manually:
 
 ```
 ./deps/fetch.sh
@@ -36,40 +113,23 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
+## Verification policy
+
+Nothing ships on "looks close". Kernel gradients are bitwise-tested
+against stan-math's var path at fixed points; whole models are
+differentially verified against CmdStan (same generated model, same
+deterministic evaluation point, `tools/verify_sample.py`). The corpus
+scoreboard (`tools/corpus.py`) tracks which posteriordb models compile,
+evaluate, and verify. Details in
+[docs/corpus-status.md](docs/corpus-status.md).
+
 ## Status
 
-Milestone 1 (spine) complete on macOS arm64 / clang. 9/9 tests green.
+macOS arm64 / clang: 16/16 tests green; 81/120 posteriordb models
+passing, all CmdStan-verified. Sampling-semantics gradients (propto with
+per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
+for the numbers.
 
-| Proven | How |
-| --- | --- |
-| Recorder scalar reproduces stan-math gradients | Bitwise vs the var path across 7 densities, mixed data/parameter shapes (`test_densities`, `test_recorder`) |
-| Zero-copy promotion of double buffers to rvar views | Static layout asserts + bitwise equality of copied vs mapped inputs |
-| Graph executor forward/reverse | Bitwise vs closed form and var references (`test_executor`) |
-| Native ops with hand vjps (exp, add_n, bcast_fma, matvec) | Bitwise vs var tape, including accumulation-order matching |
-| Legacy op mechanism (nested var tape replay) | log_sum_exp and softmax bitwise vs var path (`test_legacy`) |
-| Whole-model parity | Eight schools (10-dim) and logistic GLM (4-dim): log_prob + full gradient bitwise vs all-var references at fixed points |
-| Sampling | stan::mcmc::adapt_diag_e_nuts over the executor gradient via a one-vari precomputed_gradients adapter; statistical checks on a 10-dim standard normal and eight schools (`test_nuts`) |
-
-Notes:
-
-- FP contraction is pinned off project-wide; clang otherwise forms FMAs
-  differently across template instantiations of the same math, which breaks
-  bitwise comparisons (measured 2 ULP before pinning).
-- All densities are instantiated propto=false (target += semantics).
-  propto variants arrive with the stanc3 backend in M2.
-- Kernels bind every argument as rvar; comparisons against mixed
-  data/parameter var instantiations can differ by ULPs through stan-math's
-  to_ref_if caching (bounded and tested; see test_densities).
-
-M2 (compiler) status: stanc3 --debug-transformed-mir sexp -> graph compiler
-with for-loop unrolling, Single indexing, constraint transforms
-(lower/upper/lower-upper), a compile-time transformed-data interpreter, JSON
-data loading, stanrt_run/stanrt_check CLIs. 67/120 posteriordb models
-compile and evaluate (docs/corpus-status.md). Eight schools runs end to end
-from .stan + .json through NUTS with bitwise gradient parity vs the var
-path at fixed points.
-
-Remaining M2 work: CmdStan gradient-reference fixtures for the passing set
-(the deps/cmdstan build for that rig exists), remaining transforms
-(simplex, ordered, cholesky_corr), matrix ops, log_prob-side indexed
-assignment cases, ODE/GP models.
+In progress: the remaining corpus models (cholesky transforms, GP
+covariance ops, ODE integrators, a few indexing forms), Linux wheels +
+CI, the CRAN shim.

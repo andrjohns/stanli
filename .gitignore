@@ -1,5 +1,8 @@
-deps/
+deps/*
+!deps/fetch.sh
 build/
+build-rel/
 python/stanrt/_bin/
 dist/
 *.egg-info/
+compile_commands.json
