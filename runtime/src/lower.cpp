@@ -3,6 +3,7 @@
 #include <stanrt/optable.hpp>
 #include <stanrt/sexp.hpp>
 
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -16,8 +17,20 @@ struct SlotInfo {
   bool data_like = false;      // no adjoint (data or constant)
 };
 
+// Compile-time interpreter for prepare_data: everything there is DataOnly,
+// so transformed data evaluates to plain doubles/ints before lowering.
+struct TEnv {
+  std::map<std::string, DataMap::Entry> vars;
+
+  DataMap::Entry* find(const std::string& n) {
+    auto it = vars.find(n);
+    return it == vars.end() ? nullptr : &it->second;
+  }
+};
+
 struct Lowering {
   const DataMap& data;
+  TEnv env;
   Graph g;
   CompiledModel out;
   std::map<std::string, int> scope;            // var -> slot
@@ -59,8 +72,19 @@ struct Lowering {
         return e.lit_i;
       case mir::Expr::Var: {
         auto it = int_env.find(e.name);
-        if (it == int_env.end()) fail("size expression needs unknown int " + e.name);
-        return it->second;
+        if (it != int_env.end()) return it->second;
+        DataMap::Entry* en = env.find(e.name);
+        if (en && en->is_int && en->i.size() == 1) return en->i[0];
+        fail("size expression needs unknown int " + e.name);
+      }
+      case mir::Expr::Indexed: {
+        DataMap::Entry* en = e.args[0].kind == mir::Expr::Var
+                                 ? env.find(e.args[0].name)
+                                 : nullptr;
+        if (en && en->is_int && e.args.size() == 2 &&
+            e.args[1].name == "IndexSingle")
+          return en->i.at(eval_int(e.args[1].args[0]) - 1);
+        fail("unsupported int index expression", e.raw);
       }
       case mir::Expr::FunApp:
         if (e.name == "Plus__") return eval_int(e.args[0]) + eval_int(e.args[1]);
@@ -91,34 +115,254 @@ struct Lowering {
     fail("unsupported sized type " + t.base, t.raw);
   }
 
-  // ---- data block -----------------------------------------------------------
+  // ---- data block: interpret prepare_data over doubles ----------------------
+  DataMap::Entry td_eval(const mir::Expr& e) {
+    DataMap::Entry r;
+    switch (e.kind) {
+      case mir::Expr::LitInt:
+        r.is_int = true;
+        r.i = {(int)e.lit_i};
+        r.r = {(double)e.lit_i};
+        return r;
+      case mir::Expr::LitReal:
+        r.r = {e.lit};
+        return r;
+      case mir::Expr::Var: {
+        DataMap::Entry* en = env.find(e.name);
+        if (!en) fail("prepare_data: unknown variable " + e.name);
+        return *en;
+      }
+      case mir::Expr::Indexed: {
+        DataMap::Entry base = td_eval(e.args[0]);
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle") {
+          const long ix = eval_int_td(e.args[1].args[0]);
+          r.is_int = base.is_int;
+          if (base.is_int) r.i = {base.i.at(ix - 1)};
+          r.r = {base.r.at(ix - 1)};
+          return r;
+        }
+        if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
+        // Matrix row/element access: [i, j] etc.
+        if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
+            e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
+          const long i = eval_int_td(e.args[1].args[0]);
+          const long j = eval_int_td(e.args[2].args[0]);
+          r.r = {base.r.at((i - 1) * base.dims[1] + (j - 1))};
+          return r;
+        }
+        fail("prepare_data: unsupported index", e.raw);
+      }
+      case mir::Expr::FunApp: {
+        auto bin = [&](auto f) {
+          DataMap::Entry a = td_eval(e.args[0]), b = td_eval(e.args[1]);
+          DataMap::Entry o;
+          const size_t n = std::max(a.r.size(), b.r.size());
+          o.r.resize(n);
+          for (size_t i = 0; i < n; ++i)
+            o.r[i] = f(a.r[a.r.size() == 1 ? 0 : i],
+                       b.r[b.r.size() == 1 ? 0 : i]);
+          o.dims = a.r.size() >= b.r.size() ? a.dims : b.dims;
+          if (a.is_int && b.is_int && a.i.size() == 1 && b.i.size() == 1) {
+            o.is_int = true;
+            o.i = {(int)f(a.i[0], b.i[0])};
+          }
+          return o;
+        };
+        auto un = [&](auto f) {
+          DataMap::Entry a = td_eval(e.args[0]);
+          DataMap::Entry o;
+          o.dims = a.dims;
+          o.r.resize(a.r.size());
+          for (size_t i = 0; i < a.r.size(); ++i) o.r[i] = f(a.r[i]);
+          return o;
+        };
+        if (e.name == "Plus__") return bin([](double x, double y) { return x + y; });
+        if (e.name == "Minus__") return bin([](double x, double y) { return x - y; });
+        if (e.name == "Times__" || e.name == "EltTimes__")
+          return bin([](double x, double y) { return x * y; });
+        if (e.name == "Divide__" || e.name == "EltDivide__")
+          return bin([](double x, double y) { return x / y; });
+        if (e.name == "Pow__" || e.name == "pow")
+          return bin([](double x, double y) { return std::pow(x, y); });
+        if (e.name == "PMinus__") return un([](double x) { return -x; });
+        if (e.name == "PPlus__") return un([](double x) { return x; });
+        if (e.name == "exp") return un([](double x) { return std::exp(x); });
+        if (e.name == "log") return un([](double x) { return std::log(x); });
+        if (e.name == "log10") return un([](double x) { return std::log10(x); });
+        if (e.name == "sqrt") return un([](double x) { return std::sqrt(x); });
+        if (e.name == "square") return un([](double x) { return x * x; });
+        if (e.name == "fabs" || e.name == "abs")
+          return un([](double x) { return std::fabs(x); });
+        if (e.name == "mean") {
+          DataMap::Entry a = td_eval(e.args[0]);
+          double m = 0;
+          for (double v : a.r) m += v;
+          r.r = {m / (double)a.r.size()};
+          return r;
+        }
+        if (e.name == "sd") {
+          DataMap::Entry a = td_eval(e.args[0]);
+          double m = 0;
+          for (double v : a.r) m += v;
+          m /= (double)a.r.size();
+          double s2 = 0;
+          for (double v : a.r) s2 += (v - m) * (v - m);
+          r.r = {std::sqrt(s2 / (double)(a.r.size() - 1))};
+          return r;
+        }
+        if (e.name == "sum") {
+          DataMap::Entry a = td_eval(e.args[0]);
+          double m = 0;
+          for (double v : a.r) m += v;
+          r.r = {m};
+          return r;
+        }
+        if (e.name == "rep_vector" || e.name == "rep_row_vector") {
+          DataMap::Entry a = td_eval(e.args[0]);
+          const long n = eval_int_td(e.args[1]);
+          r.r.assign(n, a.r.at(0));
+          r.dims = {n};
+          return r;
+        }
+        if (e.name == "to_vector") {
+          DataMap::Entry a = td_eval(e.args[0]);
+          a.dims = {(int64_t)a.r.size()};
+          a.is_int = false;
+          return a;
+        }
+        fail("prepare_data: unsupported function " + e.name, e.raw);
+      }
+      default:
+        fail("prepare_data: unsupported expression", e.raw);
+    }
+  }
+
+  long eval_int_td(const mir::Expr& e) {
+    DataMap::Entry v = td_eval(e);
+    if (v.is_int && v.i.size() == 1) return v.i[0];
+    if (v.r.size() == 1) return (long)v.r[0];
+    fail("prepare_data: expected int scalar", e.raw);
+  }
+
+  void td_exec(const mir::Stmt& st) {
+    switch (st.kind) {
+      case mir::Stmt::Decl: {
+        DataMap::Entry e;
+        if (st.decl_type.base == "SInt") e.is_int = true;
+        if (st.has_init && st.init.kind == mir::Expr::FunApp &&
+            st.init.fn_lib == mir::Expr::Lib::Internal &&
+            st.init.name == "FnReadData") {
+          // Reads name the source data variable in their argument.
+          e = data.at(st.init.args.at(0).lit_s);
+        } else if (st.has_init &&
+                   !(st.init.kind == mir::Expr::FunApp &&
+                     st.init.fn_lib == mir::Expr::Lib::Internal)) {
+          e = td_eval(st.init);
+        } else if (data.has(st.decl_id)) {
+          e = data.at(st.decl_id);
+        } else if (!st.decl_type.base.empty() &&
+                   st.decl_type.base != "SInt" &&
+                   st.decl_type.base != "SReal") {
+          // Bare sized decl: allocate zeros so element writes work.
+          int64_t n = 1;
+          std::vector<int64_t> dims;
+          for (const auto& d : st.decl_type.dims) {
+            const long v = eval_int_td(d);
+            dims.push_back(v);
+            n *= v;
+          }
+          e.r.assign(n, 0.0);
+          e.dims = std::move(dims);
+        }
+        env.vars[st.decl_id] = std::move(e);
+        return;
+      }
+      case mir::Stmt::Assignment: {
+        // Data reads: the FnReadData argument names the source variable.
+        std::string read_name;
+        std::function<void(const mir::Expr&)> scan = [&](const mir::Expr& x) {
+          if (x.kind == mir::Expr::FunApp && x.name == "FnReadData" &&
+              !x.args.empty())
+            read_name = x.args[0].lit_s;
+          for (const auto& a : x.args) scan(a);
+        };
+        scan(st.rhs);
+        if (!read_name.empty()) {
+          env.vars[st.lhs] = data.at(read_name);
+          return;
+        }
+        if (st.lhs_idx.empty()) {
+          env.vars[st.lhs] = td_eval(st.rhs);
+          return;
+        }
+        DataMap::Entry* en = env.find(st.lhs);
+        if (!en) fail("prepare_data: assignment to unknown " + st.lhs);
+        DataMap::Entry v = td_eval(st.rhs);
+        if (st.lhs_idx.size() == 1 && st.lhs_idx[0].name == "IndexSingle") {
+          const long ix = eval_int_td(st.lhs_idx[0].args[0]);
+          if ((size_t)ix > en->r.size()) en->r.resize(ix, 0.0);
+          en->r[ix - 1] = v.r.at(0);
+          return;
+        }
+        fail("prepare_data: unsupported indexed assignment");
+      }
+      case mir::Stmt::For: {
+        const long lo = eval_int_td(st.lower), hi = eval_int_td(st.upper);
+        for (long v = lo; v <= hi; ++v) {
+          DataMap::Entry lv;
+          lv.is_int = true;
+          lv.i = {(int)v};
+          lv.r = {(double)v};
+          env.vars[st.loopvar] = lv;
+          for (const auto& k : st.body) td_exec(k);
+        }
+        env.vars.erase(st.loopvar);
+        return;
+      }
+      case mir::Stmt::IfElse: {
+        const bool c = td_eval(st.cond).r.at(0) != 0.0;
+        if (c && !st.body.empty()) td_exec(st.body[0]);
+        if (!c && st.body.size() > 1) td_exec(st.body[1]);
+        return;
+      }
+      case mir::Stmt::Block:
+      case mir::Stmt::SList:
+        for (const auto& k : st.body) td_exec(k);
+        return;
+      case mir::Stmt::NRFunApp:
+      case mir::Stmt::Skip:
+        return;  // checks skipped in M2
+      default:
+        fail("prepare_data: unsupported statement", st.raw);
+    }
+  }
+
   void bind_data(const mir::Program& p) {
     for (const auto& [name, type] : p.input_vars) {
-      const DataMap::Entry& e = data.at(name);
-      if (type.base == "SInt") {
-        if (!e.is_int) fail("data " + name + " must be int");
-        int_env[name] = e.i.at(0);
-        continue;  // int scalars live in the int env, not the arena
-      }
-      if (type.base == "SArray" && !e.r.size() && e.is_int) {
-        // Int arrays: kept by name for density outcomes (idata), and also
-        // exposed as a double slot if arithmetic needs them later.
-        int_arrays[name] = name;
-        continue;
-      }
-      int64_t rows = 0, cols = 0;
-      const int64_t len = sized_len(type, &rows, &cols);
-      if ((int64_t)e.r.size() != len)
-        fail("data " + name + ": expected " + std::to_string(len) +
-             " values, got " + std::to_string(e.r.size()));
-      SlotInfo si;
-      si.data_like = true;
-      si.rows = rows;
-      si.cols = cols;
-      const int s = add_slot(len, false, si);
-      out.fills.emplace_back(s, e.r);
-      scope[name] = s;
+      (void)type;
+      if (data.has(name)) env.vars[name] = data.at(name);
     }
+    for (const auto& st : p.prepare_data) td_exec(st);
+    for (auto& [name, e] : env.vars) {
+      if (e.is_int && e.i.size() == 1 && e.dims.empty())
+        int_env[name] = e.i[0];
+    }
+  }
+
+  // Lazily materialize an env value as a data slot when log_prob uses it.
+  int env_slot(const std::string& name) {
+    DataMap::Entry* en = env.find(name);
+    if (!en || en->r.empty()) return -1;
+    SlotInfo si;
+    si.data_like = true;
+    if (en->dims.size() == 2) {
+      si.rows = en->dims[0];
+      si.cols = en->dims[1];
+    }
+    const int s = add_slot((int64_t)en->r.size(), false, si);
+    out.fills.emplace_back(s, en->r);
+    scope[name] = s;
+    return s;
   }
 
   // ---- expressions ----------------------------------------------------------
@@ -135,9 +379,27 @@ struct Lowering {
           auto ii = int_env.find(e.name);
           if (ii != int_env.end())
             return {const_slot(static_cast<double>(ii->second)), {}};
+          const int s = env_slot(e.name);
+          if (s >= 0) return {s, info[s]};
           fail("unknown variable " + e.name);
         }
         return {it->second, info[it->second]};
+      }
+      case mir::Expr::Indexed: {
+        // All-Single indices with compile-time values -> element read.
+        Val base = lower_expr(e.args[0]);
+        if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
+        int64_t flat = 0;
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle") {
+          flat = eval_int(e.args[1].args[0]) - 1;
+        } else if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
+                   e.args[2].name == "IndexSingle" && base.si.rows > 0) {
+          flat = (eval_int(e.args[1].args[0]) - 1) * base.si.cols +
+                 (eval_int(e.args[2].args[0]) - 1);
+        } else {
+          fail("unsupported index expression", e.raw);
+        }
+        return emit(OP_INDEX, {base.slot}, 1, {}, {(int)flat});
       }
       case mir::Expr::LitInt:
         return {const_slot(static_cast<double>(e.lit_i)), {}};
@@ -204,13 +466,18 @@ struct Lowering {
       if ((int)e.args.size() != d.nargs)
         fail(e.name + ": expected " + std::to_string(d.nargs) + " args");
       auto int_arg = [&](const mir::Expr& oc) -> std::vector<int> {
-        if (oc.kind == mir::Expr::Var && data.has(oc.name) &&
-            data.at(oc.name).is_int)
-          return data.at(oc.name).i;
+        if (oc.kind == mir::Expr::Var) {
+          DataMap::Entry* en = env.find(oc.name);
+          if (en && en->is_int && !en->i.empty()) return en->i;
+          if (int_env.count(oc.name))
+            return {static_cast<int>(int_env[oc.name])};
+        }
         if (oc.kind == mir::Expr::LitInt)
           return {static_cast<int>(oc.lit_i)};
-        if (oc.kind == mir::Expr::Var && int_env.count(oc.name))
-          return {static_cast<int>(int_env[oc.name])};
+        if (oc.kind == mir::Expr::Indexed || oc.kind == mir::Expr::FunApp) {
+          // Compile-time int expression (e.g. y[n] under an unrolled loop).
+          return {static_cast<int>(eval_int(oc))};
+        }
         fail(e.name + ": int argument must be int data in M2", oc.raw);
       };
       std::vector<int> idata;
@@ -343,6 +610,8 @@ struct Lowering {
     out.views.push_back({s.decl_id, con.slot, len});
   }
 
+  std::map<std::string, int64_t> decl_lens;
+
   void lower_stmt(const mir::Stmt& s) {
     switch (s.kind) {
       case mir::Stmt::Decl:
@@ -350,14 +619,40 @@ struct Lowering {
           lower_read_param(s);
         } else if (s.has_init) {
           scope[s.decl_id] = lower_expr(s.init).slot;
+        } else {
+          int64_t rows = 0, cols = 0;
+          decl_lens[s.decl_id] = sized_len(s.decl_type, &rows, &cols);
         }
-        // Bare decls bind on first assignment.
         return;
-      case mir::Stmt::Assignment:
-        if (!s.lhs_idx.empty())
-          fail("indexed assignment unsupported in M2", s.raw);
+      case mir::Stmt::Assignment: {
+        if (!s.lhs_idx.empty()) {
+          // Element write under unrolled control flow: functional update.
+          if (s.lhs_idx.size() != 1 || s.lhs_idx[0].name != "IndexSingle")
+            fail("unsupported indexed assignment", s.raw);
+          const int64_t flat = eval_int(s.lhs_idx[0].args[0]) - 1;
+          int prev;
+          auto it = scope.find(s.lhs);
+          if (it != scope.end()) {
+            prev = it->second;
+          } else {
+            auto dl = decl_lens.find(s.lhs);
+            if (dl == decl_lens.end())
+              fail("indexed assignment to undeclared " + s.lhs);
+            SlotInfo si;
+            si.data_like = true;
+            prev = add_slot(dl->second, false, si);
+            out.fills.emplace_back(prev,
+                                   std::vector<double>(dl->second, 0.0));
+          }
+          const int rhs = lower_expr(s.rhs).slot;
+          Val nv = emit(OP_SET_INDEX, {prev, rhs}, info[prev].len, info[prev],
+                        {(int)flat});
+          scope[s.lhs] = nv.slot;
+          return;
+        }
         scope[s.lhs] = lower_expr(s.rhs).slot;
         return;
+      }
       case mir::Stmt::TargetPE:
         target_terms.push_back(lower_expr(s.target).slot);
         return;
@@ -372,8 +667,15 @@ struct Lowering {
         // enforced at data binding; value checks are skipped in M2.
         if (s.fn_name == "FnCheck" || s.fn_name == "FnValidateSize") return;
         fail("unsupported statement function " + s.fn_name);
-      case mir::Stmt::For:
-        fail("For loops unsupported in M2 tier-1", s.raw);
+      case mir::Stmt::For: {
+        const long lo = eval_int(s.lower), hi = eval_int(s.upper);
+        for (long v = lo; v <= hi; ++v) {
+          int_env[s.loopvar] = v;
+          for (const auto& k : s.body) lower_stmt(k);
+        }
+        int_env.erase(s.loopvar);
+        return;
+      }
       case mir::Stmt::IfElse:
         fail("IfElse unsupported in M2 tier-1", s.raw);
       default:

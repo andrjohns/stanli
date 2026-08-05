@@ -101,19 +101,41 @@ int main() {
       expect_eq(tag + " g" + std::to_string(i), grad[i], grad_ref[i]);
   }
 
-  // Unsupported construct: for loop must fail with a clear error.
+  // For loops unroll: scalar-loop normal model vs per-term var reference.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_real_array("y", {1.0, 2.0, 3.0});
+    CompiledModel lm = compile_model(slurp("tests/fixtures/loopy.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.4;
+    double g = 0, lp = lex.gradient(&g);
+
+    using stan::math::var;
+    var mu = 0.4;
+    const double yv[3] = {1.0, 2.0, 3.0};
+    var acc = 0.0;
+    for (int n = 0; n < 3; ++n)
+      acc = acc + stan::math::normal_lpdf<false>(var(yv[n]), mu, var(1.0));
+    acc.grad();
+    expect_eq("loopy lp", lp, acc.val());
+    expect_eq("loopy dmu", g, mu.adj());
+    stan::math::recover_memory();
+  }
+
+  // Unsupported construct: simplex transform must fail with a clear error.
   bool threw = false;
   try {
-    compile_model(slurp("tests/fixtures/loopy.tmir.sexp"), [] {
+    compile_model(slurp("tests/fixtures/simp.tmir.sexp"), [] {
       DataMap d;
-      d.set_int("N", 3);
-      d.set_real_array("y", {1.0, 2.0, 3.0});
+      d.set_int("K", 3);
       return d;
     }());
   } catch (const CompileError& e) {
-    threw = std::string(e.what()).find("For") != std::string::npos;
+    threw = std::string(e.what()).find("transform") != std::string::npos;
   }
-  check(threw, "for loop rejected with construct name");
+  check(threw, "simplex rejected with construct name");
 
   if (failures == 0) std::printf("test_lower OK\n");
   return failures == 0 ? 0 : 1;

@@ -96,11 +96,19 @@ Expr read_expr_pattern(const Node& p) {
     for (size_t i = 2; i < p.size(); ++i) {
       const Node& idxs = p[i];
       for (size_t a = 0; a < idxs.size(); ++a) {
-        // Index kinds (All / Single e / ...) unsupported until the corpus
-        // loop lifts them; record raw for the error path.
+        const Node& ix_n = idxs[a];
         Expr ix;
-        ix.kind = Expr::Unsupported;
-        ix.raw = dump(idxs[a]);
+        if (ix_n.is_atom() && ix_n.atom == "All") {
+          ix.kind = Expr::FunApp;
+          ix.name = "IndexAll";
+        } else if (!ix_n.is_atom() && ix_n.head_is("Single")) {
+          ix.kind = Expr::FunApp;
+          ix.name = "IndexSingle";
+          ix.args.push_back(read_expr(ix_n[1]));
+        } else {
+          ix.kind = Expr::Unsupported;
+          ix.raw = dump(ix_n);
+        }
         e.args.push_back(ix);
       }
     }
@@ -239,9 +247,19 @@ Stmt read_stmt(const Node& n) {
     }
     if (lhs.size() > 1) {
       for (size_t i = 0; i < lhs[1].size(); ++i) {
+        const Node& ix_n = lhs[1][i];
         Expr ix;
-        ix.kind = Expr::Unsupported;
-        ix.raw = dump(lhs[1][i]);
+        if (ix_n.is_atom() && ix_n.atom == "All") {
+          ix.kind = Expr::FunApp;
+          ix.name = "IndexAll";
+        } else if (!ix_n.is_atom() && ix_n.head_is("Single")) {
+          ix.kind = Expr::FunApp;
+          ix.name = "IndexSingle";
+          ix.args.push_back(read_expr(ix_n[1]));
+        } else {
+          ix.kind = Expr::Unsupported;
+          ix.raw = dump(ix_n);
+        }
         s.lhs_idx.push_back(ix);
       }
     }

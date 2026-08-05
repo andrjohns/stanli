@@ -86,6 +86,27 @@ void sum_vec_bwd(KernelCtx& ctx) {
       ctx.in_adj[0].data[i] += ctx.out_adj;
 }
 
+// OP_INDEX: scalar out = in[flat], idata = {flat}. Backward scatters.
+void index_fwd(KernelCtx& ctx) {
+  ctx.out.data[0] = ctx.in[0].data[ctx.idata[0]];
+}
+void index_bwd(KernelCtx& ctx) {
+  if (ctx.in_adj[0].data) ctx.in_adj[0].data[ctx.idata[0]] += ctx.out_adj;
+}
+
+// OP_SET_INDEX: out = copy(in[0]) with out[flat] = in[1] (scalar).
+void set_index_fwd(KernelCtx& ctx) {
+  for (int64_t i = 0; i < ctx.out.len; ++i) ctx.out.data[i] = ctx.in[0].data[i];
+  ctx.out.data[ctx.idata[0]] = ctx.in[1].data[0];
+}
+void set_index_bwd(KernelCtx& ctx) {
+  const int64_t f = ctx.idata[0];
+  if (ctx.in_adj[0].data)
+    for (int64_t i = 0; i < ctx.out.len; ++i)
+      if (i != f) ctx.in_adj[0].data[i] += ctx.out_adj_vec.data[i];
+  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += ctx.out_adj_vec.data[f];
+}
+
 }  // namespace
 
 // Called from Executor's constructor path; a static registrar object in a
@@ -96,6 +117,8 @@ void register_elementwise_kernels() {
   register_kernel(OP_BCAST_FMA, Kernel{fma_fwd, fma_bwd, nullptr});
   register_kernel(OP_MATVEC, Kernel{matvec_fwd, matvec_bwd, nullptr});
   register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
+  register_kernel(OP_INDEX, Kernel{index_fwd, index_bwd, nullptr});
+  register_kernel(OP_SET_INDEX, Kernel{set_index_fwd, set_index_bwd, nullptr});
 }
 
 }  // namespace stanrt

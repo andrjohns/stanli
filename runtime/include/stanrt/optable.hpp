@@ -33,6 +33,8 @@ enum Opcode : uint16_t {
   OP_LOGIT,
   OP_MEAN,
   OP_REP_VEC,
+  OP_INDEX,
+  OP_SET_INDEX,
   OP_LOG_SUM_EXP,
   OP_SOFTMAX,
   OP_SUM_VEC,
