@@ -1,2 +1,5 @@
 deps/
 build/
+python/stanrt/_bin/
+dist/
+*.egg-info/

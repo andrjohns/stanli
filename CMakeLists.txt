@@ -29,6 +29,25 @@ target_compile_definitions(stanmath INTERFACE _REENTRANT BOOST_DISABLE_ASSERTS)
 # eight-schools d/dmu). Cost is well inside the performance budget.
 target_compile_options(stanmath INTERFACE -ffp-contract=off)
 
+# The distributable shared library: C ABI + all kernels, TBB stubbed
+# (single-threaded until the payload ships real TBB).
+add_library(stanrt_shared SHARED
+  runtime/src/capi.cpp
+  runtime/src/executor.cpp
+  runtime/kernels/elementwise.cpp
+  runtime/kernels/densities.cpp
+  runtime/kernels/legacy_fns.cpp
+  runtime/kernels/constrain.cpp
+  runtime/kernels/eltwise_expr.cpp
+  runtime/src/nuts.cpp
+  runtime/src/mir_reader.cpp
+  runtime/src/lower.cpp
+  runtime/src/data.cpp
+  tests/tbb_stub.cpp)
+target_include_directories(stanrt_shared PUBLIC runtime/include)
+target_link_libraries(stanrt_shared PUBLIC stanmath)
+set_target_properties(stanrt_shared PROPERTIES OUTPUT_NAME stanrt)
+
 add_library(stanrt STATIC
   runtime/src/executor.cpp
   runtime/kernels/elementwise.cpp

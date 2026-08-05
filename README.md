@@ -6,6 +6,24 @@ kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
 Design: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
 Current plan: `docs/superpowers/plans/2026-08-04-m1-spine.md`
 
+## Python
+
+```
+./tools/build_wheel.sh          # builds dist/stanrt-*.whl for this platform
+pip install dist/stanrt-*.whl
+```
+
+```python
+import stanrt
+m = stanrt.Model(stan_file="model.stan", data="data.json")
+draws = m.sample(seed=1, warmup=1000, samples=1000)
+draws["mu"].mean()
+```
+
+The wheel bundles the stanrt shared library (C ABI in
+`runtime/include/stanrt/capi.h`) and the stanc3 binary; stanc runs as a
+subprocess, nothing is compiled on the user's machine.
+
 ## Build
 
 ```
