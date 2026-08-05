@@ -30,7 +30,8 @@ struct Expr {
 
 struct Transform {
   enum Kind { Identity, Lower, Upper, LowerUpper, Offset, Multiplier,
-              OffsetMultiplier, Unsupported } kind = Identity;
+              OffsetMultiplier, Simplex, Ordered, PositiveOrdered,
+              Unsupported } kind = Identity;
   std::vector<Expr> args;
   std::string raw;
 };

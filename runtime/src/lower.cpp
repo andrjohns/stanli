@@ -52,7 +52,7 @@ struct Lowering {
 
   [[noreturn]] void fail(const std::string& msg, const std::string& raw = "") {
     throw CompileError("stanrt compile: " + msg +
-                       (raw.empty() ? "" : "\n  in: " + raw));
+                       (raw.empty() ? "" : " | in: " + raw));
   }
 
   int const_slot(double v) {
@@ -84,6 +84,11 @@ struct Lowering {
         if (en && en->is_int && e.args.size() == 2 &&
             e.args[1].name == "IndexSingle")
           return en->i.at(eval_int(e.args[1].args[0]) - 1);
+        if (en && en->is_int && e.args.size() == 3 &&
+            e.args[1].name == "IndexSingle" &&
+            e.args[2].name == "IndexSingle" && en->dims.size() == 2)
+          return en->i.at((eval_int(e.args[2].args[0]) - 1) * en->dims[0] +
+                          (eval_int(e.args[1].args[0]) - 1));
         fail("unsupported int index expression", e.raw);
       }
       case mir::Expr::FunApp:
@@ -129,19 +134,48 @@ struct Lowering {
         return r;
       case mir::Expr::Var: {
         DataMap::Entry* en = env.find(e.name);
-        if (!en) fail("prepare_data: unknown variable " + e.name);
+        if (!en)
+          fail("prepare_data: unknown variable " + e.name +
+               " (type " + e.type_ + ")", e.raw);
         return *en;
       }
       case mir::Expr::Indexed: {
         DataMap::Entry base = td_eval(e.args[0]);
-        if (e.args.size() == 2 && e.args[1].name == "IndexSingle") {
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
+            base.dims.size() <= 1) {
           const long ix = eval_int_td(e.args[1].args[0]);
           r.is_int = base.is_int;
           if (base.is_int) r.i = {base.i.at(ix - 1)};
           r.r = {base.r.at(ix - 1)};
           return r;
         }
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
+            base.dims.size() == 2) {
+          // Row of a 2-D array (col-major storage).
+          const long i = eval_int_td(e.args[1].args[0]);
+          const int64_t R = base.dims[0], C = base.dims[1];
+          r.is_int = base.is_int;
+          r.dims = {C};
+          for (int64_t j = 0; j < C; ++j) {
+            r.r.push_back(base.r.at(j * R + (i - 1)));
+            if (base.is_int) r.i.push_back(base.i.at(j * R + (i - 1)));
+          }
+          return r;
+        }
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
+            base.dims.size() == 2) {
+          // Row of a 2-D array (col-major storage).
+          const long i = eval_int_td(e.args[1].args[0]);
+          const int64_t R = base.dims[0], C = base.dims[1];
+          r.is_int = base.is_int;
+          r.dims = {C};
+          for (int64_t j = 0; j < C; ++j) {
+            r.r.push_back(base.r.at(j * R + (i - 1)));
+            if (base.is_int) r.i.push_back(base.i.at(j * R + (i - 1)));
+          }
+          return r;
+        }
         // Matrix row/element access: [i, j] etc.
         if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
             e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
@@ -321,7 +355,9 @@ struct Lowering {
     switch (st.kind) {
       case mir::Stmt::Decl: {
         DataMap::Entry e;
-        if (st.decl_type.base == "SInt") e.is_int = true;
+        if (st.decl_type.base == "SInt" ||
+            (st.decl_type.base == "SArray" && st.decl_type.raw == "SInt"))
+          e.is_int = true;
         if (st.has_init && st.init.kind == mir::Expr::FunApp &&
             st.init.fn_lib == mir::Expr::Lib::Internal &&
             st.init.name == "FnReadData") {
@@ -345,6 +381,7 @@ struct Lowering {
             n *= v;
           }
           e.r.assign(n, 0.0);
+          if (e.is_int) e.i.assign(n, 0);
           e.dims = std::move(dims);
         }
         env.vars[st.decl_id] = std::move(e);
@@ -361,7 +398,11 @@ struct Lowering {
         };
         scan(st.rhs);
         if (!read_name.empty()) {
-          env.vars[st.lhs] = data.at(read_name);
+          // The flat read buffer is consumed with sequential 1-D indexing
+          // regardless of the source variable's shape.
+          DataMap::Entry flat = data.at(read_name);
+          flat.dims = {(int64_t)std::max(flat.r.size(), flat.i.size())};
+          env.vars[st.lhs] = std::move(flat);
           return;
         }
         if (st.lhs_idx.empty()) {
@@ -548,6 +589,7 @@ struct Lowering {
         {"binomial_logit_lpmf", {OP_BINOMIAL_LOGIT_LPMF, 3, 2}},
         {"bernoulli_logit_glm_lpmf",
          {OP_BERNOULLI_LOGIT_GLM_LPMF, 4, 1, true}},
+        {"dirichlet_lpdf", {OP_DIRICHLET_LPDF, 2, 0}},
     };
     auto dit = kDens.find(e.name);
     if (dit != kDens.end()) {
@@ -653,6 +695,11 @@ struct Lowering {
       return emit(OP_REP_VEC, {a.slot}, n);
     }
     if (e.name == "log_sum_exp" || e.name == "sum") {
+      if (e.name == "log_sum_exp" && e.args.size() == 2) {
+        Val a = lower_expr(e.args[0]);
+        Val b = lower_expr(e.args[1]);
+        return emit(OP_LSE2, {a.slot, b.slot}, 1);
+      }
       Val a = lower_expr(e.args[0]);
       return emit(e.name == "sum" ? OP_SUM_VEC : OP_LOG_SUM_EXP, {a.slot}, 1);
     }
@@ -666,16 +713,20 @@ struct Lowering {
 
   // ---- statements -----------------------------------------------------------
   void lower_read_param(const mir::Stmt& s) {
-    int64_t len = 1;
-    for (const auto& d : s.read_dims) len *= eval_int(d);
-    const int raw = add_slot(len, /*is_param=*/true);
-    out.param_names.push_back(s.decl_id);
-    out.n_unconstrained += len;
-
+    // Declared (constrained) size from the read dims; the unconstrained raw
+    // size depends on the transform (simplex uses K-1).
+    int64_t con_len = 1;
+    for (const auto& d : s.read_dims) con_len *= eval_int(d);
     const mir::Transform& tr = *s.read_transform;
+    int64_t raw_len = con_len;
+    if (tr.kind == mir::Transform::Simplex) raw_len = con_len - 1;
+    const int raw = add_slot(raw_len, /*is_param=*/true);
+    out.param_names.push_back(s.decl_id);
+    out.n_unconstrained += raw_len;
+
     if (tr.kind == mir::Transform::Identity) {
       scope[s.decl_id] = raw;
-      out.views.push_back({s.decl_id, raw, len});
+      out.views.push_back({s.decl_id, raw, raw_len});
       return;
     }
     uint16_t opcode = 0;
@@ -694,17 +745,29 @@ struct Lowering {
         ins.push_back(lower_expr(tr.args[0]).slot);
         ins.push_back(lower_expr(tr.args[1]).slot);
         break;
+      case mir::Transform::Simplex:
+        opcode = OP_CONSTRAIN_SIMPLEX;
+        break;
+      case mir::Transform::Ordered:
+        opcode = OP_CONSTRAIN_ORDERED;
+        break;
+      case mir::Transform::PositiveOrdered:
+        opcode = OP_CONSTRAIN_POS_ORDERED;
+        break;
       default:
         fail("unsupported parameter transform", tr.raw);
     }
     const int jac = add_slot(1, false);
-    Val con = emit(opcode, ins, len, {}, {}, jac);
+    Val con = emit(opcode, ins, con_len, {}, {}, jac);
     jac_slots.push_back(jac);
     scope[s.decl_id] = con.slot;
-    out.views.push_back({s.decl_id, con.slot, len});
+    out.views.push_back({s.decl_id, con.slot, con_len});
   }
 
-  std::map<std::string, int64_t> decl_lens;
+  struct DeclShape {
+    int64_t len = 0, rows = 0, cols = 0;
+  };
+  std::map<std::string, DeclShape> decl_lens;
 
   void lower_stmt(const mir::Stmt& s) {
     switch (s.kind) {
@@ -714,16 +777,14 @@ struct Lowering {
         } else if (s.has_init) {
           scope[s.decl_id] = lower_expr(s.init).slot;
         } else {
-          int64_t rows = 0, cols = 0;
-          decl_lens[s.decl_id] = sized_len(s.decl_type, &rows, &cols);
+          DeclShape sh;
+          sh.len = sized_len(s.decl_type, &sh.rows, &sh.cols);
+          decl_lens[s.decl_id] = sh;
         }
         return;
       case mir::Stmt::Assignment: {
         if (!s.lhs_idx.empty()) {
           // Element write under unrolled control flow: functional update.
-          if (s.lhs_idx.size() != 1 || s.lhs_idx[0].name != "IndexSingle")
-            fail("unsupported indexed assignment", s.raw);
-          const int64_t flat = eval_int(s.lhs_idx[0].args[0]) - 1;
           int prev;
           auto it = scope.find(s.lhs);
           if (it != scope.end()) {
@@ -734,9 +795,24 @@ struct Lowering {
               fail("indexed assignment to undeclared " + s.lhs);
             SlotInfo si;
             si.data_like = true;
-            prev = add_slot(dl->second, false, si);
-            out.fills.emplace_back(prev,
-                                   std::vector<double>(dl->second, 0.0));
+            si.rows = dl->second.rows;
+            si.cols = dl->second.cols;
+            prev = add_slot(dl->second.len, false, si);
+            out.fills.emplace_back(
+                prev, std::vector<double>(dl->second.len, 0.0));
+          }
+          int64_t flat = 0;
+          if (s.lhs_idx.size() == 1 &&
+              s.lhs_idx[0].name == "IndexSingle") {
+            flat = eval_int(s.lhs_idx[0].args[0]) - 1;
+          } else if (s.lhs_idx.size() == 2 &&
+                     s.lhs_idx[0].name == "IndexSingle" &&
+                     s.lhs_idx[1].name == "IndexSingle" &&
+                     info[prev].rows > 0) {
+            flat = (eval_int(s.lhs_idx[1].args[0]) - 1) * info[prev].rows +
+                   (eval_int(s.lhs_idx[0].args[0]) - 1);
+          } else {
+            fail("unsupported indexed assignment", s.raw);
           }
           const int rhs = lower_expr(s.rhs).slot;
           Val nv = emit(OP_SET_INDEX, {prev, rhs}, info[prev].len, info[prev],

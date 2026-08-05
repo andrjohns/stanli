@@ -166,7 +166,11 @@ SizedType read_sized(const Node& n) {
 Transform read_transform(const Node& n) {
   Transform t;
   if (n.is_atom()) {
-    t.kind = n.atom == "Identity" ? Transform::Identity : Transform::Unsupported;
+    if (n.atom == "Identity") t.kind = Transform::Identity;
+    else if (n.atom == "Simplex") t.kind = Transform::Simplex;
+    else if (n.atom == "Ordered") t.kind = Transform::Ordered;
+    else if (n.atom == "PositiveOrdered") t.kind = Transform::PositiveOrdered;
+    else t.kind = Transform::Unsupported;
     t.raw = n.atom;
     return t;
   }

@@ -42,9 +42,19 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
         // reconstruction loops assume for the flat read buffer).
         const int64_t R = dims[0], C = dims[1];
         e.r.resize(R * C);
+        bool all_int = true;
         for (int64_t i = 0; i < R; ++i)
-          for (int64_t j = 0; j < C; ++j)
+          for (int64_t j = 0; j < C; ++j) {
             e.r[j * R + i] = v[i][j].get<double>();
+            if (!v[i][j].is_number_integer()) all_int = false;
+          }
+        if (all_int) {
+          e.is_int = true;
+          e.i.resize(R * C);
+          for (int64_t i = 0; i < R; ++i)
+            for (int64_t j = 0; j < C; ++j)
+              e.i[j * R + i] = v[i][j].get<int>();
+        }
         return e;
       }
       std::function<void(const json&)> flat = [&](const json& node) {
