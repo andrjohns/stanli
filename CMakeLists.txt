@@ -34,7 +34,12 @@ add_library(stanrt STATIC
   runtime/kernels/elementwise.cpp
   runtime/kernels/densities.cpp
   runtime/kernels/legacy_fns.cpp
-  runtime/src/nuts.cpp)
+  runtime/kernels/constrain.cpp
+  runtime/kernels/eltwise_expr.cpp
+  runtime/src/nuts.cpp
+  runtime/src/mir_reader.cpp
+  runtime/src/lower.cpp
+  runtime/src/data.cpp)
 target_include_directories(stanrt PUBLIC runtime/include)
 target_link_libraries(stanrt PUBLIC stanmath)
 
@@ -43,8 +48,15 @@ enable_testing()
 function(stanrt_add_test NAME)
   add_executable(${NAME} tests/${NAME}.cpp tests/tbb_stub.cpp)
   target_link_libraries(${NAME} PRIVATE stanrt)
-  add_test(NAME ${NAME} COMMAND ${NAME})
+  # Tests run from the repo root so fixture paths are stable.
+  add_test(NAME ${NAME} COMMAND ${NAME}
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endfunction()
+
+add_executable(stanrt_run tools/stanrt_run.cpp tests/tbb_stub.cpp)
+target_link_libraries(stanrt_run PRIVATE stanrt)
+add_executable(stanrt_check tools/stanrt_check.cpp tests/tbb_stub.cpp)
+target_link_libraries(stanrt_check PRIVATE stanrt)
 
 stanrt_add_test(test_smoke)
 stanrt_add_test(test_executor)
@@ -55,3 +67,10 @@ stanrt_add_test(test_legacy)
 stanrt_add_test(test_eight_schools)
 stanrt_add_test(test_glm)
 stanrt_add_test(test_nuts)
+stanrt_add_test(test_sexp)
+stanrt_add_test(test_mir)
+stanrt_add_test(test_transforms)
+stanrt_add_test(test_eltwise)
+stanrt_add_test(test_lower)
+stanrt_add_test(test_data)
+stanrt_add_test(test_e2e)

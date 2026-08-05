@@ -24,12 +24,16 @@ void register_kernel(uint16_t opcode, Kernel k) {
 void register_elementwise_kernels();
 void register_density_kernels();
 void register_legacy_kernels();
+void register_constrain_kernels();
+void register_eltwise_kernels();
 
 static void ensure_registered() {
   static const bool once = [] {
     register_elementwise_kernels();
     register_density_kernels();
     register_legacy_kernels();
+    register_constrain_kernels();
+    register_eltwise_kernels();
     return true;
   }();
   (void)once;
@@ -64,7 +68,10 @@ void Executor::bind_() {
   // A slot carries adjoint if it is a parameter or an op writes it. Slots
   // that are neither are data: kernels see a null adjoint Desc and skip them.
   written_.assign(graph_.slots.size(), 0);
-  for (const auto& op : graph_.ops) written_[op.out] = 1;
+  for (const auto& op : graph_.ops) {
+    written_[op.out] = 1;
+    if (op.out2 >= 0) written_[op.out2] = 1;
+  }
 
   int64_t scratch = 0;
   for (auto& op : graph_.ops) {
@@ -89,6 +96,10 @@ KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
   }
   const Slot& so = graph_.slots[op.out];
   ctx.out = Desc{values_.data() + so.offset, so.len};
+  if (op.out2 >= 0) {
+    const Slot& s2 = graph_.slots[op.out2];
+    ctx.out2 = Desc{values_.data() + s2.offset, s2.len};
+  }
   ctx.scratch = scratch_.data() + op.scratch_off;
   ctx.idata = op.idata;
   ctx.n_idata = op.n_idata;
@@ -102,6 +113,7 @@ KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
     }
     if (so.len == 1) ctx.out_adj = adjoints_[so.offset];
     ctx.out_adj_vec = Desc{adjoints_.data() + so.offset, so.len};
+    if (op.out2 >= 0) ctx.out2_adj = adjoints_[graph_.slots[op.out2].offset];
   }
   return ctx;
 }

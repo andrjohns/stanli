@@ -1,0 +1,127 @@
+# Corpus status
+
+Passing: 67/120
+
+- OK `GLMM_Poisson_model`
+- OK `GLM_Binomial_model`
+- OK `GLM_Poisson_model`
+- OK `Rate_1_model`
+- OK `Rate_2_model`
+- OK `Rate_3_model`
+- OK `Rate_4_model`
+- OK `Rate_5_model`
+- OK `arK`
+- OK `arma11`
+- OK `blr`
+- OK `dugongs_model`
+- OK `earn_height`
+- OK `eight_schools_centered`
+- OK `eight_schools_noncentered`
+- OK `election88_full`
+- OK `garch11`
+- OK `kidscore_interaction`
+- OK `kidscore_interaction_c`
+- OK `kidscore_interaction_c2`
+- OK `kidscore_interaction_z`
+- OK `kidscore_mom_work`
+- OK `kidscore_momhs`
+- OK `kidscore_momhsiq`
+- OK `kidscore_momiq`
+- OK `kilpisjarvi`
+- OK `log10earn_height`
+- OK `logearn_height`
+- OK `logearn_height_male`
+- OK `logearn_interaction`
+- OK `logearn_interaction_z`
+- OK `logearn_logheight_male`
+- OK `logistic_regression_rhs`
+- OK `logmesquite`
+- OK `logmesquite_logva`
+- OK `logmesquite_logvas`
+- OK `logmesquite_logvash`
+- OK `logmesquite_logvolume`
+- OK `mesquite`
+- OK `nes`
+- OK `pilots`
+- OK `radon_county`
+- OK `radon_county_intercept`
+- OK `radon_hierarchical_intercept_centered`
+- OK `radon_hierarchical_intercept_noncentered`
+- OK `radon_partially_pooled_centered`
+- OK `radon_partially_pooled_noncentered`
+- OK `radon_pooled`
+- OK `radon_variable_intercept_centered`
+- OK `radon_variable_intercept_noncentered`
+- OK `radon_variable_intercept_slope_centered`
+- OK `radon_variable_intercept_slope_noncentered`
+- OK `radon_variable_slope_centered`
+- OK `radon_variable_slope_noncentered`
+- OK `seeds_centered_model`
+- OK `seeds_model`
+- OK `seeds_stanified_model`
+- OK `sesame_one_pred_a`
+- OK `surgical_model`
+- OK `wells_daae_c_model`
+- OK `wells_dae_c_model`
+- OK `wells_dae_inter_model`
+- OK `wells_dae_model`
+- OK `wells_dist`
+- OK `wells_dist100ars_model`
+- OK `wells_interaction_c_model`
+- OK `wells_interaction_model`
+
+## Failures
+
+- `2pl_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
+- `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
+- `M0_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i
+- `Mb_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `Mh_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i
+- `Mt_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable i
+- `Mtbh_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `Mth_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `Survey_model`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable n
+- `accel_gp`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `accel_splines`: COMPILE_FAIL stanrt compile: unsupported function student_t_lccdf
+- `bones_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `bym2_offset_only`: COMPILE_FAIL stanrt compile: unsupported function dot_self
+- `covid19imperial_v2`: COMPILE_FAIL stanrt compile: prepare_data: unsupported indexed assignment
+- `covid19imperial_v3`: COMPILE_FAIL stanrt compile: prepare_data: unsupported indexed assignment
+- `diamonds`: COMPILE_FAIL stanrt compile: prepare_data: unsupported index
+- `dogs`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `dogs_hierarchical`: COMPILE_FAIL stanrt compile: unsupported int index expression
+- `dogs_log`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
+- `gp_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
+- `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function rep_array
+- `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
+- `hier_2pl`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hmm_example`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hmm_gaussian`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `iohmm_reg`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `irt_2pl`: COMPILE_FAIL stanrt compile: unsupported int index expression
+- `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `ldaK2`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `ldaK5`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported expression
+- `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
+- `low_dim_gauss_mix`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `low_dim_gauss_mix_collapse`: COMPILE_FAIL stanrt compile: unsupported function log_mix
+- `lsat_model`: COMPILE_FAIL stanrt compile: unsupported int index expression
+- `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `nes_logit_model`: EVAL_FAIL glm: unsupported shape combo
+- `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function append_col
+- `nn_rbm1bJ100`: EVAL_FAIL timeout
+- `normal_mixture`: COMPILE_FAIL stanrt compile: unsupported function log_mix
+- `normal_mixture_k`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
+- `prophet`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function get_changepoint_matrix
+- `rats_model`: COMPILE_FAIL stanrt compile: size expression needs unknown int irat
+- `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
+- `soil_incubation`: COMPILE_FAIL stanrt compile: unsupported function kind for evolved_CO2
+- `state_space_stochastic_level_stochastic_seasonal`: COMPILE_FAIL stanrt compile: unsupported function sd
+- `wells_dist100_model`: EVAL_FAIL glm: unsupported shape combo

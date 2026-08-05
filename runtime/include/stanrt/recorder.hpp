@@ -25,6 +25,7 @@
 #include <stan/math/prim/functor/broadcast_array.hpp>
 
 #include <cstddef>
+#include <ostream>
 #include <type_traits>
 
 namespace stanrt {
@@ -36,7 +37,14 @@ struct rvar {
   double val_{0};
   rvar() = default;
   rvar(double v) : val_(v) {}  // NOLINT: implicit on purpose
+  // scalar_seq_view and check-message streaming touch these.
+  double val() const { return val_; }
+  friend std::ostream& operator<<(std::ostream& os, const rvar& v);
 };
+
+inline std::ostream& operator<<(std::ostream& os, const rvar& v) {
+  return os << v.val_;
+}
 
 static_assert(sizeof(rvar) == sizeof(double), "rvar must alias double");
 static_assert(alignof(rvar) == alignof(double), "rvar must alias double");
