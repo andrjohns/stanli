@@ -241,6 +241,72 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // Transformed-data UDF (loops, range slices, 2-D writes, return) plus
+  // ternary selection on data conditions, for both branch polarities.
+  for (int flag = 0; flag <= 1; ++flag) {
+    DataMap d = DataMap::from_json(
+        std::string(R"({"N": 3, "K": 3, "flag": )") + std::to_string(flag) +
+        R"(, "W": [[1.0, 2.0, 4.0], [1.0, 0.5, 2.0], [1.0, -1.0, 6.0]]})");
+    CompiledModel lm = compile_model(slurp("tests/fixtures/udf.tmir.sexp"), d);
+    check(lm.n_unconstrained == 3, "udf 3 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[3] = {0.4, -0.9, 1.7};
+    for (int i = 0; i < 3; ++i) lex.params_data()[i] = q[i];
+    double grad[3] = {0, 0, 0};
+    const double lp = lex.gradient(grad);
+
+    // adj column 2 exactly as the td interpreter computes it.
+    const double c2[3] = {2.0, 0.5, -1.0};
+    double m = 0;
+    for (double v : c2) m += v;
+    m /= 3.0;
+    double s2 = 0;
+    for (double v : c2) s2 += (v - m) * (v - m);
+    const double sdv = std::sqrt(s2 / 2.0);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> b(3);
+    b << q[0], q[1], q[2];
+    var t1 = stan::math::normal_lpdf<false>(b, m, sdv * 2.0);
+    var t2 = stan::math::normal_lpdf<false>(b(0), flag ? 0.5 : -0.5, 1.0);
+    var t3 = flag ? stan::math::normal_lpdf<false>(b(1), b(0), 1.0)
+                  : stan::math::normal_lpdf<false>(b(1), 0.0, 1.0);
+    var acc = ((t1 + t2) + t3);
+    acc.grad();
+    const std::string tag = "udf f" + std::to_string(flag);
+    expect_eq(tag + " lp", lp, acc.val());
+    for (int i = 0; i < 3; ++i)
+      expect_eq(tag + " g" + std::to_string(i), grad[i], b(i).adj());
+    stan::math::recover_memory();
+  }
+
+  // Transformed-data While loop with a short-circuit guard, append_row.
+  {
+    DataMap d;
+    d.set_int("N", 4);
+    d.set_real_array("y", {2.0, 1.5, -1.0, 3.0});
+    CompiledModel lm = compile_model(slurp("tests/fixtures/tdext.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.3;
+    double g = 0, lp = lex.gradient(&g);
+
+    // c = 2 (first two positive), s = sum of y twice + c.
+    double s = 0;
+    const double yv[4] = {2.0, 1.5, -1.0, 3.0};
+    for (int rep = 0; rep < 2; ++rep)
+      for (double v : yv) s += v;
+    s += 2.0;
+    using stan::math::var;
+    var mu = 0.3;
+    var acc = stan::math::normal_lpdf<false>(mu, s, 1.0);
+    acc.grad();
+    expect_eq("tdext lp", lp, acc.val());
+    expect_eq("tdext dmu", g, mu.adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

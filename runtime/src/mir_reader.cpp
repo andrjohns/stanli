@@ -90,6 +90,12 @@ Expr read_expr_pattern(const Node& p) {
   } else if (p.head_is("Promotion")) {
     e = read_expr(p[1]);  // transparent: keep inner, adopt promoted type later
     return e;
+  } else if (p.head_is("TernaryIf")) {
+    e.kind = Expr::TernaryIf;
+    for (size_t i = 1; i < p.size(); ++i) e.args.push_back(read_expr(p[i]));
+  } else if (p.head_is("EOr") || p.head_is("EAnd")) {
+    e.kind = p.head_is("EOr") ? Expr::EOr : Expr::EAnd;
+    for (size_t i = 1; i < p.size(); ++i) e.args.push_back(read_expr(p[i]));
   } else if (p.head_is("Indexed")) {
     e.kind = Expr::Indexed;
     e.args.push_back(read_expr(p[1]));
@@ -105,6 +111,11 @@ Expr read_expr_pattern(const Node& p) {
           ix.kind = Expr::FunApp;
           ix.name = "IndexSingle";
           ix.args.push_back(read_expr(ix_n[1]));
+        } else if (!ix_n.is_atom() && ix_n.head_is("Between")) {
+          ix.kind = Expr::FunApp;
+          ix.name = "IndexBetween";
+          ix.args.push_back(read_expr(ix_n[1]));
+          ix.args.push_back(read_expr(ix_n[2]));
         } else {
           ix.kind = Expr::Unsupported;
           ix.raw = dump(ix_n);
@@ -289,6 +300,15 @@ Stmt read_stmt(const Node& n) {
     s.body.push_back(read_stmt(p[2]));
     if (p.size() > 3 && !p[3].is_atom() && p[3].size() > 0)
       s.body.push_back(read_stmt(p[3][0]));
+  } else if (head == "While") {
+    s.kind = Stmt::While;
+    s.cond = read_expr(p[1]);
+    s.body.push_back(read_stmt(p[2]));
+  } else if (head == "Return") {
+    // (Return ()) or (Return (expr)); the value, if any, lands in rhs.
+    s.kind = Stmt::Return;
+    s.has_init = !p[1].is_atom() && p[1].size() > 0;
+    if (s.has_init) s.rhs = read_expr(p[1][0]);
   } else if (head == "NRFunApp") {
     s.kind = Stmt::NRFunApp;
     const Node& kind = p[1];
@@ -322,6 +342,26 @@ Program read_program(const sexp::Node& root) {
   }
   if (const Node* pd = field(root, "prepare_data"))
     read_stmt_list((*pd)[1], prog.prepare_data);
+  if (const Node* fb = field(root, "functions_block")) {
+    const Node& defs = (*fb)[1];
+    for (size_t i = 0; i < defs.size(); ++i) {
+      const Node& fd = defs[i];
+      FunDef f;
+      if (const Node* nm = field(fd, "fdname")) f.name = (*nm)[1].atom;
+      if (const Node* fa = field(fd, "fdargs")) {
+        const Node& args = (*fa)[1];
+        for (size_t a = 0; a < args.size(); ++a) {
+          // (AutoDiffable name type) or (DataOnly name type)
+          f.arg_names.push_back(args[a][1].atom);
+          f.arg_types.push_back(args[a][2].is_atom() ? args[a][2].atom
+                                                     : dump(args[a][2], 40));
+        }
+      }
+      if (const Node* fb2 = field(fd, "fdbody"))
+        read_stmt_list((*fb2)[1], f.body);
+      prog.fun_defs.push_back(std::move(f));
+    }
+  }
   const Node* lp = field(root, "log_prob");
   if (!lp) throw std::runtime_error("mir: no log_prob section");
   read_stmt_list((*lp)[1], prog.log_prob);

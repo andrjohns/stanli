@@ -43,6 +43,8 @@ struct Lowering {
   std::vector<SlotInfo> info;                  // parallel to g.slots
   std::vector<int> target_terms;
   std::vector<int> jac_slots;
+  std::map<std::string, const mir::FunDef*> fun_defs;
+  int udf_depth = 0;
 
   explicit Lowering(const DataMap& d) : data(d) {}
 
@@ -124,6 +126,37 @@ struct Lowering {
   }
 
   // ---- data block: interpret prepare_data over doubles ----------------------
+  // Thrown by a Return statement inside an interpreted UDF body.
+  struct TdReturn {
+    DataMap::Entry v;
+  };
+
+  DataMap::Entry td_call_udf(const mir::Expr& e) {
+    auto it = fun_defs.find(e.name);
+    if (it == fun_defs.end())
+      fail("prepare_data: unknown function " + e.name, e.raw);
+    const mir::FunDef& f = *it->second;
+    if (e.args.size() != f.arg_names.size())
+      fail("prepare_data: " + e.name + " arity mismatch");
+    if (++udf_depth > 64) fail("prepare_data: UDF recursion too deep");
+    std::vector<DataMap::Entry> argv;
+    for (const auto& a : e.args) argv.push_back(td_eval(a));
+    // Function bodies get their own scope: snapshot and restore the whole
+    // environment (UDF calls are rare and happen at compile time).
+    std::map<std::string, DataMap::Entry> saved = env.vars;
+    for (size_t i = 0; i < argv.size(); ++i)
+      env.vars[f.arg_names[i]] = std::move(argv[i]);
+    DataMap::Entry ret;
+    try {
+      for (const auto& st : f.body) td_exec(st);
+    } catch (TdReturn& r) {
+      ret = std::move(r.v);
+    }
+    env.vars = std::move(saved);
+    --udf_depth;
+    return ret;
+  }
+
   DataMap::Entry td_eval(const mir::Expr& e) {
     DataMap::Entry r;
     switch (e.kind) {
@@ -149,6 +182,22 @@ struct Lowering {
         }
         fail("prepare_data: unknown variable " + e.name +
              " (type " + e.type_ + ")", e.raw);
+      }
+      case mir::Expr::TernaryIf: {
+        const bool c = td_eval(e.args[0]).r.at(0) != 0.0;
+        return td_eval(e.args[c ? 1 : 2]);
+      }
+      case mir::Expr::EOr:
+      case mir::Expr::EAnd: {
+        // Short-circuit like the language does.
+        const bool a = td_eval(e.args[0]).r.at(0) != 0.0;
+        bool v = a;
+        if (e.kind == mir::Expr::EOr ? !a : a)
+          v = td_eval(e.args[1]).r.at(0) != 0.0;
+        r.is_int = true;
+        r.i = {v ? 1 : 0};
+        r.r = {v ? 1.0 : 0.0};
+        return r;
       }
       case mir::Expr::Indexed: {
         DataMap::Entry base = td_eval(e.args[0]);
@@ -224,9 +273,35 @@ struct Lowering {
             r.r.push_back(base.r.at(j * R + (i - 1)));
           return r;
         }
+        // Between subrange of a 1-D value: v[a:b].
+        if (e.args.size() == 2 && e.args[1].name == "IndexBetween" &&
+            base.dims.size() <= 1) {
+          const long a = eval_int_td(e.args[1].args[0]);
+          const long b = eval_int_td(e.args[1].args[1]);
+          r.is_int = base.is_int;
+          r.dims = {b - a + 1};
+          for (long k = a; k <= b; ++k) {
+            r.r.push_back(base.r.at(k - 1));
+            if (base.is_int) r.i.push_back(base.i.at(k - 1));
+          }
+          return r;
+        }
+        // X[a:b, j] on a matrix: rows a..b of column j (col-major).
+        if (e.args.size() == 3 && e.args[1].name == "IndexBetween" &&
+            e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
+          const long a = eval_int_td(e.args[1].args[0]);
+          const long b = eval_int_td(e.args[1].args[1]);
+          const long j = eval_int_td(e.args[2].args[0]);
+          const int64_t R = base.dims[0];
+          r.dims = {b - a + 1};
+          for (long k = a; k <= b; ++k)
+            r.r.push_back(base.r.at((j - 1) * R + (k - 1)));
+          return r;
+        }
         fail("prepare_data: unsupported index", e.raw);
       }
       case mir::Expr::FunApp: {
+        if (e.fn_lib == mir::Expr::Lib::UserDefined) return td_call_udf(e);
         auto bin = [&](auto f) {
           DataMap::Entry a = td_eval(e.args[0]), b = td_eval(e.args[1]);
           DataMap::Entry o;
@@ -377,6 +452,24 @@ struct Lowering {
           a.is_int = false;
           return a;
         }
+        if (e.name == "rows" || e.name == "cols" || e.name == "size" ||
+            e.name == "num_elements") {
+          DataMap::Entry a = td_eval(e.args[0]);
+          long v = 0;
+          if (e.name == "rows")
+            v = a.dims.size() == 2 ? a.dims[0] : (long)a.r.size();
+          else if (e.name == "cols")
+            v = a.dims.size() == 2 ? a.dims[1] : 1;
+          else
+            v = a.dims.empty() ? (long)std::max(a.r.size(), a.i.size())
+                               : (long)a.dims[0];
+          if (e.name == "num_elements")
+            v = (long)std::max(a.r.size(), a.i.size());
+          r.is_int = true;
+          r.i = {(int)v};
+          r.r = {(double)v};
+          return r;
+        }
         if (e.name == "negative_infinity") {
           r.r = {-std::numeric_limits<double>::infinity()};
           return r;
@@ -406,6 +499,31 @@ struct Lowering {
           r.dims = {R, C};
           r.r.assign(R * C, v.r.at(0));
           return r;
+        }
+        if (e.name == "append_row" && e.args.size() == 2) {
+          DataMap::Entry a = td_eval(e.args[0]), b = td_eval(e.args[1]);
+          if (a.dims.size() <= 1 && b.dims.size() <= 1) {
+            // Vectors/scalars: vertical concatenation.
+            r.dims = {(int64_t)(a.r.size() + b.r.size())};
+            r.r = a.r;
+            r.r.insert(r.r.end(), b.r.begin(), b.r.end());
+            return r;
+          }
+          if (a.dims.size() == 2 && b.dims.size() == 2 &&
+              a.dims[1] == b.dims[1]) {
+            // Matrices: stack rows, col-major storage interleaves columns.
+            const int64_t Ra = a.dims[0], Rb = b.dims[0], C = a.dims[1];
+            r.dims = {Ra + Rb, C};
+            r.r.reserve((Ra + Rb) * C);
+            for (int64_t j = 0; j < C; ++j) {
+              r.r.insert(r.r.end(), a.r.begin() + j * Ra,
+                         a.r.begin() + (j + 1) * Ra);
+              r.r.insert(r.r.end(), b.r.begin() + j * Rb,
+                         b.r.begin() + (j + 1) * Rb);
+            }
+            return r;
+          }
+          fail("prepare_data: append_row shape mismatch", e.raw);
         }
         if (e.name == "append_col" && e.args.size() == 2) {
           DataMap::Entry a = td_eval(e.args[0]), b = td_eval(e.args[1]);
@@ -562,6 +680,17 @@ struct Lowering {
       case mir::Stmt::SList:
         for (const auto& k : st.body) td_exec(k);
         return;
+      case mir::Stmt::While: {
+        int64_t guard = 0;
+        while (td_eval(st.cond).r.at(0) != 0.0) {
+          if (++guard > 100000000)
+            fail("prepare_data: while loop did not terminate");
+          for (const auto& k : st.body) td_exec(k);
+        }
+        return;
+      }
+      case mir::Stmt::Return:
+        throw TdReturn{st.has_init ? td_eval(st.rhs) : DataMap::Entry{}};
       case mir::Stmt::NRFunApp:
       case mir::Stmt::Skip:
         return;  // checks skipped in M2
@@ -672,8 +801,25 @@ struct Lowering {
         return {const_slot(e.lit), {}};
       case mir::Expr::FunApp:
         return lower_funapp(e);
-      default:
+      case mir::Expr::TernaryIf: {
+        // Data-only conditions resolve at compile time; either branch may
+        // reference parameters.
+        if (!e.args[0].data_only)
+          fail("TernaryIf on a parameter condition unsupported in M2", e.raw);
+        const bool c = td_eval(e.args[0]).r.at(0) != 0.0;
+        return lower_expr(e.args[c ? 1 : 2]);
+      }
+      case mir::Expr::EOr:
+      case mir::Expr::EAnd: {
+        Val v;
+        if (try_fold_const(e, &v)) return v;
+        fail("boolean operator on parameters unsupported in M2", e.raw);
+      }
+      default: {
+        Val v;
+        if (try_fold_const(e, &v)) return v;
         fail("unsupported expression", e.raw.empty() ? e.name : e.raw);
+      }
     }
   }
 
@@ -1124,6 +1270,7 @@ struct Lowering {
   }
 
   CompiledModel run(const mir::Program& p) {
+    for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
     bind_data(p);
     for (const auto& s : p.log_prob) lower_stmt(s);
     std::vector<int> all = target_terms;

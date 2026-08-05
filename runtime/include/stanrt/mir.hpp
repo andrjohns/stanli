@@ -15,7 +15,7 @@ namespace mir {
 
 struct Expr {
   enum Kind { Var, LitInt, LitReal, LitStr, FunApp, Promotion, Indexed,
-              Unsupported } kind = Unsupported;
+              TernaryIf, EOr, EAnd, Unsupported } kind = Unsupported;
   std::string name;  // Var name or FunApp function name
   enum class Lib { StanLib, Internal, UserDefined } fn_lib = Lib::StanLib;
   bool fn_propto = false;  // (FnLpdf true) / (FnLpmf true)
@@ -43,8 +43,8 @@ struct SizedType {
 };
 
 struct Stmt {
-  enum Kind { Decl, Assignment, TargetPE, Block, SList, For, IfElse, NRFunApp,
-              Skip, Unsupported } kind = Unsupported;
+  enum Kind { Decl, Assignment, TargetPE, Block, SList, For, IfElse, While,
+              NRFunApp, Return, Skip, Unsupported } kind = Unsupported;
   // Decl
   std::string decl_id;
   SizedType decl_type;
@@ -72,10 +72,18 @@ struct Stmt {
   std::string raw;
 };
 
+struct FunDef {
+  std::string name;
+  std::vector<std::string> arg_names;
+  std::vector<std::string> arg_types;  // unsized: UReal UVector UMatrix ...
+  std::vector<Stmt> body;
+};
+
 struct Program {
   std::vector<std::pair<std::string, SizedType>> input_vars;
   std::vector<Stmt> prepare_data;
   std::vector<Stmt> log_prob;
+  std::vector<FunDef> fun_defs;
 };
 
 Program read_program(const sexp::Node& root);

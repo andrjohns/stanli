@@ -93,7 +93,7 @@ Passing: 88/120
 
 ## Failures
 
-- `2pl_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
+- `2pl_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
 - `Mtbh_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Mth_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
@@ -106,21 +106,21 @@ Passing: 88/120
 - `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `gp_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
-- `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
-- `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
+- `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: size expression needs unknown int beta_free_1dim__
+- `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported function append_row
 - `hier_2pl`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
-- `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported expression | in: (TernaryIf ((pattern (FunApp (StanLib Equals__ FnPlain AoS) (((pattern (Var growthmodel_id)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))) ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))) (meta (...
+- `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported function kind for growth_factor_weibull
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
 - `lsat_model`: COMPILE_FAIL stanrt compile: bernoulli_logit_lpmf: int argument must be int data in M2
 - `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported function multi_normal_lpdf
 - `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: unsupported function append_col
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
-- `prophet`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function get_changepoint_matrix
+- `prophet`: COMPILE_FAIL stanrt compile: unsupported function kind for linear_trend
 - `rats_model`: COMPILE_FAIL stanrt compile: size expression needs unknown int irat
 - `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
 - `soil_incubation`: COMPILE_FAIL stanrt compile: unsupported function kind for evolved_CO2
