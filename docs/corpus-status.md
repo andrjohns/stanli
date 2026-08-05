@@ -1,0 +1,127 @@
+# Corpus status
+
+Passing: 10/120
+
+- OK `Rate_1_model`
+- OK `Rate_2_model`
+- OK `Rate_3_model`
+- OK `Rate_4_model`
+- OK `Rate_5_model`
+- OK `blr`
+- OK `eight_schools_centered`
+- OK `eight_schools_noncentered`
+- OK `kilpisjarvi`
+- OK `logistic_regression_rhs`
+
+## Failures
+
+- `2pl_latent_reg_irt`: COMPILE_FAIL stanrt compile: size expression needs unknown int beta_free_1dim__
+- `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
+- `GLMM_Poisson_model`: COMPILE_FAIL stanrt compile: unknown variable year_squared
+- `GLM_Binomial_model`: COMPILE_FAIL stanrt compile: unknown variable year_squared
+- `GLM_Poisson_model`: COMPILE_FAIL stanrt compile: unknown variable year_squared
+- `M0_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `Mb_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `Mh_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `Mt_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `Mtbh_model`: COMPILE_FAIL stanrt compile: indexed assignment unsupported in M2
+- `Mth_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `Survey_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `accel_gp`: COMPILE_FAIL stanrt compile: indexed assignment unsupported in M2
+- `accel_splines`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `arK`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `arma11`: COMPILE_FAIL stanrt compile: indexed assignment unsupported in M2
+- `bones_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `bym2_offset_only`: COMPILE_FAIL stanrt compile: unknown variable log_E
+- `covid19imperial_v2`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
+- `covid19imperial_v3`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
+- `diamonds`: COMPILE_FAIL stanrt compile: size expression needs unknown int Kc
+- `dogs`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `dogs_hierarchical`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `dogs_log`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `dugongs_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `earn_height`: COMPILE_FAIL stanrt compile: unsupported expression
+- `election88_full`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `garch11`: COMPILE_FAIL stanrt compile: indexed assignment unsupported in M2
+- `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
+- `gp_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
+- `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: size expression needs unknown int beta_free_1dim__
+- `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: size expression needs unknown int beta_free_1dim__
+- `hier_2pl`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hmm_example`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `hmm_gaussian`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `iohmm_reg`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `irt_2pl`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `kidscore_interaction`: COMPILE_FAIL stanrt compile: unsupported expression
+- `kidscore_interaction_c`: COMPILE_FAIL stanrt compile: unsupported expression
+- `kidscore_interaction_c2`: COMPILE_FAIL stanrt compile: unsupported expression
+- `kidscore_interaction_z`: COMPILE_FAIL stanrt compile: unsupported expression
+- `kidscore_mom_work`: COMPILE_FAIL stanrt compile: unsupported expression
+- `kidscore_momhs`: COMPILE_FAIL stanrt compile: unsupported expression
+- `kidscore_momhsiq`: COMPILE_FAIL stanrt compile: unsupported expression
+- `kidscore_momiq`: COMPILE_FAIL stanrt compile: unsupported expression
+- `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `ldaK2`: COMPILE_FAIL stanrt compile: size expression needs unknown int K
+- `ldaK5`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `log10earn_height`: COMPILE_FAIL stanrt compile: unknown variable log10_earn
+- `logearn_height`: COMPILE_FAIL stanrt compile: unknown variable log_earn
+- `logearn_height_male`: COMPILE_FAIL stanrt compile: unknown variable log_earn
+- `logearn_interaction`: COMPILE_FAIL stanrt compile: unknown variable log_earn
+- `logearn_interaction_z`: COMPILE_FAIL stanrt compile: unknown variable log_earn
+- `logearn_logheight_male`: COMPILE_FAIL stanrt compile: unknown variable log_earn
+- `logmesquite`: COMPILE_FAIL stanrt compile: unknown variable log_weight
+- `logmesquite_logva`: COMPILE_FAIL stanrt compile: unknown variable log_weight
+- `logmesquite_logvas`: COMPILE_FAIL stanrt compile: unknown variable log_weight
+- `logmesquite_logvash`: COMPILE_FAIL stanrt compile: unknown variable log_weight
+- `logmesquite_logvolume`: COMPILE_FAIL stanrt compile: unknown variable log_weight
+- `losscurve_sislob`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
+- `low_dim_gauss_mix`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `low_dim_gauss_mix_collapse`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `lsat_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `mesquite`: COMPILE_FAIL stanrt compile: unsupported expression
+- `multi_occupancy`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `nes`: COMPILE_FAIL stanrt compile: unsupported expression
+- `nes_logit_model`: COMPILE_FAIL stanrt compile: unknown variable x
+- `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: size expression needs unknown int J
+- `nn_rbm1bJ100`: COMPILE_FAIL stanrt compile: size expression needs unknown int J
+- `normal_mixture`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `normal_mixture_k`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
+- `pilots`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `prophet`: COMPILE_FAIL stanrt compile: IfElse unsupported in M2 tier-1
+- `radon_county`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_county_intercept`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_hierarchical_intercept_centered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_hierarchical_intercept_noncentered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_partially_pooled_centered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_partially_pooled_noncentered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_pooled`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_variable_intercept_centered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_variable_intercept_noncentered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_variable_intercept_slope_centered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_variable_intercept_slope_noncentered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_variable_slope_centered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `radon_variable_slope_noncentered`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `rats_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `seeds_centered_model`: COMPILE_FAIL stanrt compile: unknown variable x1x2
+- `seeds_model`: COMPILE_FAIL stanrt compile: unknown variable x1x2
+- `seeds_stanified_model`: COMPILE_FAIL stanrt compile: unknown variable x1x2
+- `sesame_one_pred_a`: COMPILE_FAIL stanrt compile: unsupported expression
+- `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
+- `soil_incubation`: COMPILE_FAIL stanrt compile: unsupported function kind for evolved_CO2
+- `state_space_stochastic_level_stochastic_seasonal`: COMPILE_FAIL stanrt compile: unsupported function sd
+- `surgical_model`: COMPILE_FAIL stanrt compile: For loops unsupported in M2 tier-1
+- `wells_daae_c_model`: COMPILE_FAIL stanrt compile: unknown variable x
+- `wells_dae_c_model`: COMPILE_FAIL stanrt compile: unknown variable x
+- `wells_dae_inter_model`: COMPILE_FAIL stanrt compile: unknown variable x
+- `wells_dae_model`: COMPILE_FAIL stanrt compile: unknown variable x
+- `wells_dist`: COMPILE_FAIL stanrt compile: unsupported expression
+- `wells_dist100_model`: COMPILE_FAIL stanrt compile: unknown variable x
+- `wells_dist100ars_model`: COMPILE_FAIL stanrt compile: unknown variable x
+- `wells_interaction_c_model`: COMPILE_FAIL stanrt compile: unknown variable x
+- `wells_interaction_model`: COMPILE_FAIL stanrt compile: unknown variable x

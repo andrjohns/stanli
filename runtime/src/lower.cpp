@@ -172,39 +172,68 @@ struct Lowering {
     if (e.fn_lib != mir::Expr::Lib::StanLib)
       fail("unsupported function kind for " + e.name, e.raw);
 
-    // Densities.
-    struct Dens { uint16_t op; int nargs; bool int_outcome; };
+    // Densities. n_int leading args come from int data (idata); the rest are
+    // real slots. Layouts: one int group = raw values; two groups =
+    // [len, vals..., len, vals...]; glm = [y..., rows, cols].
+    struct Dens { uint16_t op; int nargs; int n_int; bool glm = false; };
     static const std::map<std::string, Dens> kDens = {
-        {"normal_lpdf", {OP_NORMAL_LPDF, 3, false}},
-        {"cauchy_lpdf", {OP_CAUCHY_LPDF, 3, false}},
-        {"student_t_lpdf", {OP_STUDENT_T_LPDF, 4, false}},
-        {"gamma_lpdf", {OP_GAMMA_LPDF, 3, false}},
-        {"beta_lpdf", {OP_BETA_LPDF, 3, false}},
-        {"poisson_log_lpmf", {OP_POISSON_LOG_LPMF, 2, true}},
-        {"bernoulli_logit_lpmf", {OP_BERNOULLI_LOGIT_LPMF, 2, true}},
+        {"normal_lpdf", {OP_NORMAL_LPDF, 3, 0}},
+        {"cauchy_lpdf", {OP_CAUCHY_LPDF, 3, 0}},
+        {"student_t_lpdf", {OP_STUDENT_T_LPDF, 4, 0}},
+        {"gamma_lpdf", {OP_GAMMA_LPDF, 3, 0}},
+        {"beta_lpdf", {OP_BETA_LPDF, 3, 0}},
+        {"lognormal_lpdf", {OP_LOGNORMAL_LPDF, 3, 0}},
+        {"uniform_lpdf", {OP_UNIFORM_LPDF, 3, 0}},
+        {"double_exponential_lpdf", {OP_DOUBLE_EXP_LPDF, 3, 0}},
+        {"exponential_lpdf", {OP_EXPONENTIAL_LPDF, 2, 0}},
+        {"inv_gamma_lpdf", {OP_INV_GAMMA_LPDF, 3, 0}},
+        {"std_normal_lpdf", {OP_STD_NORMAL_LPDF, 1, 0}},
+        {"poisson_log_lpmf", {OP_POISSON_LOG_LPMF, 2, 1}},
+        {"bernoulli_logit_lpmf", {OP_BERNOULLI_LOGIT_LPMF, 2, 1}},
+        {"bernoulli_lpmf", {OP_BERNOULLI_LPMF, 2, 1}},
+        {"poisson_lpmf", {OP_POISSON_LPMF, 2, 1}},
+        {"neg_binomial_2_lpmf", {OP_NEG_BINOMIAL_2_LPMF, 3, 1}},
+        {"binomial_lpmf", {OP_BINOMIAL_LPMF, 3, 2}},
+        {"binomial_logit_lpmf", {OP_BINOMIAL_LOGIT_LPMF, 3, 2}},
+        {"bernoulli_logit_glm_lpmf",
+         {OP_BERNOULLI_LOGIT_GLM_LPMF, 4, 1, true}},
     };
     auto dit = kDens.find(e.name);
     if (dit != kDens.end()) {
       const Dens& d = dit->second;
       if ((int)e.args.size() != d.nargs)
         fail(e.name + ": expected " + std::to_string(d.nargs) + " args");
-      std::vector<int> ins;
-      std::vector<int> idata;
-      size_t a0 = 0;
-      if (d.int_outcome) {
-        const mir::Expr& oc = e.args[0];
+      auto int_arg = [&](const mir::Expr& oc) -> std::vector<int> {
         if (oc.kind == mir::Expr::Var && data.has(oc.name) &&
-            data.at(oc.name).is_int) {
-          idata = data.at(oc.name).i;
-        } else if (oc.kind == mir::Expr::LitInt) {
-          idata = {static_cast<int>(oc.lit_i)};
-        } else {
-          fail(e.name + ": outcome must be int data in M2", oc.raw);
-        }
-        a0 = 1;
+            data.at(oc.name).is_int)
+          return data.at(oc.name).i;
+        if (oc.kind == mir::Expr::LitInt)
+          return {static_cast<int>(oc.lit_i)};
+        if (oc.kind == mir::Expr::Var && int_env.count(oc.name))
+          return {static_cast<int>(int_env[oc.name])};
+        fail(e.name + ": int argument must be int data in M2", oc.raw);
+      };
+      std::vector<int> idata;
+      if (d.n_int == 1) {
+        idata = int_arg(e.args[0]);
+      } else if (d.n_int == 2) {
+        auto g1 = int_arg(e.args[0]), g2 = int_arg(e.args[1]);
+        idata.push_back((int)g1.size());
+        idata.insert(idata.end(), g1.begin(), g1.end());
+        idata.push_back((int)g2.size());
+        idata.insert(idata.end(), g2.begin(), g2.end());
       }
-      for (size_t i = a0; i < e.args.size(); ++i)
+      std::vector<int> ins;
+      for (size_t i = d.n_int; i < e.args.size(); ++i)
         ins.push_back(lower_expr(e.args[i]).slot);
+      if (d.glm) {
+        // X must be a data matrix; append its dims to idata.
+        const SlotInfo& xsi = info[ins[0]];
+        if (xsi.rows == 0 || !xsi.data_like)
+          fail(e.name + ": X must be a data matrix in M2");
+        idata.push_back((int)xsi.rows);
+        idata.push_back((int)xsi.cols);
+      }
       return emit(d.op, ins, 1, {}, idata);
     }
 
@@ -247,6 +276,20 @@ struct Lowering {
     if (uit != kUn.end()) {
       Val a = lower_expr(e.args[0]);
       return emit(uit->second, {a.slot}, info[a.slot].len);
+    }
+    if (e.name == "PPlus__") return lower_expr(e.args[0]);
+    if (e.name == "logit") {
+      Val a = lower_expr(e.args[0]);
+      return emit(OP_LOGIT, {a.slot}, info[a.slot].len);
+    }
+    if (e.name == "mean") {
+      Val a = lower_expr(e.args[0]);
+      return emit(OP_MEAN, {a.slot}, 1);
+    }
+    if (e.name == "rep_vector") {
+      Val a = lower_expr(e.args[0]);
+      const long n = eval_int(e.args[1]);
+      return emit(OP_REP_VEC, {a.slot}, n);
     }
     if (e.name == "log_sum_exp" || e.name == "sum") {
       Val a = lower_expr(e.args[0]);

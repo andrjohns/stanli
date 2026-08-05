@@ -15,6 +15,7 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
   if (v.is_number_integer()) {
     e.is_int = true;
     e.i = {v.get<int>()};
+    e.r = {v.get<double>()};  // int scalars are usable wherever reals are
     return e;
   }
   if (v.is_number()) {

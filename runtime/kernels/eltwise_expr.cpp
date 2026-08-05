@@ -288,6 +288,40 @@ void log1mv_bwd(KernelCtx& ctx) {
     dx_a(ctx, 0) += dout_a(ctx) / (in_a(ctx, 0) - 1.0);
 }
 
+// logit(x) = log(x/(1-x)); rev scalar: adj / (x*(1-x)) per element.
+void logitv_fwd(KernelCtx& ctx) {
+  for (int64_t i = 0; i < ctx.out.len; ++i)
+    ctx.out.data[i] = stan::math::logit(ctx.in[0].data[i]);
+}
+void logitv_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  for (int64_t i = 0; i < ctx.out.len; ++i) {
+    const double x = ctx.in[0].data[i];
+    const double d = ctx.out.len == 1 ? ctx.out_adj : ctx.out_adj_vec.data[i];
+    ctx.in_adj[0].data[i] += d / (x * (1.0 - x));
+  }
+}
+
+void mean_fwd(KernelCtx& ctx) {
+  ctx.out.data[0] = in_a(ctx, 0).mean();
+}
+void mean_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  const double d = ctx.out_adj / static_cast<double>(ctx.in[0].len);
+  for (int64_t i = 0; i < ctx.in[0].len; ++i) ctx.in_adj[0].data[i] += d;
+}
+
+// rep_vector(x, n): out[i] = x; scalar adjoint accumulates ascending.
+void repv_fwd(KernelCtx& ctx) {
+  for (int64_t i = 0; i < ctx.out.len; ++i)
+    ctx.out.data[i] = ctx.in[0].data[0];
+}
+void repv_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  for (int64_t i = 0; i < ctx.out.len; ++i)
+    ctx.in_adj[0].data[0] += ctx.out_adj_vec.data[i];
+}
+
 }  // namespace
 
 void register_eltwise_kernels() {
@@ -304,6 +338,9 @@ void register_eltwise_kernels() {
   register_kernel(OP_SQRT, Kernel{sqrtv_fwd, sqrtv_bwd, nullptr});
   register_kernel(OP_SQUARE, Kernel{squarev_fwd, squarev_bwd, nullptr});
   register_kernel(OP_LOG1M, Kernel{log1mv_fwd, log1mv_bwd, nullptr});
+  register_kernel(OP_LOGIT, Kernel{logitv_fwd, logitv_bwd, nullptr});
+  register_kernel(OP_MEAN, Kernel{mean_fwd, mean_bwd, nullptr});
+  register_kernel(OP_REP_VEC, Kernel{repv_fwd, repv_bwd, nullptr});
 }
 
 }  // namespace stanrt
