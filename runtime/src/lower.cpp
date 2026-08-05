@@ -965,6 +965,31 @@ struct Lowering {
     return true;
   }
 
+  // Integer argument of a density/pmf: values must be known at compile
+  // time (int data, loop variables, or compile-time expressions).
+  std::vector<int> int_arg_values(const mir::Expr& oc) {
+    if (oc.kind == mir::Expr::Var) {
+      DataMap::Entry* en = env.find(oc.name);
+      if (en && en->is_int && !en->i.empty()) return en->i;
+      if (int_env.count(oc.name))
+        return {static_cast<int>(int_env[oc.name])};
+    }
+    if (oc.kind == mir::Expr::LitInt) return {static_cast<int>(oc.lit_i)};
+    if (oc.kind == mir::Expr::Indexed) {
+      // May be a slice (y[i] on a 2-D array yields a whole row), so
+      // evaluate through the data interpreter, not scalar eval_int.
+      DataMap::Entry v = td_eval(oc);
+      if (v.is_int && !v.i.empty()) return v.i;
+    }
+    if (oc.kind == mir::Expr::FunApp) {
+      // Compile-time int expression (e.g. sum(y[n]) under an unrolled loop).
+      return {static_cast<int>(eval_int(oc))};
+    }
+    fail("int argument must be int data in M2 (kind=" +
+             std::to_string((int)oc.kind) + " type=" + oc.type_ + ")",
+         oc.raw);
+  }
+
   // Thrown by a Return statement inside an inlined UDF body.
   struct LpReturn {
     Val v;
@@ -1074,30 +1099,7 @@ struct Lowering {
       const Dens& d = dit->second;
       if ((int)e.args.size() != d.nargs)
         fail(e.name + ": expected " + std::to_string(d.nargs) + " args");
-      auto int_arg = [&](const mir::Expr& oc) -> std::vector<int> {
-        if (oc.kind == mir::Expr::Var) {
-          DataMap::Entry* en = env.find(oc.name);
-          if (en && en->is_int && !en->i.empty()) return en->i;
-          if (int_env.count(oc.name))
-            return {static_cast<int>(int_env[oc.name])};
-        }
-        if (oc.kind == mir::Expr::LitInt)
-          return {static_cast<int>(oc.lit_i)};
-        if (oc.kind == mir::Expr::Indexed) {
-          // May be a slice (y[i] on a 2-D array yields a whole row), so
-          // evaluate through the data interpreter, not scalar eval_int.
-          DataMap::Entry v = td_eval(oc);
-          if (v.is_int && !v.i.empty()) return v.i;
-        }
-        if (oc.kind == mir::Expr::FunApp) {
-          // Compile-time int expression (e.g. sum(y[n]) under an unrolled
-          // loop).
-          return {static_cast<int>(eval_int(oc))};
-        }
-        fail(e.name + ": int argument must be int data in M2 (kind=" +
-                 std::to_string((int)oc.kind) + " type=" + oc.type_ + ")",
-             oc.raw);
-      };
+      auto int_arg = [&](const mir::Expr& oc) { return int_arg_values(oc); };
       std::vector<int> idata;
       if (d.n_int == 1) {
         idata = int_arg(e.args[0]);
@@ -1217,6 +1219,24 @@ struct Lowering {
       Val a = lower_expr(e.args[0]);
       Val b = lower_expr(e.args[1]);
       return emit(OP_DOT, {a.slot, b.slot}, 1);
+    }
+    if (e.name == "categorical_lpmf" && e.args.size() == 2) {
+      // stan-math computes log(theta[n-1]) on the scalar type directly (no
+      // ops_partials), so this decomposes exactly onto existing ops. For an
+      // array outcome the reference logs the whole simplex once and gathers,
+      // which also fixes the adjoint association for repeated categories.
+      if (e.fn_propto && e.args[1].data_only) return {const_slot(0.0), {}};
+      Val th = lower_expr(e.args[1]);
+      auto ns = int_arg_values(e.args[0]);
+      if (e.args[0].type_ == "UInt" && ns.size() == 1) {
+        Val el = emit(OP_INDEX, {th.slot}, 1, {}, {ns[0] - 1});
+        return emit(OP_LOGV, {el.slot}, 1);
+      }
+      Val lg = emit(OP_LOGV, {th.slot}, info[th.slot].len);
+      std::vector<int> idata;
+      for (int n : ns) idata.push_back(n - 1);
+      Val ga = emit(OP_GATHER, {lg.slot}, (int64_t)idata.size(), {}, idata);
+      return emit(OP_SUM_VEC, {ga.slot}, 1);
     }
     if (e.name == "dot_self") {
       Val a = lower_expr(e.args[0]);

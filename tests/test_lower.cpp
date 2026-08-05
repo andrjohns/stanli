@@ -393,6 +393,35 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // categorical_lpmf, scalar and array outcomes, on a simplex parameter.
+  {
+    DataMap d = DataMap::from_json(R"({"K": 3, "y": 2, "ys": [3, 1, 3]})");
+    CompiledModel lm = compile_model(slurp("tests/fixtures/cat.tmir.sexp"), d);
+    check(lm.n_unconstrained == 2, "cat 2 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.3;
+    lex.params_data()[1] = -0.8;
+    double grad[2];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> q(2);
+    q << 0.3, -0.8;
+    var lj = 0.0;
+    Eigen::Matrix<var, -1, 1> theta =
+        stan::math::simplex_constrain(q, lj);
+    var t1 = stan::math::categorical_lpmf<false>(2, theta);
+    const std::vector<int> ys = {3, 1, 3};
+    var t2 = stan::math::categorical_lpmf<false>(ys, theta);
+    var acc = (t1 + t2) + lj;
+    acc.grad();
+    expect_eq("cat lp", lp, acc.val());
+    for (int i = 0; i < 2; ++i)
+      expect_eq("cat g" + std::to_string(i), grad[i], q(i).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

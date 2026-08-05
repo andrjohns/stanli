@@ -1,6 +1,6 @@
 # Corpus status
 
-Passing: 100/120
+Passing: 102/120
 
 - OK `2pl_latent_reg_irt`
 - OK `GLMM_Poisson_model`
@@ -33,6 +33,8 @@ Passing: 100/120
 - OK `eight_schools_noncentered`
 - OK `election88_full`
 - OK `garch11`
+- OK `gpcm_latent_reg_irt`
+- OK `grsm_latent_reg_irt`
 - OK `hmm_drive_0`
 - OK `hmm_drive_1`
 - OK `hmm_example`
@@ -113,8 +115,6 @@ Passing: 100/120
 - `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `gp_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
-- `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported function categorical_lpmf
-- `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported function categorical_lpmf
 - `hier_2pl`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
