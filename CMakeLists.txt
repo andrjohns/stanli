@@ -42,3 +42,4 @@ function(stanrt_add_test NAME)
 endfunction()
 
 stanrt_add_test(test_smoke)
+stanrt_add_test(test_executor)
