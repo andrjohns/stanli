@@ -40,5 +40,15 @@ Notes:
   data/parameter var instantiations can differ by ULPs through stan-math's
   to_ref_if caching (bounded and tested; see test_densities).
 
-Next (M2): stanc3 MIR-to-graph backend, graph serialization + loader,
-posteriordb corpus differential testing.
+M2 (compiler) status: stanc3 --debug-transformed-mir sexp -> graph compiler
+with for-loop unrolling, Single indexing, constraint transforms
+(lower/upper/lower-upper), a compile-time transformed-data interpreter, JSON
+data loading, stanrt_run/stanrt_check CLIs. 67/120 posteriordb models
+compile and evaluate (docs/corpus-status.md). Eight schools runs end to end
+from .stan + .json through NUTS with bitwise gradient parity vs the var
+path at fixed points.
+
+Remaining M2 work: CmdStan gradient-reference fixtures for the passing set
+(the deps/cmdstan build for that rig exists), remaining transforms
+(simplex, ordered, cholesky_corr), matrix ops, log_prob-side indexed
+assignment cases, ODE/GP models.
