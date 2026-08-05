@@ -83,6 +83,9 @@ class Executor {
   explicit Executor(Graph g);
 
   int64_t n_params() const { return n_params_; }
+  // The unconstrained parameter vector: the first n_params() arena entries,
+  // in parameter-slot declaration order.
+  double* params_data() { return values_.data(); }
   double* param_ptr(int slot) { return values_.data() + graph_.slots[slot].offset; }
   double* value_ptr(int slot) { return values_.data() + graph_.slots[slot].offset; }
 
