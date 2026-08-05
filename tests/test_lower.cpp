@@ -458,6 +458,45 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // append_row stacking parameter matrices: col-major storage interleaves
+  // columns, so the lowering concatenates then gathers into place.
+  {
+    DataMap d;
+    d.set_int("C", 2);
+    CompiledModel lm = compile_model(slurp("tests/fixtures/aprow.tmir.sexp"), d);
+    check(lm.n_unconstrained == 8, "aprow 8 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[8] = {0.5, -0.4, 1.1, 0.2, -0.9, 0.7, 0.3, -0.6};
+    for (int i = 0; i < 8; ++i) lex.params_data()[i] = q[i];
+    double grad[8];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    // A is 2xC col-major (q0..q3), B is 1xC (q4,q5), r is C (q6,q7).
+    Eigen::Matrix<var, -1, 1> p(8);
+    for (int i = 0; i < 8; ++i) p(i) = q[i];
+    auto A = [&](int i, int j) { return p(j * 2 + i); };     // 2 rows
+    auto B = [&](int j) { return p(4 + j); };
+    auto r = [&](int j) { return p(6 + j); };
+    Eigen::Matrix<var, -1, 1> S(6), T(6);
+    for (int j = 0; j < 2; ++j) {
+      S(j * 3 + 0) = A(0, j);
+      S(j * 3 + 1) = A(1, j);
+      S(j * 3 + 2) = B(j);
+      T(j * 3 + 0) = r(j);
+      T(j * 3 + 1) = A(0, j);
+      T(j * 3 + 2) = A(1, j);
+    }
+    var acc = stan::math::normal_lpdf<false>(S, 0.0, 1.0) +
+              stan::math::normal_lpdf<false>(T, 0.0, 2.0);
+    acc.grad();
+    expect_eq("aprow lp", lp, acc.val());
+    for (int i = 0; i < 8; ++i)
+      expect_eq("aprow g" + std::to_string(i), grad[i], p(i).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

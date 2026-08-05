@@ -102,6 +102,16 @@ struct Lowering {
         if (e.name == "Plus__") return eval_int(e.args[0]) + eval_int(e.args[1]);
         if (e.name == "Minus__") return eval_int(e.args[0]) - eval_int(e.args[1]);
         if (e.name == "Times__") return eval_int(e.args[0]) * eval_int(e.args[1]);
+        if (e.name == "dims" && e.args.size() == 1 &&
+            e.args[0].kind == mir::Expr::Var) {
+          auto sit = scope.find(e.args[0].name);
+          if (sit != scope.end()) {
+            const SlotInfo& si = info[sit->second];
+            // Only reachable through an index, which eval_int resolves on
+            // the returned sequence; expose rows for matrices, len else.
+            return si.rows > 0 ? si.rows : si.len;
+          }
+        }
         // Anything data-only the td interpreter can evaluate (sum of an
         // int array in a size expression, etc.).
         if (e.data_only) {
@@ -525,6 +535,19 @@ struct Lowering {
           r.is_int = true;
           r.i = {(int)v};
           r.r = {(double)v};
+          return r;
+        }
+        if (e.name == "dims" && e.args.size() == 1) {
+          DataMap::Entry a = td_eval(e.args[0]);
+          r.is_int = true;
+          std::vector<int64_t> ds = a.dims;
+          if (ds.empty())
+            ds = {(int64_t)std::max(a.r.size(), a.i.size())};
+          r.dims = {(int64_t)ds.size()};
+          for (int64_t d : ds) {
+            r.i.push_back((int)d);
+            r.r.push_back((double)d);
+          }
           return r;
         }
         if (e.name == "negative_infinity") {
@@ -1079,10 +1102,21 @@ struct Lowering {
     auto ie_saved = int_env;
     auto dd_saved = decl_dims;
     auto dl_saved = decl_lens;
+    auto env_saved = env.vars;
     for (size_t i = 0; i < binds.size(); ++i) {
       const std::string& name = f.arg_names[i];
       decl_dims.erase(name);
       decl_lens.erase(name);
+      // Data-only arguments also enter the interpreter's environment, so
+      // shape and size queries inside the body (dims, size, rows) resolve
+      // at compile time just as they do in transformed data.
+      env.vars.erase(name);
+      if (e.args[i].data_only) {
+        try {
+          env.vars[name] = td_eval(e.args[i]);
+        } catch (const CompileError&) {
+        }
+      }
       if (binds[i].is_int) {
         int_env[name] = binds[i].iv;
         scope.erase(name);
@@ -1103,6 +1137,7 @@ struct Lowering {
     int_env = std::move(ie_saved);
     decl_dims = std::move(dd_saved);
     decl_lens = std::move(dl_saved);
+    env.vars = std::move(env_saved);
     --udf_depth;
     if (!returned)
       fail(e.name + ": no return value on the executed path");
@@ -1359,8 +1394,25 @@ struct Lowering {
         si.cols = (a.si.rows > 0 ? a.si.cols : 1) +
                   (b.si.rows > 0 ? b.si.cols : 1);
       } else if (a.si.rows > 0 || b.si.rows > 0) {
-        // Row-appending matrices interleaves columns; not needed yet.
-        fail("append_row on matrices unsupported in M2", e.raw);
+        // Stacking rows interleaves columns in col-major storage:
+        // concatenate flat, then gather into destination order.
+        const int64_t ra = a.si.rows > 0 ? a.si.rows : 1;
+        const int64_t rb = b.si.rows > 0 ? b.si.rows : 1;
+        const int64_t ca = a.si.rows > 0 ? a.si.cols : la;
+        const int64_t cb = b.si.rows > 0 ? b.si.cols : lb;
+        if (ca != cb) fail("append_row column mismatch", e.raw);
+        SlotInfo csi;
+        Val cat = emit(OP_CONCAT2, {a.slot, b.slot}, la + lb, csi);
+        std::vector<int> idx;
+        idx.reserve(la + lb);
+        for (int64_t j = 0; j < ca; ++j) {
+          for (int64_t i = 0; i < ra; ++i) idx.push_back((int)(j * ra + i));
+          for (int64_t i = 0; i < rb; ++i)
+            idx.push_back((int)(la + j * rb + i));
+        }
+        si.rows = ra + rb;
+        si.cols = ca;
+        return emit(OP_GATHER, {cat.slot}, la + lb, si, idx);
       }
       return emit(OP_CONCAT2, {a.slot, b.slot}, la + lb, si);
     }

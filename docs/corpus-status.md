@@ -113,7 +113,7 @@ A model counts as verified only when tools/verify_sample.py matches CmdStan's lo
 
 ## Failures
 
-- `accel_gp`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function dims
+- `accel_gp`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable x (type )
 - `diamonds`: COMPILE_FAIL stanrt compile: unsupported function normal_id_glm_lpdf
 - `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
@@ -123,7 +123,7 @@ A model counts as verified only when tools/verify_sample.py matches CmdStan's lo
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
 - `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported function multi_normal_lpdf
-- `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: append_row on matrices unsupported in M2
+- `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: parameter matrix in Times__ unsupported in M2
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
 - `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
