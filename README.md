@@ -4,11 +4,11 @@ A portable Stan runtime: op-graph executor over precompiled stan-math
 kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
-  (sampling gradient 1.26x faster, time-to-first-draw ~20x faster)
+  (gradient 1.9x-3.0x faster on vectorized models, 0.4x-0.9x on
+  explicit scalar loops; time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
-  (103/120 posteriordb models differentially verified against CmdStan's
-  log_prob and gradients; 2 more evaluate but do not yet match and are
-  not counted)
+  (105/120 posteriordb models differentially verified against CmdStan's
+  log_prob and gradients)
 - Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
 
 ## Architecture
@@ -126,7 +126,7 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 17/17 tests green; 103/120 posteriordb models
+macOS arm64 / clang: 17/17 tests green; 105/120 posteriordb models
 CmdStan-verified. Sampling-semantics gradients (propto with
 per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
 for the numbers.
@@ -136,9 +136,15 @@ for the numbers.
 1. Corpus tail: GLM/multivariate densities, cholesky transforms, GP
    covariance ops, ODE integrators (legacy nested replay), graph-level
    loops for the unroll-bound models.
-2. Linux + x86 wheels with CI owning the opam + cmake build
+2. Re-rolling unrolled scalar loops into vectorized ops, and fusing
+   adjacent elementwise chains into one pass over the arena. The
+   benchmarks show this is the largest win available: models written as
+   explicit per-observation loops currently run 0.4x-0.9x CmdStan
+   because each unrolled iteration pays a full op dispatch, while
+   vectorized models run 1.9x-3.0x.
+3. Linux + x86 wheels with CI owning the opam + cmake build
    (cibuildwheel); CRAN shim package.
-3. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
+4. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
    kernels mirror CmdStan's default AoS arithmetic, which is scalar for
    transcendentals and reductions (strided var access defeats Eigen's
    packet math). stan-math's `var_value<Matrix>` overloads compute over

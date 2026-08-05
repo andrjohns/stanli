@@ -1028,6 +1028,22 @@ struct Lowering {
          oc.raw);
   }
 
+  // Matrix shape of an elementwise result: whichever operand carries one
+  // (both must agree when both do).
+  SlotInfo shape_of(const Val& a, const Val& b) {
+    SlotInfo si;
+    const SlotInfo& src = a.si.rows > 0 ? a.si : b.si;
+    if (a.si.rows > 0 && b.si.rows > 0 &&
+        (a.si.rows != b.si.rows || a.si.cols != b.si.cols))
+      fail("elementwise op on matrices of different shapes");
+    si.rows = src.rows;
+    si.cols = src.cols;
+    // An op over data-only inputs is itself data (no adjoint), which is
+    // what lets a transformed data matrix still drive OP_MATVEC.
+    si.data_like = info[a.slot].data_like && info[b.slot].data_like;
+    return si;
+  }
+
   // Thrown by a Return statement inside an inlined UDF body.
   struct LpReturn {
     Val v;
@@ -1204,7 +1220,10 @@ struct Lowering {
       const int64_t la = info[a.slot].len, lb = info[b.slot].len;
       if (la != lb && la != 1 && lb != 1)
         fail(e.name + ": incompatible lengths");
-      return emit(bit->second, {a.slot, b.slot}, std::max(la, lb));
+      // Elementwise results keep the matrix shape of whichever operand
+      // has one; losing it would make a later Times__ miss the matvec.
+      SlotInfo si = shape_of(a, b);
+      return emit(bit->second, {a.slot, b.slot}, std::max(la, lb), si);
     }
 
     // Elementwise unaries + reductions.
@@ -1217,7 +1236,15 @@ struct Lowering {
     auto uit = kUn.find(e.name);
     if (uit != kUn.end()) {
       Val a = lower_expr(e.args[0]);
-      return emit(uit->second, {a.slot}, info[a.slot].len);
+      SlotInfo si;
+      // Shape-preserving unaries keep rows/cols (softmax/cumulative_sum
+      // are vector-only, so they never carry one).
+      if (uit->second != OP_SOFTMAX && uit->second != OP_CUMSUM) {
+        si.rows = a.si.rows;
+        si.cols = a.si.cols;
+      }
+      si.data_like = info[a.slot].data_like;
+      return emit(uit->second, {a.slot}, info[a.slot].len, si);
     }
     if (e.name == "PPlus__") return lower_expr(e.args[0]);
     if (e.name == "Transpose__") {
@@ -1451,7 +1478,7 @@ struct Lowering {
     if (opcode == OP_CONSTRAIN_SIMPLEX || opcode == OP_CONSTRAIN_ORDERED ||
         opcode == OP_CONSTRAIN_POS_ORDERED)
       tr_idata = {(int)n_batch, (int)inner_con};
-    Val con = emit(opcode, ins, con_len, {}, tr_idata, jac);
+    Val con = emit(opcode, ins, con_len, psi, tr_idata, jac);
     jac_slots.push_back(jac);
     scope[s.decl_id] = con.slot;
     out.views.push_back({s.decl_id, con.slot, con_len});

@@ -21,12 +21,7 @@ CHECK = REPO / "build" / "stanrt_check"
 # Models that compile and produce a finite gradient but do NOT match
 # CmdStan differentially. They are never counted as passing; entries leave
 # only when tools/verify_sample.py agrees.
-UNVERIFIED = {
-    "covid19imperial_v2": "lp and 49/51 gradients differ from CmdStan "
-                          "(~10%); under investigation",
-    "covid19imperial_v3": "lp and 49/51 gradients differ from CmdStan "
-                          "(~10%); under investigation",
-}
+UNVERIFIED = {}
 
 
 def main():

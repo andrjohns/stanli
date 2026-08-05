@@ -1,7 +1,7 @@
 # Corpus status
 
 Evaluating: 105/120
-Differentially verified against CmdStan: 103/120
+Differentially verified against CmdStan: 105/120
 
 A model counts as verified only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Models that compile and evaluate but do not yet match are listed as EVAL-ONLY and are not claimed as passing.
 
@@ -28,6 +28,8 @@ A model counts as verified only when tools/verify_sample.py matches CmdStan's lo
 - OK `blr`
 - OK `bones_model`
 - OK `bym2_offset_only`
+- OK `covid19imperial_v2`
+- OK `covid19imperial_v3`
 - OK `dogs`
 - OK `dogs_hierarchical`
 - OK `dogs_log`
@@ -108,11 +110,6 @@ A model counts as verified only when tools/verify_sample.py matches CmdStan's lo
 - OK `wells_dist100ars_model`
 - OK `wells_interaction_c_model`
 - OK `wells_interaction_model`
-
-## Evaluate but not verified
-
-- `covid19imperial_v2`: lp and 49/51 gradients differ from CmdStan (~10%); under investigation
-- `covid19imperial_v3`: lp and 49/51 gradients differ from CmdStan (~10%); under investigation
 
 ## Failures
 

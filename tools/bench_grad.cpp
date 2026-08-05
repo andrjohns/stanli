@@ -39,7 +39,8 @@ int main(int argc, char** argv) {
   auto t1 = std::chrono::steady_clock::now();
   const double ns =
       std::chrono::duration<double, std::nano>(t1 - t0).count() / N;
-  std::printf("stanrt gradient: %.1f ns/eval (%d evals, sink %.3g)\n", ns, N,
-              sink);
+  // Machine-readable: <ns/eval> <sink> <n_params>, consumed by
+  // tools/bench_models.py.
+  std::printf("%.1f %.6g %lld\n", ns, sink, (long long)n);
   return 0;
 }
