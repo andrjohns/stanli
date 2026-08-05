@@ -6,8 +6,8 @@ kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
   (sampling gradient 1.26x faster, time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
-  (88/120 posteriordb models, every one differentially verified against
-  CmdStan's log_prob and gradients; 39 of 88 bitwise-identical, worst
+  (100/120 posteriordb models, every one differentially verified against
+  CmdStan's log_prob and gradients; 41 of 100 bitwise-identical, worst
   relative deviation 9.2e-14)
 - Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
 
@@ -126,11 +126,11 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 16/16 tests green; 88/120 posteriordb models
-passing, all CmdStan-verified (39 bitwise). Sampling-semantics gradients (propto with
+macOS arm64 / clang: 17/17 tests green; 100/120 posteriordb models
+passing, all CmdStan-verified (41 bitwise). Sampling-semantics gradients (propto with
 per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
 for the numbers.
 
-In progress: the remaining corpus models (cholesky transforms, GP
-covariance ops, ODE integrators, a few indexing forms), Linux wheels +
-CI, the CRAN shim.
+In progress: the remaining corpus models (categorical/GLM densities,
+rep_matrix, cholesky transforms, GP covariance ops, ODE integrators),
+Linux wheels + CI, the CRAN shim.
