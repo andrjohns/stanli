@@ -109,29 +109,44 @@ int64_t constrain_scratch(const Op& op, const Slot* slots) {
 // the prim double implementation; backward replays the actual REV constrain
 // on a nested tape with output + jacobian adjoints seeded via the dot trick.
 // Correct by construction against CmdStan's own code path.
+// Batched for array-of-simplex etc.: idata = {n_batch, inner_con}; each
+// batch element constrains independently, jacobians summed.
 template <typename FwdF>
 void structured_fwd(KernelCtx& ctx, FwdF&& f) {
-  Eigen::Map<const Eigen::VectorXd> y(ctx.in[0].data, ctx.in[0].len);
+  const int64_t nb = ctx.n_idata >= 2 ? ctx.idata[0] : 1;
+  const int64_t inner_con = ctx.n_idata >= 2 ? ctx.idata[1] : ctx.out.len;
+  const int64_t inner_raw = ctx.in[0].len / nb;
   double lp = 0.0;
-  Eigen::VectorXd x = f(y, lp);
-  for (int64_t i = 0; i < ctx.out.len; ++i) ctx.out.data[i] = x(i);
+  for (int64_t b = 0; b < nb; ++b) {
+    Eigen::Map<const Eigen::VectorXd> y(ctx.in[0].data + b * inner_raw,
+                                        inner_raw);
+    Eigen::VectorXd x = f(y, lp);
+    for (int64_t i = 0; i < inner_con; ++i)
+      ctx.out.data[b * inner_con + i] = x(i);
+  }
   ctx.out2.data[0] = lp;
 }
 template <typename RevF>
 void structured_bwd(KernelCtx& ctx, RevF&& f) {
   if (ctx.in_adj[0].data == nullptr) return;
-  stan::math::nested_rev_autodiff nested;
+  const int64_t nb = ctx.n_idata >= 2 ? ctx.idata[0] : 1;
+  const int64_t inner_con = ctx.n_idata >= 2 ? ctx.idata[1] : ctx.out.len;
+  const int64_t inner_raw = ctx.in[0].len / nb;
   using stan::math::var;
-  Eigen::Matrix<var, -1, 1> y(ctx.in[0].len);
-  for (int64_t i = 0; i < ctx.in[0].len; ++i) y(i) = ctx.in[0].data[i];
-  var lp = 0.0;
-  auto x = f(y, lp);
-  Eigen::Map<const Eigen::VectorXd> seed(ctx.out_adj_vec.data,
-                                         ctx.out_adj_vec.len);
-  var j = stan::math::dot_product(seed, x) + ctx.out2_adj * lp;
-  stan::math::grad(j.vi_);
-  for (int64_t i = 0; i < ctx.in[0].len; ++i)
-    ctx.in_adj[0].data[i] += y(i).adj();
+  for (int64_t b = 0; b < nb; ++b) {
+    stan::math::nested_rev_autodiff nested;
+    Eigen::Matrix<var, -1, 1> y(inner_raw);
+    for (int64_t i = 0; i < inner_raw; ++i)
+      y(i) = ctx.in[0].data[b * inner_raw + i];
+    var lp = 0.0;
+    auto x = f(y, lp);
+    Eigen::Map<const Eigen::VectorXd> seed(
+        ctx.out_adj_vec.data + b * inner_con, inner_con);
+    var j = stan::math::dot_product(seed, x) + ctx.out2_adj * lp;
+    stan::math::grad(j.vi_);
+    for (int64_t i = 0; i < inner_raw; ++i)
+      ctx.in_adj[0].data[b * inner_raw + i] += y(i).adj();
+  }
 }
 
 void simplex_fwd(KernelCtx& ctx) {

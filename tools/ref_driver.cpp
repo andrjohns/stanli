@@ -1,7 +1,8 @@
 // Reference driver: compiled per model against CmdStan's generated .hpp
-// (passed via -include). Evaluates log_prob_jacobian (propto=false,
-// jacobian=true: exactly stanrt's semantics) and its gradient at the same
-// deterministic point stanrt_check uses. Output: OK <lp> <g0> <g1> ...
+// (passed via -include). Evaluates log_prob_propto_jacobian (the sampling
+// semantics; stanrt lowers ~ statements propto with matched activity) and
+// its gradient at the deterministic stanrt_check point.
+// Output: OK <lp> <g0> <g1> ...
 #include <stan/io/json/json_data.hpp>
 #include <stan/model/model_base.hpp>
 #include <stan/math.hpp>
@@ -30,7 +31,7 @@ int main(int argc, char** argv) {
     q(i) = 0.1 + 0.05 * static_cast<double>(i % 7) -
            0.15 * static_cast<double>(i % 3);
 
-  stan::math::var lp = model.log_prob_jacobian(q, &std::cerr);
+  stan::math::var lp = model.log_prob_propto_jacobian(q, &std::cerr);
   lp.grad();
   std::printf("OK %.17g", lp.val());
   for (int64_t i = 0; i < n; ++i) std::printf(" %.17g", q(i).adj());

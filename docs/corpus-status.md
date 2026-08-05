@@ -1,6 +1,6 @@
 # Corpus status
 
-Passing: 77/120
+Passing: 81/120
 
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
@@ -22,6 +22,8 @@ Passing: 77/120
 - OK `eight_schools_noncentered`
 - OK `election88_full`
 - OK `garch11`
+- OK `hmm_example`
+- OK `hmm_gaussian`
 - OK `iohmm_reg`
 - OK `kidscore_interaction`
 - OK `kidscore_interaction_c`
@@ -32,6 +34,8 @@ Passing: 77/120
 - OK `kidscore_momhsiq`
 - OK `kidscore_momiq`
 - OK `kilpisjarvi`
+- OK `ldaK2`
+- OK `ldaK5`
 - OK `log10earn_height`
 - OK `logearn_height`
 - OK `logearn_height_male`
@@ -107,12 +111,8 @@ Passing: 77/120
 - `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported index expression
-- `hmm_example`: EVAL_FAIL nonfinite gradient
-- `hmm_gaussian`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `irt_2pl`: EVAL_FAIL bernoulli_logit_lpmf: Random variable has size = 1, but Probability parameter has size 100; and they must be the same size.
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
-- `ldaK2`: COMPILE_FAIL stanrt compile: unsupported index expression
-- `ldaK5`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported expression | in: (TernaryIf ((pattern (FunApp (StanLib Equals__ FnPlain AoS) (((pattern (Var growthmodel_id)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))) ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))) (meta (...
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
 - `lsat_model`: COMPILE_FAIL stanrt compile: unsupported int index expression

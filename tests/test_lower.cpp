@@ -50,15 +50,14 @@ static void reference(const double* q, double* lp_out, double* grad_out) {
   Eigen::Matrix<var, -1, 1> theta =
       stan::math::add(mu, stan::math::multiply(tau, tilde));
 
-  Eigen::Matrix<var, -1, 1> y(J), sigma(J), zeros(J);
-  for (int i = 0; i < J; ++i) {
-    y(i) = kY[i];
-    sigma(i) = kSigma[i];
-  }
-  var t1 = stan::math::normal_lpdf<false>(mu, var(0.0), var(5.0));
-  var t2 = stan::math::cauchy_lpdf<false>(tau, var(0.0), var(5.0));
-  var t3 = stan::math::normal_lpdf<false>(tilde, var(0.0), var(1.0));
-  var t4 = stan::math::normal_lpdf<false>(y, theta, sigma);
+  // ~ statements lower propto=true with activity from MIR adlevels: exactly
+  // the instantiations CmdStan's generated C++ uses (data args stay double).
+  Eigen::Map<const Eigen::VectorXd> y(kY, J);
+  Eigen::Map<const Eigen::VectorXd> sigma(kSigma, J);
+  var t1 = stan::math::normal_lpdf<true>(mu, 0.0, 5.0);
+  var t2 = stan::math::cauchy_lpdf<true>(tau, 0.0, 5.0);
+  var t3 = stan::math::normal_lpdf<true>(tilde, 0.0, 1.0);
+  var t4 = stan::math::normal_lpdf<true>(y, theta, sigma);
   var lp = ((((t1 + t2) + t3) + t4) + jac);
   lp.grad();
 
@@ -117,7 +116,7 @@ int main() {
     const double yv[3] = {1.0, 2.0, 3.0};
     var acc = 0.0;
     for (int n = 0; n < 3; ++n)
-      acc = acc + stan::math::normal_lpdf<false>(var(yv[n]), mu, var(1.0));
+      acc = acc + stan::math::normal_lpdf<true>(yv[n], mu, 1.0);
     acc.grad();
     expect_eq("loopy lp", lp, acc.val());
     expect_eq("loopy dmu", g, mu.adj());
@@ -143,9 +142,9 @@ int main() {
     y(1) = -0.8;
     var jac = 0.0;
     auto theta = stan::math::simplex_constrain(y, jac);
-    Eigen::Matrix<var, -1, 1> alpha(3);
+    Eigen::VectorXd alpha(3);
     for (int i = 0; i < 3; ++i) alpha(i) = 2.0;
-    var lp = stan::math::dirichlet_lpdf<false>(theta, alpha) + jac;
+    var lp = stan::math::dirichlet_lpdf<true>(theta, alpha) + jac;
     lp.grad();
     expect_eq("simplex lp", slp, lp.val());
     expect_eq("simplex g0", sg[0], y(0).adj());

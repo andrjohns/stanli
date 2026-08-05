@@ -26,6 +26,8 @@ struct Slot {
 
 struct Op {
   uint16_t opcode = 0;
+  uint8_t variant = 0;  // density kernels: bits 0..5 per-arg activity
+                        // (1 = autodiff), bit 7 = propto
   int out = -1;
   int out2 = -1;  // optional second output (e.g. constrain jacobian term)
   int in[6] = {-1, -1, -1, -1, -1, -1};
@@ -70,6 +72,7 @@ struct KernelCtx {
   Desc in[6];
   int n_in = 0;
   Desc out{nullptr, 0};
+  uint8_t variant = 0;
   double* scratch = nullptr;
   const int* idata = nullptr;
   int64_t n_idata = 0;
