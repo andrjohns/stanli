@@ -99,6 +99,7 @@ class Executor {
   // forward() + reverse sweep. grad_out receives d result / d params in
   // param-slot declaration order. Returns the forward value.
   double gradient(double* grad_out);
+  int64_t n_grad_evals() const { return n_grad_evals_; }
 
  private:
   void bind_();
@@ -109,6 +110,7 @@ class Executor {
   std::vector<double> adjoints_;
   std::vector<double> scratch_;
   std::vector<char> written_;  // slot carries adjoint (param or op output)
+  int64_t n_grad_evals_ = 0;
   int64_t n_params_ = 0;
   int64_t arena_len_ = 0;
 };

@@ -133,6 +133,7 @@ double Executor::forward() {
 }
 
 double Executor::gradient(double* grad_out) {
+  ++n_grad_evals_;
   const double v = forward();
   std::memset(adjoints_.data(), 0, sizeof(double) * adjoints_.size());
   adjoints_[graph_.slots[graph_.result_slot].offset] = 1.0;
