@@ -74,15 +74,28 @@ void matvec_bwd(KernelCtx& ctx) {
   }
 }
 
+// OP_SUM_VEC: scalar out = sum(x), ascending like Eigen's redux.
+void sum_vec_fwd(KernelCtx& ctx) {
+  double acc = 0;
+  for (int64_t i = 0; i < ctx.in[0].len; ++i) acc += ctx.in[0].data[i];
+  ctx.out.data[0] = acc;
+}
+void sum_vec_bwd(KernelCtx& ctx) {
+  if (ctx.in_adj[0].data)
+    for (int64_t i = 0; i < ctx.in[0].len; ++i)
+      ctx.in_adj[0].data[i] += ctx.out_adj;
+}
+
 }  // namespace
 
 // Called from Executor's constructor path; a static registrar object in a
-// static library gets dropped by the linker.
+// static library dropped by the linker.
 void register_elementwise_kernels() {
   register_kernel(OP_EXP, Kernel{exp_fwd, exp_bwd, nullptr});
   register_kernel(OP_ADD_N, Kernel{add_n_fwd, add_n_bwd, nullptr});
   register_kernel(OP_BCAST_FMA, Kernel{fma_fwd, fma_bwd, nullptr});
   register_kernel(OP_MATVEC, Kernel{matvec_fwd, matvec_bwd, nullptr});
+  register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
 }
 
 }  // namespace stanrt

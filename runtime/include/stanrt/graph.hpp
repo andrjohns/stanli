@@ -27,6 +27,7 @@ struct Slot {
 struct Op {
   uint16_t opcode = 0;
   int out = -1;
+  int out2 = -1;  // optional second output (e.g. constrain jacobian term)
   int in[6] = {-1, -1, -1, -1, -1, -1};
   int n_in = 0;
   const int* idata = nullptr;  // integer immediates (outcome counts, dims)
@@ -72,10 +73,12 @@ struct KernelCtx {
   double* scratch = nullptr;
   const int* idata = nullptr;
   int64_t n_idata = 0;
+  Desc out2{nullptr, 0};      // second output value (scalar), if any
   // Backward only. Data inputs get {nullptr, len}: kernels skip them.
   Desc in_adj[6];
   double out_adj = 0;         // scalar-output ops
   Desc out_adj_vec{nullptr, 0};  // vector-output ops
+  double out2_adj = 0;        // adjoint of the second output
 };
 
 class Executor {
