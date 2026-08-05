@@ -57,15 +57,41 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
         }
         return e;
       }
-      std::function<void(const json&)> flat = [&](const json& node) {
-        if (node.is_array()) {
-          for (const auto& k : node) flat(k);
-        } else {
-          e.r.push_back(node.get<double>());
+      // N-D (>2): column-major like everything else (first index fastest).
+      {
+        const std::vector<int64_t>& D = e.dims;
+        std::vector<int64_t> stride(D.size());
+        int64_t total = 1;
+        for (size_t d = 0; d < D.size(); ++d) {
+          stride[d] = total;
+          total *= D[d];
         }
-      };
-      flat(v);
-      return e;
+        e.r.assign(total, 0.0);
+        bool all_int = true;
+        std::vector<int64_t> ix(D.size(), 0);
+        std::function<void(const json&, size_t)> walk = [&](const json& node,
+                                                           size_t depth) {
+          if (depth == D.size()) {
+            int64_t flatpos = 0;
+            for (size_t d = 0; d < D.size(); ++d)
+              flatpos += ix[d] * stride[d];
+            e.r[flatpos] = node.get<double>();
+            if (!node.is_number_integer()) all_int = false;
+            return;
+          }
+          for (size_t k = 0; k < node.size(); ++k) {
+            ix[depth] = (int64_t)k;
+            walk(node[k], depth + 1);
+          }
+        };
+        walk(v, 0);
+        if (all_int) {
+          e.is_int = true;
+          e.i.resize(total);
+          for (int64_t k = 0; k < total; ++k) e.i[k] = (int)e.r[k];
+        }
+        return e;
+      }
     }
     bool all_int = true;
     for (const auto& k : v)

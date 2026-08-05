@@ -176,12 +176,41 @@ struct Lowering {
           }
           return r;
         }
-        // Matrix row/element access: [i, j] etc.
-        if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
+        // General all-Single N-D element access (col-major strides).
+        if (e.args.size() == base.dims.size() + 1) {
+          bool all_single = true;
+          for (size_t k = 1; k < e.args.size(); ++k)
+            if (e.args[k].name != "IndexSingle") all_single = false;
+          if (all_single) {
+            int64_t flatpos = 0, stride = 1;
+            for (size_t d = 0; d < base.dims.size(); ++d) {
+              flatpos += (eval_int_td(e.args[1 + d].args[0]) - 1) * stride;
+              stride *= base.dims[d];
+            }
+            r.is_int = base.is_int;
+            if (base.is_int) r.i = {base.i.at(flatpos)};
+            r.r = {base.r.at(flatpos)};
+            return r;
+          }
+        }
+        // Column slice X[:, j] on a matrix: contiguous in col-major.
+        if (e.args.size() == 3 && e.args[1].name == "IndexAll" &&
             e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
-          const long i = eval_int_td(e.args[1].args[0]);
           const long j = eval_int_td(e.args[2].args[0]);
-          r.r = {base.r.at((j - 1) * base.dims[0] + (i - 1))};
+          const int64_t R = base.dims[0];
+          r.dims = {R};
+          r.r.assign(base.r.begin() + (j - 1) * R,
+                     base.r.begin() + j * R);
+          return r;
+        }
+        // Row slice X[i, :] on a matrix.
+        if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
+            e.args[2].name == "IndexAll" && base.dims.size() == 2) {
+          const long i = eval_int_td(e.args[1].args[0]);
+          const int64_t R = base.dims[0], C = base.dims[1];
+          r.dims = {C};
+          for (int64_t j = 0; j < C; ++j)
+            r.r.push_back(base.r.at(j * R + (i - 1)));
           return r;
         }
         fail("prepare_data: unsupported index", e.raw);
@@ -423,15 +452,31 @@ struct Lowering {
           }
           return;
         }
-        if (st.lhs_idx.size() == 2 && st.lhs_idx[0].name == "IndexSingle" &&
+        // General all-Single N-D element write.
+        if (st.lhs_idx.size() == en->dims.size()) {
+          bool all_single = true;
+          for (const auto& ix : st.lhs_idx)
+            if (ix.name != "IndexSingle") all_single = false;
+          if (all_single) {
+            int64_t flatpos = 0, stride = 1;
+            for (size_t d = 0; d < en->dims.size(); ++d) {
+              flatpos += (eval_int_td(st.lhs_idx[d].args[0]) - 1) * stride;
+              stride *= en->dims[d];
+            }
+            en->r.at(flatpos) = v.r.at(0);
+            if (en->is_int)
+              en->i.at(flatpos) =
+                  v.is_int && !v.i.empty() ? v.i[0] : (int)v.r.at(0);
+            return;
+          }
+        }
+        // Column write Xc[:, j] = vector.
+        if (st.lhs_idx.size() == 2 && st.lhs_idx[0].name == "IndexAll" &&
             st.lhs_idx[1].name == "IndexSingle" && en->dims.size() == 2) {
-          const long i = eval_int_td(st.lhs_idx[0].args[0]);
           const long j = eval_int_td(st.lhs_idx[1].args[0]);
-          const int64_t flat = (j - 1) * en->dims[0] + (i - 1);
-          en->r.at(flat) = v.r.at(0);
-          if (en->is_int) en->i.at(flat) = v.is_int && !v.i.empty()
-                                               ? v.i[0]
-                                               : (int)v.r.at(0);
+          const int64_t R = en->dims[0];
+          for (int64_t i = 0; i < R; ++i)
+            en->r.at((j - 1) * R + i) = v.r.at(i);
           return;
         }
         fail("prepare_data: unsupported indexed assignment");
@@ -520,10 +565,25 @@ struct Lowering {
         Val base = lower_expr(e.args[0]);
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
         int64_t flat = 0;
-        if (e.args.size() == 2 && e.args[1].name == "IndexSingle") {
+        bool all_single = true;
+        for (size_t k = 1; k < e.args.size(); ++k)
+          if (e.args[k].name != "IndexSingle") all_single = false;
+        const std::vector<int64_t>* bdims = nullptr;
+        if (e.args[0].kind == mir::Expr::Var) {
+          auto dd = decl_dims.find(e.args[0].name);
+          if (dd != decl_dims.end() && !dd->second.empty())
+            bdims = &dd->second;
+        }
+        if (all_single && e.args.size() == 2) {
           flat = eval_int(e.args[1].args[0]) - 1;
-        } else if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
-                   e.args[2].name == "IndexSingle" && base.si.rows > 0) {
+        } else if (all_single && bdims &&
+                   e.args.size() == bdims->size() + 1) {
+          int64_t stride = 1;
+          for (size_t d = 0; d < bdims->size(); ++d) {
+            flat += (eval_int(e.args[1 + d].args[0]) - 1) * stride;
+            stride *= (*bdims)[d];
+          }
+        } else if (all_single && e.args.size() == 3 && base.si.rows > 0) {
           flat = (eval_int(e.args[2].args[0]) - 1) * base.si.rows +
                  (eval_int(e.args[1].args[0]) - 1);
         } else {
@@ -703,6 +763,12 @@ struct Lowering {
       Val a = lower_expr(e.args[0]);
       return emit(e.name == "sum" ? OP_SUM_VEC : OP_LOG_SUM_EXP, {a.slot}, 1);
     }
+    if (e.name == "log_mix" && e.args.size() == 3) {
+      Val a = lower_expr(e.args[0]);
+      Val b = lower_expr(e.args[1]);
+      Val c = lower_expr(e.args[2]);
+      return emit(OP_LOG_MIX, {a.slot, b.slot, c.slot}, 1);
+    }
     if (e.name == "dot_product") {
       Val a = lower_expr(e.args[0]);
       Val b = lower_expr(e.args[1]);
@@ -764,8 +830,11 @@ struct Lowering {
     out.views.push_back({s.decl_id, con.slot, con_len});
   }
 
+  std::map<std::string, std::vector<int64_t>> decl_dims;
+
   struct DeclShape {
     int64_t len = 0, rows = 0, cols = 0;
+    std::vector<int64_t> dims;
   };
   std::map<std::string, DeclShape> decl_lens;
 
@@ -779,7 +848,13 @@ struct Lowering {
         } else {
           DeclShape sh;
           sh.len = sized_len(s.decl_type, &sh.rows, &sh.cols);
+          if (s.decl_type.base == "SArray")
+            for (const auto& d : s.decl_type.dims)
+              sh.dims.push_back(eval_int(d));
+          else if (sh.rows > 0)
+            sh.dims = {sh.rows, sh.cols};
           decl_lens[s.decl_id] = sh;
+          decl_dims[s.decl_id] = sh.dims;
         }
         return;
       case mir::Stmt::Assignment: {
@@ -802,12 +877,20 @@ struct Lowering {
                 prev, std::vector<double>(dl->second.len, 0.0));
           }
           int64_t flat = 0;
-          if (s.lhs_idx.size() == 1 &&
-              s.lhs_idx[0].name == "IndexSingle") {
+          bool all_single = true;
+          for (const auto& ix : s.lhs_idx)
+            if (ix.name != "IndexSingle") all_single = false;
+          auto dd = decl_dims.find(s.lhs);
+          if (all_single && s.lhs_idx.size() == 1) {
             flat = eval_int(s.lhs_idx[0].args[0]) - 1;
-          } else if (s.lhs_idx.size() == 2 &&
-                     s.lhs_idx[0].name == "IndexSingle" &&
-                     s.lhs_idx[1].name == "IndexSingle" &&
+          } else if (all_single && dd != decl_dims.end() &&
+                     s.lhs_idx.size() == dd->second.size()) {
+            int64_t stride = 1;
+            for (size_t d = 0; d < dd->second.size(); ++d) {
+              flat += (eval_int(s.lhs_idx[d].args[0]) - 1) * stride;
+              stride *= dd->second[d];
+            }
+          } else if (all_single && s.lhs_idx.size() == 2 &&
                      info[prev].rows > 0) {
             flat = (eval_int(s.lhs_idx[1].args[0]) - 1) * info[prev].rows +
                    (eval_int(s.lhs_idx[0].args[0]) - 1);
