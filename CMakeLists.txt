@@ -38,7 +38,8 @@ add_library(stanrt STATIC
   runtime/kernels/eltwise_expr.cpp
   runtime/src/nuts.cpp
   runtime/src/mir_reader.cpp
-  runtime/src/lower.cpp)
+  runtime/src/lower.cpp
+  runtime/src/data.cpp)
 target_include_directories(stanrt PUBLIC runtime/include)
 target_link_libraries(stanrt PUBLIC stanmath)
 
@@ -66,3 +67,4 @@ stanrt_add_test(test_mir)
 stanrt_add_test(test_transforms)
 stanrt_add_test(test_eltwise)
 stanrt_add_test(test_lower)
+stanrt_add_test(test_data)
