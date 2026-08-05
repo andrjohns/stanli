@@ -20,9 +20,12 @@ draws = m.sample(seed=1, warmup=1000, samples=1000)
 draws["mu"].mean()
 ```
 
-The wheel bundles the stanrt shared library (C ABI in
-`runtime/include/stanrt/capi.h`) and the stanc3 binary; stanc runs as a
-subprocess, nothing is compiled on the user's machine.
+The wheel bundles one file: the stanrt shared library (C ABI in
+`runtime/include/stanrt/capi.h`) with stanc3 embedded in-process (OCaml
+compiled to a self-contained object via tools/stanc_embed/, linked in).
+Model compilation, lowering, and sampling all happen inside the library;
+no subprocess, nothing compiled on the user's machine. Builds without the
+embed object fall back to running a bundled stanc binary as a subprocess.
 
 ## Build
 

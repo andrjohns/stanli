@@ -1,0 +1,6 @@
+(executable
+ (name stanc_embed)
+ (modes object)
+ (libraries core fmt common frontend driver)
+ (link_flags
+  (-output-complete-obj)))

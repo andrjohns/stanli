@@ -45,6 +45,12 @@ def _load_lib():
     lib.stanrt_constrain.argtypes = [ctypes.c_void_p,
                                      ctypes.POINTER(ctypes.c_double),
                                      ctypes.POINTER(ctypes.c_double)]
+    lib.stanrt_has_embedded_stanc.restype = ctypes.c_int
+    lib.stanrt_model_new_from_stan.restype = ctypes.c_void_p
+    lib.stanrt_model_new_from_stan.argtypes = [ctypes.c_char_p,
+                                               ctypes.c_char_p,
+                                               ctypes.c_char_p,
+                                               ctypes.c_size_t]
     return lib
 
 
@@ -65,22 +71,28 @@ class Model:
     """A compiled (model, data) pair."""
 
     def __init__(self, stan_file=None, data=None, stan_code=None):
-        if stan_code is not None:
-            import tempfile
-            tmp = pathlib.Path(tempfile.mkdtemp()) / "model.stan"
-            tmp.write_text(stan_code)
-            stan_file = tmp
-        if stan_file is None:
-            raise ValueError("provide stan_file or stan_code")
+        if stan_code is None:
+            if stan_file is None:
+                raise ValueError("provide stan_file or stan_code")
+            stan_code = pathlib.Path(stan_file).read_text()
         if isinstance(data, (str, pathlib.Path)):
             data_json = pathlib.Path(data).read_text()
         else:
             data_json = json.dumps(data or {})
 
-        mir = _stanc_mir(pathlib.Path(stan_file))
-        err = ctypes.create_string_buffer(4096)
-        self._m = _lib.stanrt_model_new(mir.encode(), data_json.encode(),
-                                        err, len(err))
+        err = ctypes.create_string_buffer(8192)
+        if _lib.stanrt_has_embedded_stanc():
+            # Fully in-process: embedded stanc3 compiles the model.
+            self._m = _lib.stanrt_model_new_from_stan(
+                stan_code.encode(), data_json.encode(), err, len(err))
+        else:
+            # Fallback: bundled stanc binary as a subprocess.
+            import tempfile
+            tmp = pathlib.Path(tempfile.mkdtemp()) / "model.stan"
+            tmp.write_text(stan_code)
+            mir = _stanc_mir(tmp)
+            self._m = _lib.stanrt_model_new(mir.encode(), data_json.encode(),
+                                            err, len(err))
         if not self._m:
             raise RuntimeError(err.value.decode())
         self.n_unconstrained = _lib.stanrt_n_unconstrained(self._m)

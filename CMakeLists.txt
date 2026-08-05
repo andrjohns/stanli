@@ -48,6 +48,20 @@ target_include_directories(stanrt_shared PUBLIC runtime/include)
 target_link_libraries(stanrt_shared PUBLIC stanmath)
 set_target_properties(stanrt_shared PROPERTIES OUTPUT_NAME stanrt)
 
+# In-process stanc3: link the OCaml-compiled embed object
+# (tools/stanc_embed/build.sh produces deps/stanc3/stanc_embed.o).
+set(STANRT_STANC_EMBED_OBJ "" CACHE FILEPATH
+    "stanc_embed.o built by tools/stanc_embed/build.sh; enables in-process stanc")
+set(STANRT_OCAML_STDLIB "" CACHE PATH
+    "OCaml stdlib dir (opam switch lib/ocaml) for caml/*.h")
+if(STANRT_STANC_EMBED_OBJ)
+  target_sources(stanrt_shared PRIVATE
+    runtime/src/stanc_embed_c.cpp ${STANRT_STANC_EMBED_OBJ})
+  target_include_directories(stanrt_shared PRIVATE ${STANRT_OCAML_STDLIB})
+  target_compile_definitions(stanrt_shared PRIVATE STANRT_EMBED_STANC)
+  target_link_libraries(stanrt_shared PUBLIC dl pthread)
+endif()
+
 add_library(stanrt STATIC
   runtime/src/executor.cpp
   runtime/kernels/elementwise.cpp

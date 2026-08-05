@@ -50,6 +50,40 @@ stanrt_model* stanrt_model_new(const char* tmir_sexp, const char* data_json,
   }
 }
 
+#ifdef STANRT_EMBED_STANC
+extern "C" char* stanrt_stanc_tmir(const char* stan_code);
+extern "C" void stanrt_stanc_free(char* p);
+#endif
+
+stanrt_model* stanrt_model_new_from_stan(const char* stan_code,
+                                         const char* data_json, char* err,
+                                         size_t err_len) {
+#ifdef STANRT_EMBED_STANC
+  char* res = stanrt_stanc_tmir(stan_code);
+  if (std::strncmp(res, "OK", 2) != 0) {
+    put_err(err, err_len, res + (std::strncmp(res, "ERR", 3) == 0 ? 3 : 0));
+    stanrt_stanc_free(res);
+    return nullptr;
+  }
+  stanrt_model* m = stanrt_model_new(res + 2, data_json, err, err_len);
+  stanrt_stanc_free(res);
+  return m;
+#else
+  (void)stan_code;
+  (void)data_json;
+  put_err(err, err_len, "this build does not embed stanc3");
+  return nullptr;
+#endif
+}
+
+int stanrt_has_embedded_stanc(void) {
+#ifdef STANRT_EMBED_STANC
+  return 1;
+#else
+  return 0;
+#endif
+}
+
 void stanrt_model_free(stanrt_model* m) { delete m; }
 
 int64_t stanrt_n_unconstrained(const stanrt_model* m) {

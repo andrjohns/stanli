@@ -19,6 +19,15 @@ typedef struct stanrt_model stanrt_model;
  * message in err. */
 stanrt_model* stanrt_model_new(const char* tmir_sexp, const char* data_json,
                                char* err, size_t err_len);
+
+/* Like stanrt_model_new but takes Stan source code directly, compiled by the
+ * embedded stanc3 (in-process; no subprocess). Fails with a message if this
+ * build does not embed stanc. */
+stanrt_model* stanrt_model_new_from_stan(const char* stan_code,
+                                         const char* data_json, char* err,
+                                         size_t err_len);
+/* 1 if this build embeds stanc3, else 0. */
+int stanrt_has_embedded_stanc(void);
 void stanrt_model_free(stanrt_model* m);
 
 int64_t stanrt_n_unconstrained(const stanrt_model* m);
