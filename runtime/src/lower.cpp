@@ -3,7 +3,10 @@
 #include <stanrt/optable.hpp>
 #include <stanrt/sexp.hpp>
 
+#include <stan/math/prim/prob/student_t_lccdf.hpp>
+
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -374,6 +377,53 @@ struct Lowering {
           a.is_int = false;
           return a;
         }
+        if (e.name == "negative_infinity") {
+          r.r = {-std::numeric_limits<double>::infinity()};
+          return r;
+        }
+        if (e.name == "positive_infinity") {
+          r.r = {std::numeric_limits<double>::infinity()};
+          return r;
+        }
+        if (e.name == "student_t_lccdf" && e.args.size() == 4) {
+          r.r = {stan::math::student_t_lccdf(
+              td_eval(e.args[0]).r.at(0), td_eval(e.args[1]).r.at(0),
+              td_eval(e.args[2]).r.at(0), td_eval(e.args[3]).r.at(0))};
+          return r;
+        }
+        if (e.name == "rep_array" && e.args.size() == 2) {
+          DataMap::Entry v = td_eval(e.args[0]);
+          const long n = eval_int_td(e.args[1]);
+          r.is_int = v.is_int;
+          r.dims = {n};
+          r.r.assign(n, v.r.at(0));
+          if (v.is_int) r.i.assign(n, v.i.at(0));
+          return r;
+        }
+        if (e.name == "rep_matrix" && e.args.size() == 3) {
+          DataMap::Entry v = td_eval(e.args[0]);
+          const long R = eval_int_td(e.args[1]), C = eval_int_td(e.args[2]);
+          r.dims = {R, C};
+          r.r.assign(R * C, v.r.at(0));
+          return r;
+        }
+        if (e.name == "append_col" && e.args.size() == 2) {
+          DataMap::Entry a = td_eval(e.args[0]), b = td_eval(e.args[1]);
+          // Column-major storage makes column appends a concatenation.
+          // A vector argument is a one-column block.
+          const int64_t Ra = a.dims.size() == 2 ? a.dims[0]
+                                                : (int64_t)a.r.size();
+          const int64_t Rb = b.dims.size() == 2 ? b.dims[0]
+                                                : (int64_t)b.r.size();
+          const int64_t Ca = a.dims.size() == 2 ? a.dims[1] : 1;
+          const int64_t Cb = b.dims.size() == 2 ? b.dims[1] : 1;
+          if (Ra != Rb) fail("prepare_data: append_col row mismatch", e.raw);
+          r.dims = {Ra, Ca + Cb};
+          r.r = a.r;
+          r.r.insert(r.r.end(), b.r.begin(), b.r.end());
+          r.is_int = false;
+          return r;
+        }
         fail("prepare_data: unsupported function " + e.name, e.raw);
       }
       default:
@@ -645,9 +695,42 @@ struct Lowering {
     return {o, info[o]};
   }
 
+  // Fallback for expressions with no native lowering: a data-only subtree
+  // is evaluated at compile time and materialized as a constant. Returns
+  // false (leaving v untouched) when the interpreter can't evaluate it
+  // either; propto densities never fold (their value is
+  // instantiation-dependent).
+  bool try_fold_const(const mir::Expr& e, Val* v) {
+    if (!e.data_only || e.fn_propto) return false;
+    DataMap::Entry en;
+    try {
+      en = td_eval(e);
+    } catch (const CompileError&) {
+      return false;
+    }
+    if (en.r.empty()) return false;
+    if (en.r.size() == 1) {
+      *v = {const_slot(en.r[0]), {}};
+      return true;
+    }
+    SlotInfo si;
+    si.data_like = true;
+    if (en.dims.size() == 2) {
+      si.rows = en.dims[0];
+      si.cols = en.dims[1];
+    }
+    const int s = add_slot((int64_t)en.r.size(), false, si);
+    out.fills.emplace_back(s, en.r);
+    *v = {s, si};
+    return true;
+  }
+
   Val lower_funapp(const mir::Expr& e) {
-    if (e.fn_lib != mir::Expr::Lib::StanLib)
+    if (e.fn_lib != mir::Expr::Lib::StanLib) {
+      Val v;
+      if (try_fold_const(e, &v)) return v;
       fail("unsupported function kind for " + e.name, e.raw);
+    }
 
     // Densities. n_int leading args come from int data (idata); the rest are
     // real slots. Layouts: one int group = raw values; two groups =
@@ -815,6 +898,10 @@ struct Lowering {
       Val a = lower_expr(e.args[0]);
       Val b = lower_expr(e.args[1]);
       return emit(OP_DOT, {a.slot, b.slot}, 1);
+    }
+    {
+      Val v;
+      if (try_fold_const(e, &v)) return v;
     }
     fail("unsupported function " + e.name);
   }

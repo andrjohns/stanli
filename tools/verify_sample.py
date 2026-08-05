@@ -2,9 +2,10 @@
 """Differential verification against CmdStan for a sample of passing models.
 
 For each model: stanc emits C++, clang++ compiles it with tools/ref_driver.cpp
-against the CmdStan tree, both sides evaluate at the same deterministic
-unconstrained point, and gradients are compared (relative 1e-10; CmdStan
-builds with FP contraction on, so bitwise is not attainable across builds).
+against the CmdStan tree (with -ffp-contract=off, matching CmdStan's own
+build flags), both sides evaluate at the same deterministic unconstrained
+point, and gradients are compared (relative 1e-10 pass threshold; measured
+diffs are typically at or near bitwise).
 lp must match exactly in policy terms: both sides use propto=false +
 jacobian, so no propto constant is expected either.
 
@@ -52,7 +53,11 @@ def main():
                         f"--o={hpp}"], check=True)
         exe = tmp / f"{model}_ref"
         tbb = math / "lib" / "tbb"
-        cmd = ["clang++", "-std=c++17", "-O1", "-D_REENTRANT",
+        # -ffp-contract=off matches CmdStan's own build (stan-math's
+        # makefiles set it); without it the reference binary forms FMAs and
+        # drifts a few ULP from what CmdStan actually computes.
+        cmd = ["clang++", "-std=c++17", "-O1", "-ffp-contract=off",
+               "-D_REENTRANT",
                "-DBOOST_DISABLE_ASSERTS", "-include", str(hpp),
                str(REPO / "tools/ref_driver.cpp"),
                f"-L{tbb}", "-ltbb", f"-Wl,-rpath,{tbb}",

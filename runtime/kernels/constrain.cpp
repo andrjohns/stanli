@@ -1,9 +1,15 @@
 // Constraint transform kernels. These mirror the REV *_constrain overloads'
-// forward expressions verbatim (Eigen array ops, packet-vectorized), because
-// that is what CmdStan executes for parameters; a scalar libm loop differs
-// from Eigen's packet exp/inv_logit by 1 ULP on some inputs. The stored
-// intermediate (exp_x / inv_logit_x) lives in scratch and is reused by
-// backward, exactly as the rev overloads reuse their arena copies.
+// arithmetic exactly. CmdStan's parameters are Eigen matrices of vars, and
+// the rev matrix overloads compute their transcendentals over strided
+// .val() expressions that Eigen cannot packet-vectorize, so the reference
+// arithmetic is SCALAR libm per element (numext::exp == std::exp; logistic
+// is Eigen's scalar functor e/(1+e) with an inf guard, no sign branch) and
+// reductions are sequential. The scalar rev overloads differ: lub uses the
+// sign-branching stan::math::inv_logit, so length-1 slots take that path.
+// Measured: the previous packet-vectorized kernels deviated from CmdStan by
+// up to ~5 ULP in gradients on vector-bounded models (dfold fixture).
+// The stored intermediate (exp_x / inv_logit_x) lives in scratch and is
+// reused by backward, exactly as the rev overloads reuse their arena copies.
 //
 // out = constrained values, out2 = summed log-jacobian term.
 #include <stanrt/graph.hpp>
@@ -18,47 +24,64 @@ using Arr = Eigen::Array<double, -1, 1>;
 using MapA = Eigen::Map<Arr>;
 using CMapA = Eigen::Map<const Arr>;
 
+// Sequential sum, matching Eigen's redux over a non-vectorizable strided
+// expression (which is how the rev matrix overloads reduce).
+inline double seq_sum(const double* p, int64_t n) {
+  double s = 0.0;
+  for (int64_t i = 0; i < n; ++i) s += p[i];
+  return s;
+}
+
 // rev lb_constrain(matrix, scalar, lp):
-//   exp_x = x.array().exp();  ret = exp_x + lb;  lp += x.sum();
+//   exp_x = x.val().array().exp() (strided -> scalar std::exp);
+//   ret = exp_x + lb;  lp += x.val().sum() (sequential);
 //   bwd: x.adj += ret.adj * exp_x + lp.adj
 void clower_fwd(KernelCtx& ctx) {
-  CMapA x(ctx.in[0].data, ctx.in[0].len);
-  MapA out(ctx.out.data, ctx.out.len);
-  MapA exp_x(ctx.scratch, ctx.in[0].len);
-  exp_x = x.exp();
-  out = exp_x + ctx.in[1].data[0];
-  ctx.out2.data[0] = x.sum();
+  const int64_t n = ctx.in[0].len;
+  const double* x = ctx.in[0].data;
+  double* exp_x = ctx.scratch;
+  const double lb = ctx.in[1].data[0];
+  for (int64_t i = 0; i < n; ++i) {
+    exp_x[i] = std::exp(x[i]);
+    ctx.out.data[i] = exp_x[i] + lb;
+  }
+  ctx.out2.data[0] = seq_sum(x, n);
 }
 void clower_bwd(KernelCtx& ctx) {
-  CMapA exp_x(ctx.scratch, ctx.in[0].len);
-  CMapA dout(ctx.out_adj_vec.data, ctx.out_adj_vec.len);
+  const int64_t n = ctx.in[0].len;
+  const double* exp_x = ctx.scratch;
+  const double* dout = ctx.out_adj_vec.data;
   if (ctx.in_adj[0].data) {
-    MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
-    dx += dout * exp_x + ctx.out2_adj;
+    for (int64_t i = 0; i < n; ++i)
+      ctx.in_adj[0].data[i] += dout[i] * exp_x[i] + ctx.out2_adj;
   }
   // Parameter-dependent bound: rev lb_constrain adds ret.adj().sum().
-  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += dout.sum();
+  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += seq_sum(dout, n);
 }
 
 // rev ub_constrain(matrix, scalar, lp):
 //   exp_x stored; ret = ub - exp_x; lp += x.sum();
 //   bwd: x.adj += -ret.adj * exp_x + lp.adj
 void cupper_fwd(KernelCtx& ctx) {
-  CMapA x(ctx.in[0].data, ctx.in[0].len);
-  MapA out(ctx.out.data, ctx.out.len);
-  MapA exp_x(ctx.scratch, ctx.in[0].len);
-  exp_x = x.exp();
-  out = ctx.in[1].data[0] - exp_x;
-  ctx.out2.data[0] = x.sum();
+  const int64_t n = ctx.in[0].len;
+  const double* x = ctx.in[0].data;
+  double* exp_x = ctx.scratch;
+  const double ub = ctx.in[1].data[0];
+  for (int64_t i = 0; i < n; ++i) {
+    exp_x[i] = std::exp(x[i]);
+    ctx.out.data[i] = ub - exp_x[i];
+  }
+  ctx.out2.data[0] = seq_sum(x, n);
 }
 void cupper_bwd(KernelCtx& ctx) {
-  CMapA exp_x(ctx.scratch, ctx.in[0].len);
-  CMapA dout(ctx.out_adj_vec.data, ctx.out_adj_vec.len);
+  const int64_t n = ctx.in[0].len;
+  const double* exp_x = ctx.scratch;
+  const double* dout = ctx.out_adj_vec.data;
   if (ctx.in_adj[0].data) {
-    MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
-    dx += -dout * exp_x + ctx.out2_adj;
+    for (int64_t i = 0; i < n; ++i)
+      ctx.in_adj[0].data[i] += -dout[i] * exp_x[i] + ctx.out2_adj;
   }
-  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += dout.sum();
+  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += seq_sum(dout, n);
 }
 
 // rev lub_constrain(matrix, scalar, scalar, lp):
@@ -67,38 +90,57 @@ void cupper_bwd(KernelCtx& ctx) {
 //   inv_logit_x = inv_logit(x) stored; ret = diff*inv_logit_x + lb;
 //   bwd: x.adj += ret.adj*diff*il*(1-il) + lp.adj*(1-2*il)
 void clu_fwd(KernelCtx& ctx) {
-  CMapA x(ctx.in[0].data, ctx.in[0].len);
-  MapA out(ctx.out.data, ctx.out.len);
-  MapA il(ctx.scratch, ctx.in[0].len);
+  const int64_t n = ctx.in[0].len;
+  const double* x = ctx.in[0].data;
+  double* il = ctx.scratch;
   const double lb = ctx.in[1].data[0], ub = ctx.in[2].data[0];
   const double diff = ub - lb;
-  Arr neg_abs_x = -x.abs();
-  ctx.out2.data[0] =
-      (std::log(diff) + (neg_abs_x - 2.0 * stan::math::log1p_exp(neg_abs_x)))
-          .sum();
-  il = stan::math::inv_logit(x.matrix().eval().array());
-  out = diff * il + lb;
+  const double log_diff = std::log(diff);
+  double jac = 0.0;
+  for (int64_t i = 0; i < n; ++i) {
+    const double nax = -std::abs(x[i]);
+    jac += log_diff + (nax - 2.0 * stan::math::log1p_exp(nax));
+  }
+  ctx.out2.data[0] = jac;
+  if (n == 1) {
+    // Scalar rev overload: sign-branching stan::math::inv_logit.
+    il[0] = stan::math::inv_logit(x[0]);
+  } else {
+    // Matrix rev overload: Eigen's scalar logistic functor over a strided
+    // .val() expression: e/(1+e) with an inf guard, no sign branch.
+    for (int64_t i = 0; i < n; ++i) {
+      const double e = std::exp(x[i]);
+      il[i] = std::isinf(e) ? 1.0 : e / (1.0 + e);
+    }
+  }
+  for (int64_t i = 0; i < n; ++i) ctx.out.data[i] = diff * il[i] + lb;
 }
 void clu_bwd(KernelCtx& ctx) {
-  CMapA il(ctx.scratch, ctx.in[0].len);
-  CMapA dout(ctx.out_adj_vec.data, ctx.out_adj_vec.len);
+  const int64_t n = ctx.in[0].len;
+  const double* il = ctx.scratch;
+  const double* dout = ctx.out_adj_vec.data;
   const double lb = ctx.in[1].data[0], ub = ctx.in[2].data[0];
   const double diff = ub - lb;
   if (ctx.in_adj[0].data) {
-    MapA dx(ctx.in_adj[0].data, ctx.in_adj[0].len);
-    dx += dout * diff * il * (1.0 - il) + ctx.out2_adj * (1.0 - 2.0 * il);
+    for (int64_t i = 0; i < n; ++i)
+      ctx.in_adj[0].data[i] += dout[i] * diff * il[i] * (1.0 - il[i]) +
+                               ctx.out2_adj * (1.0 - 2.0 * il[i]);
   }
   // rev lub_constrain bound adjoints (matrix-with-lp form):
   //   lb.adj += (ret.adj*(1-il)).sum() - (1/diff)*lp.adj*N
   //   ub.adj += (ret.adj*il).sum() + (1/diff)*lp.adj*N
-  const double n = static_cast<double>(ctx.in[0].len);
+  const double nd = static_cast<double>(n);
   const double one_over_diff = 1.0 / diff;
-  if (ctx.in_adj[1].data)
-    ctx.in_adj[1].data[0] += (dout * (1.0 - il)).sum() +
-                             -one_over_diff * ctx.out2_adj * n;
-  if (ctx.in_adj[2].data)
-    ctx.in_adj[2].data[0] +=
-        (dout * il).sum() + one_over_diff * ctx.out2_adj * n;
+  if (ctx.in_adj[1].data) {
+    double s = 0.0;
+    for (int64_t i = 0; i < n; ++i) s += dout[i] * (1.0 - il[i]);
+    ctx.in_adj[1].data[0] += s + -one_over_diff * ctx.out2_adj * nd;
+  }
+  if (ctx.in_adj[2].data) {
+    double s = 0.0;
+    for (int64_t i = 0; i < n; ++i) s += dout[i] * il[i];
+    ctx.in_adj[2].data[0] += s + one_over_diff * ctx.out2_adj * nd;
+  }
 }
 
 int64_t constrain_scratch(const Op& op, const Slot* slots) {
