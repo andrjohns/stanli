@@ -224,6 +224,69 @@ struct Lowering {
           r.dims = {n};
           return r;
         }
+        if (e.name == "Equals__") return bin([](double x, double y) { return x == y ? 1.0 : 0.0; });
+        if (e.name == "NEquals__") return bin([](double x, double y) { return x != y ? 1.0 : 0.0; });
+        if (e.name == "Greater__") return bin([](double x, double y) { return x > y ? 1.0 : 0.0; });
+        if (e.name == "Geq__") return bin([](double x, double y) { return x >= y ? 1.0 : 0.0; });
+        if (e.name == "Less__") return bin([](double x, double y) { return x < y ? 1.0 : 0.0; });
+        if (e.name == "Leq__") return bin([](double x, double y) { return x <= y ? 1.0 : 0.0; });
+        if (e.name == "PNot__") return un([](double x) { return x == 0.0 ? 1.0 : 0.0; });
+        if (e.name == "max" || e.name == "min") {
+          DataMap::Entry a = td_eval(e.args[0]);
+          if (e.args.size() == 2) {
+            DataMap::Entry b = td_eval(e.args[1]);
+            const double m = e.name == "max"
+                                 ? std::max(a.r.at(0), b.r.at(0))
+                                 : std::min(a.r.at(0), b.r.at(0));
+            r.is_int = a.is_int && b.is_int;
+            if (r.is_int) r.i = {(int)m};
+            r.r = {m};
+            return r;
+          }
+          double m = a.r.at(0);
+          for (double x : a.r) m = e.name == "max" ? std::max(m, x) : std::min(m, x);
+          r.is_int = a.is_int;
+          if (r.is_int) r.i = {(int)m};
+          r.r = {m};
+          return r;
+        }
+        if (e.name == "FnMakeArray" || e.name == "FnMakeRowVec") {
+          DataMap::Entry o;
+          o.is_int = true;
+          bool rows_mode = false;
+          int64_t row_len = 0;
+          for (const auto& a : e.args) {
+            DataMap::Entry v2 = td_eval(a);
+            if (v2.r.size() > 1 || rows_mode) {
+              // Row-vector elements: build a matrix, row-major.
+              rows_mode = true;
+              row_len = (int64_t)v2.r.size();
+              o.is_int = false;
+              o.r.insert(o.r.end(), v2.r.begin(), v2.r.end());
+              continue;
+            }
+            o.r.push_back(v2.r.at(0));
+            if (v2.is_int && !v2.i.empty()) o.i.push_back(v2.i[0]);
+            else o.is_int = false;
+          }
+          if (!o.is_int) o.i.clear();
+          if (rows_mode)
+            o.dims = {(int64_t)e.args.size(), row_len};
+          else
+            o.dims = {(int64_t)o.r.size()};
+          return o;
+        }
+        if (e.name == "Transpose__") {
+          DataMap::Entry a = td_eval(e.args[0]);
+          if (a.dims.size() < 2) return a;  // vector transpose: same storage
+          DataMap::Entry o;
+          o.dims = {a.dims[1], a.dims[0]};
+          o.r.resize(a.r.size());
+          for (int64_t i = 0; i < a.dims[0]; ++i)
+            for (int64_t j = 0; j < a.dims[1]; ++j)
+              o.r[j * a.dims[0] + i] = a.r[i * a.dims[1] + j];
+          return o;
+        }
         if (e.name == "to_vector") {
           DataMap::Entry a = td_eval(e.args[0]);
           a.dims = {(int64_t)a.r.size()};
@@ -302,6 +365,22 @@ struct Lowering {
           const long ix = eval_int_td(st.lhs_idx[0].args[0]);
           if ((size_t)ix > en->r.size()) en->r.resize(ix, 0.0);
           en->r[ix - 1] = v.r.at(0);
+          if (en->is_int) {
+            if ((size_t)ix > en->i.size()) en->i.resize(ix, 0);
+            en->i[ix - 1] = v.is_int && !v.i.empty() ? v.i[0]
+                                                     : (int)v.r.at(0);
+          }
+          return;
+        }
+        if (st.lhs_idx.size() == 2 && st.lhs_idx[0].name == "IndexSingle" &&
+            st.lhs_idx[1].name == "IndexSingle" && en->dims.size() == 2) {
+          const long i = eval_int_td(st.lhs_idx[0].args[0]);
+          const long j = eval_int_td(st.lhs_idx[1].args[0]);
+          const int64_t flat = (i - 1) * en->dims[1] + (j - 1);
+          en->r.at(flat) = v.r.at(0);
+          if (en->is_int) en->i.at(flat) = v.is_int && !v.i.empty()
+                                               ? v.i[0]
+                                               : (int)v.r.at(0);
           return;
         }
         fail("prepare_data: unsupported indexed assignment");
@@ -508,7 +587,7 @@ struct Lowering {
     static const std::map<std::string, uint16_t> kBin = {
         {"Plus__", OP_ADD},      {"Minus__", OP_SUB},
         {"Divide__", OP_DIV},    {"EltTimes__", OP_MUL},
-        {"EltDivide__", OP_DIV}, {"Pow__", OP_POW},
+        {"EltDivide__", OP_DIV}, {"Pow__", OP_POW}, {"pow", OP_POW},
     };
     if (e.name == "Times__") {
       Val a = lower_expr(e.args[0]);
@@ -545,6 +624,11 @@ struct Lowering {
       return emit(uit->second, {a.slot}, info[a.slot].len);
     }
     if (e.name == "PPlus__") return lower_expr(e.args[0]);
+    if (e.name == "Transpose__") {
+      Val a = lower_expr(e.args[0]);
+      if (a.si.rows == 0) return a;  // vector transpose: same flat storage
+      fail("matrix transpose unsupported in M2");
+    }
     if (e.name == "logit") {
       Val a = lower_expr(e.args[0]);
       return emit(OP_LOGIT, {a.slot}, info[a.slot].len);
@@ -676,8 +760,14 @@ struct Lowering {
         int_env.erase(s.loopvar);
         return;
       }
-      case mir::Stmt::IfElse:
-        fail("IfElse unsupported in M2 tier-1", s.raw);
+      case mir::Stmt::IfElse: {
+        if (!s.cond.data_only)
+          fail("IfElse on parameters unsupported in M2", s.raw);
+        const bool c = td_eval(s.cond).r.at(0) != 0.0;
+        if (c && !s.body.empty()) lower_stmt(s.body[0]);
+        if (!c && s.body.size() > 1) lower_stmt(s.body[1]);
+        return;
+      }
       default:
         fail("unsupported statement", s.raw);
     }
