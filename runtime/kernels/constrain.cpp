@@ -9,7 +9,7 @@
 #include <stanrt/graph.hpp>
 #include <stanrt/optable.hpp>
 
-#include <stan/math/prim.hpp>
+#include <stan/math.hpp>
 
 namespace stanrt {
 namespace {
@@ -88,6 +88,66 @@ int64_t constrain_scratch(const Op& op, const Slot* slots) {
   return slots[op.in[0]].len;
 }
 
+// Structured transforms (simplex / ordered / positive_ordered): forward runs
+// the prim double implementation; backward replays the actual REV constrain
+// on a nested tape with output + jacobian adjoints seeded via the dot trick.
+// Correct by construction against CmdStan's own code path.
+template <typename FwdF>
+void structured_fwd(KernelCtx& ctx, FwdF&& f) {
+  Eigen::Map<const Eigen::VectorXd> y(ctx.in[0].data, ctx.in[0].len);
+  double lp = 0.0;
+  Eigen::VectorXd x = f(y, lp);
+  for (int64_t i = 0; i < ctx.out.len; ++i) ctx.out.data[i] = x(i);
+  ctx.out2.data[0] = lp;
+}
+template <typename RevF>
+void structured_bwd(KernelCtx& ctx, RevF&& f) {
+  if (ctx.in_adj[0].data == nullptr) return;
+  stan::math::nested_rev_autodiff nested;
+  using stan::math::var;
+  Eigen::Matrix<var, -1, 1> y(ctx.in[0].len);
+  for (int64_t i = 0; i < ctx.in[0].len; ++i) y(i) = ctx.in[0].data[i];
+  var lp = 0.0;
+  auto x = f(y, lp);
+  Eigen::Map<const Eigen::VectorXd> seed(ctx.out_adj_vec.data,
+                                         ctx.out_adj_vec.len);
+  var j = stan::math::dot_product(seed, x) + ctx.out2_adj * lp;
+  stan::math::grad(j.vi_);
+  for (int64_t i = 0; i < ctx.in[0].len; ++i)
+    ctx.in_adj[0].data[i] += y(i).adj();
+}
+
+void simplex_fwd(KernelCtx& ctx) {
+  structured_fwd(ctx, [](const auto& y, double& lp) {
+    return stan::math::simplex_constrain(y, lp);
+  });
+}
+void simplex_bwd(KernelCtx& ctx) {
+  structured_bwd(ctx, [](auto& y, stan::math::var& lp) {
+    return stan::math::simplex_constrain(y, lp);
+  });
+}
+void ordered_fwd(KernelCtx& ctx) {
+  structured_fwd(ctx, [](const auto& y, double& lp) {
+    return stan::math::ordered_constrain(y, lp);
+  });
+}
+void ordered_bwd(KernelCtx& ctx) {
+  structured_bwd(ctx, [](auto& y, stan::math::var& lp) {
+    return stan::math::ordered_constrain(y, lp);
+  });
+}
+void pos_ordered_fwd(KernelCtx& ctx) {
+  structured_fwd(ctx, [](const auto& y, double& lp) {
+    return stan::math::positive_ordered_constrain(y, lp);
+  });
+}
+void pos_ordered_bwd(KernelCtx& ctx) {
+  structured_bwd(ctx, [](auto& y, stan::math::var& lp) {
+    return stan::math::positive_ordered_constrain(y, lp);
+  });
+}
+
 }  // namespace
 
 void register_constrain_kernels() {
@@ -97,6 +157,12 @@ void register_constrain_kernels() {
                   Kernel{cupper_fwd, cupper_bwd, constrain_scratch});
   register_kernel(OP_CONSTRAIN_LU,
                   Kernel{clu_fwd, clu_bwd, constrain_scratch});
+  register_kernel(OP_CONSTRAIN_SIMPLEX,
+                  Kernel{simplex_fwd, simplex_bwd, nullptr});
+  register_kernel(OP_CONSTRAIN_ORDERED,
+                  Kernel{ordered_fwd, ordered_bwd, nullptr});
+  register_kernel(OP_CONSTRAIN_POS_ORDERED,
+                  Kernel{pos_ordered_fwd, pos_ordered_bwd, nullptr});
 }
 
 }  // namespace stanrt

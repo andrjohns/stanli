@@ -124,10 +124,39 @@ int main() {
     stan::math::recover_memory();
   }
 
-  // Unsupported construct: simplex transform must fail with a clear error.
+  // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
+  // dirichlet_lpdf composed exactly as the lowering emits them).
+  {
+    DataMap d;
+    d.set_int("K", 3);
+    CompiledModel sm = compile_model(slurp("tests/fixtures/simp.tmir.sexp"), d);
+    check(sm.n_unconstrained == 2, "simplex K-1 unconstrained");
+    Executor sex(std::move(sm.graph));
+    sm.bind(sex);
+    sex.params_data()[0] = 0.3;
+    sex.params_data()[1] = -0.8;
+    double sg[2], slp = sex.gradient(sg);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> y(2);
+    y(0) = 0.3;
+    y(1) = -0.8;
+    var jac = 0.0;
+    auto theta = stan::math::simplex_constrain(y, jac);
+    Eigen::Matrix<var, -1, 1> alpha(3);
+    for (int i = 0; i < 3; ++i) alpha(i) = 2.0;
+    var lp = stan::math::dirichlet_lpdf<false>(theta, alpha) + jac;
+    lp.grad();
+    expect_eq("simplex lp", slp, lp.val());
+    expect_eq("simplex g0", sg[0], y(0).adj());
+    expect_eq("simplex g1", sg[1], y(1).adj());
+    stan::math::recover_memory();
+  }
+
+  // Unsupported construct: cholesky_factor_corr must fail clearly.
   bool threw = false;
   try {
-    compile_model(slurp("tests/fixtures/simp.tmir.sexp"), [] {
+    compile_model(slurp("tests/fixtures/chol.tmir.sexp"), [] {
       DataMap d;
       d.set_int("K", 3);
       return d;
@@ -135,7 +164,7 @@ int main() {
   } catch (const CompileError& e) {
     threw = std::string(e.what()).find("transform") != std::string::npos;
   }
-  check(threw, "simplex rejected with construct name");
+  check(threw, "cholesky_corr rejected with construct name");
 
   if (failures == 0) std::printf("test_lower OK\n");
   return failures == 0 ? 0 : 1;

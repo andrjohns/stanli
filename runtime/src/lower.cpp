@@ -548,6 +548,7 @@ struct Lowering {
         {"binomial_logit_lpmf", {OP_BINOMIAL_LOGIT_LPMF, 3, 2}},
         {"bernoulli_logit_glm_lpmf",
          {OP_BERNOULLI_LOGIT_GLM_LPMF, 4, 1, true}},
+        {"dirichlet_lpdf", {OP_DIRICHLET_LPDF, 2, 0}},
     };
     auto dit = kDens.find(e.name);
     if (dit != kDens.end()) {
@@ -666,16 +667,20 @@ struct Lowering {
 
   // ---- statements -----------------------------------------------------------
   void lower_read_param(const mir::Stmt& s) {
-    int64_t len = 1;
-    for (const auto& d : s.read_dims) len *= eval_int(d);
-    const int raw = add_slot(len, /*is_param=*/true);
-    out.param_names.push_back(s.decl_id);
-    out.n_unconstrained += len;
-
+    // Declared (constrained) size from the read dims; the unconstrained raw
+    // size depends on the transform (simplex uses K-1).
+    int64_t con_len = 1;
+    for (const auto& d : s.read_dims) con_len *= eval_int(d);
     const mir::Transform& tr = *s.read_transform;
+    int64_t raw_len = con_len;
+    if (tr.kind == mir::Transform::Simplex) raw_len = con_len - 1;
+    const int raw = add_slot(raw_len, /*is_param=*/true);
+    out.param_names.push_back(s.decl_id);
+    out.n_unconstrained += raw_len;
+
     if (tr.kind == mir::Transform::Identity) {
       scope[s.decl_id] = raw;
-      out.views.push_back({s.decl_id, raw, len});
+      out.views.push_back({s.decl_id, raw, raw_len});
       return;
     }
     uint16_t opcode = 0;
@@ -694,14 +699,23 @@ struct Lowering {
         ins.push_back(lower_expr(tr.args[0]).slot);
         ins.push_back(lower_expr(tr.args[1]).slot);
         break;
+      case mir::Transform::Simplex:
+        opcode = OP_CONSTRAIN_SIMPLEX;
+        break;
+      case mir::Transform::Ordered:
+        opcode = OP_CONSTRAIN_ORDERED;
+        break;
+      case mir::Transform::PositiveOrdered:
+        opcode = OP_CONSTRAIN_POS_ORDERED;
+        break;
       default:
         fail("unsupported parameter transform", tr.raw);
     }
     const int jac = add_slot(1, false);
-    Val con = emit(opcode, ins, len, {}, {}, jac);
+    Val con = emit(opcode, ins, con_len, {}, {}, jac);
     jac_slots.push_back(jac);
     scope[s.decl_id] = con.slot;
-    out.views.push_back({s.decl_id, con.slot, len});
+    out.views.push_back({s.decl_id, con.slot, con_len});
   }
 
   std::map<std::string, int64_t> decl_lens;
