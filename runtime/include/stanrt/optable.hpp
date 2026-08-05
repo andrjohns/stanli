@@ -36,6 +36,7 @@ enum Opcode : uint16_t {
   OP_INDEX,
   OP_SET_INDEX,
   OP_LOG_SUM_EXP,
+  OP_LSE2,
   OP_SOFTMAX,
   OP_SUM_VEC,
   OP_ADD,

@@ -53,6 +53,21 @@ void dirichlet_bwd(KernelCtx& ctx) {
       ctx.in_adj[1].data[i] += alpha(i).adj();
 }
 
+// Binary scalar log_sum_exp via nested replay.
+void lse2_fwd(KernelCtx& ctx) {
+  ctx.out.data[0] =
+      stan::math::log_sum_exp(ctx.in[0].data[0], ctx.in[1].data[0]);
+}
+void lse2_bwd(KernelCtx& ctx) {
+  stan::math::nested_rev_autodiff nested;
+  using stan::math::var;
+  var a = ctx.in[0].data[0], b = ctx.in[1].data[0];
+  var j = stan::math::log_sum_exp(a, b) * ctx.out_adj;
+  stan::math::grad(j.vi_);
+  if (ctx.in_adj[0].data) ctx.in_adj[0].data[0] += a.adj();
+  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += b.adj();
+}
+
 }  // namespace
 
 void register_legacy_kernels() {
@@ -60,6 +75,7 @@ void register_legacy_kernels() {
   register_kernel(OP_SOFTMAX, Kernel{softmax_fwd, softmax_bwd, nullptr});
   register_kernel(OP_DIRICHLET_LPDF,
                   Kernel{dirichlet_fwd, dirichlet_bwd, nullptr});
+  register_kernel(OP_LSE2, Kernel{lse2_fwd, lse2_bwd, nullptr});
 }
 
 }  // namespace stanrt

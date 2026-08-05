@@ -52,7 +52,7 @@ struct Lowering {
 
   [[noreturn]] void fail(const std::string& msg, const std::string& raw = "") {
     throw CompileError("stanrt compile: " + msg +
-                       (raw.empty() ? "" : "\n  in: " + raw));
+                       (raw.empty() ? "" : " | in: " + raw));
   }
 
   int const_slot(double v) {
@@ -134,19 +134,48 @@ struct Lowering {
         return r;
       case mir::Expr::Var: {
         DataMap::Entry* en = env.find(e.name);
-        if (!en) fail("prepare_data: unknown variable " + e.name);
+        if (!en)
+          fail("prepare_data: unknown variable " + e.name +
+               " (type " + e.type_ + ")", e.raw);
         return *en;
       }
       case mir::Expr::Indexed: {
         DataMap::Entry base = td_eval(e.args[0]);
-        if (e.args.size() == 2 && e.args[1].name == "IndexSingle") {
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
+            base.dims.size() <= 1) {
           const long ix = eval_int_td(e.args[1].args[0]);
           r.is_int = base.is_int;
           if (base.is_int) r.i = {base.i.at(ix - 1)};
           r.r = {base.r.at(ix - 1)};
           return r;
         }
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
+            base.dims.size() == 2) {
+          // Row of a 2-D array (col-major storage).
+          const long i = eval_int_td(e.args[1].args[0]);
+          const int64_t R = base.dims[0], C = base.dims[1];
+          r.is_int = base.is_int;
+          r.dims = {C};
+          for (int64_t j = 0; j < C; ++j) {
+            r.r.push_back(base.r.at(j * R + (i - 1)));
+            if (base.is_int) r.i.push_back(base.i.at(j * R + (i - 1)));
+          }
+          return r;
+        }
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
+        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
+            base.dims.size() == 2) {
+          // Row of a 2-D array (col-major storage).
+          const long i = eval_int_td(e.args[1].args[0]);
+          const int64_t R = base.dims[0], C = base.dims[1];
+          r.is_int = base.is_int;
+          r.dims = {C};
+          for (int64_t j = 0; j < C; ++j) {
+            r.r.push_back(base.r.at(j * R + (i - 1)));
+            if (base.is_int) r.i.push_back(base.i.at(j * R + (i - 1)));
+          }
+          return r;
+        }
         // Matrix row/element access: [i, j] etc.
         if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
             e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
@@ -326,7 +355,9 @@ struct Lowering {
     switch (st.kind) {
       case mir::Stmt::Decl: {
         DataMap::Entry e;
-        if (st.decl_type.base == "SInt") e.is_int = true;
+        if (st.decl_type.base == "SInt" ||
+            (st.decl_type.base == "SArray" && st.decl_type.raw == "SInt"))
+          e.is_int = true;
         if (st.has_init && st.init.kind == mir::Expr::FunApp &&
             st.init.fn_lib == mir::Expr::Lib::Internal &&
             st.init.name == "FnReadData") {
@@ -350,6 +381,7 @@ struct Lowering {
             n *= v;
           }
           e.r.assign(n, 0.0);
+          if (e.is_int) e.i.assign(n, 0);
           e.dims = std::move(dims);
         }
         env.vars[st.decl_id] = std::move(e);
@@ -366,7 +398,11 @@ struct Lowering {
         };
         scan(st.rhs);
         if (!read_name.empty()) {
-          env.vars[st.lhs] = data.at(read_name);
+          // The flat read buffer is consumed with sequential 1-D indexing
+          // regardless of the source variable's shape.
+          DataMap::Entry flat = data.at(read_name);
+          flat.dims = {(int64_t)std::max(flat.r.size(), flat.i.size())};
+          env.vars[st.lhs] = std::move(flat);
           return;
         }
         if (st.lhs_idx.empty()) {
@@ -659,6 +695,11 @@ struct Lowering {
       return emit(OP_REP_VEC, {a.slot}, n);
     }
     if (e.name == "log_sum_exp" || e.name == "sum") {
+      if (e.name == "log_sum_exp" && e.args.size() == 2) {
+        Val a = lower_expr(e.args[0]);
+        Val b = lower_expr(e.args[1]);
+        return emit(OP_LSE2, {a.slot, b.slot}, 1);
+      }
       Val a = lower_expr(e.args[0]);
       return emit(e.name == "sum" ? OP_SUM_VEC : OP_LOG_SUM_EXP, {a.slot}, 1);
     }
