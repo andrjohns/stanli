@@ -35,6 +35,7 @@ add_library(stanrt STATIC
   runtime/kernels/densities.cpp
   runtime/kernels/legacy_fns.cpp
   runtime/kernels/constrain.cpp
+  runtime/kernels/eltwise_expr.cpp
   runtime/src/nuts.cpp
   runtime/src/mir_reader.cpp)
 target_include_directories(stanrt PUBLIC runtime/include)
@@ -62,3 +63,4 @@ stanrt_add_test(test_nuts)
 stanrt_add_test(test_sexp)
 stanrt_add_test(test_mir)
 stanrt_add_test(test_transforms)
+stanrt_add_test(test_eltwise)

@@ -25,6 +25,7 @@ void register_elementwise_kernels();
 void register_density_kernels();
 void register_legacy_kernels();
 void register_constrain_kernels();
+void register_eltwise_kernels();
 
 static void ensure_registered() {
   static const bool once = [] {
@@ -32,6 +33,7 @@ static void ensure_registered() {
     register_density_kernels();
     register_legacy_kernels();
     register_constrain_kernels();
+    register_eltwise_kernels();
     return true;
   }();
   (void)once;
