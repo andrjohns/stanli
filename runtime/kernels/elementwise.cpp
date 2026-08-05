@@ -48,6 +48,32 @@ void fma_bwd(KernelCtx& ctx) {
   if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += dot;
 }
 
+// OP_MATVEC: out = X * beta, X data laid out row-major, idata = {rows, cols}.
+// X as a parameter is out of scope in M1.
+void matvec_fwd(KernelCtx& ctx) {
+  const int64_t rows = ctx.idata[0], cols = ctx.idata[1];
+  const double* X = ctx.in[0].data;
+  const double* b = ctx.in[1].data;
+  for (int64_t r = 0; r < rows; ++r) {
+    double acc = 0;
+    for (int64_t c = 0; c < cols; ++c) acc += X[r * cols + c] * b[c];
+    ctx.out.data[r] = acc;
+  }
+}
+void matvec_bwd(KernelCtx& ctx) {
+  const int64_t rows = ctx.idata[0], cols = ctx.idata[1];
+  const double* X = ctx.in[0].data;
+  const double* dout = ctx.out_adj_vec.data;
+  if (ctx.in_adj[1].data != nullptr) {
+    // Rows descending: the var tape replays eta's entries in reverse
+    // creation order, and matching its accumulation order keeps parity
+    // with the reference bitwise.
+    for (int64_t r = rows - 1; r >= 0; --r)
+      for (int64_t c = 0; c < cols; ++c)
+        ctx.in_adj[1].data[c] += X[r * cols + c] * dout[r];
+  }
+}
+
 }  // namespace
 
 // Called from Executor's constructor path; a static registrar object in a
@@ -56,6 +82,7 @@ void register_elementwise_kernels() {
   register_kernel(OP_EXP, Kernel{exp_fwd, exp_bwd, nullptr});
   register_kernel(OP_ADD_N, Kernel{add_n_fwd, add_n_bwd, nullptr});
   register_kernel(OP_BCAST_FMA, Kernel{fma_fwd, fma_bwd, nullptr});
+  register_kernel(OP_MATVEC, Kernel{matvec_fwd, matvec_bwd, nullptr});
 }
 
 }  // namespace stanrt
