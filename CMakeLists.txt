@@ -23,6 +23,11 @@ target_include_directories(stanmath INTERFACE
   ${_sundials}/include
   ${_tbb}/include)
 target_compile_definitions(stanmath INTERFACE _REENTRANT BOOST_DISABLE_ASSERTS)
+# Pin FP contraction off: clang otherwise forms FMAs differently across
+# template instantiations of the same math, which breaks bitwise parity
+# between the kernels and the var-path references (measured: 2 ULP on
+# eight-schools d/dmu). Cost is well inside the performance budget.
+target_compile_options(stanmath INTERFACE -ffp-contract=off)
 
 add_library(stanrt STATIC
   runtime/src/executor.cpp
@@ -47,3 +52,4 @@ stanrt_add_test(test_recorder)
 stanrt_add_test(test_densities)
 stanrt_add_test(test_matvec)
 stanrt_add_test(test_legacy)
+stanrt_add_test(test_eight_schools)

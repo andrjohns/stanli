@@ -38,14 +38,14 @@ void fma_bwd(KernelCtx& ctx) {
   const double b = ctx.in[1].data[0];
   const Desc& x = ctx.in[2];
   const Desc& dout = ctx.out_adj_vec;
-  double sum = 0, dot = 0;
-  for (int64_t i = 0; i < dout.len; ++i) {
-    sum += dout.data[i];
-    dot += dout.data[i] * x.data[i];
+  // Element order descending with direct accumulation, matching the var
+  // tape's reverse replay of the per-element vari chain: local ascending
+  // partial sums differ from it by 1 ULP.
+  for (int64_t i = dout.len - 1; i >= 0; --i) {
+    if (ctx.in_adj[0].data) ctx.in_adj[0].data[0] += dout.data[i];
+    if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += dout.data[i] * x.data[i];
     if (ctx.in_adj[2].data) ctx.in_adj[2].data[i] += b * dout.data[i];
   }
-  if (ctx.in_adj[0].data) ctx.in_adj[0].data[0] += sum;
-  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += dot;
 }
 
 // OP_MATVEC: out = X * beta, X data laid out row-major, idata = {rows, cols}.
