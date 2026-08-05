@@ -227,6 +227,48 @@ void expv_bwd(KernelCtx& ctx) {
   else
     dx_a(ctx, 0) += dout_a(ctx) * out_v;
 }
+// AoS Matrix<var> tanh goes through apply_scalar_unary: per-element
+// std::tanh forward, adjoint dout / cosh(x)^2 with cosh recomputed, exactly
+// as the scalar rev overload's callback does.
+void tanhv_fwd(KernelCtx& ctx) {
+  for (int64_t i = 0; i < ctx.out.len; ++i)
+    ctx.out.data[i] = std::tanh(ctx.in[0].data[i]);
+}
+void tanhv_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  const double* dout = ctx.out.len == 1 ? &ctx.out_adj
+                                        : ctx.out_adj_vec.data;
+  for (int64_t i = 0; i < ctx.out.len; ++i) {
+    const double c = std::cosh(ctx.in[0].data[i]);
+    ctx.in_adj[0].data[i] += dout[i] / (c * c);
+  }
+}
+
+// rev cumulative_sum: sequential prefix sums forward; backward walks
+// descending, accumulating a running suffix into the result adjoint itself
+// (safe here: the output slot's adjoint is dead after this op).
+void cumsum_fwd(KernelCtx& ctx) {
+  double acc = 0.0;
+  for (int64_t i = 0; i < ctx.out.len; ++i) {
+    acc += ctx.in[0].data[i];
+    ctx.out.data[i] = acc;
+  }
+}
+void cumsum_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  if (ctx.out.len == 1) {
+    ctx.in_adj[0].data[0] += ctx.out_adj;
+    return;
+  }
+  double* radj = ctx.out_adj_vec.data;
+  const int64_t n = ctx.out.len;
+  for (int64_t i = n - 1; i > 0; --i) {
+    ctx.in_adj[0].data[i] += radj[i];
+    radj[i - 1] += radj[i];
+  }
+  ctx.in_adj[0].data[0] += radj[0];
+}
+
 void logv_fwd(KernelCtx& ctx) {
   for (int64_t i = 0; i < ctx.out.len; ++i)
     ctx.out.data[i] = std::log(ctx.in[0].data[i]);
@@ -333,6 +375,8 @@ void register_eltwise_kernels() {
   register_kernel(OP_DOT, Kernel{dot_fwd, dot_bwd, nullptr});
   register_kernel(OP_NEG, Kernel{negu_fwd, negu_bwd, nullptr});
   register_kernel(OP_EXPV, Kernel{expv_fwd, expv_bwd, nullptr});
+  register_kernel(OP_TANHV, Kernel{tanhv_fwd, tanhv_bwd, nullptr});
+  register_kernel(OP_CUMSUM, Kernel{cumsum_fwd, cumsum_bwd, nullptr});
   register_kernel(OP_LOGV, Kernel{logv_fwd, logv_bwd, nullptr});
   register_kernel(OP_INV_LOGIT, Kernel{invlogit_fwd, invlogit_bwd, nullptr});
   register_kernel(OP_SQRT, Kernel{sqrtv_fwd, sqrtv_bwd, nullptr});

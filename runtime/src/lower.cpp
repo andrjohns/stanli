@@ -8,6 +8,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,7 @@ struct Lowering {
   std::vector<int> target_terms;
   std::vector<int> jac_slots;
   std::map<std::string, const mir::FunDef*> fun_defs;
+  std::set<std::string> int_locals;  // SInt locals in log_prob (data-only)
   int udf_depth = 0;
 
   explicit Lowering(const DataMap& d) : data(d) {}
@@ -100,6 +102,14 @@ struct Lowering {
         if (e.name == "Plus__") return eval_int(e.args[0]) + eval_int(e.args[1]);
         if (e.name == "Minus__") return eval_int(e.args[0]) - eval_int(e.args[1]);
         if (e.name == "Times__") return eval_int(e.args[0]) * eval_int(e.args[1]);
+        // Anything data-only the td interpreter can evaluate (sum of an
+        // int array in a size expression, etc.).
+        if (e.data_only) {
+          try {
+            return eval_int_td(e);
+          } catch (const CompileError&) {
+          }
+        }
         // Shape queries on slot-bound values (e.g. rows(v) on an inlined
         // UDF's vector argument) answer from the slot's SlotInfo.
         if ((e.name == "rows" || e.name == "cols" || e.name == "size" ||
@@ -279,19 +289,25 @@ struct Lowering {
             e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
           const long j = eval_int_td(e.args[2].args[0]);
           const int64_t R = base.dims[0];
+          r.is_int = base.is_int;
           r.dims = {R};
           r.r.assign(base.r.begin() + (j - 1) * R,
                      base.r.begin() + j * R);
+          if (base.is_int)
+            r.i.assign(base.i.begin() + (j - 1) * R, base.i.begin() + j * R);
           return r;
         }
-        // Row slice X[i, :] on a matrix.
+        // Row slice X[i, :] on a matrix / 2-D array.
         if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
             e.args[2].name == "IndexAll" && base.dims.size() == 2) {
           const long i = eval_int_td(e.args[1].args[0]);
           const int64_t R = base.dims[0], C = base.dims[1];
+          r.is_int = base.is_int;
           r.dims = {C};
-          for (int64_t j = 0; j < C; ++j)
+          for (int64_t j = 0; j < C; ++j) {
             r.r.push_back(base.r.at(j * R + (i - 1)));
+            if (base.is_int) r.i.push_back(base.i.at(j * R + (i - 1)));
+          }
           return r;
         }
         // Between subrange of a 1-D value: v[a:b].
@@ -592,7 +608,14 @@ struct Lowering {
         } else if (st.has_init &&
                    !(st.init.kind == mir::Expr::FunApp &&
                      st.init.fn_lib == mir::Expr::Lib::Internal)) {
+          const bool want_int = e.is_int;
           e = td_eval(st.init);
+          if (want_int && !e.is_int) {
+            // Declared int, computed through real arithmetic: coerce back.
+            e.is_int = true;
+            e.i.clear();
+            for (double v : e.r) e.i.push_back((int)v);
+          }
         } else if (data.has(st.decl_id)) {
           e = data.at(st.decl_id);
         } else if (!st.decl_type.base.empty() &&
@@ -1071,17 +1094,25 @@ struct Lowering {
           // loop).
           return {static_cast<int>(eval_int(oc))};
         }
-        fail(e.name + ": int argument must be int data in M2", oc.raw);
+        fail(e.name + ": int argument must be int data in M2 (kind=" +
+                 std::to_string((int)oc.kind) + " type=" + oc.type_ + ")",
+             oc.raw);
       };
       std::vector<int> idata;
       if (d.n_int == 1) {
         idata = int_arg(e.args[0]);
       } else if (d.n_int == 2) {
-        auto g1 = int_arg(e.args[0]), g2 = int_arg(e.args[1]);
-        idata.push_back((int)g1.size());
-        idata.insert(idata.end(), g1.begin(), g1.end());
-        idata.push_back((int)g2.size());
-        idata.insert(idata.end(), g2.begin(), g2.end());
+        // Group length -1 marks a language-level scalar (broadcast in
+        // stan-math); a length-1 array stays a vector, as CmdStan would
+        // instantiate it.
+        auto put = [&](const mir::Expr& a) {
+          auto g = int_arg(a);
+          const bool scalar = a.type_ == "UInt" && g.size() == 1;
+          idata.push_back(scalar ? -1 : (int)g.size());
+          idata.insert(idata.end(), g.begin(), g.end());
+        };
+        put(e.args[0]);
+        put(e.args[1]);
       }
       std::vector<int> ins;
       uint8_t variant = 0;
@@ -1141,6 +1172,7 @@ struct Lowering {
         {"PMinus__", OP_NEG}, {"exp", OP_EXPV},      {"log", OP_LOGV},
         {"inv_logit", OP_INV_LOGIT}, {"sqrt", OP_SQRT},
         {"square", OP_SQUARE}, {"log1m", OP_LOG1M},  {"softmax", OP_SOFTMAX},
+        {"tanh", OP_TANHV},    {"cumulative_sum", OP_CUMSUM},
     };
     auto uit = kUn.find(e.name);
     if (uit != kUn.end()) {
@@ -1185,6 +1217,36 @@ struct Lowering {
       Val a = lower_expr(e.args[0]);
       Val b = lower_expr(e.args[1]);
       return emit(OP_DOT, {a.slot, b.slot}, 1);
+    }
+    if (e.name == "dot_self") {
+      Val a = lower_expr(e.args[0]);
+      return emit(OP_DOT, {a.slot, a.slot}, 1);
+    }
+    if ((e.name == "append_row" || e.name == "append_col") &&
+        e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      Val b = lower_expr(e.args[1]);
+      const int64_t la = info[a.slot].len, lb = info[b.slot].len;
+      SlotInfo si;
+      if (e.name == "append_col") {
+        // Col-major storage: appending columns is a contiguous concat.
+        const int64_t ra = a.si.rows > 0 ? a.si.rows : la;
+        const int64_t rb = b.si.rows > 0 ? b.si.rows : lb;
+        if (ra != rb) fail("append_col row mismatch", e.raw);
+        si.rows = ra;
+        si.cols = (a.si.rows > 0 ? a.si.cols : 1) +
+                  (b.si.rows > 0 ? b.si.cols : 1);
+      } else if (a.si.rows > 0 || b.si.rows > 0) {
+        // Row-appending matrices interleaves columns; not needed yet.
+        fail("append_row on matrices unsupported in M2", e.raw);
+      }
+      return emit(OP_CONCAT2, {a.slot, b.slot}, la + lb, si);
+    }
+    if (e.name == "segment" && e.args.size() == 3) {
+      Val a = lower_expr(e.args[0]);
+      const long from = eval_int(e.args[1]);
+      const long cnt = eval_int(e.args[2]);
+      return emit(OP_SLICE, {a.slot}, cnt, {}, {(int)(from - 1)});
     }
     {
       Val v;
@@ -1283,6 +1345,11 @@ struct Lowering {
       case mir::Stmt::Decl:
         if (s.read_transform) {
           lower_read_param(s);
+        } else if (s.decl_type.base == "SInt") {
+          // Int locals are always data-only in Stan; keep them in int_env
+          // so size expressions and indices resolve at compile time.
+          int_locals.insert(s.decl_id);
+          if (s.has_init) int_env[s.decl_id] = eval_int_td(s.init);
         } else if (s.has_init) {
           scope[s.decl_id] = lower_expr(s.init).slot;
         } else {
@@ -1298,6 +1365,10 @@ struct Lowering {
         }
         return;
       case mir::Stmt::Assignment: {
+        if (s.lhs_idx.empty() && int_locals.count(s.lhs)) {
+          int_env[s.lhs] = eval_int_td(s.rhs);
+          return;
+        }
         if (!s.lhs_idx.empty()) {
           // Element write under unrolled control flow: functional update.
           int prev;

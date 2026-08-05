@@ -146,6 +146,23 @@ void gather_bwd(KernelCtx& ctx) {
     ctx.in_adj[0].data[ctx.idata[k]] += ctx.out_adj_vec.data[k];
 }
 
+// OP_CONCAT2: out = [in[0]; in[1]] (contiguous; serves append_row of
+// vectors and append_col of col-major matrices). Backward splits.
+void concat2_fwd(KernelCtx& ctx) {
+  for (int64_t i = 0; i < ctx.in[0].len; ++i)
+    ctx.out.data[i] = ctx.in[0].data[i];
+  for (int64_t i = 0; i < ctx.in[1].len; ++i)
+    ctx.out.data[ctx.in[0].len + i] = ctx.in[1].data[i];
+}
+void concat2_bwd(KernelCtx& ctx) {
+  if (ctx.in_adj[0].data)
+    for (int64_t i = 0; i < ctx.in[0].len; ++i)
+      ctx.in_adj[0].data[i] += ctx.out_adj_vec.data[i];
+  if (ctx.in_adj[1].data)
+    for (int64_t i = 0; i < ctx.in[1].len; ++i)
+      ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[ctx.in[0].len + i];
+}
+
 // OP_SET_SLICE: out = copy(in[0]) with out[start..start+in[1].len) = in[1].
 void set_slice_fwd(KernelCtx& ctx) {
   const int64_t start = ctx.idata[0];
@@ -181,6 +198,7 @@ void register_elementwise_kernels() {
   register_kernel(OP_SLICE_STRIDED,
                   Kernel{slice_strided_fwd, slice_strided_bwd, nullptr});
   register_kernel(OP_GATHER, Kernel{gather_fwd, gather_bwd, nullptr});
+  register_kernel(OP_CONCAT2, Kernel{concat2_fwd, concat2_bwd, nullptr});
 }
 
 }  // namespace stanrt

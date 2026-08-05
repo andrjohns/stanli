@@ -1,6 +1,6 @@
 # Corpus status
 
-Passing: 96/120
+Passing: 100/120
 
 - OK `2pl_latent_reg_irt`
 - OK `GLMM_Poisson_model`
@@ -17,11 +17,13 @@ Passing: 96/120
 - OK `Rate_3_model`
 - OK `Rate_4_model`
 - OK `Rate_5_model`
+- OK `Survey_model`
 - OK `accel_splines`
 - OK `arK`
 - OK `arma11`
 - OK `blr`
 - OK `bones_model`
+- OK `bym2_offset_only`
 - OK `dogs`
 - OK `dogs_hierarchical`
 - OK `dogs_log`
@@ -63,6 +65,7 @@ Passing: 96/120
 - OK `losscurve_sislob`
 - OK `low_dim_gauss_mix`
 - OK `low_dim_gauss_mix_collapse`
+- OK `lsat_model`
 - OK `mesquite`
 - OK `nes`
 - OK `nes_logit_model`
@@ -83,6 +86,7 @@ Passing: 96/120
 - OK `radon_variable_intercept_slope_noncentered`
 - OK `radon_variable_slope_centered`
 - OK `radon_variable_slope_noncentered`
+- OK `rats_model`
 - OK `seeds_centered_model`
 - OK `seeds_model`
 - OK `seeds_stanified_model`
@@ -102,26 +106,22 @@ Passing: 96/120
 ## Failures
 
 - `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
-- `Survey_model`: EVAL_FAIL binomial_lpmf: Successes variable has size = 5, but Population size parameter has size 1; and they must be the same size.
-- `accel_gp`: COMPILE_FAIL stanrt compile: unsupported function dims
-- `bym2_offset_only`: COMPILE_FAIL stanrt compile: unsupported function dot_self
+- `accel_gp`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function dims
 - `covid19imperial_v2`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
 - `covid19imperial_v3`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
 - `diamonds`: COMPILE_FAIL stanrt compile: unsupported function normal_id_glm_lpdf
 - `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `gp_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
-- `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: size expression needs unknown int beta_free_1dim__
-- `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported function append_row
+- `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported function categorical_lpmf
+- `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: unsupported function categorical_lpmf
 - `hier_2pl`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
-- `lsat_model`: COMPILE_FAIL stanrt compile: bernoulli_logit_lpmf: int argument must be int data in M2
 - `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported function multi_normal_lpdf
-- `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: unsupported function append_col
+- `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: append_row on matrices unsupported in M2
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
-- `rats_model`: COMPILE_FAIL stanrt compile: size expression needs unknown int irat
 - `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
 - `soil_incubation`: COMPILE_FAIL stanrt compile: unknown variable x_r

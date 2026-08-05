@@ -214,23 +214,35 @@ void neg_binomial_2_fwd(KernelCtx& ctx) {
       [&](const auto&... a) { stan::math::neg_binomial_2_lpmf<false>(n, a...); });
 }
 // Binomials carry two int groups; idata = [len_n, n..., len_N, N...].
+// A length of -1 marks a language-level int scalar (stan-math broadcasts
+// scalars; a size-1 vector would be a size error against a longer group).
+template <typename F>
+void with_int_group(const int* p, F&& f) {
+  const int len = static_cast<int>(p[0]);
+  if (len == -1)
+    f(p[1], p + 2);
+  else
+    f(Eigen::Map<const Eigen::VectorXi>(p + 1, len), p + 1 + len);
+}
 void binomial_fwd(KernelCtx& ctx) {
-  const int ln = static_cast<int>(ctx.idata[0]);
-  Eigen::Map<const Eigen::VectorXi> n(ctx.idata + 1, ln);
-  const int lN = static_cast<int>(ctx.idata[1 + ln]);
-  Eigen::Map<const Eigen::VectorXi> N(ctx.idata + 2 + ln, lN);
-  density_fwd_v<1>(
-      ctx, [&](const auto& theta) { stan::math::binomial_lpmf<true>(n, N, theta); },
-      [&](const auto& theta) { stan::math::binomial_lpmf<false>(n, N, theta); });
+  with_int_group(ctx.idata, [&](const auto& n, const int* rest) {
+    with_int_group(rest, [&](const auto& N, const int*) {
+      density_fwd_v<1>(
+          ctx,
+          [&](const auto& theta) { stan::math::binomial_lpmf<true>(n, N, theta); },
+          [&](const auto& theta) { stan::math::binomial_lpmf<false>(n, N, theta); });
+    });
+  });
 }
 void binomial_logit_fwd(KernelCtx& ctx) {
-  const int ln = static_cast<int>(ctx.idata[0]);
-  Eigen::Map<const Eigen::VectorXi> n(ctx.idata + 1, ln);
-  const int lN = static_cast<int>(ctx.idata[1 + ln]);
-  Eigen::Map<const Eigen::VectorXi> N(ctx.idata + 2 + ln, lN);
-  density_fwd_v<1>(
-      ctx, [&](const auto& alpha) { stan::math::binomial_logit_lpmf<true>(n, N, alpha); },
-      [&](const auto& alpha) { stan::math::binomial_logit_lpmf<false>(n, N, alpha); });
+  with_int_group(ctx.idata, [&](const auto& n, const int* rest) {
+    with_int_group(rest, [&](const auto& N, const int*) {
+      density_fwd_v<1>(
+          ctx,
+          [&](const auto& alpha) { stan::math::binomial_logit_lpmf<true>(n, N, alpha); },
+          [&](const auto& alpha) { stan::math::binomial_logit_lpmf<false>(n, N, alpha); });
+    });
+  });
 }
 // bernoulli_logit_glm(y | X, alpha, beta): X data matrix (row-major slot),
 // idata = [y..., rows, cols]. Edges are (x, alpha, beta); X is arg 0.

@@ -173,7 +173,9 @@ SizedType read_sized(const Node& n) {
     SizedType inner = read_sized(n[1]);
     st.dims.push_back(read_expr(n[2]));
     for (auto& d : inner.dims) st.dims.push_back(std::move(d));
-    st.raw = inner.base;  // inner base kept for the lowering
+    // Innermost element base kept for the lowering (nested SArray chains
+    // propagate it up, so array[T, N] int reports SInt).
+    st.raw = inner.base == "SArray" ? inner.raw : inner.base;
   } else {
     st.raw = dump(n);
   }
