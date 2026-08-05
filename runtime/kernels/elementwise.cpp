@@ -120,6 +120,20 @@ void slice_bwd(KernelCtx& ctx) {
     ctx.in_adj[0].data[start + i] += ctx.out_adj_vec.data[i];
 }
 
+// OP_SLICE_STRIDED: out[i] = in[start + i*stride], idata = {start, stride}.
+// Row extraction from column-major data matrices.
+void slice_strided_fwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0], stride = ctx.idata[1];
+  for (int64_t i = 0; i < ctx.out.len; ++i)
+    ctx.out.data[i] = ctx.in[0].data[start + i * stride];
+}
+void slice_strided_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  const int64_t start = ctx.idata[0], stride = ctx.idata[1];
+  for (int64_t i = 0; i < ctx.out.len; ++i)
+    ctx.in_adj[0].data[start + i * stride] += ctx.out_adj_vec.data[i];
+}
+
 // OP_SET_SLICE: out = copy(in[0]) with out[start..start+in[1].len) = in[1].
 void set_slice_fwd(KernelCtx& ctx) {
   const int64_t start = ctx.idata[0];
@@ -152,6 +166,8 @@ void register_elementwise_kernels() {
   register_kernel(OP_SET_INDEX, Kernel{set_index_fwd, set_index_bwd, nullptr});
   register_kernel(OP_SLICE, Kernel{slice_fwd, slice_bwd, nullptr});
   register_kernel(OP_SET_SLICE, Kernel{set_slice_fwd, set_slice_bwd, nullptr});
+  register_kernel(OP_SLICE_STRIDED,
+                  Kernel{slice_strided_fwd, slice_strided_bwd, nullptr});
 }
 
 }  // namespace stanrt

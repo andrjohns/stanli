@@ -1,6 +1,6 @@
 # Corpus status
 
-Passing: 79/120
+Passing: 81/120
 
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
@@ -34,6 +34,8 @@ Passing: 79/120
 - OK `kidscore_momhsiq`
 - OK `kidscore_momiq`
 - OK `kilpisjarvi`
+- OK `ldaK2`
+- OK `ldaK5`
 - OK `log10earn_height`
 - OK `logearn_height`
 - OK `logearn_height_male`
@@ -111,8 +113,6 @@ Passing: 79/120
 - `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `irt_2pl`: EVAL_FAIL bernoulli_logit_lpmf: Random variable has size = 1, but Probability parameter has size 100; and they must be the same size.
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
-- `ldaK2`: EVAL_FAIL dirichlet_lpdf: probabilities is not a valid simplex. sum(probabilities) = 0.3498186321, but should be 1
-- `ldaK5`: EVAL_FAIL dirichlet_lpdf: probabilities is not a valid simplex. sum(probabilities) = 0.02476452872, but should be 1
 - `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported expression | in: (TernaryIf ((pattern (FunApp (StanLib Equals__ FnPlain AoS) (((pattern (Var growthmodel_id)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))) ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))) (meta (...
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
 - `lsat_model`: COMPILE_FAIL stanrt compile: unsupported int index expression

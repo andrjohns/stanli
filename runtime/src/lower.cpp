@@ -590,6 +590,13 @@ struct Lowering {
             return emit(OP_INDEX, {base.slot}, 1, {}, {(int)off});
           return emit(OP_SLICE, {base.slot}, inner, {}, {(int)off});
         }
+        // Row of a column-major data matrix / 2-D array: strided slice.
+        if (all_single && e.args.size() == 2 && base.si.rows > 0 &&
+            e.type_ != "UReal" && e.type_ != "UInt") {
+          const int64_t t = eval_int(e.args[1].args[0]) - 1;
+          return emit(OP_SLICE_STRIDED, {base.slot}, base.si.cols, {},
+                      {(int)t, (int)base.si.rows});
+        }
         int64_t flat = 0;
         if (all_single && e.args.size() == 2) {
           flat = eval_int(e.args[1].args[0]) - 1;
@@ -727,6 +734,10 @@ struct Lowering {
         return emit(OP_MATVEC, {a.slot, b.slot}, a.si.rows, si,
                     {(int)a.si.rows, (int)a.si.cols});
       }
+      // row_vector * vector with scalar result type is an inner product.
+      if ((e.type_ == "UReal" || e.type_ == "UInt") &&
+          info[a.slot].len > 1 && info[b.slot].len > 1)
+        return emit(OP_DOT, {a.slot, b.slot}, 1);
       const int64_t len = std::max(info[a.slot].len, info[b.slot].len);
       return emit(OP_MUL, {a.slot, b.slot}, len);
     }
@@ -800,8 +811,16 @@ struct Lowering {
     int64_t con_len = 1;
     for (const auto& d : s.read_dims) con_len *= eval_int(d);
     const mir::Transform& tr = *s.read_transform;
+    // Batched structured transforms: the last read dim is the per-element
+    // size; outer dims multiply into a batch count.
+    int64_t inner_con = con_len, n_batch = 1;
+    if (!s.read_dims.empty()) {
+      inner_con = eval_int(s.read_dims.back());
+      n_batch = con_len / inner_con;
+    }
     int64_t raw_len = con_len;
-    if (tr.kind == mir::Transform::Simplex) raw_len = con_len - 1;
+    if (tr.kind == mir::Transform::Simplex)
+      raw_len = n_batch * (inner_con - 1);
     if (s.read_dims.size() > 1) {
       std::vector<int64_t> dims;
       for (const auto& d : s.read_dims) dims.push_back(eval_int(d));
@@ -845,7 +864,11 @@ struct Lowering {
         fail("unsupported parameter transform", tr.raw);
     }
     const int jac = add_slot(1, false);
-    Val con = emit(opcode, ins, con_len, {}, {}, jac);
+    std::vector<int> tr_idata;
+    if (opcode == OP_CONSTRAIN_SIMPLEX || opcode == OP_CONSTRAIN_ORDERED ||
+        opcode == OP_CONSTRAIN_POS_ORDERED)
+      tr_idata = {(int)n_batch, (int)inner_con};
+    Val con = emit(opcode, ins, con_len, {}, tr_idata, jac);
     jac_slots.push_back(jac);
     scope[s.decl_id] = con.slot;
     out.views.push_back({s.decl_id, con.slot, con_len});
