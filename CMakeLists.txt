@@ -43,3 +43,4 @@ endfunction()
 
 stanrt_add_test(test_smoke)
 stanrt_add_test(test_executor)
+stanrt_add_test(test_recorder)
