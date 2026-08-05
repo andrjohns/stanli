@@ -1,6 +1,6 @@
 # Corpus status
 
-Passing: 69/120
+Passing: 73/120
 
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
@@ -13,6 +13,9 @@ Passing: 69/120
 - OK `arK`
 - OK `arma11`
 - OK `blr`
+- OK `dogs`
+- OK `dogs_hierarchical`
+- OK `dogs_log`
 - OK `dugongs_model`
 - OK `earn_height`
 - OK `eight_schools_centered`
@@ -43,6 +46,7 @@ Passing: 69/120
 - OK `mesquite`
 - OK `nes`
 - OK `nes_logit_model`
+- OK `normal_mixture_k`
 - OK `pilots`
 - OK `radon_county`
 - OK `radon_county_intercept`
@@ -90,35 +94,31 @@ Passing: 69/120
 - `covid19imperial_v2`: COMPILE_FAIL stanrt compile: prepare_data: unsupported indexed assignment
 - `covid19imperial_v3`: COMPILE_FAIL stanrt compile: prepare_data: unsupported indexed assignment
 - `diamonds`: COMPILE_FAIL stanrt compile: prepare_data: unsupported index
-- `dogs`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
-- `dogs_hierarchical`: COMPILE_FAIL stanrt compile: unsupported int index expression
-- `dogs_log`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: unsupported parameter transform
 - `gp_pois_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `gp_regr`: COMPILE_FAIL stanrt compile: unsupported function gp_exp_quad_cov
 - `gpcm_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function rep_array
 - `grsm_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
 - `hier_2pl`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `hmm_example`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `hmm_gaussian`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `iohmm_reg`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `irt_2pl`: COMPILE_FAIL stanrt compile: unsupported int index expression
+- `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported index expression
+- `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported index expression
+- `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported index expression
+- `hmm_example`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `hmm_gaussian`: COMPILE_FAIL stanrt compile: unsupported index expression
+- `iohmm_reg`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
+- `irt_2pl`: EVAL_FAIL bernoulli_logit_lpmf: Random variable has size = 1, but Probability parameter has size 100; and they must be the same size.
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `ldaK2`: COMPILE_FAIL stanrt compile: unsupported parameter transform
-- `ldaK5`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `ldaK2`: COMPILE_FAIL stanrt compile: unsupported index expression
+- `ldaK5`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported expression
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
-- `low_dim_gauss_mix`: COMPILE_FAIL stanrt compile: unsupported parameter transform
+- `low_dim_gauss_mix`: COMPILE_FAIL stanrt compile: unsupported function log_mix
 - `low_dim_gauss_mix_collapse`: COMPILE_FAIL stanrt compile: unsupported function log_mix
 - `lsat_model`: COMPILE_FAIL stanrt compile: unsupported int index expression
 - `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function append_col
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `normal_mixture`: COMPILE_FAIL stanrt compile: unsupported function log_mix
-- `normal_mixture_k`: COMPILE_FAIL stanrt compile: unsupported parameter transform
 - `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
 - `prophet`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function get_changepoint_matrix
 - `rats_model`: COMPILE_FAIL stanrt compile: size expression needs unknown int irat

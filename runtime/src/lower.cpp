@@ -84,6 +84,11 @@ struct Lowering {
         if (en && en->is_int && e.args.size() == 2 &&
             e.args[1].name == "IndexSingle")
           return en->i.at(eval_int(e.args[1].args[0]) - 1);
+        if (en && en->is_int && e.args.size() == 3 &&
+            e.args[1].name == "IndexSingle" &&
+            e.args[2].name == "IndexSingle" && en->dims.size() == 2)
+          return en->i.at((eval_int(e.args[2].args[0]) - 1) * en->dims[0] +
+                          (eval_int(e.args[1].args[0]) - 1));
         fail("unsupported int index expression", e.raw);
       }
       case mir::Expr::FunApp:
@@ -718,7 +723,10 @@ struct Lowering {
     out.views.push_back({s.decl_id, con.slot, con_len});
   }
 
-  std::map<std::string, int64_t> decl_lens;
+  struct DeclShape {
+    int64_t len = 0, rows = 0, cols = 0;
+  };
+  std::map<std::string, DeclShape> decl_lens;
 
   void lower_stmt(const mir::Stmt& s) {
     switch (s.kind) {
@@ -728,16 +736,14 @@ struct Lowering {
         } else if (s.has_init) {
           scope[s.decl_id] = lower_expr(s.init).slot;
         } else {
-          int64_t rows = 0, cols = 0;
-          decl_lens[s.decl_id] = sized_len(s.decl_type, &rows, &cols);
+          DeclShape sh;
+          sh.len = sized_len(s.decl_type, &sh.rows, &sh.cols);
+          decl_lens[s.decl_id] = sh;
         }
         return;
       case mir::Stmt::Assignment: {
         if (!s.lhs_idx.empty()) {
           // Element write under unrolled control flow: functional update.
-          if (s.lhs_idx.size() != 1 || s.lhs_idx[0].name != "IndexSingle")
-            fail("unsupported indexed assignment", s.raw);
-          const int64_t flat = eval_int(s.lhs_idx[0].args[0]) - 1;
           int prev;
           auto it = scope.find(s.lhs);
           if (it != scope.end()) {
@@ -748,9 +754,24 @@ struct Lowering {
               fail("indexed assignment to undeclared " + s.lhs);
             SlotInfo si;
             si.data_like = true;
-            prev = add_slot(dl->second, false, si);
-            out.fills.emplace_back(prev,
-                                   std::vector<double>(dl->second, 0.0));
+            si.rows = dl->second.rows;
+            si.cols = dl->second.cols;
+            prev = add_slot(dl->second.len, false, si);
+            out.fills.emplace_back(
+                prev, std::vector<double>(dl->second.len, 0.0));
+          }
+          int64_t flat = 0;
+          if (s.lhs_idx.size() == 1 &&
+              s.lhs_idx[0].name == "IndexSingle") {
+            flat = eval_int(s.lhs_idx[0].args[0]) - 1;
+          } else if (s.lhs_idx.size() == 2 &&
+                     s.lhs_idx[0].name == "IndexSingle" &&
+                     s.lhs_idx[1].name == "IndexSingle" &&
+                     info[prev].rows > 0) {
+            flat = (eval_int(s.lhs_idx[1].args[0]) - 1) * info[prev].rows +
+                   (eval_int(s.lhs_idx[0].args[0]) - 1);
+          } else {
+            fail("unsupported indexed assignment", s.raw);
           }
           const int rhs = lower_expr(s.rhs).slot;
           Val nv = emit(OP_SET_INDEX, {prev, rhs}, info[prev].len, info[prev],
