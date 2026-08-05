@@ -156,6 +156,37 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // Row of a 2-D int data array as a density outcome: y[i] reaches the
+  // kernel as a T-length int array (Mb/Mt/irt_2pl pattern).
+  {
+    DataMap d = DataMap::from_json(
+        R"({"M": 2, "T": 3, "y": [[1, 0, 1], [0, 0, 1]]})");
+    CompiledModel lm = compile_model(slurp("tests/fixtures/introw.tmir.sexp"), d);
+    check(lm.n_unconstrained == 3, "introw 3 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    for (int i = 0; i < 3; ++i) lex.params_data()[i] = 0.2 * (i + 1) - 0.3;
+    double grad[3] = {0, 0, 0};
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> pu(3);
+    for (int i = 0; i < 3; ++i) pu(i) = 0.2 * (i + 1) - 0.3;
+    var lj = 0.0;
+    Eigen::Matrix<var, -1, 1> pc =
+        stan::math::lub_constrain(pu, 0.0, 1.0, lj);
+    const std::vector<std::vector<int>> yv = {{1, 0, 1}, {0, 0, 1}};
+    var acc = 0.0;
+    for (int i = 0; i < 2; ++i)
+      acc = acc + stan::math::bernoulli_lpmf<false>(yv[i], pc);
+    acc = acc + lj;
+    acc.grad();
+    expect_eq("introw lp", lp, acc.val());
+    for (int i = 0; i < 3; ++i)
+      expect_eq("introw g" + std::to_string(i), grad[i], pu(i).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

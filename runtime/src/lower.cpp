@@ -690,8 +690,15 @@ struct Lowering {
         }
         if (oc.kind == mir::Expr::LitInt)
           return {static_cast<int>(oc.lit_i)};
-        if (oc.kind == mir::Expr::Indexed || oc.kind == mir::Expr::FunApp) {
-          // Compile-time int expression (e.g. y[n] under an unrolled loop).
+        if (oc.kind == mir::Expr::Indexed) {
+          // May be a slice (y[i] on a 2-D array yields a whole row), so
+          // evaluate through the data interpreter, not scalar eval_int.
+          DataMap::Entry v = td_eval(oc);
+          if (v.is_int && !v.i.empty()) return v.i;
+        }
+        if (oc.kind == mir::Expr::FunApp) {
+          // Compile-time int expression (e.g. sum(y[n]) under an unrolled
+          // loop).
           return {static_cast<int>(eval_int(oc))};
         }
         fail(e.name + ": int argument must be int data in M2", oc.raw);

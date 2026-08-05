@@ -1,12 +1,14 @@
 # Corpus status
 
-Passing: 84/120
+Passing: 87/120
 
 - OK `GLMM_Poisson_model`
 - OK `GLM_Binomial_model`
 - OK `GLM_Poisson_model`
 - OK `M0_model`
+- OK `Mb_model`
 - OK `Mh_model`
+- OK `Mt_model`
 - OK `Rate_1_model`
 - OK `Rate_2_model`
 - OK `Rate_3_model`
@@ -28,6 +30,7 @@ Passing: 84/120
 - OK `hmm_example`
 - OK `hmm_gaussian`
 - OK `iohmm_reg`
+- OK `irt_2pl`
 - OK `kidscore_interaction`
 - OK `kidscore_interaction_c`
 - OK `kidscore_interaction_c2`
@@ -91,8 +94,6 @@ Passing: 84/120
 
 - `2pl_latent_reg_irt`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function obtain_adjustments
 - `GLMM1_model`: COMPILE_FAIL stanrt compile: unsupported function rep_matrix
-- `Mb_model`: EVAL_FAIL bernoulli_lpmf: Random variable has size = 1, but Probability parameter has size 5; and they must be the same size.
-- `Mt_model`: EVAL_FAIL bernoulli_lpmf: Random variable has size = 1, but Probability parameter has size 3; and they must be the same size.
 - `Mtbh_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Mth_model`: COMPILE_FAIL stanrt compile: unsupported indexed assignment
 - `Survey_model`: COMPILE_FAIL stanrt compile: unsupported function negative_infinity
@@ -111,11 +112,10 @@ Passing: 84/120
 - `hierarchical_gp`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_0`: COMPILE_FAIL stanrt compile: unsupported index expression
 - `hmm_drive_1`: COMPILE_FAIL stanrt compile: unsupported index expression
-- `irt_2pl`: EVAL_FAIL bernoulli_logit_lpmf: Random variable has size = 1, but Probability parameter has size 100; and they must be the same size.
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported parameter transform | in: CholeskyCorr
 - `losscurve_sislob`: COMPILE_FAIL stanrt compile: unsupported expression | in: (TernaryIf ((pattern (FunApp (StanLib Equals__ FnPlain AoS) (((pattern (Var growthmodel_id)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))) ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))) (meta (...
 - `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported function integrate_ode_rk45
-- `lsat_model`: COMPILE_FAIL stanrt compile: unsupported int index expression
+- `lsat_model`: COMPILE_FAIL stanrt compile: bernoulli_logit_lpmf: int argument must be int data in M2
 - `multi_occupancy`: COMPILE_FAIL stanrt compile: unsupported function multi_normal_lpdf
 - `nn_rbm1bJ10`: COMPILE_FAIL stanrt compile: prepare_data: unsupported function append_col
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
