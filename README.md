@@ -124,10 +124,26 @@ without `--enable-function-sections`), so `-dead_strip` cannot reach
 inside the compiler object at all: the whole 11 MB is one indivisible
 atom, and stripping recovers 117 KB, all of it from the C++ side.
 Module-level selection does work, and already happens at link time
-(`base.a` is 3.8 MB on disk, of which 1.6 MB is linked). Bytecode is the
-one large lever measured so far: `(modes (byte object))` produces a 10.5
-MB library, 3.7 MB smaller, at the cost of roughly 8x slower model
-compilation (2 ms to 18 ms for eight schools). That trade is not taken.
+(`base.a` is 3.8 MB on disk, of which 1.6 MB is linked).
+
+Rebuilding the compiler with `--enable-function-sections` would not buy
+much either, and the ceiling is measurable without building it: model the
+linker at its finest possible granularity, one node per defined symbol
+with an edge wherever a relocation inside one symbol names another, and
+96.4% of the object is reachable from its entry points. Only 220 KB of
+6.06 MB is not, most of it module initializers a linker keeps anyway.
+OCaml's module blocks hold closures for every top-level function in the
+module, so function-level stripping has almost nothing to bite on.
+
+Bytecode is the one large lever measured so far: `(modes (byte object))`
+produces a 10.5 MB library, 3.7 MB smaller. Three effects, and the
+largest is not the one folklore expects: global static data is marshalled
+rather than laid out as a relocated object graph (3.01 MB to 984 KB),
+per-function unwind and exception metadata disappears (531 KB of
+`__eh_frame` to 828 bytes), and code compresses only 1.35x (2.79 MB of
+ARM64 to 2.06 MB of bytecode). The interpreter itself costs 11 KB. The
+price is roughly 8x slower model compilation, 2 ms to 18 ms for eight
+schools, and that trade is not taken.
 
 ## Python
 
