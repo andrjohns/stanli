@@ -95,8 +95,73 @@ static void test_radon_shape() {
     expect_close(("radon v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
+// arK shape: per lane {INDEX(beta,k), MUL, ADD} x K then NORMAL.
+// beta INDEX ops are lane-invariant (same idata) -> hoisted once.
+// MUL second args are per-lane consts (the lag values).
+static void test_ark_shape() {
+  const int L = 6, K = 2;
+  Graph g;
+  Fills fills;
+  const int alpha = g.add_slot(1, true);
+  const int beta = g.add_slot(K, true);
+  const int sigma = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<std::vector<int>> lag(K, std::vector<int>(L));
+  std::vector<int> yobs(L);
+  for (int l = 0; l < L; ++l) {
+    for (int k = 0; k < K; ++k) lag[k][l] = cslot(0.3 * l + 0.1 * k);
+    yobs[l] = cslot(0.5 * l - 0.7);
+  }
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    int mu = alpha;
+    for (int k = 0; k < K; ++k) {
+      const int bk = g.add_slot(1, false);
+      g.add_op(OP_INDEX, {beta}, bk, {k});
+      const int prod = g.add_slot(1, false);
+      g.add_op(OP_MUL, {bk, lag[k][l]}, prod);
+      const int acc = g.add_slot(1, false);
+      g.add_op(OP_ADD, {mu, prod}, acc);
+      mu = acc;
+    }
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {yobs[l], mu, sigma}, lp);
+    g.ops[id].variant = 0x86;  // propto + mu,sigma active, like real arK
+    terms.push_back(lp);
+  }
+  Graph ref = g;
+  {
+    int acc = terms[0];
+    for (int l = 1; l < L; ++l) {
+      const int s = ref.add_slot(1, false);
+      ref.add_op(OP_ADD_N, {acc, terms[l]}, s);
+      acc = s;
+    }
+    ref.result_slot = acc;
+  }
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  RerollStats st = reroll(g, f2, tt);
+  expect("ark regions==1", st.regions == 1);
+  // 2 hoisted INDEX + 2 vec MUL + 2 vec ADD + 1 vec NORMAL = 7 ops.
+  expect("ark ops==7", g.ops.size() == 7);
+  expect("ark one term", tt.size() == 1);
+  g.result_slot = tt[0];
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("ark sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("ark v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
 int main() {
   test_radon_shape();
+  test_ark_shape();
   if (failures) { std::printf("%d failures\n", failures); return 1; }
   std::printf("test_reroll OK\n");
   return 0;
