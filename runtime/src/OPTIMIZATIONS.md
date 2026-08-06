@@ -241,7 +241,7 @@ wrong numbers silently. Three layers of checking:
   include tests that the passes refuse the cases they must refuse, and
   a fuzz test that runs hundreds of random graphs through all passes
   and compares gradients before and after.
-- A full-corpus A/B check (`spikes/ab_corpus.py`). It evaluates every
+- A full-corpus A/B check (`harnesses/ab_corpus.py`). It evaluates every
   model in the posteriordb test set twice, once with the passes turned
   off and once with them on, and compares the log density and every
   gradient component. The passes-off graph is separately verified

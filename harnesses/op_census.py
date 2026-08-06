@@ -5,7 +5,7 @@ interpreter's per-op dispatch + recorder tax per element of data. Ranks
 models by remaining scalar ops and aggregates the responsible opcodes, so
 the next vectorization target is chosen from the corpus, not from memory.
 
-Usage: python3 spikes/op_census.py deps/posteriordb [--filter SUBSTR]
+Usage: python3 harnesses/op_census.py deps/posteriordb [--filter SUBSTR]
 Run from the worktree root with build-rel/ built.
 """
 import collections

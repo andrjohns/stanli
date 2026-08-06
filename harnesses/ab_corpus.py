@@ -5,7 +5,7 @@ deterministic point) with the passes disabled vs enabled, and count ops
 via dump_ops. The passes-off graph is the CmdStan-verified baseline, so
 A/B parity is transitive verification of the passes.
 
-Usage: python3 spikes/ab_corpus.py deps/posteriordb [--filter SUBSTR]
+Usage: python3 harnesses/ab_corpus.py deps/posteriordb [--filter SUBSTR]
                                    [--disable VAR[,VAR...]]
 Default disables every pass at once (re-roll and in-place), which is the
 end-to-end check; pass one variable to attribute a divergence.

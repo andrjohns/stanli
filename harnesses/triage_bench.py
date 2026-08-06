@@ -2,7 +2,7 @@
 """Triage the corpus benchmark as it streams in: where is stanli losing,
 and by how much. Reads the TSV corpus_bench.py writes.
 
-Usage: python3 spikes/triage_bench.py docs/corpus-bench.tsv [--all]
+Usage: python3 harnesses/triage_bench.py docs/corpus-bench.tsv [--all]
 """
 import pathlib
 import sys

@@ -117,7 +117,7 @@ Stage by stage:
    theirs in full; the rest stop at an RNG call or at generated
    quantities that branch on a parameter, and emit the prefix that did
    lower along with the reason they stopped
-   (`spikes/wa_coverage.py`, `spikes/wa_header_check.py`).
+   (`harnesses/wa_coverage.py`, `harnesses/wa_header_check.py`).
 
 8. **Distribution.** Everything above sits behind a C ABI
    (`runtime/include/stanli/capi.h`) in one shared library; the Python

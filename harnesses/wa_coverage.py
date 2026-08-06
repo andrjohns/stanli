@@ -9,7 +9,7 @@ it uses for the gradient and reports on stderr:
     WA empty <why>          the graph could not be driven by the draw
     WA none                 the MIR had no generate_quantities section
 
-Usage: python3 spikes/wa_coverage.py PDB_DIR [--filter SUBSTR]
+Usage: python3 harnesses/wa_coverage.py PDB_DIR [--filter SUBSTR]
 """
 import collections
 import json

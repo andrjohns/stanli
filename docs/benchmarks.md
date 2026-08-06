@@ -31,6 +31,59 @@ table with `tools/bench_models.py deps/cmdstan deps/posteriordb`.
 write-fusion, constant-folding and bind-time-context work below moved
 them; the first two used to be 0.36x and 0.39x.)
 
+## Which models are faster, which are slower, and why
+
+Across the full corpus (`docs/corpus-bench.tsv`, 118 models with both
+gradients) the median is ~1.4x and about two thirds of models are at or
+above parity. The ratio is almost entirely predicted by the model's
+*shape*, not its size:
+
+**Faster (most of the corpus, typically 1.5-6x):**
+
+- **Vectorized-statement models.** A `y ~ normal(X * beta, sigma)` or a
+  vectorized GLM over N observations is a handful of ops here; CmdStan
+  builds and walks N var-tape nodes per statement per leapfrog step. The
+  gap grows with N. This class is regressions, GLMs, and most
+  hierarchical models written with vectorized statements.
+- **Scalar loops the passes can vectorize.** The hierarchical indexing
+  idiom — `y[n] ~ normal(mu[county[n]], sigma)` and loops that fill a
+  vector element by element — arrives unrolled and is re-rolled back
+  into the class above (radon family up to 6.1x, `election88_full`
+  3.0x, `dogs` 2.8x). What the passes handle is described below.
+- **Everything, on preparation.** Lowering a model is 4-400 ms against
+  a ~7 s CmdStan compile, so short runs and iterative model development
+  are dominated by this regardless of gradient speed.
+
+**Near parity (0.8-1.2x):**
+
+- **Models dominated by one large dense operation** — a Cholesky, a big
+  matrix product, an eigendecomposition (the GP models). Both engines
+  spend their time inside the same stan-math kernel on the same
+  contiguous doubles; interpreter overhead is noise on top.
+
+**Slower (about a third of the corpus, mostly 0.2-0.8x):**
+
+- **Sequential models.** HMM forward recursions, state-space and
+  ARMA/GARCH-style updates, LDA's per-document loops: each step reads
+  the previous step's parameter-dependent result, so re-rolling
+  correctly refuses (vectorizing a recurrence would change the math),
+  and the model pays per-op dispatch on every scalar step while CmdStan
+  runs straight-line compiled C++ (`iohmm_reg` 0.21x, the hmm family
+  ~0.5x, lda ~0.5x). Bind-time context assembly trimmed this class;
+  closing it further means batching the per-step kernels themselves.
+- **Mixture-shape models.** When the per-observation density feeds
+  `log_mix`/`log_sum_exp` instead of the target
+  (`low_dim_gauss_mix` 0.78x, `normal_mixture_k`, the occupancy /
+  `Survey_model` family), the density outputs are op inputs, the
+  region cannot fuse into one summed vector density, and the loop stays
+  scalar. This is the elementwise-lp gap: the fix is a density variant
+  that returns per-element lp plus batched `log_sum_exp`/`log_mix`
+  kernels, and it is the next planned piece of work.
+- **ODE models** were the extreme case (0.015x) when the right-hand
+  side was interpreted per call; with it compiled (below) they sit at
+  ~0.6x, the residue being our per-call dispatch against CmdStan's
+  fully inlined right-hand side inside the same CVODES solver.
+
 **Where the wins come from: op granularity.** The interpreter's cost is
 per op, not per element: ~17-20 ns for a scalar density op forward +
 backward, measured as ~9.5 ns executor (dispatch + context assembly) plus
@@ -216,7 +269,7 @@ Re-rolled models change summation order relative to CmdStan's scalar
 loop, so they verify at tolerance rather than bitwise: across the corpus
 the passes change 28 models and the worst gradient deviation any of them
 introduces vs the untransformed graph is 3.7e-14 relative
-(`spikes/ab_corpus.py` compares every corpus model passes-on vs
+(`harnesses/ab_corpus.py` compares every corpus model passes-on vs
 passes-off and flags any divergence; `--disable` one variable to
 attribute one).
 
@@ -243,5 +296,5 @@ resting on that transitive argument, and all six still verify:
 cmake -B build-rel -DCMAKE_BUILD_TYPE=Release
 cmake --build build-rel -j
 python3 tools/bench_models.py deps/cmdstan deps/posteriordb
-python3 spikes/ab_corpus.py deps/posteriordb   # re-roll A/B over the corpus
+python3 harnesses/ab_corpus.py deps/posteriordb   # re-roll A/B over the corpus
 ```

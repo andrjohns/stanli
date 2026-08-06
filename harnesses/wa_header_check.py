@@ -9,7 +9,7 @@ theta.K.K, in that order, with the array index outermost.
 CmdStan is the oracle: build the model, take one draw, drop the seven sampler
 diagnostic columns, and diff.
 
-Usage: python3 spikes/wa_header_check.py CMDSTAN_DIR PDB_DIR [MODEL ...]
+Usage: python3 harnesses/wa_header_check.py CMDSTAN_DIR PDB_DIR [MODEL ...]
 With no MODEL arguments, checks every corpus model whose write_array lowers
 completely -- which means a CmdStan build each, so it is not quick.
 """
