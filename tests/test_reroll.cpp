@@ -159,9 +159,121 @@ static void test_ark_shape() {
     expect_close(("ark v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
+// (a) cross-lane dependence: lane l reads lane l-1's output (a recurrence
+// on parameters). Must NOT vectorize.
+static void test_bail_recurrence() {
+  const int L = 6;
+  Graph g;
+  Fills fills;
+  const int sigma = g.add_slot(1, true);
+  int prev = g.add_slot(1, true);  // x0 param
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int nx = g.add_slot(1, false);
+    g.add_op(OP_MUL, {prev, sigma}, nx);
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {nx, prev, sigma}, lp);
+    g.ops[id].variant = 0x06;
+    terms.push_back(lp);
+    prev = nx;  // <- lane l+1 reads lane l's out
+  }
+  std::vector<int> tt = terms;
+  const size_t before = g.ops.size();
+  RerollStats st = reroll(g, fills, tt);
+  expect("recurrence not rerolled", st.regions == 0);
+  expect("recurrence ops unchanged", g.ops.size() == before);
+}
+
+// (b) density out consumed by another op (gauss_mix shape): must bail.
+static void test_bail_nonterm_density() {
+  const int L = 6;
+  Graph g;
+  Fills fills;
+  const int mu = g.add_slot(1, true);
+  const int sigma = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {cslot(0.1 * l), mu, sigma}, lp);
+    g.ops[id].variant = 0x06;
+    const int doubled = g.add_slot(1, false);
+    g.add_op(OP_ADD, {lp, lp}, doubled);  // lp escapes into an op
+    terms.push_back(doubled);
+  }
+  std::vector<int> tt = terms;
+  const size_t before = g.ops.size();
+  RerollStats st = reroll(g, fills, tt);
+  expect("nonterm density not rerolled", st.regions == 0);
+  expect("nonterm ops unchanged", g.ops.size() == before);
+}
+
+// (c) partial-range INDEX progression (0..L-1 over a longer base): bail.
+static void test_bail_partial_range() {
+  const int L = 6;
+  Graph g;
+  Fills fills;
+  const int alpha = g.add_slot(1, true);
+  const int sigma = g.add_slot(1, true);
+  const int base = g.add_slot(L + 3, false);  // longer than lane count
+  g.add_op(OP_REP_VEC, {alpha}, base);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int idx = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {base}, idx, {l});
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {cslot(0.2 * l), idx, sigma}, lp);
+    g.ops[id].variant = 0x06;
+    terms.push_back(lp);
+  }
+  std::vector<int> tt = terms;
+  const size_t before = g.ops.size();
+  RerollStats st = reroll(g, fills, tt);
+  expect("partial range not rerolled", st.regions == 0);
+  expect("partial ops unchanged", g.ops.size() == before);
+}
+
+// (d) STANRT_NO_REROLL disables the pass.
+static void test_env_disable() {
+  setenv("STANRT_NO_REROLL", "1", 1);
+  const int L = 6;
+  Graph g;
+  Fills fills;
+  const int mu = g.add_slot(1, true);
+  const int sigma = g.add_slot(1, true);
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int c = g.add_slot(1, false);
+    fills.emplace_back(c, std::vector<double>{0.1 * l});
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {c, mu, sigma}, lp);
+    g.ops[id].variant = 0x06;
+    terms.push_back(lp);
+  }
+  std::vector<int> tt = terms;
+  const size_t before = g.ops.size();
+  RerollStats st = reroll(g, fills, tt);
+  expect("env disables", st.regions == 0);
+  expect("env ops unchanged", g.ops.size() == before);
+  unsetenv("STANRT_NO_REROLL");
+}
+
 int main() {
   test_radon_shape();
   test_ark_shape();
+  test_bail_recurrence();
+  test_bail_nonterm_density();
+  test_bail_partial_range();
+  test_env_disable();
   if (failures) { std::printf("%d failures\n", failures); return 1; }
   std::printf("test_reroll OK\n");
   return 0;
