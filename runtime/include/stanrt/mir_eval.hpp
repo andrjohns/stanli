@@ -115,6 +115,14 @@ class MirEval {
           fail("index form unsupported in an ODE function");
         return Vec{b.at(as_int(e.args[1].args[0]) - 1)};
       }
+      case mir::Expr::EOr:
+      case mir::Expr::EAnd: {
+        const bool a = stan::math::value_of(eval(e.args[0])[0]) != 0.0;
+        bool v = a;
+        if (e.kind == mir::Expr::EOr ? !a : a)
+          v = stan::math::value_of(eval(e.args[1])[0]) != 0.0;
+        return Vec{T(v ? 1 : 0)};
+      }
       case mir::Expr::TernaryIf:
         return eval(e.args[stan::math::value_of(eval(e.args[0])[0]) != 0.0
                                ? 1
@@ -164,6 +172,20 @@ class MirEval {
           out[i] = stan::math::pow(x, y);
         else if (e.name == "fmax") out[i] = stan::math::fmax(x, y);
         else if (e.name == "fmin") out[i] = stan::math::fmin(x, y);
+        // Comparisons produce plain 0/1 (no derivative), matching how the
+        // generated C++ evaluates them on values.
+        else if (e.name == "Greater__")
+          out[i] = T(stan::math::value_of(x) > stan::math::value_of(y));
+        else if (e.name == "Geq__")
+          out[i] = T(stan::math::value_of(x) >= stan::math::value_of(y));
+        else if (e.name == "Less__")
+          out[i] = T(stan::math::value_of(x) < stan::math::value_of(y));
+        else if (e.name == "Leq__")
+          out[i] = T(stan::math::value_of(x) <= stan::math::value_of(y));
+        else if (e.name == "Equals__")
+          out[i] = T(stan::math::value_of(x) == stan::math::value_of(y));
+        else if (e.name == "NEquals__")
+          out[i] = T(stan::math::value_of(x) != stan::math::value_of(y));
         else fail("function unsupported in an ODE function: " + e.name);
       }
       return out;

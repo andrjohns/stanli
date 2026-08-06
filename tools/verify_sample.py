@@ -75,11 +75,15 @@ def main():
         # -ffp-contract=off matches CmdStan's own build (stan-math's
         # makefiles set it); without it the reference binary forms FMAs and
         # drifts a few ULP from what CmdStan actually computes.
+        # ODE models pull in CVODES; CmdStan ships it prebuilt.
+        sun = lib("sundials_*") / "lib"
         cmd = ["clang++", "-std=c++17", "-O1", "-ffp-contract=off",
                "-D_REENTRANT",
                "-DBOOST_DISABLE_ASSERTS", "-include", str(hpp),
                str(REPO / "tools/ref_driver.cpp"),
                f"-L{tbb}", "-ltbb", f"-Wl,-rpath,{tbb}",
+               f"-L{sun}", "-lsundials_cvodes", "-lsundials_idas",
+               "-lsundials_kinsol", "-lsundials_nvecserial",
                "-o", str(exe)]
         for i in inc:
             cmd.insert(3, f"-I{i}")
@@ -88,16 +92,39 @@ def main():
             print(f"BUILD_FAIL {model}: {r.stderr.splitlines()[-1][:120]}")
             continue
 
-        ref = subprocess.run([str(exe), str(dj)], capture_output=True,
-                             text=True).stdout.split()
-        try:
-            got = subprocess.run([str(REPO / "build/stanrt_check"), str(stan),
-                                  str(dj)], capture_output=True, text=True,
-                                 cwd=REPO, timeout=300).stdout.split()
-        except subprocess.TimeoutExpired:
-            print(f"TIMEOUT {model}")
+        # Some models are invalid at a given point for BOTH engines (an ODE
+        # solution dipping below a declared bound, say). Walk the shared
+        # point list until one works on both sides.
+        ref, got, point = [], [], 0
+        for point in range(3):
+            ref = subprocess.run([str(exe), str(dj), str(point)],
+                                 capture_output=True, text=True).stdout.split()
+            try:
+                got = subprocess.run(
+                    [str(REPO / "build/stanrt_check"), str(stan), str(dj),
+                     "--point", str(point)], capture_output=True, text=True,
+                    cwd=REPO, timeout=300).stdout.split()
+            except subprocess.TimeoutExpired:
+                print(f"TIMEOUT {model}")
+                got = []
+                break
+            if ref and ref[0] == "OK" and got and got[0] == "OK":
+                break
+
+        ref_ok = bool(ref) and ref[0] == "OK"
+        got_ok = bool(got) and got[0] == "OK"
+        if not ref_ok and not got_ok:
+            # Both engines reject every shared point: the model is invalid
+            # there (an ODE solution dipping below a declared bound, say),
+            # so this is agreement, not a stanrt failure. Recorded
+            # separately and never counted as verified.
+            results[model] = {"status": "REJECTED_BOTH", "max_rel": 0.0,
+                              "max_ulp": 0, "n_values": 0, "point": point}
+            write_results(results)
+            print(f"REJECTED_BOTH {model}: CmdStan and stanrt both reject "
+                  f"every shared evaluation point")
             continue
-        if not ref or ref[0] != "OK" or not got or got[0] != "OK":
+        if not ref_ok or not got_ok:
             print(f"RUN_FAIL {model}: ref={ref[:2]} got={got[:2]}")
             continue
 
@@ -116,7 +143,8 @@ def main():
         if status == "VERIFIED":
             n_pass += 1
         results[model] = {"status": status, "max_rel": worst,
-                          "max_ulp": worst_ulp, "n_values": len(rv)}
+                          "max_ulp": worst_ulp, "n_values": len(rv),
+                          "point": point}
         write_results(results)  # incremental: a later hang keeps the rest
         print(f"{status} {model}: max rel diff {worst:.2e} "
               f"({worst_ulp} ulp) over lp + {len(rv) - 1} grads")

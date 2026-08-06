@@ -110,7 +110,17 @@ def main():
         v = ver[m]
         rel = "0 (bitwise)" if v["max_rel"] == 0 else f"{v['max_rel']:.1e}"
         md.append(f"| `{m}` | {v['n_values']} | {rel} | {v['max_ulp']} |")
-    unver = [m for m in ok if m not in verified]
+    rejected = [m for m, v in ver.items()
+                if v.get("status") == "REJECTED_BOTH"]
+    if rejected:
+        md += ["", "## Rejected by both engines", "",
+               "CmdStan and stanrt both reject every shared evaluation "
+               "point for these models: the model is invalid there (an ODE "
+               "solution dipping below a declared lower bound, for "
+               "instance), so there is nothing to compare. Agreement, not "
+               "a gap, but not counted as verified either.", ""]
+        md += [f"- `{m}`" for m in sorted(rejected)]
+    unver = [m for m in ok if m not in verified and m not in rejected]
     if unver:
         md += ["", "## Evaluate but not verified", ""]
         for m in unver:

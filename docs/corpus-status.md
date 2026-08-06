@@ -1,7 +1,7 @@
 # Corpus status
 
-Evaluating: 112/120
-Differentially verified against CmdStan: 111/120
+Evaluating: 114/120
+Differentially verified against CmdStan: 112/120
 
 A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Models that evaluate but are not verified are listed separately and are not counted.
 
@@ -87,6 +87,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `nn_rbm1bJ10` | 7952 | 4.6e-16 | 3 |
 | `normal_mixture` | 4 | 5.6e-16 | 4 |
 | `normal_mixture_k` | 15 | 1.1e-14 | 57 |
+| `one_comp_mm_elim_abs` | 5 | 6.9e-15 | 256 |
 | `pilots` | 19 | 1.4e-16 | 1 |
 | `prophet` | 63 | 8.1e-15 | 46 |
 | `radon_county` | 390 | 1.1e-16 | 272 |
@@ -119,17 +120,22 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `wells_interaction_c_model` | 5 | 6.6e-15 | 39 |
 | `wells_interaction_model` | 5 | 0 (bitwise) | 0 |
 
+## Rejected by both engines
+
+CmdStan and stanrt both reject every shared evaluation point for these models: the model is invalid there (an ODE solution dipping below a declared lower bound, for instance), so there is nothing to compare. Agreement, not a gap, but not counted as verified either.
+
+- `sir`
+
 ## Evaluate but not verified
 
+- `hier_2pl`: not yet run through verify_sample.py
 - `multi_occupancy`: max rel diff 3.5e-01
 
 ## Failures
 
 - `accel_gp`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable x (type )
-- `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: Times__: inner dimension mismatch
-- `hier_2pl`: COMPILE_FAIL stanrt compile: multi_normal_cholesky_lpdf: needs a matrix argument
+- `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: Plus__: incompatible lengths
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported function eigenvectors_sym
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
-- `one_comp_mm_elim_abs`: EVAL_FAIL stanrt runtime: function unsupported in an ODE function: Greater__
-- `sir`: COMPILE_FAIL stanrt compile: unsupported function to_matrix
+- `sir`: EVAL_FAIL poisson_lpmf: Rate parameter is -4.42014e-10, but must be nonnegative!
 - `soil_incubation`: COMPILE_FAIL stanrt compile: unknown variable x_r

@@ -233,6 +233,13 @@
   "n_values": 409,
   "status": "VERIFIED"
  },
+ "hier_2pl": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 670,
+  "point": 0,
+  "status": "VERIFIED"
+ },
  "hierarchical_gp": {
   "max_rel": 0.0,
   "max_ulp": 0,
@@ -485,6 +492,12 @@
   "n_values": 15,
   "status": "VERIFIED"
  },
+ "one_comp_mm_elim_abs": {
+  "max_rel": 6.8833827526759706e-15,
+  "max_ulp": 256,
+  "n_values": 5,
+  "status": "VERIFIED"
+ },
  "pilots": {
   "max_rel": 1.44e-16,
   "max_ulp": 1,
@@ -604,6 +617,13 @@
   "max_ulp": 0,
   "n_values": 4,
   "status": "VERIFIED"
+ },
+ "sir": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 2,
+  "status": "REJECTED_BOTH"
  },
  "state_space_stochastic_level_stochastic_seasonal": {
   "max_rel": 8.65e-16,

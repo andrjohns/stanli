@@ -1272,7 +1272,12 @@ struct Lowering {
         // General product; a vector operand is one column.
         const int64_t cb = b.si.rows > 0 ? b.si.cols : 1;
         const int64_t rb = b.si.rows > 0 ? b.si.rows : info[b.slot].len;
-        if (rb != a.si.cols) fail("Times__: inner dimension mismatch", e.raw);
+        if (rb != a.si.cols)
+          fail("Times__: inner dimension mismatch (" +
+                   std::to_string(a.si.rows) + "x" +
+                   std::to_string(a.si.cols) + " times " +
+                   std::to_string(rb) + "x" + std::to_string(cb) + ")",
+               e.raw);
         SlotInfo si;
         si.rows = a.si.rows;
         si.cols = cb;
@@ -1410,7 +1415,7 @@ struct Lowering {
         e.args.size() == 2) {
       // diag_pre_multiply(v, M) = diag_matrix(v) * M (and the mirror);
       // the explicit zeros contribute exactly nothing to each sum.
-      const bool pre = e.name[5] == 'p' && e.name[9] == 'e';
+      const bool pre = e.name.find("_pre_") != std::string::npos;
       Val v = lower_expr(e.args[pre ? 0 : 1]);
       Val m = lower_expr(e.args[pre ? 1 : 0]);
       const int64_t n = info[v.slot].len;
@@ -1439,6 +1444,33 @@ struct Lowering {
       si.cols = L.si.rows;
       return emit(OP_GEMM, {L.slot, Lt.slot}, si.rows * si.cols, si,
                   {(int)L.si.rows, (int)L.si.cols, (int)L.si.rows});
+    }
+    if (e.name == "to_matrix" && (e.args.size() == 1 || e.args.size() == 3)) {
+      // Col-major storage makes reshaping a relabelling. One argument on an
+      // array[N] vector[S] value yields the N x S matrix stan-math builds
+      // from it, which is the transpose of our array-major flat order.
+      Val a = lower_expr(e.args[0]);
+      SlotInfo si;
+      si.data_like = info[a.slot].data_like;
+      if (e.args.size() == 3) {
+        si.rows = eval_int(e.args[1]);
+        si.cols = eval_int(e.args[2]);
+        return {a.slot, si};
+      }
+      if (a.si.rows > 0) return {a.slot, a.si};
+      std::vector<int64_t> dims;
+      if (e.args[0].kind == mir::Expr::Var) {
+        auto dd = decl_dims.find(e.args[0].name);
+        if (dd != decl_dims.end()) dims = dd->second;
+      }
+      if (dims.size() != 2)
+        fail("to_matrix: unknown source shape", e.raw);
+      // array-major (row-major) source -> col-major matrix of the same
+      // logical shape: transpose the storage.
+      si.rows = dims[0];
+      si.cols = dims[1];
+      return emit(OP_TRANSPOSE, {a.slot}, info[a.slot].len, si,
+                  {(int)dims[1], (int)dims[0]});
     }
     if ((e.name == "to_vector" || e.name == "to_row_vector") &&
         e.args.size() == 1) {
@@ -1521,7 +1553,10 @@ struct Lowering {
       if (e.fn_propto) variant |= 0x80u;
       // K comes from the matrix argument; y may be one K-vector or an
       // array of m of them (stan-math's vectorized signature).
-      if (m.si.rows == 0) fail(e.name + ": needs a matrix argument", e.raw);
+      if (m.si.rows == 0)
+        fail(e.name + ": needs a matrix argument (got length " +
+                 std::to_string(info[m.slot].len) + ")",
+             e.raw);
       const int64_t K = m.si.rows;
       const int64_t reps = info[y.slot].len / K;
       Val v = emit(e.name.find("cholesky") != std::string::npos
@@ -1571,6 +1606,14 @@ struct Lowering {
       spec->adopt(fun_defs);
       spec->rhs_name = e.args[0].name;
       spec->stiff = e.name.find("bdf") != std::string::npos;
+      // stan-math's own defaults differ per solver: rk45 1e-6/1e-6/1e6,
+      // bdf 1e-10/1e-10/1e8. Using one set for both left one_comp_mm's
+      // gradients 2.9e-6 off CmdStan.
+      if (spec->stiff) {
+        spec->rtol = 1e-10;
+        spec->atol = 1e-10;
+        spec->max_steps = 100000000;
+      }
       spec->t0 = td_eval(e.args[2]).r.at(0);
       DataMap::Entry ts = td_eval(e.args[3]);
       spec->ts = ts.r;

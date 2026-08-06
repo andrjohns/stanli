@@ -16,6 +16,22 @@
 #include <string>
 #include <vector>
 
+// Deterministic evaluation points, shared with tools/ref_driver.cpp. Some
+// models are invalid at a given point (an ODE solution dips below a declared
+// lower bound, say) and both engines reject it; the harness then retries the
+// next variant so those models still get a real comparison.
+static double eval_point(int64_t i, int variant) {
+  switch (variant) {
+    case 1:
+      return 0.02 * static_cast<double>((i % 5) - 2);
+    case 2:
+      return 0.0;
+    default:
+      return 0.1 + 0.05 * static_cast<double>(i % 7) -
+             0.15 * static_cast<double>(i % 3);
+  }
+}
+
 static std::string run_stanc(const std::string& stanc,
                              const std::string& model) {
   const std::string cmd = stanc + " --debug-transformed-mir '" + model +
@@ -32,12 +48,15 @@ static std::string run_stanc(const std::string& stanc,
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: stanrt_check model.stan data.json [--stanc PATH]\n");
+    std::fprintf(stderr, "usage: stanrt_check model.stan data.json [--stanc PATH] [--point N]\n");
     return 2;
   }
   std::string stanc = "deps/stanc3/stanc";
-  for (int i = 3; i + 1 < argc; i += 2)
+  int variant = 0;
+  for (int i = 3; i + 1 < argc; i += 2) {
     if (std::string(argv[i]) == "--stanc") stanc = argv[i + 1];
+    if (std::string(argv[i]) == "--point") variant = std::atoi(argv[i + 1]);
+  }
   if (const char* env = std::getenv("STANC")) stanc = env;
 
   std::string mir;
@@ -68,10 +87,8 @@ int main(int argc, char** argv) {
     stanrt::Executor ex(std::move(cm.graph));
     cm.bind(ex);
     const int64_t n = ex.n_params();
-    // Deterministic mildly-off-center point.
     for (int64_t i = 0; i < n; ++i)
-      ex.params_data()[i] = 0.1 + 0.05 * static_cast<double>(i % 7) -
-                            0.15 * static_cast<double>(i % 3);
+      ex.params_data()[i] = eval_point(i, variant);
     std::vector<double> grad(n, 0.0);
     const double lp = ex.gradient(grad.data());
     if (!std::isfinite(lp)) {
