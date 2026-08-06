@@ -1,7 +1,7 @@
 # Corpus status
 
-Evaluating: 114/120
-Differentially verified against CmdStan: 112/120
+Evaluating: 115/120
+Differentially verified against CmdStan: 114/120
 
 A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Models that evaluate but are not verified are listed separately and are not counted.
 
@@ -46,6 +46,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `gp_regr` | 4 | 0 (bitwise) | 0 |
 | `gpcm_latent_reg_irt` | 531 | 1.5e-14 | 3928 |
 | `grsm_latent_reg_irt` | 409 | 1.3e-15 | 11 |
+| `hier_2pl` | 670 | 0 (bitwise) | 0 |
 | `hierarchical_gp` | 934 | 0 (bitwise) | 0 |
 | `hmm_drive_0` | 7 | 1.2e-16 | 1 |
 | `hmm_drive_1` | 7 | 1.4e-16 | 1 |
@@ -108,6 +109,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `seeds_model` | 27 | 0 (bitwise) | 0 |
 | `seeds_stanified_model` | 27 | 0 (bitwise) | 0 |
 | `sesame_one_pred_a` | 4 | 0 (bitwise) | 0 |
+| `soil_incubation` | 7 | 1.3e-16 | 1 |
 | `state_space_stochastic_level_stochastic_seasonal` | 390 | 8.6e-16 | 6 |
 | `surgical_model` | 15 | 0 (bitwise) | 0 |
 | `wells_daae_c_model` | 7 | 8.6e-15 | 55 |
@@ -128,7 +130,6 @@ CmdStan and stanrt both reject every shared evaluation point for these models: t
 
 ## Evaluate but not verified
 
-- `hier_2pl`: not yet run through verify_sample.py
 - `multi_occupancy`: max rel diff 3.5e-01
 
 ## Failures
@@ -138,4 +139,3 @@ CmdStan and stanrt both reject every shared evaluation point for these models: t
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported function eigenvectors_sym
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `sir`: EVAL_FAIL poisson_lpmf: Rate parameter is -4.42014e-10, but must be nonnegative!
-- `soil_incubation`: COMPILE_FAIL stanrt compile: unknown variable x_r

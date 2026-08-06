@@ -625,6 +625,13 @@
   "point": 2,
   "status": "REJECTED_BOTH"
  },
+ "soil_incubation": {
+  "max_rel": 1.299664972131347e-16,
+  "max_ulp": 1,
+  "n_values": 7,
+  "point": 0,
+  "status": "VERIFIED"
+ },
  "state_space_stochastic_level_stochastic_seasonal": {
   "max_rel": 8.65e-16,
   "max_ulp": 6,

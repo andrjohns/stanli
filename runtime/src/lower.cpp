@@ -42,6 +42,7 @@ struct Lowering {
   std::map<std::string, long> int_env;         // data int scalars
   std::map<std::string, std::string> int_arrays;  // int-array vars (by name)
   std::map<double, int> const_cache;
+  std::map<int, std::vector<double>> slot_values;  // constant/data fills
   std::vector<SlotInfo> info;                  // parallel to g.slots
   std::vector<int> target_terms;
   std::vector<int> jac_slots;
@@ -72,6 +73,7 @@ struct Lowering {
     const int s = add_slot(1, false, si);
     out.fills.emplace_back(s, std::vector<double>{v});
     const_cache[v] = s;
+    slot_values[s] = {v};
     return s;
   }
 
@@ -812,7 +814,16 @@ struct Lowering {
   // Lazily materialize an env value as a data slot when log_prob uses it.
   int env_slot(const std::string& name) {
     DataMap::Entry* en = env.find(name);
-    if (!en || en->r.empty()) return -1;
+    // Empty entries are real: `array[0] real x_r` is how ODE models spell
+    // "no data for the system", and it still has to become a (zero-length)
+    // slot when passed around.
+    if (!en) return -1;
+    if (en->r.empty() && !en->dims.empty() && en->dims[0] == 0) {
+      const int s = add_slot(0, false, SlotInfo{0, 0, 0, true});
+      scope[name] = s;
+      return s;
+    }
+    if (en->r.empty()) return -1;
     SlotInfo si;
     si.data_like = true;
     if (en->dims.size() == 2) {
@@ -821,6 +832,7 @@ struct Lowering {
     }
     const int s = add_slot((int64_t)en->r.size(), false, si);
     out.fills.emplace_back(s, en->r);
+    slot_values[s] = en->r;
     scope[name] = s;
     return s;
   }
@@ -1033,6 +1045,7 @@ struct Lowering {
     }
     const int s = add_slot((int64_t)en.r.size(), false, si);
     out.fills.emplace_back(s, en.r);
+    slot_values[s] = en.r;
     *v = {s, si};
     return true;
   }
@@ -1076,6 +1089,39 @@ struct Lowering {
     // what lets a transformed data matrix still drive OP_MATVEC.
     si.data_like = info[a.slot].data_like && info[b.slot].data_like;
     return si;
+  }
+
+  // Value of a data-only expression at compile time. The interpreter
+  // handles most cases; a UDF-local constant lives only as a slot, so fall
+  // back to that slot's recorded fill.
+  std::vector<double> const_values(const mir::Expr& e) {
+    try {
+      DataMap::Entry en = td_eval(e);
+      return en.r;
+    } catch (const CompileError&) {
+    }
+    Val v = lower_expr(e);
+    auto it = slot_values.find(v.slot);
+    if (it != slot_values.end()) return it->second;
+    // A zero-length slot carries no values by construction (`array[0] real`
+    // is how ODE models spell "no data for the system").
+    if (info[v.slot].len == 0) return {};
+    fail("value must be known at compile time: " +
+             (e.kind == mir::Expr::Var ? e.name : ("<" + e.name + ">")),
+         e.raw);
+  }
+  std::vector<int> const_ints(const mir::Expr& e) {
+    try {
+      DataMap::Entry en = td_eval(e);
+      if (en.is_int) return en.i;
+      std::vector<int> out;
+      for (double d : en.r) out.push_back((int)d);
+      return out;
+    } catch (const CompileError&) {
+    }
+    std::vector<int> out;
+    for (double d : const_values(e)) out.push_back((int)d);
+    return out;
   }
 
   // Thrown by a Return statement inside an inlined UDF body.
@@ -1614,17 +1660,14 @@ struct Lowering {
         spec->atol = 1e-10;
         spec->max_steps = 100000000;
       }
-      spec->t0 = td_eval(e.args[2]).r.at(0);
-      DataMap::Entry ts = td_eval(e.args[3]);
-      spec->ts = ts.r;
-      DataMap::Entry xr = td_eval(e.args[5]);
-      spec->x_r = xr.r;
-      DataMap::Entry xi = td_eval(e.args[6]);
-      spec->x_i = xi.i;
+      spec->t0 = const_values(e.args[2]).at(0);
+      spec->ts = const_values(e.args[3]);
+      spec->x_r = const_values(e.args[5]);
+      spec->x_i = const_ints(e.args[6]);
       if (e.args.size() >= 10) {
-        spec->rtol = td_eval(e.args[7]).r.at(0);
-        spec->atol = td_eval(e.args[8]).r.at(0);
-        spec->max_steps = (long)td_eval(e.args[9]).r.at(0);
+        spec->rtol = const_values(e.args[7]).at(0);
+        spec->atol = const_values(e.args[8]).at(0);
+        spec->max_steps = (long)const_values(e.args[9]).at(0);
       }
       Val z0 = lower_expr(e.args[1]);
       Val theta = lower_expr(e.args[4]);
