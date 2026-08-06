@@ -42,9 +42,18 @@ int main(int argc, char** argv) {
   const stanrt::Graph& g = cm.graph;
   std::printf("slots=%zu ops=%zu result=%d\n", g.slots.size(), g.ops.size(),
               g.result_slot);
+  constexpr size_t kNames = sizeof(NAMES) / sizeof(NAMES[0]);
   for (size_t i = 0; i < g.ops.size() && (int)i < max_ops; ++i) {
     const stanrt::Op& op = g.ops[i];
-    std::printf("%5zu %-10s v=%02x out=s%d(len%lld)", i, NAMES[op.opcode],
+    char namebuf[16];
+    const char* name;
+    if (op.opcode < kNames) {
+      name = NAMES[op.opcode];
+    } else {
+      std::snprintf(namebuf, sizeof namebuf, "op%u", op.opcode);
+      name = namebuf;
+    }
+    std::printf("%5zu %-10s v=%02x out=s%d(len%lld)", i, name,
                 op.variant, op.out, (long long)g.slots[op.out].len);
     std::printf(" in=");
     for (int k = 0; k < op.n_in; ++k) {

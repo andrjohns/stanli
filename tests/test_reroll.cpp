@@ -270,6 +270,117 @@ static void test_env_disable() {
   unsetenv("STANRT_NO_REROLL");
 }
 
+// (e) first lane anomalous (its y is an op output, not a const): the pass
+// must skip lane 0 and still re-roll lanes 1..L-1 on the second attempt.
+static void test_first_lane_anomalous() {
+  const int L = 8;
+  Graph g;
+  Fills fills;
+  const int mu = g.add_slot(1, true);
+  const int sigma = g.add_slot(1, true);
+  // lane 0's observation comes from an op, not the const pool
+  const int y0 = g.add_slot(1, false);
+  g.add_op(OP_MUL, {mu, sigma}, y0);
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    int y;
+    if (l == 0) {
+      y = y0;
+    } else {
+      y = g.add_slot(1, false);
+      fills.emplace_back(y, std::vector<double>{0.1 * l});
+    }
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {y, mu, sigma}, lp);
+    g.ops[id].variant = 0x06;
+    terms.push_back(lp);
+  }
+  Graph ref = g;
+  {
+    int acc = terms[0];
+    for (int l = 1; l < L; ++l) {
+      const int s = ref.add_slot(1, false);
+      ref.add_op(OP_ADD_N, {acc, terms[l]}, s);
+      acc = s;
+    }
+    ref.result_slot = acc;
+  }
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  RerollStats st = reroll(g, f2, tt);
+  expect("anomalous regions==1", st.regions == 1);
+  // MUL + lane-0 NORMAL survive scalar; lanes 1..7 collapse to 1 vec op.
+  expect("anomalous ops==3", g.ops.size() == 3);
+  expect("anomalous terms==2", tt.size() == 2);
+  int acc = tt[0];
+  for (size_t k = 1; k < tt.size(); ++k) {
+    const int s = g.add_slot(1, false);
+    g.add_op(OP_ADD_N, {acc, tt[(int)k]}, s);
+    acc = s;
+  }
+  g.result_slot = acc;
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("anomalous sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("anom v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// (f) block-structured region (rats_model shape, time-major data): the
+// INDEX idata is a 0..B-1 progression that restarts every block. The pass
+// must split the run at block boundaries and re-roll every block.
+static void test_block_structured() {
+  const int B = 5;   // lanes per block (== param vector length)
+  const int NB = 3;  // blocks
+  Graph g;
+  Fills fills;
+  const int theta = g.add_slot(B, true);
+  const int sigma = g.add_slot(1, true);
+  std::vector<int> terms;
+  for (int b = 0; b < NB; ++b) {
+    for (int l = 0; l < B; ++l) {
+      const int y = g.add_slot(1, false);
+      fills.emplace_back(y, std::vector<double>{0.2 * (b * B + l) - 0.5});
+      const int idx = g.add_slot(1, false);
+      g.add_op(OP_INDEX, {theta}, idx, {l});  // restarts every block
+      const int lp = g.add_slot(1, false);
+      const int id = g.add_op(OP_NORMAL_LPDF, {y, idx, sigma}, lp);
+      g.ops[id].variant = 0x06;
+      terms.push_back(lp);
+    }
+  }
+  Graph ref = g;
+  {
+    int acc = terms[0];
+    for (size_t k = 1; k < terms.size(); ++k) {
+      const int s = ref.add_slot(1, false);
+      ref.add_op(OP_ADD_N, {acc, terms[k]}, s);
+      acc = s;
+    }
+    ref.result_slot = acc;
+  }
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  RerollStats st = reroll(g, f2, tt);
+  expect("block regions==3", st.regions == NB);
+  expect("block ops==3", g.ops.size() == (size_t)NB);  // 1 vec NORMAL each
+  expect("block terms==3", tt.size() == (size_t)NB);
+  int acc = tt[0];
+  for (size_t k = 1; k < tt.size(); ++k) {
+    const int s = g.add_slot(1, false);
+    g.add_op(OP_ADD_N, {acc, tt[k]}, s);
+    acc = s;
+  }
+  g.result_slot = acc;
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("block sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("block v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
 // ---- end to end through compile_model ------------------------------------
 
 static std::string slurp(const char* p) {
@@ -336,6 +447,8 @@ int main() {
   test_bail_nonterm_density();
   test_bail_partial_range();
   test_env_disable();
+  test_first_lane_anomalous();
+  test_block_structured();
   test_e2e_fixtures();
   if (failures) { std::printf("%d failures\n", failures); return 1; }
   std::printf("test_reroll OK\n");

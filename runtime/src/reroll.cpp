@@ -20,12 +20,18 @@
 // density: the vector kernels already return the summed lp, which also
 // deletes the region's share of the ADD_N reduction tree.
 //
-// Anything unclassifiable bails per-region, never per-model: cross-lane
-// reads (parameter recurrences), partial/strided INDEX progressions,
-// outputs escaping the lane, non-allowlisted opcodes.
+// Failed classifications report the longest still-classifiable lane
+// prefix and retry with it. This is what handles block-structured data
+// (rats_model: obs sorted time-major, so INDEX idata restarts 0..29 every
+// time block): each block classifies as its own region and the scan
+// resumes at the block boundary. Anything unclassifiable bails per-region,
+// never per-model: cross-lane reads (parameter recurrences), partial or
+// strided INDEX progressions, outputs escaping the lane, opcodes outside
+// the vocabulary.
 #include <stanrt/optable.hpp>
 #include <stanrt/reroll.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
@@ -34,8 +40,9 @@
 namespace stanrt {
 namespace {
 
-constexpr int kMinLanes = 4;
+constexpr int64_t kMinLanes = 4;
 constexpr int kMaxPeriod = 32;
+constexpr int kMaxClassifyAttempts = 6;
 
 // Real-argument lpdfs whose vector instantiation returns the summed lp
 // with per-element partials (densities.cpp bind_args shape dispatch).
@@ -129,6 +136,17 @@ RerollStats reroll(Graph& g,
 
   std::unordered_set<int> term_set(target_terms.begin(), target_terms.end());
 
+  // Scan-cost control: after a hard classification failure (prefix 0,
+  // lane-independent evidence) the run gets one more attempt one lane in,
+  // then is skipped wholesale for that period. Soft failures (positive
+  // prefix) always re-attempt at the reported boundary. Without this,
+  // graphs made of enormous near-periodic runs go quadratic (ldaK5:
+  // 1.03M ops in 33k-lane log_sum_exp lanes hung the pass; its runs are
+  // now pruned by the density pre-check before lane counting).
+  std::vector<size_t> retry_at((size_t)kMaxPeriod + 1, 0);
+  std::vector<size_t> fail_end((size_t)kMaxPeriod + 1, 0);
+  std::vector<bool> hard_failed((size_t)kMaxPeriod + 1, false);
+
   std::vector<Op> result;
   result.reserve(g.ops.size());
   size_t i = 0;
@@ -136,8 +154,18 @@ RerollStats reroll(Graph& g,
     bool rewrote = false;
     for (int P = 1; P <= kMaxPeriod && i + 2 * (size_t)P <= g.ops.size();
          ++P) {
+      if (i < retry_at[(size_t)P]) continue;
+      // Cheap pre-check before any lane counting: a profitable region
+      // must contain an allowlisted density whose out is a target term.
+      bool candidate = false;
+      for (int p = 0; p < P && !candidate; ++p) {
+        const Op& t = g.ops[i + p];
+        candidate = is_density(t.opcode) && term_set.count(t.out) != 0;
+      }
+      if (!candidate) continue;
+
       // Count template-matching lanes.
-      int L = 1;
+      int64_t L = 1;
       while (i + ((size_t)L + 1) * P <= g.ops.size()) {
         bool match = true;
         for (int p = 0; p < P && match; ++p)
@@ -147,121 +175,192 @@ RerollStats reroll(Graph& g,
       }
       if (L < kMinLanes) continue;
 
-      const auto op_at = [&](int p, int l) -> const Op& {
+      const auto op_at = [&](int p, int64_t l) -> const Op& {
         return g.ops[i + (size_t)l * P + p];
       };
 
-      // ---- classify ----
-      std::vector<Pos> pos((size_t)P);
-      std::unordered_map<int, int> lane0_producer;  // lane-0 out -> position
-      bool ok = true;
-      bool any_term_density = false;
-      for (int p = 0; p < P && ok; ++p) {
-        const Op& t = op_at(p, 0);
-        Pos& ap = pos[p];
-        ap.ins.resize(t.n_in);
-        bool all_inputs_invariant = true;
-        for (int j = 0; j < t.n_in && ok; ++j) {
-          bool invariant = true;
-          for (int l = 1; l < L && invariant; ++l)
-            invariant = op_at(p, l).in[j] == t.in[j];
-          if (invariant) {
-            ap.ins[j].kind = InKind::kInvariant;
-            continue;
-          }
-          all_inputs_invariant = false;
-          auto pit = lane0_producer.find(t.in[j]);
-          if (pit != lane0_producer.end()) {
-            bool local = true;
-            for (int l = 1; l < L && local; ++l)
-              local = op_at(p, l).in[j] == op_at(pit->second, l).out;
-            if (local) {
-              ap.ins[j].kind = InKind::kLaneLocal;
-              ap.ins[j].producer_pos = pit->second;
+      // ---- classify, shrinking to the reported prefix on failure ----
+      std::vector<Pos> pos;
+      int64_t Luse = L;
+      bool classified = false;
+      for (int attempt = 0;
+           attempt < kMaxClassifyAttempts && Luse >= kMinLanes; ++attempt) {
+        int64_t prefix = Luse;
+        pos.assign((size_t)P, Pos{});
+        std::unordered_map<int, int> lane0_producer;
+        bool ok = true;
+        bool any_term_density = false;
+        for (int p = 0; p < P; ++p) {
+          const Op& t = op_at(p, 0);
+          Pos& ap = pos[p];
+          ap.ins.resize(t.n_in);
+          bool all_inputs_invariant = true;
+          for (int j = 0; j < t.n_in; ++j) {
+            // Longest lane prefix under each interpretation; pick the
+            // interpretation valid for all Luse lanes, else bound prefix.
+            int64_t br_inv = Luse;
+            for (int64_t l = 1; l < Luse; ++l)
+              if (op_at(p, l).in[j] != t.in[j]) {
+                br_inv = l;
+                break;
+              }
+            if (br_inv == Luse) {
+              ap.ins[j].kind = InKind::kInvariant;
               continue;
             }
-          }
-          std::vector<double> vals((size_t)L);
-          bool all_const = true;
-          for (int l = 0; l < L && all_const; ++l) {
-            auto cit = const_val.find(op_at(p, l).in[j]);
-            if (cit == const_val.end())
-              all_const = false;
-            else
-              vals[(size_t)l] = cit->second;
-          }
-          if (all_const) {
-            ap.ins[j].kind = InKind::kConstLanes;
-            ap.ins[j].values = std::move(vals);
-            continue;
-          }
-          ok = false;  // cross-lane read or otherwise unclassifiable
-        }
-        if (!ok) break;
-
-        // Output discipline. A lane's output may be consumed only by later
-        // ops of the same lane instance; density outputs may instead be
-        // target terms (and then must have no op consumers at all).
-        bool outs_are_terms = true;
-        bool outs_lane_internal = true;
-        for (int l = 0; l < L; ++l) {
-          const int o = op_at(p, l).out;
-          if (!term_set.count(o)) outs_are_terms = false;
-          auto uit = uses.find(o);
-          if (uit == uses.end()) continue;
-          for (size_t u : uit->second) {
-            const bool inside = u > i + (size_t)l * P + p &&
-                                u < i + ((size_t)l + 1) * P;
-            if (!inside) outs_lane_internal = false;
-          }
-        }
-
-        // Position-level classification.
-        if (t.opcode == OP_INDEX) {
-          if (ap.ins[0].kind != InKind::kInvariant || !outs_lane_internal ||
-              term_set.count(t.out)) {
+            all_inputs_invariant = false;
+            int64_t br_local = 0;
+            auto pit = lane0_producer.find(t.in[j]);
+            if (pit != lane0_producer.end()) {
+              br_local = Luse;
+              for (int64_t l = 1; l < Luse; ++l)
+                if (op_at(p, l).in[j] != op_at(pit->second, l).out) {
+                  br_local = l;
+                  break;
+                }
+              if (br_local == Luse) {
+                ap.ins[j].kind = InKind::kLaneLocal;
+                ap.ins[j].producer_pos = pit->second;
+                continue;
+              }
+            }
+            int64_t br_const = Luse;
+            std::vector<double> vals;
+            vals.reserve((size_t)Luse);
+            for (int64_t l = 0; l < Luse; ++l) {
+              auto cit = const_val.find(op_at(p, l).in[j]);
+              if (cit == const_val.end()) {
+                br_const = l;
+                break;
+              }
+              vals.push_back(cit->second);
+            }
+            if (br_const == Luse) {
+              ap.ins[j].kind = InKind::kConstLanes;
+              ap.ins[j].values = std::move(vals);
+              continue;
+            }
             ok = false;
-            break;
+            prefix =
+                std::min(prefix, std::max({br_inv, br_local, br_const}));
           }
-          bool idata_invariant = true, progression = true;
-          for (int l = 0; l < L; ++l) {
-            const int v = op_at(p, l).idata[0];
-            if (v != t.idata[0]) idata_invariant = false;
-            if (v != l) progression = false;
-          }
-          if (progression && g.slots[t.in[0]].len == L) {
-            ap.index_elision = true;
-          } else if (idata_invariant) {
-            ap.hoist = true;
-          } else {
-            ok = false;  // partial or strided progression: bail (v1)
-          }
-        } else if (is_density(t.opcode) && outs_are_terms) {
-          auto uit = uses.find(t.out);
-          if (uit != uses.end() && !uit->second.empty()) {
-            ok = false;  // a term that is also an op input: leave alone
-          } else {
-            ap.term_density = true;
-            any_term_density = true;
-          }
-        } else if (all_inputs_invariant && !term_set.count(t.out) &&
-                   outs_lane_internal) {
-          ap.hoist = true;
-        } else if (is_widenable(t.opcode) && !term_set.count(t.out) &&
-                   outs_lane_internal) {
-          // widened in the rewrite below
-        } else {
-          ok = false;
-        }
-        if (ok) lane0_producer[t.out] = p;
-      }
-      if (!ok || !any_term_density) continue;
 
-      // ---- rewrite ----
+          // Output discipline prefixes. A lane's out may be consumed only
+          // by later ops of its own lane instance; density outs may
+          // instead be target terms (with no op consumers at all).
+          int64_t br_term = Luse;     // lanes whose out IS a term
+          int64_t br_nonterm = Luse;  // lanes whose out is NOT a term
+          int64_t br_internal = Luse; // lanes whose consumers stay inside
+          for (int64_t l = 0; l < Luse; ++l) {
+            const int o = op_at(p, l).out;
+            const bool is_term = term_set.count(o) != 0;
+            if (!is_term && br_term == Luse) br_term = l;
+            if (is_term && br_nonterm == Luse) br_nonterm = l;
+            if (br_internal == Luse) {
+              auto uit = uses.find(o);
+              if (uit != uses.end())
+                for (size_t u : uit->second) {
+                  const bool inside = u > i + (size_t)l * P + p &&
+                                      u < i + ((size_t)l + 1) * P;
+                  if (!inside) {
+                    br_internal = l;
+                    break;
+                  }
+                }
+            }
+          }
+
+          // Position-level classification.
+          if (t.opcode == OP_INDEX) {
+            int64_t br_prog = Luse, br_iinv = Luse;
+            for (int64_t l = 0; l < Luse; ++l) {
+              const int v = op_at(p, l).idata[0];
+              if (v != l && br_prog == Luse) br_prog = l;
+              if (v != t.idata[0] && br_iinv == Luse) br_iinv = l;
+            }
+            const int64_t blen = g.slots[t.in[0]].len;
+            const int64_t io_ok = std::min(br_internal, br_nonterm);
+            if (ap.ins[0].kind == InKind::kInvariant && br_prog == Luse &&
+                blen == Luse && io_ok == Luse) {
+              ap.index_elision = true;
+            } else if (ap.ins[0].kind == InKind::kInvariant &&
+                       br_iinv == Luse && io_ok == Luse) {
+              ap.hoist = true;
+            } else {
+              ok = false;
+              // Elision works at exactly len(base) lanes if the
+              // progression covers them; hoisting at the idata-invariant
+              // prefix. Either is bounded by output discipline.
+              int64_t cand = br_iinv;
+              if (blen <= br_prog) cand = std::max(cand, blen);
+              prefix = std::min(prefix, std::min(cand, io_ok));
+            }
+          } else if (is_density(t.opcode)) {
+            if (br_term < Luse) {
+              ok = false;
+              prefix = std::min(prefix, br_term);
+            } else {
+              auto uit = uses.find(t.out);
+              if (uit != uses.end() && !uit->second.empty()) {
+                ok = false;
+                prefix = 0;  // a term that is also an op input
+              } else {
+                ap.term_density = true;
+                any_term_density = true;
+              }
+            }
+          } else if (all_inputs_invariant) {
+            const int64_t io_ok = std::min(br_internal, br_nonterm);
+            if (io_ok == Luse) {
+              ap.hoist = true;
+            } else {
+              ok = false;
+              prefix = std::min(prefix, io_ok);
+            }
+          } else if (is_widenable(t.opcode)) {
+            const int64_t io_ok = std::min(br_internal, br_nonterm);
+            if (io_ok < Luse) {
+              ok = false;
+              prefix = std::min(prefix, io_ok);
+            }
+          } else {
+            ok = false;
+            prefix = 0;  // opcode outside the vocabulary: no prefix helps
+          }
+          lane0_producer[t.out] = p;
+        }
+        if (ok && any_term_density) {
+          classified = true;
+          break;
+        }
+        if (ok && !any_term_density) prefix = 0;  // classifiable but useless
+        if (prefix >= Luse) prefix = Luse - 1;    // guarantee progress
+        Luse = prefix;
+      }
+
+      if (!classified) {
+        // Bookkeeping. Soft failures (positive prefix) re-attempt at the
+        // reported boundary; hard failures (prefix 0) get one second
+        // chance one lane in, then the whole run is skipped.
+        const size_t run_end = i + (size_t)P * (size_t)L;
+        if (Luse > 0) {
+          retry_at[(size_t)P] = i + (size_t)P * (size_t)Luse;
+          hard_failed[(size_t)P] = false;
+        } else if (hard_failed[(size_t)P] && i < fail_end[(size_t)P]) {
+          retry_at[(size_t)P] = fail_end[(size_t)P];
+        } else {
+          fail_end[(size_t)P] = run_end;
+          hard_failed[(size_t)P] = true;
+          retry_at[(size_t)P] = i + (size_t)P;
+        }
+        continue;
+      }
+
+      // ---- rewrite the classified prefix [i, i + P*Luse) ----
       std::vector<int> pos_out((size_t)P, -1);
       for (int p = 0; p < P; ++p) {
         const Op& t = op_at(p, 0);
-        Pos& ap = pos[p];
+        Pos& ap = pos[(size_t)p];
         if (ap.index_elision) {
           pos_out[(size_t)p] = t.in[0];
           continue;
@@ -280,7 +379,7 @@ RerollStats reroll(Graph& g,
               op.in[j] = pos_out[(size_t)ap.ins[j].producer_pos];
               break;
             case InKind::kConstLanes: {
-              const int cs = g.add_slot(L, false);
+              const int cs = g.add_slot(Luse, false);
               fills.emplace_back(cs, ap.ins[j].values);
               op.in[j] = cs;
               break;
@@ -291,10 +390,10 @@ RerollStats reroll(Graph& g,
         }
         if (ap.term_density) {
           op.out = g.add_slot(1, false);
-          // Swap the L lane terms for the one summed term, at the first
-          // lane's position.
+          // Swap the Luse lane terms for the one summed term, at the
+          // first lane's position.
           std::unordered_set<int> dead;
-          for (int l = 0; l < L; ++l) dead.insert(op_at(p, l).out);
+          for (int64_t l = 0; l < Luse; ++l) dead.insert(op_at(p, l).out);
           std::vector<int> next_terms;
           next_terms.reserve(target_terms.size());
           bool placed = false;
@@ -312,12 +411,12 @@ RerollStats reroll(Graph& g,
           for (int s : dead) term_set.erase(s);
           term_set.insert(op.out);
         } else {
-          op.out = g.add_slot(L, false);
+          op.out = g.add_slot(Luse, false);
         }
         pos_out[(size_t)p] = op.out;
         result.push_back(op);
       }
-      i += (size_t)P * L;
+      i += (size_t)P * (size_t)Luse;
       ++st.regions;
       rewrote = true;
       break;
