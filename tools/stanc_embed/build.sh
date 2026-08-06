@@ -17,5 +17,8 @@ eval "$(opam env --switch="$SWITCH")"
    2>&1 | tail -5 ||
  dune build --profile release src/stanc_embed 2>&1 | tail -5)
 OBJ=$(find "$SRC/_build" -path '*/src/stanc_embed/stanc_embed*.o' | head -1)
-cp "$OBJ" deps/stanc3/stanc_embed.o
+# -f: dune's _build artifacts are read-only, and so is a previous copy.
+rm -f deps/stanc3/stanc_embed.o
+cp -f "$OBJ" deps/stanc3/stanc_embed.o
+chmod u+w deps/stanc3/stanc_embed.o
 echo "embedded stanc object: deps/stanc3/stanc_embed.o ($(du -h deps/stanc3/stanc_embed.o | cut -f1))"

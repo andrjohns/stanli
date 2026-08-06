@@ -70,10 +70,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 11 MB object, ~30 minutes to build. Keyed on the stanc3 commit and
-      # the OCaml version, so a hit skips the entire opam path below. The
-      # caml/ headers ride along because the link needs them and a hit
-      # means no opam switch exists to take them from.
+      # 11 MB object, ~30 minutes to build. Keyed on the stanc3 commit,
+      # the OCaml version, and the embed shim itself, so editing the shim
+      # or its link flags rebuilds instead of reusing a stale object. A
+      # hit skips the entire opam path below. The caml/ headers ride along
+      # because the link needs them and a hit means no opam switch exists
+      # to take them from.
       - name: Restore the embedded stanc3 object
         id: stanc-cache
         uses: actions/cache@v4
@@ -81,7 +83,7 @@ jobs:
           path: |
             deps/stanc3/stanc_embed.o
             deps/ocaml-include
-          key: stanc-embed-${{ matrix.plat }}-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}
+          key: stanc-embed-${{ matrix.plat }}-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-${{ hashFiles('tools/stanc_embed/**') }}
 
       - name: System packages (manylinux)
         if: matrix.container != ''
