@@ -124,12 +124,9 @@ void log_softmax_bwd(KernelCtx& ctx) {
 void register_legacy_kernels() {
   register_kernel(OP_LOG_SOFTMAX,
                   Kernel{log_softmax_fwd, log_softmax_bwd, nullptr});
-  register_kernel(OP_LOG_SUM_EXP, Kernel{lse_fwd, lse_bwd, nullptr});
   register_kernel(OP_SOFTMAX, Kernel{softmax_fwd, softmax_bwd, nullptr});
   register_kernel(OP_DIRICHLET_LPDF,
                   Kernel{dirichlet_fwd, dirichlet_bwd, nullptr});
-  register_kernel(OP_LSE2, Kernel{lse2_fwd, lse2_bwd, nullptr});
-  register_kernel(OP_LOG_MIX, Kernel{log_mix_fwd, log_mix_bwd, nullptr});
 }
 
 }  // namespace stanli

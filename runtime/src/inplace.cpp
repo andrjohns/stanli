@@ -54,6 +54,14 @@ bool backward_ignores_input_values(uint16_t oc) {
     case OP_GATHER:
     case OP_SET_INDEX:
     case OP_SET_INDEX_INPLACE:
+    // Since runtime/kernels/mixture.cpp made these native, their partials
+    // live in scratch (which destructive writes never touch) rather than
+    // being recomputed from the inputs. That is what lets the HMM forward
+    // algorithm -- fill `acc` element by element, read it whole -- take
+    // the destructive path.
+    case OP_LOG_SUM_EXP:
+    case OP_LSE2:
+    case OP_LOG_MIX:
       return true;
     default:
       return false;

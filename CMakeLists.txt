@@ -65,6 +65,7 @@ add_library(stanli_shared SHARED
   runtime/kernels/ode.cpp
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
+  runtime/kernels/mixture.cpp
   runtime/src/nuts.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp
@@ -115,6 +116,7 @@ add_library(stanli STATIC
   runtime/kernels/ode.cpp
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
+  runtime/kernels/mixture.cpp
   runtime/src/nuts.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp

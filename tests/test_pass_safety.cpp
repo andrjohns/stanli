@@ -41,13 +41,20 @@ static std::vector<double> route_adjoints(uint16_t oc, bool poison) {
   const int64_t N = 6;
   std::vector<double> vec(N), out(N, 0.0), scalar{0.75};
   std::vector<double> vec_adj(N, 0.0), out_adj(N, 0.0), scalar_adj{0.0};
+  // Extra operands for the multi-argument mixture ops, and the scratch the
+  // native ones stash partials in (a separate arena a destructive write
+  // never touches -- which is exactly why their backward is value-free).
+  std::vector<double> scratch((size_t)N + 4, 0.0);
+  std::vector<double> b_in{0.4}, c_in{-0.2}, b_adj{0.0}, c_adj{0.0};
   for (int64_t i = 0; i < N; ++i) vec[i] = 0.5 + 0.25 * i;
   std::vector<int> idata;
   KernelCtx ctx;
   ctx.n_in = 1;
   ctx.in[0] = Desc{vec.data(), N};
   ctx.in_adj[0] = Desc{vec_adj.data(), N};
+  ctx.scratch = scratch.data();
   int64_t out_len = N;
+  bool scalar_out = false;
   switch (oc) {
     case OP_INDEX:
       idata = {3};
@@ -73,6 +80,33 @@ static std::vector<double> route_adjoints(uint16_t oc, bool poison) {
       ctx.in[1] = Desc{scalar.data(), 1};
       ctx.in_adj[1] = Desc{scalar_adj.data(), 1};
       break;
+    case OP_LOG_SUM_EXP:
+      out_len = 1;
+      scalar_out = true;
+      break;
+    case OP_LSE2:
+      // Two scalar inputs; reuse the vector buffer's first element.
+      ctx.n_in = 2;
+      ctx.in[0] = Desc{vec.data(), 1};
+      ctx.in[1] = Desc{b_in.data(), 1};
+      ctx.in_adj[0] = Desc{vec_adj.data(), 1};
+      ctx.in_adj[1] = Desc{b_adj.data(), 1};
+      out_len = 1;
+      scalar_out = true;
+      break;
+    case OP_LOG_MIX:
+      // theta must be a probability.
+      vec[0] = 0.35;
+      ctx.n_in = 3;
+      ctx.in[0] = Desc{vec.data(), 1};
+      ctx.in[1] = Desc{b_in.data(), 1};
+      ctx.in[2] = Desc{c_in.data(), 1};
+      ctx.in_adj[0] = Desc{vec_adj.data(), 1};
+      ctx.in_adj[1] = Desc{b_adj.data(), 1};
+      ctx.in_adj[2] = Desc{c_adj.data(), 1};
+      out_len = 1;
+      scalar_out = true;
+      break;
     default:
       return {};
   }
@@ -89,11 +123,14 @@ static std::vector<double> route_adjoints(uint16_t oc, bool poison) {
   // write would. Adjoint buffers are deliberately left alone.
   for (int64_t i = 0; i < out_len; ++i) out_adj[i] = 1.0 + 0.5 * i;
   ctx.out_adj = out_adj[0];
+  (void)scalar_out;
   ctx.out_adj_vec = Desc{aliased ? out_adj.data() : out_adj.data(), out_len};
   if (poison) {
     const double nan = std::nan("");
     for (int64_t i = 0; i < N; ++i) vec[i] = nan;
     scalar[0] = nan;
+    b_in[0] = nan;
+    c_in[0] = nan;
     if (!aliased)
       for (int64_t i = 0; i < out_len; ++i) out[i] = nan;
   }
@@ -101,6 +138,8 @@ static std::vector<double> route_adjoints(uint16_t oc, bool poison) {
 
   std::vector<double> got = vec_adj;
   got.push_back(scalar_adj[0]);
+  got.push_back(b_adj[0]);
+  got.push_back(c_adj[0]);
   return got;
 }
 

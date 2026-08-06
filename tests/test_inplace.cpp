@@ -187,12 +187,16 @@ static void test_bail_root() {
 }
 
 // The hmm_example shape, and the reason a last-use rule alone is not
-// enough: `acc` is filled element by element, read WHOLE by log_sum_exp,
-// then refilled for the next time step. log_sum_exp's backward replays
-// the function on its input values (legacy_bwd_vec_in), so those values
-// must still be there during the reverse sweep -- a destructive refill
-// would hand it the next step's numbers. Caught by the corpus A/B: 8
-// models, deviations up to 1.7e+05 relative.
+// enough: `acc` is filled element by element, read WHOLE, then refilled
+// for the next time step. A legacy nested-replay backward replays the
+// function on its input values, so those values must still be there
+// during the reverse sweep -- a destructive refill would hand it the next
+// step's numbers. Caught by the corpus A/B: 8 models, deviations up to
+// 1.7e+05 relative.
+//
+// The reader here is softmax, which is still legacy. log_sum_exp used to
+// play this role and no longer does: mixture.cpp made it native, so its
+// partials live in scratch and it stopped blocking (see the test below).
 static void test_bail_value_reading_consumer() {
   const int K = 2, T = 4;
   Graph g;
@@ -218,9 +222,11 @@ static void test_bail_value_reading_consumer() {
       g.add_op(OP_SET_INDEX, {acc, v}, nxt, {k});
       acc = nxt;
     }
-    const int lse = g.add_slot(1, false);
-    g.add_op(OP_LOG_SUM_EXP, {acc}, lse);  // reads the WHOLE vector
-    terms.push_back(lse);
+    const int sm = g.add_slot(K, false);
+    g.add_op(OP_SOFTMAX, {acc}, sm);  // legacy: replays on the values
+    const int s = g.add_slot(1, false);
+    g.add_op(OP_SUM_VEC, {sm}, s);
+    terms.push_back(s);
   }
   Graph ref = g;
   reduce_into_result(ref, terms);
@@ -303,8 +309,52 @@ static void test_keeps_live_writes() {
     expect_close(("live v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
+// The same shape with log_sum_exp, which mixture.cpp made native: its
+// partials are stashed in scratch, so nothing needs the buffer's values
+// at reverse time and every write after the first may be destructive.
+static void test_native_lse_allows_destructive() {
+  const int K = 2, T = 4;
+  Graph g;
+  Fills fills;
+  const int mu = g.add_slot(1, true);
+  const int acc0 = g.add_slot(K, false);
+  fills.emplace_back(acc0, std::vector<double>((size_t)K, 0.0));
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> terms;
+  int acc = acc0;
+  for (int t = 0; t < T; ++t) {
+    for (int k = 0; k < K; ++k) {
+      const int v = g.add_slot(1, false);
+      g.add_op(OP_MUL, {mu, cslot(0.3 + 0.9 * t * (k + 1))}, v);
+      const int nxt = g.add_slot(K, false);
+      g.add_op(OP_SET_INDEX, {acc, v}, nxt, {k});
+      acc = nxt;
+    }
+    const int lse = g.add_slot(1, false);
+    g.add_op(OP_LOG_SUM_EXP, {acc}, lse);
+    terms.push_back(lse);
+  }
+  Graph ref = g;
+  reduce_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  const int n_inplace = make_inplace_updates(g, {});
+  // Only the first write, whose source is the fill-backed acc0, copies.
+  expect("native lse frees every later write", n_inplace == T * K - 1);
+  reduce_into_result(g, terms);
+  const std::vector<double> got = run_grad_twice(std::move(g), fills);
+  expect("native lse sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("nlse v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
 int main() {
   test_chain_collapses();
+  test_native_lse_allows_destructive();
   test_store_to_load_forwarding();
   test_keeps_live_writes();
   test_bail_value_reading_consumer();
