@@ -13,7 +13,7 @@ pip install stanli
 ```
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
-  (gradient 1.1x-6.2x faster on seven of the eight benchmark models,
+  (gradient 1.1x-6.2x faster on nine of the ten benchmark models,
   0.53x on the one that still defeats the re-roll pass;
   time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
@@ -242,7 +242,7 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 17/17 tests green; 119/120 posteriordb models
+macOS arm64 / clang: 20/20 tests green; 119/120 posteriordb models
 compile and evaluate, 118 of them CmdStan-verified. Of the two that are
 not: `sir`'s ODE solution dips ~1e-9 below a declared lower bound at
 every shared evaluation point and CmdStan rejects it there too, and

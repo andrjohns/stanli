@@ -84,14 +84,16 @@ both sides `-O3` with FP contraction pinned off:
 
 | model | params | stanli | CmdStan | speedup |
 | --- | ---: | ---: | ---: | ---: |
-| `radon_pooled` | 3 | 52.7 us | 325.9 us | **6.2x** |
-| `arK` | 7 | 2.4 us | 12.0 us | **4.9x** |
-| `bym2_offset_only` | 3845 | 40.1 us | 122.0 us | **3.0x** |
-| `kidscore_momiq` | 3 | 1.9 us | 3.9 us | **2.1x** |
-| `eight_schools_noncentered` | 10 | 0.28 us | 0.56 us | **2.0x** |
-| `lsat_model` | 1006 | 46.2 us | 91.6 us | **2.0x** |
-| `wells_dist100ars_model` | 3 | 17.3 us | 18.3 us | **1.1x** |
-| `low_dim_gauss_mix` | 5 | 184.5 us | 98.2 us | 0.53x |
+| `radon_pooled` | 3 | 53.1 us | 328.1 us | **6.2x** |
+| `radon_hierarchical_intercept_centered` | 391 | 112.1 us | 574.2 us | **5.1x** |
+| `arK` | 7 | 2.5 us | 11.9 us | **4.8x** |
+| `radon_county_intercept` | 388 | 90.4 us | 431.5 us | **4.8x** |
+| `bym2_offset_only` | 3845 | 40.0 us | 125.4 us | **3.1x** |
+| `eight_schools_noncentered` | 10 | 0.28 us | 0.64 us | **2.3x** |
+| `kidscore_momiq` | 3 | 1.9 us | 3.9 us | **2.0x** |
+| `lsat_model` | 1006 | 46.6 us | 91.2 us | **2.0x** |
+| `wells_dist100ars_model` | 3 | 17.3 us | 18.4 us | **1.1x** |
+| `low_dim_gauss_mix` | 5 | 186.4 us | 98.9 us | 0.53x |
 
 The wins come from op granularity. CmdStan's var tape allocates, walks, and
 frees one node per scalar operation per leapfrog step; stanli pays a fixed
@@ -143,10 +145,18 @@ about 410 KB.
 ## Status
 
 Early, and deliberately narrow. The sampler is Stan's own NUTS with
-diagonal-metric adaptation; there is no variational inference, no
-optimization, no multi-chain threading, and no generated quantities block
-yet. What is here is verified against CmdStan model by model, and every
-number on this page is reproducible from the repository.
+diagonal-metric adaptation. Known limits, stated plainly:
+
+- `sample()` returns declared parameters only. Transformed parameters and
+  generated quantities are computed by the runtime and written by the
+  command line tool, but are not exposed through the Python API yet, so
+  the non-centered eight schools gives you `mu`, `tau`, and
+  `theta_tilde`, not `theta`.
+- No variational inference, no optimization, no multi-chain threading.
+- No convergence diagnostics. Pair it with ArviZ or similar for now.
+
+What is here is verified against CmdStan model by model, and every number
+on this page is reproducible from the repository.
 
 - Source, issues, and roadmap:
   [github.com/seantalts/stanli](https://github.com/seantalts/stanli)
