@@ -140,37 +140,10 @@ rest is the Stan compiler and the math library, which is the trade the
 design makes: ship every kernel and the compiler once so that nothing is
 built on the user's machine.
 
-Within the OCaml half, stanc3's own modules are 2.74 MB and its
-dependencies 3.01 MB (Jane Street Base and Core 1.66 MB, OCaml stdlib
-1.07 MB, Yojson and Menhir 0.28 MB). The OCaml C runtime itself is only
-290 KB, and a third of that is link tables rather than code.
-
-Two things the linker cannot do here. `ocamlopt` does not set
-`MH_SUBSECTIONS_VIA_SYMBOLS` on its output (and this switch was built
-without `--enable-function-sections`), so `-dead_strip` cannot reach
-inside the compiler object at all: the whole 11 MB is one indivisible
-atom, and stripping recovers 117 KB, all of it from the C++ side.
-Module-level selection does work, and already happens at link time
-(`base.a` is 3.8 MB on disk, of which 1.6 MB is linked).
-
-Rebuilding the compiler with `--enable-function-sections` would not buy
-much either, and the ceiling is measurable without building it: model the
-linker at its finest possible granularity, one node per defined symbol
-with an edge wherever a relocation inside one symbol names another, and
-96.4% of the object is reachable from its entry points. Only 220 KB of
-6.06 MB is not, most of it module initializers a linker keeps anyway.
-OCaml's module blocks hold closures for every top-level function in the
-module, so function-level stripping has almost nothing to bite on.
-
-Bytecode is the one large lever measured so far: `(modes (byte object))`
-produces a 10.5 MB library, 3.7 MB smaller. Three effects, and the
-largest is not the one folklore expects: global static data is marshalled
-rather than laid out as a relocated object graph (3.01 MB to 984 KB),
-per-function unwind and exception metadata disappears (531 KB of
-`__eh_frame` to 828 bytes), and code compresses only 1.35x (2.79 MB of
-ARM64 to 2.06 MB of bytecode). The interpreter itself costs 11 KB. The
-price is roughly 8x slower model compilation, 2 ms to 18 ms for eight
-schools, and that trade is not taken.
+Shrinking it further has been measured and declined: dead-code stripping
+cannot reach inside the OCaml object (96.4% of it is reachable from its
+entry points anyway), and compiling stanc3 to bytecode saves 3.7 MB at
+the cost of ~8x slower model compilation.
 
 ## Python
 
@@ -249,15 +222,14 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 21/21 tests green; 119/120 posteriordb models
-compile and evaluate, 118 of them CmdStan-verified. Of the two that are
-not: `sir`'s ODE solution dips ~1e-9 below a declared lower bound at
-every shared evaluation point and CmdStan rejects it there too, and
-`kronecker_gp` matches on lp and 436 of 438 gradients but differs on the
-two that flow through eigenvectors of a nearly degenerate covariance
-(see the note in the corpus status). Sampling-semantics gradients (propto with
-per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
-for the numbers.
+21/21 tests green, built and tested in CI on macOS (arm64, x86_64) and
+manylinux (x86_64, aarch64). 119/120 posteriordb models compile and
+evaluate, 118 of them CmdStan-verified. Of the two that are not: `sir`'s
+ODE solution dips ~1e-9 below a declared lower bound at every shared
+evaluation point and CmdStan rejects it there too, and `kronecker_gp`
+matches on lp and 436 of 438 gradients but differs on the two that flow
+through eigenvectors of a nearly degenerate covariance (see the note in
+the corpus status).
 
 ## Roadmap
 
