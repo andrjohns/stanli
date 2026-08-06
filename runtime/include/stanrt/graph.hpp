@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <vector>
 
 namespace stanrt {
@@ -34,6 +35,9 @@ struct Op {
   int n_in = 0;
   const int* idata = nullptr;  // integer immediates (outcome counts, dims)
   int64_t n_idata = 0;
+  // Opaque per-op payload for kernels that need compile-time structure the
+  // integer immediates cannot carry (today: the ODE right-hand side).
+  const void* udata = nullptr;
   int64_t scratch_off = 0;  // into the scratch arena (filled at bind)
   int64_t scratch_len = 0;
 };
@@ -42,6 +46,9 @@ struct Graph {
   std::vector<Slot> slots;
   std::vector<Op> ops;
   std::vector<std::vector<int>> idata_pool;  // owns per-op integer arrays
+  // Owns per-op opaque payloads (ODE specs); pointers into this outlive
+  // lowering because the graph is moved, never copied element-wise.
+  std::vector<std::shared_ptr<void>> udata_pool;
   int result_slot = -1;
 
   int add_slot(int64_t len, bool is_param) {
@@ -76,6 +83,7 @@ struct KernelCtx {
   double* scratch = nullptr;
   const int* idata = nullptr;
   int64_t n_idata = 0;
+  const void* udata = nullptr;
   Desc out2{nullptr, 0};      // second output value (scalar), if any
   // Backward only. Data inputs get {nullptr, len}: kernels skip them.
   Desc in_adj[6];

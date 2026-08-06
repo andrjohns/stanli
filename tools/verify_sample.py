@@ -13,12 +13,30 @@ Usage: tools/verify_sample.py CMDSTAN_DIR PDB_DIR model1 model2 ...
 """
 import json
 import pathlib
+import struct
 import subprocess
 import sys
 import tempfile
 import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def write_results(results):
+    """Merge into the machine-readable record the corpus scoreboard reads."""
+    out = REPO / "docs" / "verification.json"
+    prev = json.loads(out.read_text()) if out.exists() else {}
+    prev.update(results)
+    out.write_text(json.dumps(prev, indent=1, sort_keys=True) + "\n")
+
+
+def ulp_distance(a, b):
+    """Distance in representable doubles; 0 means bitwise identical."""
+    if a == b:
+        return 0
+    ia, ib = (struct.unpack("<q", struct.pack("<d", v))[0] for v in (a, b))
+    key = lambda i: (-(1 << 63)) - i if i < 0 else i
+    return abs(key(ia) - key(ib))
 
 
 def main():
@@ -41,6 +59,7 @@ def main():
         datas.setdefault(meta["model_name"], meta["data_name"])
 
     n_pass = 0
+    results = {}
     for model in models:
         stan = pdb / "models" / "stan" / f"{model}.stan"
         dz = pdb / "data" / "data" / f"{datas[model]}.json.zip"
@@ -71,9 +90,13 @@ def main():
 
         ref = subprocess.run([str(exe), str(dj)], capture_output=True,
                              text=True).stdout.split()
-        got = subprocess.run([str(REPO / "build/stanrt_check"), str(stan),
-                              str(dj)], capture_output=True, text=True,
-                             cwd=REPO).stdout.split()
+        try:
+            got = subprocess.run([str(REPO / "build/stanrt_check"), str(stan),
+                                  str(dj)], capture_output=True, text=True,
+                                 cwd=REPO, timeout=300).stdout.split()
+        except subprocess.TimeoutExpired:
+            print(f"TIMEOUT {model}")
+            continue
         if not ref or ref[0] != "OK" or not got or got[0] != "OK":
             print(f"RUN_FAIL {model}: ref={ref[:2]} got={got[:2]}")
             continue
@@ -84,15 +107,21 @@ def main():
             print(f"SHAPE_FAIL {model}: {len(rv)} vs {len(gv)}")
             continue
         worst = 0.0
+        worst_ulp = 0
         for a, b in zip(rv, gv):
             scale = max(abs(a), abs(b), 1.0)
             worst = max(worst, abs(a - b) / scale)
+            worst_ulp = max(worst_ulp, ulp_distance(a, b))
         status = "VERIFIED" if worst < 1e-10 else "MISMATCH"
         if status == "VERIFIED":
             n_pass += 1
-        print(f"{status} {model}: max rel diff {worst:.2e} over lp + "
-              f"{len(rv) - 1} grads")
+        results[model] = {"status": status, "max_rel": worst,
+                          "max_ulp": worst_ulp, "n_values": len(rv)}
+        write_results(results)  # incremental: a later hang keeps the rest
+        print(f"{status} {model}: max rel diff {worst:.2e} "
+              f"({worst_ulp} ulp) over lp + {len(rv) - 1} grads")
 
+    write_results(results)
     print(f"\n{n_pass}/{len(models)} models verified against CmdStan")
 
 

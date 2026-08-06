@@ -191,6 +191,37 @@ void structured_bwd(KernelCtx& ctx, RevF&& f) {
   }
 }
 
+// cholesky_corr_constrain(y, K) returns a K x K lower-triangular factor;
+// idata = {K}. Same nested-replay backward as the vector transforms, with
+// the output flattened column-major to match slot layout.
+void chol_corr_fwd(KernelCtx& ctx) {
+  const int64_t K = ctx.idata[0];
+  Eigen::Map<const Eigen::VectorXd> y(ctx.in[0].data, ctx.in[0].len);
+  double lp = 0.0;
+  Eigen::MatrixXd x = stan::math::cholesky_corr_constrain(y, (int)K, lp);
+  for (int64_t j = 0; j < K; ++j)
+    for (int64_t i = 0; i < K; ++i) ctx.out.data[j * K + i] = x(i, j);
+  ctx.out2.data[0] = lp;
+}
+void chol_corr_bwd(KernelCtx& ctx) {
+  if (ctx.in_adj[0].data == nullptr) return;
+  const int64_t K = ctx.idata[0];
+  using stan::math::var;
+  stan::math::nested_rev_autodiff nested;
+  Eigen::Matrix<var, -1, 1> y(ctx.in[0].len);
+  for (int64_t i = 0; i < ctx.in[0].len; ++i) y(i) = ctx.in[0].data[i];
+  var lp = 0.0;
+  auto x = stan::math::cholesky_corr_constrain(y, (int)K, lp);
+  Eigen::Matrix<var, -1, 1> flat(K * K);
+  for (int64_t j = 0; j < K; ++j)
+    for (int64_t i = 0; i < K; ++i) flat(j * K + i) = x(i, j);
+  Eigen::Map<const Eigen::VectorXd> seed(ctx.out_adj_vec.data, K * K);
+  var j2 = stan::math::dot_product(seed, flat) + ctx.out2_adj * lp;
+  stan::math::grad(j2.vi_);
+  for (int64_t i = 0; i < ctx.in[0].len; ++i)
+    ctx.in_adj[0].data[i] += y(i).adj();
+}
+
 void simplex_fwd(KernelCtx& ctx) {
   structured_fwd(ctx, [](const auto& y, double& lp) {
     return stan::math::simplex_constrain(y, lp);
@@ -231,6 +262,8 @@ void register_constrain_kernels() {
                   Kernel{cupper_fwd, cupper_bwd, constrain_scratch});
   register_kernel(OP_CONSTRAIN_LU,
                   Kernel{clu_fwd, clu_bwd, constrain_scratch});
+  register_kernel(OP_CONSTRAIN_CHOL_CORR,
+                  Kernel{chol_corr_fwd, chol_corr_bwd, nullptr});
   register_kernel(OP_CONSTRAIN_SIMPLEX,
                   Kernel{simplex_fwd, simplex_bwd, nullptr});
   register_kernel(OP_CONSTRAIN_ORDERED,

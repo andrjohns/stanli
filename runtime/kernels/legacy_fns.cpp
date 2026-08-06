@@ -110,7 +110,20 @@ void log_mix_bwd(KernelCtx& ctx) {
 
 }  // namespace
 
+void log_softmax_fwd(KernelCtx& ctx) {
+  Eigen::Map<const Eigen::VectorXd> x(ctx.in[0].data, ctx.in[0].len);
+  Eigen::Map<Eigen::VectorXd> out(ctx.out.data, ctx.out.len);
+  out = stan::math::log_softmax(x);
+}
+void log_softmax_bwd(KernelCtx& ctx) {
+  legacy_bwd_vec_in(ctx, [](const auto& x) {
+    return stan::math::log_softmax(x);
+  });
+}
+
 void register_legacy_kernels() {
+  register_kernel(OP_LOG_SOFTMAX,
+                  Kernel{log_softmax_fwd, log_softmax_bwd, nullptr});
   register_kernel(OP_LOG_SUM_EXP, Kernel{lse_fwd, lse_bwd, nullptr});
   register_kernel(OP_SOFTMAX, Kernel{softmax_fwd, softmax_bwd, nullptr});
   register_kernel(OP_DIRICHLET_LPDF,

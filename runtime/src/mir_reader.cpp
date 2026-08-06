@@ -189,6 +189,7 @@ Transform read_transform(const Node& n) {
     else if (n.atom == "Simplex") t.kind = Transform::Simplex;
     else if (n.atom == "Ordered") t.kind = Transform::Ordered;
     else if (n.atom == "PositiveOrdered") t.kind = Transform::PositiveOrdered;
+    else if (n.atom == "CholeskyCorr") t.kind = Transform::CholeskyCorr;
     else t.kind = Transform::Unsupported;
     t.raw = n.atom;
     return t;

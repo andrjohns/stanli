@@ -24,6 +24,8 @@ void register_kernel(uint16_t opcode, Kernel k) {
 void register_elementwise_kernels();
 void register_density_kernels();
 void register_legacy_kernels();
+void register_matrix_kernels();
+void register_ode_kernels();
 void register_constrain_kernels();
 void register_eltwise_kernels();
 
@@ -32,6 +34,8 @@ static void ensure_registered() {
     register_elementwise_kernels();
     register_density_kernels();
     register_legacy_kernels();
+  register_matrix_kernels();
+  register_ode_kernels();
     register_constrain_kernels();
     register_eltwise_kernels();
     return true;
@@ -103,6 +107,7 @@ KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
   ctx.variant = op.variant;
   ctx.scratch = scratch_.data() + op.scratch_off;
   ctx.idata = op.idata;
+  ctx.udata = op.udata;
   ctx.n_idata = op.n_idata;
   if (backward) {
     for (int i = 0; i < op.n_in; ++i) {

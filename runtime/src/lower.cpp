@@ -1,5 +1,6 @@
 #include <stanrt/compile.hpp>
 #include <stanrt/mir.hpp>
+#include <stanrt/ode.hpp>
 #include <stanrt/optable.hpp>
 #include <stanrt/sexp.hpp>
 
@@ -46,6 +47,7 @@ struct Lowering {
   std::vector<int> jac_slots;
   std::map<std::string, const mir::FunDef*> fun_defs;
   std::set<std::string> int_locals;  // SInt locals in log_prob (data-only)
+  std::vector<int64_t> decl_dims_pending;  // shape of the last ODE result
   int udf_depth = 0;
 
   explicit Lowering(const DataMap& d) : data(d) {}
@@ -888,6 +890,15 @@ struct Lowering {
           return emit(OP_SLICE, {base.slot}, base.si.rows, {},
                       {(int)(j * base.si.rows)});
         }
+        // Column of an array-major 2-D value (array[N, S] real): elements
+        // sit S apart, so this is a strided slice, not a contiguous one.
+        if (e.args.size() == 3 && base.si.rows == 0 && bdims &&
+            bdims->size() == 2 && e.args[1].name == "IndexAll" &&
+            e.args[2].name == "IndexSingle") {
+          const int64_t k = eval_int(e.args[2].args[0]) - 1;
+          const int64_t N = (*bdims)[0], S = (*bdims)[1];
+          return emit(OP_SLICE_STRIDED, {base.slot}, N, {}, {(int)k, (int)S});
+        }
         // Row-range column read M[a:b, j] (contiguous within the column).
         if (e.args.size() == 3 && base.si.rows > 0 &&
             e.args[1].name == "IndexBetween" &&
@@ -1150,6 +1161,21 @@ struct Lowering {
       if (e.data_only && try_fold_const(e, &v)) return v;
       return lower_call_udf(e);
     }
+    if (e.fn_lib == mir::Expr::Lib::Internal &&
+        (e.name == "FnMakeArray" || e.name == "FnMakeRowVec")) {
+      // Array/row-vector literal: concatenate the pieces. Data-only ones
+      // fold; the rest become a CONCAT2 chain.
+      Val v;
+      if (e.data_only && try_fold_const(e, &v)) return v;
+      std::vector<Val> parts;
+      for (const auto& a : e.args) parts.push_back(lower_expr(a));
+      Val acc = parts[0];
+      for (size_t i = 1; i < parts.size(); ++i) {
+        const int64_t len = info[acc.slot].len + info[parts[i].slot].len;
+        acc = emit(OP_CONCAT2, {acc.slot, parts[i].slot}, len);
+      }
+      return acc;
+    }
     if (e.fn_lib != mir::Expr::Lib::StanLib) {
       Val v;
       if (try_fold_const(e, &v)) return v;
@@ -1182,6 +1208,7 @@ struct Lowering {
         {"bernoulli_logit_glm_lpmf",
          {OP_BERNOULLI_LOGIT_GLM_LPMF, 4, 1, true}},
         {"dirichlet_lpdf", {OP_DIRICHLET_LPDF, 2, 0}},
+        {"weibull_lpdf", {OP_WEIBULL_LPDF, 3, 0}},
     };
     auto dit = kDens.find(e.name);
     if (dit != kDens.end()) {
@@ -1234,12 +1261,25 @@ struct Lowering {
     if (e.name == "Times__") {
       Val a = lower_expr(e.args[0]);
       Val b = lower_expr(e.args[1]);
-      if (a.si.rows > 0) {  // matrix * vector
-        if (!info[a.slot].data_like)
-          fail("parameter matrix in Times__ unsupported in M2");
+      if (a.si.rows > 0) {
+        if (info[a.slot].data_like && b.si.rows == 0) {
+          // Data matrix * vector keeps the tuned MATVEC kernel (its
+          // accumulation order is matched to the var path).
+          SlotInfo si;
+          return emit(OP_MATVEC, {a.slot, b.slot}, a.si.rows, si,
+                      {(int)a.si.rows, (int)a.si.cols});
+        }
+        // General product; a vector operand is one column.
+        const int64_t cb = b.si.rows > 0 ? b.si.cols : 1;
+        const int64_t rb = b.si.rows > 0 ? b.si.rows : info[b.slot].len;
+        if (rb != a.si.cols) fail("Times__: inner dimension mismatch", e.raw);
         SlotInfo si;
-        return emit(OP_MATVEC, {a.slot, b.slot}, a.si.rows, si,
-                    {(int)a.si.rows, (int)a.si.cols});
+        si.rows = a.si.rows;
+        si.cols = cb;
+        if (cb == 1) si.rows = 0, si.cols = 0;  // result is a vector
+        Val v = emit(OP_GEMM, {a.slot, b.slot}, a.si.rows * cb, si,
+                     {(int)a.si.rows, (int)a.si.cols, (int)cb});
+        return v;
       }
       // row_vector * vector with scalar result type is an inner product.
       if ((e.type_ == "UReal" || e.type_ == "UInt") &&
@@ -1267,6 +1307,9 @@ struct Lowering {
         {"inv_logit", OP_INV_LOGIT}, {"sqrt", OP_SQRT},
         {"square", OP_SQUARE}, {"log1m", OP_LOG1M},  {"softmax", OP_SOFTMAX},
         {"tanh", OP_TANHV},    {"cumulative_sum", OP_CUMSUM},
+        {"log_inv_logit", OP_LOG_INV_LOGIT},
+        {"log1m_inv_logit", OP_LOG1M_INV_LOGIT},
+        {"log_softmax", OP_LOG_SOFTMAX},
     };
     auto uit = kUn.find(e.name);
     if (uit != kUn.end()) {
@@ -1320,6 +1363,20 @@ struct Lowering {
       Val b = lower_expr(e.args[1]);
       return emit(OP_DOT, {a.slot, b.slot}, 1);
     }
+    if (e.name == "categorical_logit_lpmf" && e.args.size() == 2) {
+      // stan-math evaluates log_softmax(beta) then picks the outcomes,
+      // which is exactly this composition.
+      if (e.fn_propto && e.args[1].data_only) return {const_slot(0.0), {}};
+      Val b = lower_expr(e.args[1]);
+      Val ls = emit(OP_LOG_SOFTMAX, {b.slot}, info[b.slot].len);
+      auto ns = int_arg_values(e.args[0]);
+      if (e.args[0].type_ == "UInt" && ns.size() == 1)
+        return emit(OP_INDEX, {ls.slot}, 1, {}, {ns[0] - 1});
+      std::vector<int> idata;
+      for (int n : ns) idata.push_back(n - 1);
+      Val ga = emit(OP_GATHER, {ls.slot}, (int64_t)idata.size(), {}, idata);
+      return emit(OP_SUM_VEC, {ga.slot}, 1);
+    }
     if (e.name == "categorical_lpmf" && e.args.size() == 2) {
       // stan-math computes log(theta[n-1]) on the scalar type directly (no
       // ops_partials), so this decomposes exactly onto existing ops. For an
@@ -1342,7 +1399,46 @@ struct Lowering {
       Val a = lower_expr(e.args[0]);
       // Vector <-> row_vector transpose is a type change, not a layout one.
       if (a.si.rows == 0) return a;
-      fail("matrix transpose unsupported in M2", e.raw);
+      SlotInfo si;
+      si.rows = a.si.cols;
+      si.cols = a.si.rows;
+      si.data_like = info[a.slot].data_like;
+      return emit(OP_TRANSPOSE, {a.slot}, info[a.slot].len, si,
+                  {(int)a.si.rows, (int)a.si.cols});
+    }
+    if ((e.name == "diag_pre_multiply" || e.name == "diag_post_multiply") &&
+        e.args.size() == 2) {
+      // diag_pre_multiply(v, M) = diag_matrix(v) * M (and the mirror);
+      // the explicit zeros contribute exactly nothing to each sum.
+      const bool pre = e.name[5] == 'p' && e.name[9] == 'e';
+      Val v = lower_expr(e.args[pre ? 0 : 1]);
+      Val m = lower_expr(e.args[pre ? 1 : 0]);
+      const int64_t n = info[v.slot].len;
+      SlotInfo dsi;
+      dsi.rows = n;
+      dsi.cols = n;
+      dsi.data_like = info[v.slot].data_like;
+      Val d = emit(OP_DIAG_MATRIX, {v.slot}, n * n, dsi);
+      Val a = pre ? d : m, b = pre ? m : d;
+      SlotInfo si;
+      si.rows = a.si.rows;
+      si.cols = b.si.cols;
+      return emit(OP_GEMM, {a.slot, b.slot}, si.rows * si.cols, si,
+                  {(int)a.si.rows, (int)a.si.cols, (int)b.si.cols});
+    }
+    if (e.name == "multiply_lower_tri_self_transpose" && e.args.size() == 1) {
+      Val L = lower_expr(e.args[0]);
+      if (L.si.rows == 0) fail("multiply_lower_tri: needs a matrix", e.raw);
+      SlotInfo tsi;
+      tsi.rows = L.si.cols;
+      tsi.cols = L.si.rows;
+      Val Lt = emit(OP_TRANSPOSE, {L.slot}, info[L.slot].len, tsi,
+                    {(int)L.si.rows, (int)L.si.cols});
+      SlotInfo si;
+      si.rows = L.si.rows;
+      si.cols = L.si.rows;
+      return emit(OP_GEMM, {L.slot, Lt.slot}, si.rows * si.cols, si,
+                  {(int)L.si.rows, (int)L.si.cols, (int)L.si.rows});
     }
     if ((e.name == "to_vector" || e.name == "to_row_vector") &&
         e.args.size() == 1) {
@@ -1374,6 +1470,128 @@ struct Lowering {
                     {(int)R, (int)C, rowvec ? 2 : 1});
       }
       fail("rep_matrix arity", e.raw);
+    }
+    if (e.name == "gp_exp_quad_cov" && e.args.size() == 3) {
+      Val x = lower_expr(e.args[0]);
+      Val alpha = lower_expr(e.args[1]);
+      Val rho = lower_expr(e.args[2]);
+      if (!info[x.slot].data_like)
+        fail("gp_exp_quad_cov: parameter inputs unsupported in M2", e.raw);
+      // x is array[N] real (D == 1) or array[N] vector[D], stored
+      // array-major, so D falls out of the declared dims.
+      int64_t D = 1;
+      if (e.args[0].kind == mir::Expr::Var) {
+        auto dd = decl_dims.find(e.args[0].name);
+        if (dd != decl_dims.end() && dd->second.size() == 2)
+          D = dd->second[1];
+        else if (DataMap::Entry* en = env.find(e.args[0].name))
+          if (en->dims.size() == 2) D = en->dims[1];
+      }
+      const int64_t N = info[x.slot].len / D;
+      SlotInfo si;
+      si.rows = N;
+      si.cols = N;
+      return emit(OP_GP_EXP_QUAD_COV, {x.slot, alpha.slot, rho.slot}, N * N,
+                  si, {(int)N, (int)D});
+    }
+    if (e.name == "diag_matrix" && e.args.size() == 1) {
+      Val v = lower_expr(e.args[0]);
+      const int64_t n = info[v.slot].len;
+      SlotInfo si;
+      si.rows = n;
+      si.cols = n;
+      return emit(OP_DIAG_MATRIX, {v.slot}, n * n, si);
+    }
+    if (e.name == "cholesky_decompose" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (a.si.rows == 0) fail("cholesky_decompose needs a matrix", e.raw);
+      SlotInfo si = a.si;
+      si.data_like = info[a.slot].data_like;
+      return emit(OP_CHOLESKY, {a.slot}, info[a.slot].len, si,
+                  {(int)a.si.rows});
+    }
+    if ((e.name == "multi_normal_cholesky_lpdf" ||
+         e.name == "multi_normal_lpdf") && e.args.size() == 3) {
+      Val y = lower_expr(e.args[0]);
+      Val mu = lower_expr(e.args[1]);
+      Val m = lower_expr(e.args[2]);
+      uint8_t variant = 0;
+      for (int i = 0; i < 3; ++i)
+        if (!e.args[i].data_only) variant |= (uint8_t)(1u << i);
+      if (e.fn_propto) variant |= 0x80u;
+      // K comes from the matrix argument; y may be one K-vector or an
+      // array of m of them (stan-math's vectorized signature).
+      if (m.si.rows == 0) fail(e.name + ": needs a matrix argument", e.raw);
+      const int64_t K = m.si.rows;
+      const int64_t reps = info[y.slot].len / K;
+      Val v = emit(e.name.find("cholesky") != std::string::npos
+                       ? OP_MULTI_NORMAL_CHOL_LPDF
+                       : OP_MULTI_NORMAL_LPDF,
+                   {y.slot, mu.slot, m.slot}, 1, {},
+                   {(int)K, (int)reps});
+      g.ops.back().variant = variant;
+      return v;
+    }
+    if (e.name == "lkj_corr_cholesky_lpdf" && e.args.size() == 2) {
+      Val L = lower_expr(e.args[0]);
+      Val eta = lower_expr(e.args[1]);
+      if (L.si.rows == 0) fail("lkj_corr_cholesky needs a matrix", e.raw);
+      Val v = emit(OP_LKJ_CORR_CHOL_LPDF, {L.slot, eta.slot}, 1, {},
+                   {(int)L.si.rows});
+      g.ops.back().variant = (uint8_t)((e.fn_propto ? 0x80u : 0u) | 0x1u);
+      return v;
+    }
+    if (e.name == "normal_id_glm_lpdf" && e.args.size() == 5) {
+      Val y = lower_expr(e.args[0]);
+      Val X = lower_expr(e.args[1]);
+      if (X.si.rows == 0 || !info[X.slot].data_like)
+        fail("normal_id_glm: X must be a data matrix in M2", e.raw);
+      Val alpha = lower_expr(e.args[2]);
+      Val beta = lower_expr(e.args[3]);
+      Val sigma = lower_expr(e.args[4]);
+      uint8_t variant = 0;
+      for (int i = 0; i < 5; ++i)
+        if (!e.args[i].data_only) variant |= (uint8_t)(1u << i);
+      if (e.fn_propto) variant |= 0x80u;
+      Val v = emit(OP_NORMAL_ID_GLM_LPDF,
+                   {y.slot, X.slot, alpha.slot, beta.slot, sigma.slot}, 1, {},
+                   {(int)X.si.rows, (int)X.si.cols});
+      g.ops.back().variant = variant;
+      return v;
+    }
+    if (e.name.rfind("integrate_ode_", 0) == 0) {
+      // integrate_ode_*(f, z_init, t0, ts, theta, x_r, x_i[, rtol, atol,
+      // max_steps]). Everything but z_init and theta is data, and is
+      // captured in the spec the kernel reads through the op payload.
+      if (e.args.size() < 7) fail(e.name + ": unexpected arity", e.raw);
+      auto spec = std::make_shared<OdeSpec>();
+      auto fit = fun_defs.find(e.args[0].name);
+      if (fit == fun_defs.end())
+        fail(e.name + ": unknown right-hand side " + e.args[0].name, e.raw);
+      spec->rhs = fit->second;
+      spec->funs = &fun_defs;
+      spec->stiff = e.name.find("bdf") != std::string::npos;
+      spec->t0 = td_eval(e.args[2]).r.at(0);
+      DataMap::Entry ts = td_eval(e.args[3]);
+      spec->ts = ts.r;
+      DataMap::Entry xr = td_eval(e.args[5]);
+      spec->x_r = xr.r;
+      DataMap::Entry xi = td_eval(e.args[6]);
+      spec->x_i = xi.i;
+      if (e.args.size() >= 10) {
+        spec->rtol = td_eval(e.args[7]).r.at(0);
+        spec->atol = td_eval(e.args[8]).r.at(0);
+        spec->max_steps = (long)td_eval(e.args[9]).r.at(0);
+      }
+      Val z0 = lower_expr(e.args[1]);
+      Val theta = lower_expr(e.args[4]);
+      const int64_t S = info[z0.slot].len;
+      const int64_t N = (int64_t)spec->ts.size();
+      Val v = emit(OP_ODE, {z0.slot, theta.slot}, N * S, {}, {(int)N, (int)S});
+      g.ops.back().udata = spec.get();
+      g.udata_pool.push_back(std::move(spec));
+      decl_dims_pending = {N, S};
+      return v;
     }
     if (e.name == "dot_self") {
       Val a = lower_expr(e.args[0]);
@@ -1476,6 +1694,13 @@ struct Lowering {
     int64_t raw_len = con_len;
     if (tr.kind == mir::Transform::Simplex)
       raw_len = n_batch * (inner_con - 1);
+    if (tr.kind == mir::Transform::CholeskyCorr) {
+      // cholesky_factor_corr[K]: K*K constrained, K*(K-1)/2 unconstrained.
+      const int64_t K = inner_con;
+      n_batch = 1;
+      raw_len = K * (K - 1) / 2;
+      con_len = K * K;
+    }
     if (s.read_dims.size() > 1) {
       std::vector<int64_t> dims;
       for (const auto& d : s.read_dims) dims.push_back(eval_int(d));
@@ -1513,6 +1738,11 @@ struct Lowering {
         ins.push_back(lower_expr(tr.args[0]).slot);
         ins.push_back(lower_expr(tr.args[1]).slot);
         break;
+      case mir::Transform::CholeskyCorr:
+        opcode = OP_CONSTRAIN_CHOL_CORR;
+        psi.rows = inner_con;
+        psi.cols = inner_con;
+        break;
       case mir::Transform::Simplex:
         opcode = OP_CONSTRAIN_SIMPLEX;
         break;
@@ -1530,6 +1760,7 @@ struct Lowering {
     if (opcode == OP_CONSTRAIN_SIMPLEX || opcode == OP_CONSTRAIN_ORDERED ||
         opcode == OP_CONSTRAIN_POS_ORDERED)
       tr_idata = {(int)n_batch, (int)inner_con};
+    if (opcode == OP_CONSTRAIN_CHOL_CORR) tr_idata = {(int)inner_con};
     Val con = emit(opcode, ins, con_len, psi, tr_idata, jac);
     jac_slots.push_back(jac);
     scope[s.decl_id] = con.slot;
@@ -1555,7 +1786,16 @@ struct Lowering {
           int_locals.insert(s.decl_id);
           if (s.has_init) int_env[s.decl_id] = eval_int_td(s.init);
         } else if (s.has_init) {
+          decl_dims_pending.clear();
           scope[s.decl_id] = lower_expr(s.init).slot;
+          if (!decl_dims_pending.empty()) {
+            decl_dims[s.decl_id] = decl_dims_pending;
+            DeclShape sh;
+            sh.len = decl_dims_pending[0] * decl_dims_pending[1];
+            sh.dims = decl_dims_pending;
+            decl_lens[s.decl_id] = sh;
+            decl_dims_pending.clear();
+          }
         } else {
           DeclShape sh;
           sh.len = sized_len(s.decl_type, &sh.rows, &sh.cols);

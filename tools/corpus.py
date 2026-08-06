@@ -18,10 +18,16 @@ import zipfile
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CHECK = REPO / "build" / "stanrt_check"
 
-# Models that compile and produce a finite gradient but do NOT match
-# CmdStan differentially. They are never counted as passing; entries leave
-# only when tools/verify_sample.py agrees.
-UNVERIFIED = {}
+# Verification results written by tools/verify_sample.py. A model counts as
+# passing only if it appears here as VERIFIED; compiling and returning a
+# finite gradient is never sufficient.
+VERIFY_JSON = REPO / "docs" / "verification.json"
+
+
+def load_verification():
+    if not VERIFY_JSON.exists():
+        return {}
+    return json.loads(VERIFY_JSON.read_text())
 
 
 def main():
@@ -74,12 +80,15 @@ def main():
                     key = f"unsupported {m.group(1)}"
             reasons[key] += 1
 
+    ver = load_verification()
     ok = sorted(m for m, (s, _) in results.items() if s == "OK")
-    verified = [m for m in ok if m not in UNVERIFIED]
+    verified = [m for m in ok
+                if ver.get(m, {}).get("status") == "VERIFIED"]
     print(f"\n== {len(ok)}/{len(results)} models evaluate "
           f"({len(verified)} verified vs CmdStan) ==")
     for m in ok:
-        print(f"  {'OK ' if m not in UNVERIFIED else 'EVAL-ONLY'} {m}")
+        tag = "OK      " if m in verified else "EVAL-ONLY"
+        print(f"  {tag} {m}")
     print("\n== failure histogram ==")
     for k, c in reasons.most_common(30):
         print(f"  {c:3d}  {k}")
@@ -88,16 +97,27 @@ def main():
           f"Evaluating: {len(ok)}/{len(results)}",
           f"Differentially verified against CmdStan: "
           f"{len(verified)}/{len(results)}", "",
-          "A model counts as verified only when tools/verify_sample.py "
+          "A model counts as passing only when tools/verify_sample.py "
           "matches CmdStan's log_prob and full gradient at the shared "
-          "deterministic point. Models that compile and evaluate but do "
-          "not yet match are listed as EVAL-ONLY and are not claimed as "
-          "passing.", ""]
-    md += [f"- OK `{m}`" for m in verified]
-    if UNVERIFIED:
+          "deterministic point. Accuracy below is the worst deviation "
+          "over lp and every gradient component: relative, and in ULPs "
+          "(0 = bitwise identical to CmdStan). Models that evaluate but "
+          "are not verified are listed separately and are not counted.",
+          "",
+          "| model | values compared | max rel diff | max ULP |",
+          "| --- | ---: | ---: | ---: |"]
+    for m in verified:
+        v = ver[m]
+        rel = "0 (bitwise)" if v["max_rel"] == 0 else f"{v['max_rel']:.1e}"
+        md.append(f"| `{m}` | {v['n_values']} | {rel} | {v['max_ulp']} |")
+    unver = [m for m in ok if m not in verified]
+    if unver:
         md += ["", "## Evaluate but not verified", ""]
-        md += [f"- `{m}`: {why}" for m, why in sorted(UNVERIFIED.items())
-               if m in ok]
+        for m in unver:
+            v = ver.get(m)
+            why = (f"max rel diff {v['max_rel']:.1e}" if v
+                   else "not yet run through verify_sample.py")
+            md.append(f"- `{m}`: {why}")
     md += ["", "## Failures", ""]
     for model, (s, msg) in sorted(results.items()):
         if s != "OK":

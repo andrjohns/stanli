@@ -7,8 +7,9 @@ kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
   (gradient 1.9x-3.0x faster on vectorized models, 0.4x-0.9x on
   explicit scalar loops; time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
-  (105/120 posteriordb models differentially verified against CmdStan's
-  log_prob and gradients)
+  (110/120 posteriordb models differentially verified against CmdStan's
+  log_prob and gradients, per-model accuracy in relative terms and ULPs;
+  43 are bitwise identical)
 - Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
 
 ## Architecture
@@ -126,8 +127,8 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 16/16 tests green; 105/120 posteriordb models
-CmdStan-verified. Sampling-semantics gradients (propto with
+macOS arm64 / clang: 16/16 tests green; 110/120 posteriordb models
+CmdStan-verified (43 bitwise). Sampling-semantics gradients (propto with
 per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
 for the numbers.
 

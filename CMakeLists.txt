@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(stanrt CXX)
+project(stanrt C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,12 +31,38 @@ target_compile_options(stanmath INTERFACE -ffp-contract=off)
 
 # The distributable shared library: C ABI + all kernels, TBB stubbed
 # (single-threaded until the payload ships real TBB).
+# SUNDIALS (CVODES) for the ODE integrators: the same translation units
+# CmdStan compiles, minus the profiler and the Fortran shims. Built once
+# into a static library and linked into both stanrt targets.
+file(GLOB SUNDIALS_SRC
+  ${_sundials}/src/cvodes/*.c
+  ${_sundials}/src/sundials/*.c
+  ${_sundials}/src/nvector/serial/*.c
+  ${_sundials}/src/sunmatrix/band/*.c
+  ${_sundials}/src/sunmatrix/dense/*.c
+  ${_sundials}/src/sunlinsol/band/*.c
+  ${_sundials}/src/sunlinsol/dense/*.c
+  ${_sundials}/src/sunnonlinsol/newton/*.c
+  ${_sundials}/src/sunnonlinsol/fixedpoint/*.c)
+list(FILTER SUNDIALS_SRC EXCLUDE REGEX "sundials_profiler\\.c$")
+list(FILTER SUNDIALS_SRC EXCLUDE REGEX "/f(nvector|sunmatrix|sunlinsol|sunnonlinsol)")
+add_library(sundials STATIC ${SUNDIALS_SRC})
+target_include_directories(sundials PUBLIC ${_sundials}/include
+                           PRIVATE ${_sundials}/src ${_sundials}/src/sundials)
+# stan-math patches sundials' logging through this header, which the
+# upstream C sources expect to be force-included (as CmdStan does).
+target_compile_options(sundials PRIVATE -w
+  -include ${_sundials}/include/stan_sundials_printf_override.hpp)
+set_target_properties(sundials PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 add_library(stanrt_shared SHARED
   runtime/src/capi.cpp
   runtime/src/executor.cpp
   runtime/kernels/elementwise.cpp
   runtime/kernels/densities.cpp
   runtime/kernels/legacy_fns.cpp
+  runtime/kernels/matrix_fns.cpp
+  runtime/kernels/ode.cpp
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/src/nuts.cpp
@@ -45,7 +71,7 @@ add_library(stanrt_shared SHARED
   runtime/src/data.cpp
   tests/tbb_stub.cpp)
 target_include_directories(stanrt_shared PUBLIC runtime/include)
-target_link_libraries(stanrt_shared PUBLIC stanmath)
+target_link_libraries(stanrt_shared PUBLIC stanmath sundials)
 set_target_properties(stanrt_shared PROPERTIES OUTPUT_NAME stanrt)
 
 # In-process stanc3: link the OCaml-compiled embed object
@@ -67,6 +93,8 @@ add_library(stanrt STATIC
   runtime/kernels/elementwise.cpp
   runtime/kernels/densities.cpp
   runtime/kernels/legacy_fns.cpp
+  runtime/kernels/matrix_fns.cpp
+  runtime/kernels/ode.cpp
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/src/nuts.cpp
@@ -74,7 +102,7 @@ add_library(stanrt STATIC
   runtime/src/lower.cpp
   runtime/src/data.cpp)
 target_include_directories(stanrt PUBLIC runtime/include)
-target_link_libraries(stanrt PUBLIC stanmath)
+target_link_libraries(stanrt PUBLIC stanmath sundials)
 
 enable_testing()
 # Single-threaded tests stub the one TBB symbol stan-math's rev core needs.

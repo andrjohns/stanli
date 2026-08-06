@@ -537,7 +537,25 @@ int main() {
   } catch (const CompileError& e) {
     threw = std::string(e.what()).find("transform") != std::string::npos;
   }
-  check(threw, "cholesky_corr rejected with construct name");
+  // cholesky_factor_corr is supported now, so this fixture compiles; the
+  // error path is covered by the unsupported-function check below.
+  check(!threw, "cholesky_corr fixture compiles");
+  {
+    // Error path: an unsupported function is reported by name, never
+    // silently miscompiled. Mutate a known-good fixture's density name.
+    std::string txt = slurp("tests/fixtures/es.tmir.sexp");
+    const std::string from = "normal_lpdf", to = "not_a_real_fn";
+    for (size_t pos = txt.find(from); pos != std::string::npos;
+         pos = txt.find(from, pos + to.size()))
+      txt.replace(pos, from.size(), to);
+    bool threw2 = false;
+    try {
+      compile_model(txt, data);
+    } catch (const CompileError& e) {
+      threw2 = std::string(e.what()).find("not_a_real_fn") != std::string::npos;
+    }
+    check(threw2, "unsupported function rejected with its name");
+  }
 
   if (failures == 0) std::printf("test_lower OK\n");
   return failures == 0 ? 0 : 1;
