@@ -13,14 +13,16 @@ table with `tools/bench_models.py deps/cmdstan deps/posteriordb`.
 
 | model | unconstrained params | stanli ns/grad | CmdStan ns/grad | speedup | stanli prep | CmdStan build |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `radon_pooled` | 3 | 52730 | 325859 | 6.18x | 0.079 s | 6.2 s |
-| `arK` | 7 | 2440 | 11994 | 4.91x | 0.007 s | 6.4 s |
-| `bym2_offset_only` | 3845 | 40126 | 121974 | 3.04x | 0.046 s | 7.6 s |
-| `kidscore_momiq` | 3 | 1882 | 3921 | 2.08x | 0.006 s | 6.4 s |
-| `eight_schools_noncentered` | 10 | 279 | 563 | 2.02x | 0.004 s | 6.8 s |
-| `lsat_model` | 1006 | 46233 | 91582 | 1.98x | 0.053 s | 7.1 s |
-| `wells_dist100ars_model` | 3 | 17311 | 18263 | 1.06x | 0.025 s | 6.7 s |
-| `low_dim_gauss_mix` | 5 | 184510 | 98153 | 0.53x | 0.194 s | 6.7 s |
+| `radon_pooled` | 3 | 53108 | 328107 | 6.18x | 0.081 s | 6.4 s |
+| `radon_hierarchical_intercept_centered` | 391 | 112087 | 574179 | 5.12x | 0.174 s | 6.9 s |
+| `arK` | 7 | 2458 | 11860 | 4.83x | 0.007 s | 6.6 s |
+| `radon_county_intercept` | 388 | 90357 | 431480 | 4.78x | 0.128 s | 6.6 s |
+| `bym2_offset_only` | 3845 | 40023 | 125379 | 3.13x | 0.047 s | 7.8 s |
+| `eight_schools_noncentered` | 10 | 281 | 638 | 2.27x | 0.004 s | 6.9 s |
+| `kidscore_momiq` | 3 | 1906 | 3867 | 2.03x | 0.006 s | 6.5 s |
+| `lsat_model` | 1006 | 46571 | 91202 | 1.96x | 0.053 s | 7.3 s |
+| `wells_dist100ars_model` | 3 | 17341 | 18393 | 1.06x | 0.026 s | 6.8 s |
+| `low_dim_gauss_mix` | 5 | 186415 | 98905 | 0.53x | 0.196 s | 6.8 s |
 
 **Where the wins come from: op granularity.** The interpreter's cost is
 per op, not per element: ~17-20 ns for a scalar density op forward +
@@ -42,12 +44,35 @@ kernels already support (constant vectors materialized from the const
 pool, invariant ops hoisted, elementwise lanes widened, INDEX
 progressions collapsed into their base vector, and N scalar density
 terms fused into one summed vector density). `radon_pooled` collapses
-from 27,670 ops to 8 (0.91x -> 6.18x), `arK` from 3,164 to 21 (0.40x ->
-4.91x), `rats_model` from 939 to 30 - block-structured data re-rolls per
-block. Anything the pass cannot prove safe it leaves alone, per region:
-cross-lane recurrences, partial/strided index progressions, outputs
-escaping their lane, opcodes outside its vocabulary. Set
-`STANLI_NO_REROLL=1` to disable it.
+from 27,670 ops to 8 (0.91x -> 6.18x) and `arK` from 3,164 to 21 (0.40x
+-> 4.83x). Indexed reads rewrite by shape: the whole base in order needs
+no op at all, a contiguous window becomes an `OP_SLICE`, and an arbitrary
+data-driven index — `alpha[county_idx[n]]`, the hierarchical idiom,
+repeats and all — becomes one `OP_GATHER` whose backward scatter-adds.
+Anything the pass cannot prove safe it leaves alone, per region:
+cross-lane recurrences, outputs escaping their lane, opcodes outside its
+vocabulary. Set `STANLI_NO_REROLL=1` to disable it, `STANLI_NO_INPLACE=1`
+for the update rules below.
+
+**Element writes: `mu[n] = ...` inside a loop.** This is the other half
+of the hierarchical idiom, and it used to be the worst thing in the
+project. Each write lowered to a *functional update* — copy the whole
+vector into a fresh slot, poke one element — so N writes cost O(N^2) time
+and O(N^2) arena. `radon_county_intercept` (N=12,573) spent 90.5 ms per
+gradient inside 2.58 GB of arena, 207x slower than CmdStan.
+
+Three rules compose to remove it (`runtime/src/inplace.cpp`, plus the
+index rules above). A write may mutate its vector directly when it is the
+**last use** of that vector — not merely its only use, since the
+read-back in the same iteration is an earlier use — and when no earlier
+reader needs the vector's values during the reverse sweep (`log_sum_exp`
+and the other nested-replay backwards rebuild their tape from the input
+buffer, so they must find it intact). The write and its read-back then
+cancel outright, and when nothing else reads the vector its writes are
+dead and swept. What is left is plain per-lane arithmetic, which the
+gather rule vectorizes: **77,960 ops become 9**, 90.5 ms becomes 92 us,
+2.58 GB becomes 42 MB. Seven radon-family models and `rats_model` collapse
+the same way.
 
 **The remaining loser, `low_dim_gauss_mix` (0.53x),** is the documented
 phase-2 case: its per-observation `log_mix(theta, normal_lpdf, ...)`
@@ -97,10 +122,20 @@ point: 118/120 verified, 44 of them bitwise identical, worst relative
 deviation 2.6e-12 (`tools/verify_sample.py`, `docs/corpus-status.md`).
 Re-rolled models change summation order relative to CmdStan's scalar
 loop, so they verify at tolerance rather than bitwise: across the corpus
-the pass touches 6 models and the worst gradient deviation it introduces
-vs the unrolled graph is 4.1e-15 relative (`spikes/ab_corpus.py`
-compares every corpus model pass-on vs pass-off and flags any
-divergence).
+the passes change 28 models and the worst gradient deviation any of them
+introduces vs the untransformed graph is 3.7e-14 relative
+(`spikes/ab_corpus.py` compares every corpus model passes-on vs
+passes-off and flags any divergence; `--disable` one variable to
+attribute one).
+
+That harness earns its keep. An earlier version of the in-place rule
+allowed a destructive write whenever it was the last use of its vector,
+which is wrong for any earlier reader that rebuilds its var tape from the
+buffer during the reverse sweep — `log_sum_exp`, `softmax`, every legacy
+nested-replay backward. Eight HMM/LDA/mixture models were silently wrong
+by up to 1.7e+05 relative **with their op counts unchanged**, so nothing
+structural would have caught it. Only ops whose backward purely routes
+adjoints may now precede a destructive write.
 
 All six were then re-run through the CmdStan rig directly rather than
 resting on that transitive argument, and all six still verify:
