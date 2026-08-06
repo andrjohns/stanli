@@ -68,6 +68,7 @@ add_library(stanrt_shared SHARED
   runtime/src/nuts.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp
+  runtime/src/reroll.cpp
   runtime/src/data.cpp
   tests/tbb_stub.cpp)
 target_include_directories(stanrt_shared PUBLIC runtime/include)
@@ -100,6 +101,7 @@ add_library(stanrt STATIC
   runtime/src/nuts.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp
+  runtime/src/reroll.cpp
   runtime/src/data.cpp)
 target_include_directories(stanrt PUBLIC runtime/include)
 target_link_libraries(stanrt PUBLIC stanmath sundials)
@@ -141,3 +143,4 @@ stanrt_add_test(test_eltwise)
 stanrt_add_test(test_lower)
 stanrt_add_test(test_data)
 stanrt_add_test(test_e2e)
+stanrt_add_test(test_reroll)
