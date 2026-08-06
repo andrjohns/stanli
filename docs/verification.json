@@ -245,8 +245,8 @@
   "status": "VERIFIED"
  },
  "election88_full": {
-  "max_rel": 0.0,
-  "max_ulp": 0,
+  "max_rel": 9.800746681323284e-15,
+  "max_ulp": 81,
   "n_values": 91,
   "point": 0,
   "status": "VERIFIED"
@@ -623,36 +623,36 @@
   "status": "VERIFIED"
  },
  "radon_county": {
-  "max_rel": 1.1102230246251565e-16,
-  "max_ulp": 272,
+  "max_rel": 2.7755575615628914e-17,
+  "max_ulp": 368,
   "n_values": 390,
   "point": 0,
   "status": "VERIFIED"
  },
  "radon_county_intercept": {
-  "max_rel": 6.26954916969231e-15,
-  "max_ulp": 38,
+  "max_rel": 1.8252508265227394e-14,
+  "max_ulp": 136,
   "n_values": 389,
   "point": 0,
   "status": "VERIFIED"
  },
  "radon_hierarchical_intercept_centered": {
-  "max_rel": 1.8042579412649363e-15,
-  "max_ulp": 11,
+  "max_rel": 8.477578192919925e-14,
+  "max_ulp": 404,
   "n_values": 392,
   "point": 0,
   "status": "VERIFIED"
  },
  "radon_hierarchical_intercept_noncentered": {
-  "max_rel": 1.17186676503871e-14,
-  "max_ulp": 70,
+  "max_rel": 1.5712884263303047e-14,
+  "max_ulp": 96,
   "n_values": 392,
   "point": 0,
   "status": "VERIFIED"
  },
  "radon_partially_pooled_centered": {
-  "max_rel": 6.873772368783629e-15,
-  "max_ulp": 42,
+  "max_rel": 3.423971065528358e-14,
+  "max_ulp": 229,
   "n_values": 390,
   "point": 0,
   "status": "VERIFIED"
@@ -686,8 +686,8 @@
   "status": "VERIFIED"
  },
  "radon_variable_intercept_slope_centered": {
-  "max_rel": 1.107000230484942e-14,
-  "max_ulp": 68,
+  "max_rel": 2.79199729791753e-14,
+  "max_ulp": 201,
   "n_values": 778,
   "point": 0,
   "status": "VERIFIED"
@@ -707,15 +707,15 @@
   "status": "VERIFIED"
  },
  "radon_variable_slope_noncentered": {
-  "max_rel": 1.1234915944923256e-14,
-  "max_ulp": 74,
+  "max_rel": 1.5024701057543596e-14,
+  "max_ulp": 144,
   "n_values": 391,
   "point": 0,
   "status": "VERIFIED"
  },
  "rats_model": {
-  "max_rel": 2.417982456027364e-16,
-  "max_ulp": 2,
+  "max_rel": 4.0535818009760125e-16,
+  "max_ulp": 3,
   "n_values": 66,
   "point": 0,
   "status": "VERIFIED"

@@ -451,6 +451,151 @@ static void test_block_structured() {
     expect_close(("block v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
+// (i) Write-side fusion. `y_hat[n] = a[idx[n]]` under an unrolled loop, then
+// one vector density over y_hat: the whole run of element writes becomes the
+// gathered vector itself, with no store at all when it covers the vector.
+//
+// Builds the run at `start`, so the same code exercises the full-vector case
+// (start 0, the writes ARE the vector) and the window case (start 1, which
+// has to keep a real store for the element the run does not reach).
+namespace writefuse {
+
+struct Built {
+  Graph g;
+  Fills fills;
+  std::vector<int> terms;
+  int y_hat = -1, a = -1, sigma = -1;
+};
+
+Built build(int L, int start, int stride = 1) {
+  Built b;
+  Graph& g = b.g;
+  const int J = 5;
+  b.a = g.add_slot(J, true);
+  b.sigma = g.add_slot(1, true);
+  const int64_t vlen = start + (int64_t)L * stride;
+  b.y_hat = g.add_slot(vlen, false);
+  b.fills.emplace_back(b.y_hat, std::vector<double>((size_t)vlen, 0.0));
+  const int ydata = g.add_slot(vlen, false);
+  std::vector<double> yv((size_t)vlen);
+  for (int64_t k = 0; k < vlen; ++k) yv[(size_t)k] = 0.4 * (double)k - 1.0;
+  b.fills.emplace_back(ydata, yv);
+  for (int l = 0; l < L; ++l) {
+    const int v = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {b.a}, v, {l % J});
+    g.add_op(OP_SET_INDEX_INPLACE, {b.y_hat, v}, b.y_hat,
+             {start + l * stride});
+  }
+  const int lp = g.add_slot(1, false);
+  const int id = g.add_op(OP_NORMAL_LPDF, {ydata, b.y_hat, b.sigma}, lp);
+  g.ops[(size_t)id].variant = 0x06;
+  b.terms.push_back(lp);
+  return b;
+}
+
+int count(const Graph& g, uint16_t oc) {
+  int n = 0;
+  for (const Op& op : g.ops) n += op.opcode == oc;
+  return n;
+}
+
+}  // namespace writefuse
+
+static void test_write_fusion() {
+  using namespace writefuse;
+  for (int start : {0, 1}) {
+    const int L = 8;
+    Built b = build(L, start);
+    Graph ref = b.g;
+    reduce_terms_into_result(ref, b.terms);
+    const std::vector<double> want = run_grad(std::move(ref), b.fills);
+
+    std::vector<int> tt = b.terms;
+    Fills f2 = b.fills;
+    RerollStats st = reroll(b.g, f2, tt, {});
+    const std::string tag = start ? "window" : "whole";
+    expect((tag + " regions==1").c_str(), st.regions == 1);
+    expect((tag + " one gather").c_str(), count(b.g, OP_GATHER) == 1);
+    expect((tag + " no element writes left").c_str(),
+           count(b.g, OP_SET_INDEX_INPLACE) == 0);
+    // Covering the vector needs no store; a window has to keep one.
+    expect((tag + " store count").c_str(),
+           count(b.g, OP_SET_SLICE) == (start ? 1 : 0));
+    expect((tag + " op count").c_str(),
+           b.g.ops.size() == (size_t)(start ? 3 : 2));
+    reduce_terms_into_result(b.g, tt);
+    const std::vector<double> got = run_grad(std::move(b.g), f2);
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close((tag + " v" + std::to_string(i)).c_str(), got[i], want[i]);
+  }
+}
+
+// (j) What write-side fusion must refuse. Each case leaves the run alone:
+// redirecting later readers to the fused value is only sound when nothing
+// else observes the vector mid-run, writes it afterwards, or reads it from
+// outside the graph entirely.
+static void test_write_fusion_bails() {
+  using namespace writefuse;
+  {  // a stride the vector store cannot express
+    Built b = build(8, 0, 2);
+    Fills f2 = b.fills;
+    std::vector<int> tt = b.terms;
+    const size_t before = b.g.ops.size();
+    reroll(b.g, f2, tt, {});
+    expect("strided writes not fused",
+           count(b.g, OP_SET_INDEX_INPLACE) == 8 && b.g.ops.size() == before);
+  }
+  {  // the vector is a root: something outside the graph reads it
+    Built b = build(8, 0);
+    Fills f2 = b.fills;
+    std::vector<int> tt = b.terms;
+    const size_t before = b.g.ops.size();
+    reroll(b.g, f2, tt, {b.y_hat});
+    expect("root vector not fused",
+           count(b.g, OP_SET_INDEX_INPLACE) == 8 && b.g.ops.size() == before);
+  }
+  {  // a later op writes the vector again
+    Built b = build(8, 0);
+    const int extra = b.g.add_slot(1, false);
+    b.fills.emplace_back(extra, std::vector<double>{2.5});
+    b.g.add_op(OP_SET_INDEX_INPLACE, {b.y_hat, extra}, b.y_hat, {0});
+    Fills f2 = b.fills;
+    std::vector<int> tt = b.terms;
+    reroll(b.g, f2, tt, {});
+    expect("later writer blocks fusion",
+           count(b.g, OP_SET_INDEX_INPLACE) == 9);
+  }
+  {  // something reads the vector while it is still half-written
+    Built b = build(8, 0);
+    Graph& g = b.g;
+    // Rebuild with a read of y_hat inside every lane.
+    Graph g2;
+    Fills f2;
+    const int a = g2.add_slot(5, true), sigma = g2.add_slot(1, true);
+    const int yh = g2.add_slot(8, false);
+    f2.emplace_back(yh, std::vector<double>(8, 0.0));
+    const int yd = g2.add_slot(8, false);
+    f2.emplace_back(yd, std::vector<double>(8, 0.75));
+    std::vector<int> terms;
+    for (int l = 0; l < 8; ++l) {
+      const int v = g2.add_slot(1, false);
+      g2.add_op(OP_INDEX, {a}, v, {l % 5});
+      g2.add_op(OP_SET_INDEX_INPLACE, {yh, v}, yh, {l});
+      const int peek = g2.add_slot(1, false);
+      g2.add_op(OP_INDEX, {yh}, peek, {0});  // mid-run reader
+    }
+    const int lp = g2.add_slot(1, false);
+    const int id = g2.add_op(OP_NORMAL_LPDF, {yd, yh, sigma}, lp);
+    g2.ops[(size_t)id].variant = 0x06;
+    terms.push_back(lp);
+    std::vector<int> tt = terms;
+    reroll(g2, f2, tt, {});
+    expect("mid-run reader blocks fusion",
+           count(g2, OP_SET_INDEX_INPLACE) == 8);
+    (void)g;
+  }
+}
+
 // ---- end to end through compile_model ------------------------------------
 
 static std::string slurp(const char* p) {
@@ -569,6 +714,8 @@ int main() {
   test_first_lane_anomalous();
   test_block_structured();
   test_bail_extra_root();
+  test_write_fusion();
+  test_write_fusion_bails();
   test_e2e_fixtures();
   if (failures) { std::printf("%d failures\n", failures); return 1; }
   std::printf("test_reroll OK\n");

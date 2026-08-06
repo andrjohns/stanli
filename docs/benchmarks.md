@@ -74,6 +74,29 @@ gather rule vectorizes: **77,960 ops become 9**, 90.5 ms becomes 92 us,
 2.58 GB becomes 42 MB. Seven radon-family models and `rats_model` collapse
 the same way.
 
+That worked when the read-back cancelled the write. When it did not —
+when the loop fills a vector that something *else* reads, which is what
+`y_hat[n] = a[county[n]]` followed by `y ~ normal(y_hat, sigma)` is — the
+writes survived, one op per element, and the re-roll pass refused the
+region because its outputs escaped the lane. **Write-side fusion** takes
+that case: a run of element writes marching contiguously through one
+vector becomes a single vector store, and no store at all when the run
+covers the vector, since the vectorized values can simply *be* it. Later
+readers are redirected to the fused value. The conditions are what make
+the redirection sound rather than what makes it possible: the vector must
+be the same one every lane, no one else may read it while it is
+half-written, nothing may write it after the run, and it must not be read
+from outside the graph. `radon_county` goes from 25,152 ops to **10**
+(0.36x -> 0.98x of CmdStan) and `election88_full` from 289,165 to **65**
+(0.39x -> 2.97x). Eleven more radon-family variants collapse to 10-22 ops
+each. 57 of the 120 corpus models now change under the passes, against 28
+before.
+
+Still refused, and worth naming: a strided run. `dogs` writes
+`p[j, t]` down a column of a 30x25 matrix, so its indices advance by 30
+rather than by 1, and there is no strided vector store to fuse into
+(there is a strided *read*). That is the next kernel.
+
 **The remaining loser, `low_dim_gauss_mix` (0.53x),** is the documented
 phase-2 case: its per-observation `log_mix(theta, normal_lpdf, ...)`
 means the density outputs feed an op instead of the target, so the pass

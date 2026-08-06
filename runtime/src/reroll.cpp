@@ -95,7 +95,14 @@ struct Pos {
   bool term_density = false;   // density, every lane's out a target term
   int slice_start = -1;        // OP_INDEX over a contiguous window
   std::vector<int> gather_idx; // OP_INDEX with a data-driven index
+  int store_vec = -1;          // element write filling a contiguous window
+  int store_start = 0;         //   of this vector, starting here
 };
+
+bool is_element_store(const Op& op) {
+  return (op.opcode == OP_SET_INDEX || op.opcode == OP_SET_INDEX_INPLACE) &&
+         op.n_in == 2 && op.n_idata == 1 && op.out == op.in[0];
+}
 
 // Structural template match; idata may differ across lanes only for
 // OP_INDEX (checked as a progression during classification).
@@ -106,7 +113,11 @@ bool ops_match(const Graph& g, const Op& a, const Op& b) {
   for (int j = 0; j < a.n_in; ++j)
     if (g.slots[a.in[j]].len != g.slots[b.in[j]].len) return false;
   if (g.slots[a.out].len != g.slots[b.out].len) return false;
-  if (a.opcode == OP_INDEX) return a.n_idata == 1 && b.n_idata == 1;
+  // Element writes carry their destination index the same way reads do, so
+  // the immediate is allowed to advance across lanes for both.
+  if (a.opcode == OP_INDEX || a.opcode == OP_SET_INDEX ||
+      a.opcode == OP_SET_INDEX_INPLACE)
+    return a.n_idata == 1 && b.n_idata == 1;
   if (a.n_idata != b.n_idata) return false;
   for (int64_t k = 0; k < a.n_idata; ++k)
     if (a.idata[k] != b.idata[k]) return false;
@@ -137,6 +148,14 @@ RerollStats reroll(Graph& g,
     for (int j = 0; j < g.ops[u].n_in; ++j)
       uses[g.ops[u].in[j]].push_back(u);
 
+  // Producers of each slot. The write-fusion rewrite below needs to know
+  // that nothing else ever writes the vector it is about to take over.
+  std::unordered_map<int, std::vector<size_t>> writers;
+  for (size_t u = 0; u < g.ops.size(); ++u) {
+    if (g.ops[u].out >= 0) writers[g.ops[u].out].push_back(u);
+    if (g.ops[u].out2 >= 0) writers[g.ops[u].out2].push_back(u);
+  }
+
   std::unordered_set<int> term_set(target_terms.begin(), target_terms.end());
 
   // Slots read from outside the op graph (jacobian terms, constrained
@@ -163,12 +182,14 @@ RerollStats reroll(Graph& g,
     for (int P = 1; P <= kMaxPeriod && i + 2 * (size_t)P <= g.ops.size();
          ++P) {
       if (i < retry_at[(size_t)P]) continue;
-      // Cheap pre-check before any lane counting: a profitable region
-      // must contain an allowlisted density whose out is a target term.
+      // Cheap pre-check before any lane counting: a profitable region must
+      // contain either an allowlisted density whose out is a target term, or
+      // a per-lane element write (which fuses into one vector store).
       bool candidate = false;
       for (int p = 0; p < P && !candidate; ++p) {
         const Op& t = g.ops[i + p];
-        candidate = is_density(t.opcode) && term_set.count(t.out) != 0;
+        candidate = (is_density(t.opcode) && term_set.count(t.out) != 0) ||
+                    is_element_store(t);
       }
       if (!candidate) continue;
 
@@ -198,6 +219,8 @@ RerollStats reroll(Graph& g,
         std::unordered_map<int, int> lane0_producer;
         bool ok = true;
         bool any_term_density = false;
+        bool any_store = false;
+        const size_t region_end = i + (size_t)P * (size_t)Luse;
         for (int p = 0; p < P; ++p) {
           const Op& t = op_at(p, 0);
           Pos& ap = pos[p];
@@ -317,6 +340,70 @@ RerollStats reroll(Graph& g,
               ok = false;
               prefix = 0;  // out-of-range index: not ours to rewrite
             }
+          } else if (is_element_store(t)) {
+            // `mu[n] = ...` under an unrolled loop, after the destructive
+            // rewrite: N writes into one vector, each at its own index. When
+            // those indices march contiguously the whole run collapses into
+            // a single vector store -- or into nothing at all, when the run
+            // covers the vector and the vectorized values can simply BE it.
+            //
+            // The output escaping the lane is the point here, so the usual
+            // escape test does not apply. What does: the vector must be the
+            // same one every lane, no one else may read it while it is
+            // half-written, and nothing may write it after the run, since
+            // later readers get redirected to the fused value.
+            const int vec = t.in[0];
+            const int64_t blen = g.slots[vec].len;
+            int64_t br_run = Luse;
+            for (int64_t l = 0; l < Luse; ++l)
+              if (op_at(p, l).idata[0] != t.idata[0] + l) {
+                br_run = l;
+                break;
+              }
+            bool clean = ap.ins[0].kind == InKind::kInvariant &&
+                         (ap.ins[1].kind == InKind::kLaneLocal ||
+                          ap.ins[1].kind == InKind::kConstLanes) &&
+                         t.idata[0] >= 0 && t.idata[0] + br_run <= blen &&
+                         !root_set.count(vec) && !term_set.count(vec);
+            if (clean && ap.ins[1].kind == InKind::kLaneLocal) {
+              // When the value comes from an elided index the fused value IS
+              // that op's base -- a pre-existing slot rather than a fresh
+              // one. Redirecting the vector's readers to it is only sound
+              // while nobody writes it after the run.
+              const Pos& prod = pos[(size_t)ap.ins[1].producer_pos];
+              if (prod.index_elision) {
+                const int base = op_at(ap.ins[1].producer_pos, 0).in[0];
+                auto wit = writers.find(base);
+                if (wit != writers.end())
+                  for (size_t u : wit->second)
+                    if (u >= region_end) clean = false;
+              }
+            }
+            if (clean) {
+              // Everything touching `vec` from the region's start onward must
+              // be one of this region's own writes.
+              auto in_region_write = [&](size_t u) {
+                return u >= i && u < region_end &&
+                       (u - i) % (size_t)P == (size_t)p;
+              };
+              auto uit = uses.find(vec);
+              if (uit != uses.end())
+                for (size_t u : uit->second)
+                  if (u >= i && u < region_end && !in_region_write(u))
+                    clean = false;
+              auto wit = writers.find(vec);
+              if (wit != writers.end())
+                for (size_t u : wit->second)
+                  if (u >= i && !in_region_write(u)) clean = false;
+            }
+            if (!clean || br_run < Luse) {
+              ok = false;
+              prefix = std::min(prefix, clean ? br_run : (int64_t)0);
+            } else {
+              ap.store_vec = vec;
+              ap.store_start = (int)t.idata[0];
+              any_store = true;
+            }
           } else if (is_density(t.opcode)) {
             if (br_term < Luse || br_internal < Luse) {
               // br_internal here can only mean an extra root: a term
@@ -353,11 +440,11 @@ RerollStats reroll(Graph& g,
           }
           lane0_producer[t.out] = p;
         }
-        if (ok && any_term_density) {
+        if (ok && (any_term_density || any_store)) {
           classified = true;
           break;
         }
-        if (ok && !any_term_density) prefix = 0;  // classifiable but useless
+        if (ok) prefix = 0;  // classifiable but useless
         if (prefix >= Luse) prefix = Luse - 1;    // guarantee progress
         Luse = prefix;
       }
@@ -392,6 +479,45 @@ RerollStats reroll(Graph& g,
         if (ap.hoist) {
           result.push_back(t);
           pos_out[(size_t)p] = t.out;
+          continue;
+        }
+        if (ap.store_vec >= 0) {
+          // The lanes' values, as one vector.
+          int W = -1;
+          if (ap.ins[1].kind == InKind::kLaneLocal) {
+            W = pos_out[(size_t)ap.ins[1].producer_pos];
+          } else {
+            W = g.add_slot(Luse, false);
+            fills.emplace_back(W, ap.ins[1].values);
+          }
+          const int vec = ap.store_vec;
+          int replacement = W;
+          if (ap.store_start != 0 || Luse != g.slots[vec].len) {
+            // A window rather than the whole vector: the untouched elements
+            // still have to come from somewhere, so this is a real store.
+            Op sv;
+            sv.opcode = OP_SET_SLICE;
+            sv.n_in = 2;
+            sv.in[0] = vec;
+            sv.in[1] = W;
+            sv.out = g.add_slot(g.slots[vec].len, false);
+            g.idata_pool.push_back(std::vector<int>{ap.store_start});
+            sv.idata = g.idata_pool.back().data();
+            sv.n_idata = 1;
+            result.push_back(sv);
+            replacement = sv.out;
+          }
+          // Later readers of the vector read the fused value instead. Ops
+          // before the region are untouched -- they saw the pre-write
+          // contents and still do -- and classification already established
+          // that nothing writes the vector from here on.
+          for (size_t u = i + (size_t)P * (size_t)Luse; u < g.ops.size(); ++u)
+            for (int j = 0; j < g.ops[u].n_in; ++j)
+              if (g.ops[u].in[j] == vec) {
+                g.ops[u].in[j] = replacement;
+                uses[replacement].push_back(u);
+              }
+          pos_out[(size_t)p] = replacement;
           continue;
         }
         if (ap.slice_start >= 0 || !ap.gather_idx.empty()) {

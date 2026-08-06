@@ -233,17 +233,22 @@ the corpus status).
 
 ## Roadmap
 
-1. Widening the re-roll pass. It now handles the shapes where every
-   lane's density output feeds the target directly, which covered
-   `radon_pooled` and `arK`. The remaining benchmark loser,
-   `low_dim_gauss_mix` (0.53x), writes `log_mix(theta, normal_lpdf(...),
-   ...)` per observation, so the density outputs feed an op instead of
-   the target and the pass correctly refuses. Closing it needs an
-   elementwise-lp density variant plus batched `log_sum_exp`/`log_mix`
-   kernels. Unary math opcodes (exp, log, inv_logit) are also outside
-   the widening vocabulary today, which bounds how many corpus models
-   the pass can reach. Fusing adjacent elementwise chains into one pass
-   over the arena is the follow-on.
+1. Widening the re-roll pass. It handles lanes whose density output
+   feeds the target directly, and lanes that fill a vector one element
+   at a time. Three gaps remain, in rough order of what they cost:
+   a **strided** element-write run (`dogs` writes `p[j, t]` down a
+   column, so its indices advance by the row count and there is no
+   strided vector store to fuse into); a **per-lane integer outcome**
+   (`y[i, j] ~ bernoulli_logit(...)` carries its observation as an
+   immediate, so the lanes do not even match as a template); and
+   density outputs that feed an op instead of the target, which is
+   `low_dim_gauss_mix` (0.53x) writing `log_mix(theta,
+   normal_lpdf(...), ...)` per observation and needs an elementwise-lp
+   density variant plus batched `log_sum_exp`/`log_mix` kernels. Unary
+   math opcodes (exp, log, inv_logit) are also outside the widening
+   vocabulary, which bounds how many corpus models the pass can reach.
+   Fusing adjacent elementwise chains into one pass over the arena is
+   the follow-on.
 2. Windows wheels, and a CRAN shim package. The macOS (arm64, x86_64) and
    Linux (x86_64, aarch64) wheels are built and published by
    `.github/workflows/wheels.yml` on a version tag; Windows needs opam's
