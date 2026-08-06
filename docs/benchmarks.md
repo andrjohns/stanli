@@ -99,6 +99,17 @@ and sizes 8 ops instead of 27,670.
 
 ## End to end: eight schools, model.stan + data.json -> 1000 warmup + 1000 draws
 
+**The sampling rows below, and the sampling columns of
+`docs/corpus-bench.tsv`, were measured with a defective max tree depth of
+5** (`stan::mcmc::base_nuts` defaults to 5; CmdStan sets 10, and
+`run_nuts` never called `set_max_depth`). Trajectories capped at 31
+leapfrogs instead of 1023, so any model needing deep trees was
+under-explored and its sampling time understated -- `prophet` ran 61,510
+gradient evaluations in 6.4 s at depth 5 against 1,686,852 in 176.5 s at
+the correct depth, versus CmdStan's 974,872 post-warmup leapfrogs in
+117.7 s. The per-gradient and preparation columns are unaffected. Numbers
+here are pending a re-run.
+
 | engine | stage | time |
 | --- | --- | --- |
 | stanli | stanc + graph compile + bind | 0.014 s |

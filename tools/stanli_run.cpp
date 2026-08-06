@@ -84,6 +84,12 @@ int main(int argc, char** argv) {
       }
       std::printf("\n");
     }
+    // Gradient evaluations = leapfrog steps + init probes. Reported so a
+    // sampling-time comparison can be split into "cost per gradient" and
+    // "how many gradients the sampler asked for", which are different
+    // claims and can move in opposite directions.
+    std::fprintf(stderr, "stanli_run: %lld gradient evaluations\n",
+                 (long long)ex.n_grad_evals());
   } catch (const std::exception& e) {
     std::fprintf(stderr, "stanli_run: %s\n", e.what());
     return 1;

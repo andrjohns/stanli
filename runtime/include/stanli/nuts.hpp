@@ -13,6 +13,10 @@ struct NutsConfig {
   int warmup = 1000;
   int samples = 1000;
   double delta = 0.8;  // target acceptance statistic
+  // stan::mcmc::base_nuts defaults this to 5; CmdStan sets 10 and so must
+  // we, or trajectories cap at 31 leapfrogs instead of 1023 and any model
+  // needing deep trees is silently under-explored.
+  int max_depth = 10;
 };
 
 // Adaptive diagonal-metric NUTS (stan::mcmc::adapt_diag_e_nuts) over the

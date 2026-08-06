@@ -31,6 +31,7 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
   sampler.get_stepsize_adaptation().set_mu(
       std::log(10.0 * sampler.get_nominal_stepsize()));
   sampler.get_stepsize_adaptation().set_delta(cfg.delta);
+  sampler.set_max_depth(cfg.max_depth);
   sampler.set_window_params(cfg.warmup, 75, 50, 25, logger);
   sampler.engage_adaptation();
 
