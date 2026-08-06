@@ -113,6 +113,19 @@ void Executor::bind_() {
     scratch += op.scratch_len;
   }
   scratch_.assign(scratch, 0.0);
+
+  // Assemble every kernel context once, now that all three arenas are sized
+  // and every offset is final. Reassembling one per op per sweep cost a
+  // scattered slot lookup per input and ~300 bytes of stores, twice per
+  // gradient, which on the serial models (one op per observation, nothing to
+  // vectorize) was a third of the time.
+  ctx_.resize(graph_.ops.size());
+  out2_adj_ptr_.assign(graph_.ops.size(), nullptr);
+  for (size_t i = 0; i < graph_.ops.size(); ++i) {
+    ctx_[i] = make_ctx_(graph_.ops[i], /*backward=*/true);
+    const int o2 = graph_.ops[i].out2;
+    if (o2 >= 0) out2_adj_ptr_[i] = adjoints_.data() + graph_.slots[o2].offset;
+  }
 }
 
 KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
@@ -149,10 +162,9 @@ KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
 }
 
 void Executor::run_forward_only() {
-  for (const auto& op : graph_.ops) {
-    KernelCtx ctx = make_ctx_(op, /*backward=*/false);
-    kernel(op.opcode).forward(ctx);
-  }
+  const size_t n = graph_.ops.size();
+  for (size_t i = 0; i < n; ++i)
+    kernel(graph_.ops[i].opcode).forward(ctx_[i]);
 }
 
 double Executor::forward() {
@@ -167,10 +179,14 @@ double Executor::gradient(double* grad_out) {
   const double v = forward();
   std::memset(adjoints_.data(), 0, sizeof(double) * adjoints_.size());
   adjoints_[graph_.slots[graph_.result_slot].offset] = 1.0;
-  for (auto it = graph_.ops.rbegin(); it != graph_.ops.rend(); ++it) {
-    const Kernel& k = kernel(it->opcode);
+  for (size_t i = graph_.ops.size(); i-- > 0;) {
+    const Kernel& k = kernel(graph_.ops[i].opcode);
     if (!k.backward) continue;
-    KernelCtx ctx = make_ctx_(*it, /*backward=*/true);
+    KernelCtx& ctx = ctx_[i];
+    // The only fields that move between evaluations: the scalar adjoints,
+    // which kernels take by value.
+    if (ctx.out_adj_vec.len == 1) ctx.out_adj = ctx.out_adj_vec.data[0];
+    if (out2_adj_ptr_[i]) ctx.out2_adj = *out2_adj_ptr_[i];
     k.backward(ctx);
   }
   std::memcpy(grad_out, adjoints_.data(), sizeof(double) * n_params_);

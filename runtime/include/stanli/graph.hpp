@@ -120,6 +120,12 @@ class Executor {
   std::vector<double> values_;
   std::vector<double> adjoints_;
   std::vector<double> scratch_;
+  // One context per op, assembled once at bind. Every field in it is a
+  // pointer into an arena that never moves after binding, or an immediate
+  // copied from the op, so the only per-evaluation work is refreshing the
+  // two scalar adjoints the reverse sweep passes by value.
+  std::vector<KernelCtx> ctx_;
+  std::vector<double*> out2_adj_ptr_;  // parallel to ops; null when no out2
   std::vector<char> written_;  // slot carries adjoint (param or op output)
   int64_t n_grad_evals_ = 0;
   int64_t n_params_ = 0;
