@@ -62,7 +62,12 @@ Stage by stage:
    block flattens into a linear sequence of ops reading and writing
    preallocated arenas. `~` statements lower to the same propto +
    per-argument-activity instantiations CmdStan's generated C++ uses, so
-   dropped constants and skipped data partials match exactly.
+   dropped constants and skipped data partials match exactly. The one
+   user function that cannot be inlined is an ODE right-hand side --
+   the integrator picks the times, so it has to stay callable at
+   runtime -- and that compiles instead into a flat register machine
+   (`runtime/src/ode_prog.cpp`), which is worth 29-39x on the models
+   that use one.
 
 3. **Re-rolling** (`runtime/src/reroll.cpp`). Unrolling is what makes
    the graph concrete, but a model written as a per-observation loop
@@ -244,7 +249,7 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 20/20 tests green; 119/120 posteriordb models
+macOS arm64 / clang: 21/21 tests green; 119/120 posteriordb models
 compile and evaluate, 118 of them CmdStan-verified. Of the two that are
 not: `sir`'s ODE solution dips ~1e-9 below a declared lower bound at
 every shared evaluation point and CmdStan rejects it there too, and

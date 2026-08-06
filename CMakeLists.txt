@@ -82,6 +82,7 @@ add_library(stanli_shared SHARED
   runtime/kernels/legacy_fns.cpp
   runtime/kernels/matrix_fns.cpp
   runtime/kernels/ode.cpp
+  runtime/src/ode_prog.cpp
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/kernels/mixture.cpp
@@ -140,6 +141,7 @@ add_library(stanli STATIC
   runtime/kernels/legacy_fns.cpp
   runtime/kernels/matrix_fns.cpp
   runtime/kernels/ode.cpp
+  runtime/src/ode_prog.cpp
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/kernels/mixture.cpp
@@ -199,3 +201,4 @@ stanli_add_test(test_reroll)
 stanli_add_test(test_inplace)
 stanli_add_test(test_pass_safety)
 stanli_add_test(test_sampling)
+stanli_add_test(test_ode_prog)

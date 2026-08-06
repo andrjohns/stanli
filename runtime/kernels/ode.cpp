@@ -3,10 +3,23 @@
 // runtime by the MIR interpreter (see mir_eval.hpp) because the integrator
 // picks the times, so the body cannot be inlined at compile time.
 //
-// Forward solves on doubles. Backward re-solves on a nested var tape with
-// the initial state and parameters promoted, then seeds the flattened
-// solution's adjoints, which is exactly what CmdStan's generated code makes
-// stan-math do.
+// One solve per gradient, in the forward sweep, with the solution's jacobian
+// stashed for the backward one.
+//
+// The forward pass has to solve the coupled system (states plus
+// sensitivities) rather than the plain state system: the adaptive step
+// controller sees the coupled error estimate, so at the loose tolerances
+// these models use a states-only solve lands on visibly different values
+// (measured 3e-2 relative on lotka_volterra, whose atol is 1e-3). Since it
+// pays for the sensitivities anyway, it may as well keep them -- the
+// backward is then a matrix-vector product instead of a second solve.
+//
+// Reading them out is cheap. stan-math integrates the coupled system on
+// doubles and only builds precomputed-gradient varis for the solution
+// itself, so the nested tape left standing after a solve holds the inputs
+// and the outputs and nothing else; one reverse sweep per output element
+// walks a few dozen varis, against several hundred right-hand-side
+// evaluations for a solve.
 #include <stanli/graph.hpp>
 #include <stanli/mir_eval.hpp>
 #include <stanli/ode.hpp>
@@ -21,8 +34,9 @@ namespace {
 
 using stan::math::var;
 
-// Adapter presented to stan-math: evaluates the MIR body for whatever
-// scalar type the integrator instantiates.
+// Adapter presented to stan-math: evaluates the right-hand side for whatever
+// scalar type the integrator instantiates. The compiled program when there is
+// one, the MIR interpreter when there is not.
 struct MirRhs {
   const OdeSpec* spec;
 
@@ -32,6 +46,15 @@ struct MirRhs {
       const std::vector<T_param>& theta, const std::vector<double>& x_r,
       const std::vector<int>& x_i, std::ostream* = nullptr) const {
     using T = stan::return_type_t<T_y, T_param>;
+    if (spec->prog.ok) {
+      // y and theta arrive as T_y / T_param, which are T or double; the
+      // register file is T, so promote through a small staging buffer only
+      // when they differ.
+      std::vector<T> out, ys(y.begin(), y.end()), ths(theta.begin(),
+                                                      theta.end());
+      run_rhs<T>(spec->prog, T(t), ys.data(), ths.data(), x_r.data(), out);
+      return out;
+    }
     std::vector<T> tv{T(t)}, yv(y.begin(), y.end()),
         thv(theta.begin(), theta.end()), xrv(x_r.begin(), x_r.end());
     MirEval<T> ev(*spec->funs());
@@ -55,49 +78,47 @@ std::vector<std::vector<T>> solve(const OdeSpec& s, const std::vector<T>& z0,
                                         s.max_steps);
 }
 
-// The forward pass solves the SAME coupled system CmdStan does (states plus
-// sensitivities), not the plain state system: the adaptive step controller
-// sees the coupled error estimate, so at the loose tolerances these models
-// use, a states-only solve lands on visibly different values (measured 3e-2
-// relative on lotka_volterra, whose atol is 1e-3).
 void ode_fwd(KernelCtx& ctx) {
   const OdeSpec& s = *static_cast<const OdeSpec*>(ctx.udata);
+  const int64_t S = ctx.in[0].len, P = ctx.in[1].len, W = S + P;
   stan::math::nested_rev_autodiff nested;
-  std::vector<var> z0(ctx.in[0].data, ctx.in[0].data + ctx.in[0].len);
-  std::vector<var> th(ctx.in[1].data, ctx.in[1].data + ctx.in[1].len);
+  std::vector<var> z0(ctx.in[0].data, ctx.in[0].data + S);
+  std::vector<var> th(ctx.in[1].data, ctx.in[1].data + P);
   auto solv = solve(s, z0, th);
-  std::vector<std::vector<double>> sol(solv.size());
-  for (size_t n = 0; n < solv.size(); ++n) {
-    sol[n].resize(solv[n].size());
-    for (size_t k = 0; k < solv[n].size(); ++k) sol[n][k] = solv[n][k].val();
+  for (size_t n = 0; n < solv.size(); ++n)
+    for (int64_t k = 0; k < S; ++k)
+      ctx.out.data[(int64_t)n * S + k] = solv[n][k].val();
+
+  // d(solution)/d(z_init, theta), row per flattened solution element. Swept
+  // last element first so the adjoint accumulation in ode_bwd runs in the
+  // same order the reverse sweep over these varis used to, which keeps the
+  // gradient bit-identical to what a second solve produced.
+  double* J = ctx.scratch;
+  for (int64_t o = ctx.out.len; o-- > 0;) {
+    stan::math::set_zero_all_adjoints_nested();
+    stan::math::grad(solv[(size_t)(o / S)][(size_t)(o % S)].vi_);
+    for (int64_t i = 0; i < S; ++i) J[o * W + i] = z0[(size_t)i].adj();
+    for (int64_t i = 0; i < P; ++i) J[o * W + S + i] = th[(size_t)i].adj();
   }
-  const int64_t S = ctx.in[0].len;
-  for (size_t n = 0; n < sol.size(); ++n)
-    for (int64_t k = 0; k < S; ++k) ctx.out.data[n * S + k] = sol[n][k];
 }
 
 void ode_bwd(KernelCtx& ctx) {
   if (ctx.in_adj[0].data == nullptr && ctx.in_adj[1].data == nullptr) return;
-  const OdeSpec& s = *static_cast<const OdeSpec*>(ctx.udata);
-  stan::math::nested_rev_autodiff nested;
-  std::vector<var> z0(ctx.in[0].data, ctx.in[0].data + ctx.in[0].len);
-  std::vector<var> th(ctx.in[1].data, ctx.in[1].data + ctx.in[1].len);
-  auto sol = solve(s, z0, th);
-  const int64_t S = ctx.in[0].len;
-  var j = 0;
-  for (size_t n = 0; n < sol.size(); ++n)
-    for (int64_t k = 0; k < S; ++k)
-      j += ctx.out_adj_vec.data[n * S + k] * sol[n][k];
-  stan::math::grad(j.vi_);
-  if (ctx.in_adj[0].data)
-    for (size_t i = 0; i < z0.size(); ++i)
-      ctx.in_adj[0].data[i] += z0[i].adj();
-  if (ctx.in_adj[1].data)
-    for (size_t i = 0; i < th.size(); ++i)
-      ctx.in_adj[1].data[i] += th[i].adj();
+  const int64_t S = ctx.in[0].len, P = ctx.in[1].len, W = S + P;
+  const double* J = ctx.scratch;
+  for (int64_t o = ctx.out.len; o-- > 0;) {
+    const double a = ctx.out_adj_vec.data[o];
+    if (ctx.in_adj[0].data)
+      for (int64_t i = 0; i < S; ++i) ctx.in_adj[0].data[i] += a * J[o * W + i];
+    if (ctx.in_adj[1].data)
+      for (int64_t i = 0; i < P; ++i)
+        ctx.in_adj[1].data[i] += a * J[o * W + S + i];
+  }
 }
 
-int64_t ode_scratch(const Op&, const Slot*) { return 0; }
+int64_t ode_scratch(const Op& op, const Slot* slots) {
+  return slots[op.out].len * (slots[op.in[0]].len + slots[op.in[1]].len);
+}
 
 }  // namespace
 

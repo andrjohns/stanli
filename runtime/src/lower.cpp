@@ -9,6 +9,8 @@
 #include <stan/math/prim/fun/constants.hpp>
 #include <stan/math/prim/prob/student_t_lccdf.hpp>
 
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <map>
@@ -1751,6 +1753,17 @@ struct Lowering {
       Val theta = lower_expr(e.args[4]);
       const int64_t S = info[z0.slot].len;
       const int64_t N = (int64_t)spec->ts.size();
+      // Compile the right-hand side now that its argument sizes are known.
+      // A failure here is not a compile error: the interpreter still runs it.
+      spec->prog = compile_rhs(*spec->rhs(), *spec->funs(), (int)S,
+                               (int)info[theta.slot].len,
+                               (int)spec->x_r.size(), spec->x_i);
+      // Falling back is correct but ~30x slower, so make it findable.
+      if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ODE"))
+        std::fprintf(stderr,
+                     "stanli: ODE right-hand side %s falls back to the "
+                     "interpreter: %s\n",
+                     spec->rhs_name.c_str(), spec->prog.why.c_str());
       Val v = emit(OP_ODE, {z0.slot, theta.slot}, N * S, {}, {(int)N, (int)S});
       g.ops.back().udata = spec.get();
       g.udata_pool.push_back(std::move(spec));

@@ -32,15 +32,30 @@ int main(int argc, char** argv) {
     ex.params_data()[i] = 0.1 + 0.05 * (i % 7) - 0.15 * (i % 3);
   std::vector<double> grad(n);
   double sink = 0;
-  // warmup
-  for (int i = 0; i < 1000; ++i) sink += ex.gradient(grad.data());
+  // Warm up by time, not by count: 1000 evaluations is nothing on a scalar
+  // model and 90 seconds on an ODE one.
+  {
+    auto w0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 1000; ++i) {
+      sink += ex.gradient(grad.data());
+      if (std::chrono::steady_clock::now() - w0 >
+          std::chrono::milliseconds(200))
+        break;
+    }
+  }
   auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < N; ++i) sink += ex.gradient(grad.data());
   auto t1 = std::chrono::steady_clock::now();
   const double ns =
       std::chrono::duration<double, std::nano>(t1 - t0).count() / N;
-  // Machine-readable: <ns/eval> <sink> <n_params>, consumed by
-  // tools/bench_models.py.
-  std::printf("%.1f %.6g %lld\n", ns, sink, (long long)n);
+  // Forward-only, for splitting a cost between the two sweeps.
+  auto t2 = std::chrono::steady_clock::now();
+  for (int i = 0; i < N; ++i) ex.run_forward_only();
+  auto t3 = std::chrono::steady_clock::now();
+  const double fwd_ns =
+      std::chrono::duration<double, std::nano>(t3 - t2).count() / N;
+  // Machine-readable: <ns/grad> <sink> <ns/forward> <n_params>, consumed by
+  // tools/bench_models.py (which reads field 0 and the last field).
+  std::printf("%.1f %.6g %.1f %lld\n", ns, sink, fwd_ns, (long long)n);
   return 0;
 }

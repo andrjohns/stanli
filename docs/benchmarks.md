@@ -82,6 +82,39 @@ batched `log_sum_exp`/`log_mix` kernel; the hand-vectorized spike puts
 the available win at 2x+ (parity with CmdStan just from vectorizing the
 two normal chains, more with the batched kernel).
 
+**ODE models: the right-hand side was an interpreter.** Every user function
+is inlined at lowering time except one -- an ODE right-hand side has to stay
+callable at runtime, because the integrator picks the times. It was evaluated
+by a tree-walking interpreter over the MIR, at a `std::map` lookup per
+variable reference and a `std::vector` allocation per intermediate: 5.8 us per
+call for lotka_volterra's two-line right-hand side, ~500 calls per gradient,
+**97% of the model's gradient time**. It also solved the system twice per
+gradient, once for the values and again for the derivatives.
+
+Both are gone. The right-hand side compiles once, at lowering time, into a
+flat register machine (`runtime/src/ode_prog.cpp`): names become indices,
+loops over the states unroll, data-only conditions fold, conditions on the
+solve time become branches, and a call is a switch over a contiguous
+instruction array with no allocation. And the forward sweep, which has to
+solve the coupled state-plus-sensitivity system anyway to match CmdStan's
+step control, now keeps the sensitivities instead of throwing them away, so
+the backward is a matrix-vector product.
+
+| model | before | after | speedup | vs CmdStan |
+| --- | ---: | ---: | ---: | ---: |
+| `lotka_volterra` | 2,790,941 ns | 71,704 ns | 38.9x | 0.015x -> 0.58x |
+| `soil_incubation` | 3,389,538 ns | 96,362 ns | 35.2x | 0.018x -> 0.63x |
+| `one_comp_mm_elim_abs` | 18,873,857 ns | 653,181 ns | 28.9x | - |
+
+Gradients are unchanged to the bit where they were before, and
+`lotka_volterra` moved from 4 ULP to bitwise identical to CmdStan: reading the
+jacobian out of the same solve that produced the values removes a second,
+independently stepped solve. All four corpus models that call
+`integrate_ode_*` compile their right-hand side. Anything the compiler cannot
+express -- a `return` out of a branch on the solve time, say -- keeps the
+interpreter, so coverage never shrinks; `STANLI_DEBUG_ODE=1` reports when that
+happens, since a silent 30x is worth a line.
+
 Model preparation scales too: the largest model in the corpus
 (`nn_rbm1bJ100`, MNIST, 60,000 rows, 79,411 parameters) lowers to a
 192,030-op graph in 20.7 s and evaluates its gradient in 0.43 s. That

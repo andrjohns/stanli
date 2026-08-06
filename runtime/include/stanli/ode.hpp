@@ -6,6 +6,7 @@
 #define STANLI_ODE_HPP
 
 #include <stanli/mir.hpp>
+#include <stanli/ode_prog.hpp>
 
 #include <map>
 #include <string>
@@ -38,6 +39,9 @@ struct OdeSpec {
   double rtol = 1e-6, atol = 1e-6;
   long max_steps = 1000000;
   bool stiff = false;  // bdf when true, rk45 otherwise
+  // The right-hand side, compiled. Falls back to the MIR interpreter when
+  // `prog.ok` is false; `prog.why` says what stopped it.
+  RhsProgram prog;
 };
 
 }  // namespace stanli
