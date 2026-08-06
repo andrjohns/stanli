@@ -1,8 +1,9 @@
 """stanli: the Stan Language Interpreter.
 
-Compiles a .stan model via the bundled stanc3 binary (subprocess), lowers it
-in-process through the bundled shared library, and samples with NUTS. No C++
-toolchain, no model compilation on this machine.
+Compiles a .stan model with stanc3 (linked into the bundled shared library,
+or a bundled stanc binary as a subprocess where it is not), lowers it to an
+op graph in-process, and samples with NUTS. No C++ toolchain, no model
+compilation on this machine.
 """
 import ctypes
 import json
@@ -13,7 +14,9 @@ import sys
 import numpy as np
 
 __all__ = ["Model", "__version__"]
-__version__ = "0.1.0.dev0"
+# The one place the version lives. setup.py and the release workflow both
+# read it from here.
+__version__ = "0.1.0"
 
 _BIN = pathlib.Path(__file__).parent / "_bin"
 

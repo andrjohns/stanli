@@ -219,15 +219,20 @@ jobs:
           twine check --strict dist/*.whl
           ls -la dist/
 
-      # setup.py holds the version; the tag has to agree with it, or a
-      # mistyped tag silently publishes the wrong number.
+      # stanli/__init__.py holds the version; the tag has to agree with it,
+      # or a mistyped tag silently publishes the wrong number.
       - name: Tag matches the packaged version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          pkg=$(python3 -c "import re,pathlib;
-          print(re.search(r'version=\"([^\"]+)\"',
-                pathlib.Path('python/setup.py').read_text()).group(1))")
-          echo "tag $tag, setup.py $pkg"
+          pkg=$(python3 - <<'PY'
+          import pathlib, re
+          src = pathlib.Path('python/stanli/__init__.py').read_text()
+          print(re.search(r'^__version__ = "([^"]+)"', src, re.M).group(1))
+          PY
+          )
+          echo "tag $tag, package $pkg"
           [ "$tag" = "$pkg" ]
+          ls dist/ | grep -q "stanli-$pkg-py3-none-" ||
+            { echo "no wheel named for version $pkg"; exit 1; }
 
       - uses: pypa/gh-action-pypi-publish@release/v1

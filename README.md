@@ -216,11 +216,13 @@ an hour to produce), runs the test suite, checks that the platform tag
 matches what the library actually requires, and installs the wheel into a
 clean venv to sample eight schools.
 
-To cut a release: bump `version` in `python/setup.py`, add the entry to
-`CHANGELOG.md`, then tag. The publish job fires only on `refs/tags/v*`,
-asserts the tag agrees with the packaged version, and uploads through
-PyPI trusted publishing, so no API token exists anywhere in the repo or
-its secrets.
+To cut a release: bump `__version__` in `python/stanli/__init__.py` (the
+one place it lives; `setup.py` and the workflow both read it from there),
+add the entry to `CHANGELOG.md`, then tag. The publish job fires only on
+`refs/tags/v*`, asserts the tag agrees with the packaged version, and
+uploads through PyPI trusted publishing, so no API token exists anywhere
+in the repo or its secrets. The `pypi` deployment environment is
+restricted to `v*` tags as a second lock on that.
 
 ```
 git tag -a v0.1.0 -m "stanli 0.1.0" && git push origin v0.1.0

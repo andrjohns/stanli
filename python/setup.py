@@ -2,11 +2,18 @@
 # setuptools must still build this. Platform wheel despite no extension
 # module: the package ships a prebuilt shared library.
 import pathlib
+import re
 
 from setuptools import setup
 from setuptools.dist import Distribution
 
 HERE = pathlib.Path(__file__).parent
+
+# Read, not import: importing the package pulls in numpy, which need not be
+# present to build a wheel.
+VERSION = re.search(r'^__version__ = "([^"]+)"',
+                    (HERE / "stanli" / "__init__.py").read_text(),
+                    re.M).group(1)
 
 
 class BinaryDistribution(Distribution):
@@ -40,7 +47,7 @@ except ImportError:  # building without the wheel package
 
 setup(
     name="stanli",
-    version="0.1.0",
+    version=VERSION,
     description=("Stan Language Interpreter: compile and sample Stan "
                  "models with no C++ toolchain"),
     long_description=(HERE / "README.md").read_text(encoding="utf-8"),
