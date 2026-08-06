@@ -1,4 +1,5 @@
 #include <stanli/compile.hpp>
+#include <stanli/constfold.hpp>
 #include <stanli/inplace.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/ode.hpp>
@@ -2289,6 +2290,12 @@ struct Lowering {
     // Deleting the write/read-back pairs first is what leaves a plain
     // arithmetic lane for reroll to vectorize.
     forward_stores_to_loads(g, update_roots);
+    // After the update chains collapse, so a data-only chain is one slot
+    // rather than N; before reroll, so the lanes it sees have data operands.
+    info.resize(g.slots.size());
+    std::vector<int> folded;
+    const_fold(g, out.fills, update_roots, &folded);
+    for (int s : folded) info[s].data_like = true;
     reroll(g, out.fills, target_terms, roots);  // off under STANLI_NO_REROLL
     info.resize(g.slots.size());  // keep SlotInfo parallel: emit() in
                                   // reduce_terms reads info[o] by slot id

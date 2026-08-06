@@ -91,6 +91,7 @@ add_library(stanli_shared SHARED
   runtime/src/lower.cpp
   runtime/src/reroll.cpp
   runtime/src/inplace.cpp
+  runtime/src/constfold.cpp
   runtime/src/data.cpp
   tests/tbb_stub.cpp)
 target_include_directories(stanli_shared PUBLIC runtime/include)
@@ -150,6 +151,7 @@ add_library(stanli STATIC
   runtime/src/lower.cpp
   runtime/src/reroll.cpp
   runtime/src/inplace.cpp
+  runtime/src/constfold.cpp
   runtime/src/data.cpp)
 target_include_directories(stanli PUBLIC runtime/include)
 target_link_libraries(stanli PUBLIC stanmath sundials)

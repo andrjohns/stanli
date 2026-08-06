@@ -45,7 +45,8 @@ def main():
     disable = {}
     for v in (sys.argv[sys.argv.index("--disable") + 1].split(",")
               if "--disable" in sys.argv
-              else ["STANLI_NO_REROLL", "STANLI_NO_INPLACE"]):
+              else ["STANLI_NO_REROLL", "STANLI_NO_INPLACE",
+                    "STANLI_NO_CONSTFOLD"]):
         k, _, val = v.partition("=")
         disable[k] = val or "1"
     print(f"A = passes off ({', '.join(disable)}), B = passes on")
