@@ -18,9 +18,11 @@ Kernel& kernel(uint16_t opcode) {
   return g_table[opcode];
 }
 
+// Default OFF, on measurement: see packet.hpp. Opt in with
+// STANLI_PACKET_MATH=1.
 static bool g_packet_math = [] {
   const char* e = std::getenv("STANLI_PACKET_MATH");
-  return e == nullptr || (e[0] != '0' || e[1] != '\0');
+  return e != nullptr && e[0] != '0';
 }();
 
 bool packet_math() { return g_packet_math; }

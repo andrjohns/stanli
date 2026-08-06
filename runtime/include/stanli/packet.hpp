@@ -15,8 +15,19 @@
 // per element (tools/bench_packet.cpp, Apple M-series): exp 2.05x,
 // inv_logit 1.93x, sum 4.3x, log 1.25x.
 //
-// On by default. Set STANLI_PACKET_MATH=0 for the scalar-libm arithmetic,
-// which is what the corpus rig uses to report both accuracy tiers.
+// OFF by default, and that default is a measurement, not caution. Per
+// element the packet forms are 2-4x faster, but at whole-model scale the
+// constrain and reduction work they touch is not where gradient time
+// goes: bym2_offset_only (3845 constrained params) measures 41.4 us with
+// packet math and 41.3 us without, lsat_model 47.0 vs 47.3 us -- both
+// inside noise. Meanwhile it costs parity: up to 10 ULP against default
+// CmdStan on the dfold fixture, and 1.4e-13 worst relative deviation
+// across the corpus versus scalar mode.
+//
+// The infrastructure stays because the trade becomes worthwhile once the
+// DENSITY path is converted -- that is where the time actually is, and it
+// is the part `stanc --O1` varmat builds accelerate too. Opt in with
+// STANLI_PACKET_MATH=1.
 #ifndef STANLI_PACKET_HPP
 #define STANLI_PACKET_HPP
 
