@@ -1,9 +1,9 @@
-#include <stanrt/compile.hpp>
-#include <stanrt/mir.hpp>
-#include <stanrt/ode.hpp>
-#include <stanrt/optable.hpp>
-#include <stanrt/reroll.hpp>
-#include <stanrt/sexp.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/mir.hpp>
+#include <stanli/ode.hpp>
+#include <stanli/optable.hpp>
+#include <stanli/reroll.hpp>
+#include <stanli/sexp.hpp>
 
 #include <stan/math/prim/fun/constants.hpp>
 #include <stan/math/prim/prob/student_t_lccdf.hpp>
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 struct SlotInfo {
@@ -63,7 +63,7 @@ struct Lowering {
   }
 
   [[noreturn]] void fail(const std::string& msg, const std::string& raw = "") {
-    throw CompileError("stanrt compile: " + msg +
+    throw CompileError("stanli compile: " + msg +
                        (raw.empty() ? "" : " | in: " + raw));
   }
 
@@ -2176,7 +2176,7 @@ struct Lowering {
     // of the arena, so no op consumes them and the pass cannot infer them.
     std::vector<int> roots = jac_slots;
     for (const auto& v : out.views) roots.push_back(v.slot);
-    reroll(g, out.fills, target_terms, roots);  // off under STANRT_NO_REROLL
+    reroll(g, out.fills, target_terms, roots);  // off under STANLI_NO_REROLL
     info.resize(g.slots.size());  // keep SlotInfo parallel: emit() in
                                   // reduce_terms reads info[o] by slot id
     std::vector<int> all = target_terms;
@@ -2195,4 +2195,4 @@ CompiledModel compile_model(const std::string& tmir_text, const DataMap& data) {
   return lo.run(prog);
 }
 
-}  // namespace stanrt
+}  // namespace stanli

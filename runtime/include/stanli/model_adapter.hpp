@@ -6,10 +6,10 @@
 //
 // propto and jacobian template flags are ignored in M1: the graph already
 // includes its Jacobian terms and all densities are propto=false.
-#ifndef STANRT_MODEL_ADAPTER_HPP
-#define STANRT_MODEL_ADAPTER_HPP
+#ifndef STANLI_MODEL_ADAPTER_HPP
+#define STANLI_MODEL_ADAPTER_HPP
 
-#include <stanrt/graph.hpp>
+#include <stanli/graph.hpp>
 
 #include <stan/math.hpp>
 
@@ -17,7 +17,7 @@
 #include <ostream>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 class ExecutorModel {
  public:
@@ -58,6 +58,6 @@ class ExecutorModel {
   mutable std::vector<double> grad_;
 };
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

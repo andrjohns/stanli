@@ -1,12 +1,12 @@
-// stanrt_check: compile model.stan + data.json and evaluate log_prob +
+// stanli_check: compile model.stan + data.json and evaluate log_prob +
 // gradient at a deterministic unconstrained point. Machine-readable output:
 //   OK <lp> <g0> <g1> ...        on success
 //   COMPILE_FAIL <first line of error>
 //   EVAL_FAIL <what>
 // Used by tools/corpus.py to build the coverage scoreboard, and by the
 // reference harness to compare against CmdStan at the same point.
-#include <stanrt/compile.hpp>
-#include <stanrt/graph.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/graph.hpp>
 
 #include <array>
 #include <cmath>
@@ -48,7 +48,7 @@ static std::string run_stanc(const std::string& stanc,
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: stanrt_check model.stan data.json [--stanc PATH] [--point N]\n");
+    std::fprintf(stderr, "usage: stanli_check model.stan data.json [--stanc PATH] [--point N]\n");
     return 2;
   }
   std::string stanc = "deps/stanc3/stanc";
@@ -71,10 +71,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  stanrt::CompiledModel cm;
+  stanli::CompiledModel cm;
   try {
-    stanrt::DataMap data = stanrt::DataMap::from_json_file(argv[2]);
-    cm = stanrt::compile_model(mir, data);
+    stanli::DataMap data = stanli::DataMap::from_json_file(argv[2]);
+    cm = stanli::compile_model(mir, data);
   } catch (const std::exception& e) {
     std::string what = e.what();
     const size_t nl = what.find('\n');
@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
   }
 
   try {
-    stanrt::Executor ex(std::move(cm.graph));
+    stanli::Executor ex(std::move(cm.graph));
     cm.bind(ex);
     const int64_t n = ex.n_params();
     for (int64_t i = 0; i < n; ++i)

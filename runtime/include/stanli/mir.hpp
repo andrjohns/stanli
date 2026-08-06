@@ -1,16 +1,16 @@
 // C++ representation of the slice of stanc3's transformed MIR that the graph
 // compiler consumes. Anything outside the slice is preserved as raw sexp text
 // in `raw` and surfaces as a clear compile error, never a miscompile.
-#ifndef STANRT_MIR_HPP
-#define STANRT_MIR_HPP
+#ifndef STANLI_MIR_HPP
+#define STANLI_MIR_HPP
 
-#include <stanrt/sexp.hpp>
+#include <stanli/sexp.hpp>
 
 #include <optional>
 #include <string>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace mir {
 
 struct Expr {
@@ -89,6 +89,6 @@ struct Program {
 Program read_program(const sexp::Node& root);
 
 }  // namespace mir
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

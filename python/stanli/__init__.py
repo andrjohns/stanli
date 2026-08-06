@@ -19,35 +19,35 @@ _BIN = pathlib.Path(__file__).parent / "_bin"
 
 
 def _load_lib():
-    names = {"darwin": "libstanrt.dylib", "linux": "libstanrt.so"}
-    lib = ctypes.CDLL(str(_BIN / names.get(sys.platform, "stanrt.dll")))
-    lib.stanrt_model_new.restype = ctypes.c_void_p
-    lib.stanrt_model_new.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+    names = {"darwin": "libstanli.dylib", "linux": "libstanli.so"}
+    lib = ctypes.CDLL(str(_BIN / names.get(sys.platform, "stanli.dll")))
+    lib.stanli_model_new.restype = ctypes.c_void_p
+    lib.stanli_model_new.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
                                      ctypes.c_char_p, ctypes.c_size_t]
-    lib.stanrt_model_free.argtypes = [ctypes.c_void_p]
-    lib.stanrt_n_unconstrained.restype = ctypes.c_int64
-    lib.stanrt_n_unconstrained.argtypes = [ctypes.c_void_p]
-    lib.stanrt_grad.restype = ctypes.c_int
-    lib.stanrt_grad.argtypes = [ctypes.c_void_p,
+    lib.stanli_model_free.argtypes = [ctypes.c_void_p]
+    lib.stanli_n_unconstrained.restype = ctypes.c_int64
+    lib.stanli_n_unconstrained.argtypes = [ctypes.c_void_p]
+    lib.stanli_grad.restype = ctypes.c_int
+    lib.stanli_grad.argtypes = [ctypes.c_void_p,
                                 ctypes.POINTER(ctypes.c_double),
                                 ctypes.POINTER(ctypes.c_double),
                                 ctypes.POINTER(ctypes.c_double)]
-    lib.stanrt_sample.restype = ctypes.c_int
-    lib.stanrt_sample.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+    lib.stanli_sample.restype = ctypes.c_int
+    lib.stanli_sample.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                   ctypes.c_int, ctypes.c_int, ctypes.c_double,
                                   ctypes.POINTER(ctypes.c_double),
                                   ctypes.c_char_p, ctypes.c_size_t]
-    lib.stanrt_n_constrained.restype = ctypes.c_int64
-    lib.stanrt_n_constrained.argtypes = [ctypes.c_void_p]
-    lib.stanrt_constrained_name.restype = ctypes.c_char_p
-    lib.stanrt_constrained_name.argtypes = [ctypes.c_void_p, ctypes.c_int64]
-    lib.stanrt_constrain.restype = ctypes.c_int
-    lib.stanrt_constrain.argtypes = [ctypes.c_void_p,
+    lib.stanli_n_constrained.restype = ctypes.c_int64
+    lib.stanli_n_constrained.argtypes = [ctypes.c_void_p]
+    lib.stanli_constrained_name.restype = ctypes.c_char_p
+    lib.stanli_constrained_name.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+    lib.stanli_constrain.restype = ctypes.c_int
+    lib.stanli_constrain.argtypes = [ctypes.c_void_p,
                                      ctypes.POINTER(ctypes.c_double),
                                      ctypes.POINTER(ctypes.c_double)]
-    lib.stanrt_has_embedded_stanc.restype = ctypes.c_int
-    lib.stanrt_model_new_from_stan.restype = ctypes.c_void_p
-    lib.stanrt_model_new_from_stan.argtypes = [ctypes.c_char_p,
+    lib.stanli_has_embedded_stanc.restype = ctypes.c_int
+    lib.stanli_model_new_from_stan.restype = ctypes.c_void_p
+    lib.stanli_model_new_from_stan.argtypes = [ctypes.c_char_p,
                                                ctypes.c_char_p,
                                                ctypes.c_char_p,
                                                ctypes.c_size_t]
@@ -101,9 +101,9 @@ class Model:
         data_json = _data_to_json(data)
 
         err = ctypes.create_string_buffer(8192)
-        if _lib.stanrt_has_embedded_stanc():
+        if _lib.stanli_has_embedded_stanc():
             # Fully in-process: embedded stanc3 compiles the model.
-            self._m = _lib.stanrt_model_new_from_stan(
+            self._m = _lib.stanli_model_new_from_stan(
                 stan_code.encode(), data_json.encode(), err, len(err))
         else:
             # Fallback: bundled stanc binary as a subprocess.
@@ -111,20 +111,20 @@ class Model:
             tmp = pathlib.Path(tempfile.mkdtemp()) / "model.stan"
             tmp.write_text(stan_code)
             mir = _stanc_mir(tmp)
-            self._m = _lib.stanrt_model_new(mir.encode(), data_json.encode(),
+            self._m = _lib.stanli_model_new(mir.encode(), data_json.encode(),
                                             err, len(err))
         if not self._m:
             raise RuntimeError(err.value.decode())
-        self.n_unconstrained = _lib.stanrt_n_unconstrained(self._m)
-        n_con = _lib.stanrt_n_constrained(self._m)
+        self.n_unconstrained = _lib.stanli_n_unconstrained(self._m)
+        n_con = _lib.stanli_n_constrained(self._m)
         self.constrained_names = [
-            _lib.stanrt_constrained_name(self._m, i).decode()
+            _lib.stanli_constrained_name(self._m, i).decode()
             for i in range(n_con)
         ]
 
     def __del__(self):
         if getattr(self, "_m", None):
-            _lib.stanrt_model_free(self._m)
+            _lib.stanli_model_free(self._m)
             self._m = None
 
     def log_prob_grad(self, q):
@@ -133,7 +133,7 @@ class Model:
         assert q.size == self.n_unconstrained
         lp = ctypes.c_double()
         grad = np.empty(self.n_unconstrained)
-        _lib.stanrt_grad(self._m,
+        _lib.stanli_grad(self._m,
                          q.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
                          ctypes.byref(lp),
                          grad.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
@@ -144,7 +144,7 @@ class Model:
         n = self.n_unconstrained
         draws = np.empty((samples, n))
         err = ctypes.create_string_buffer(4096)
-        rc = _lib.stanrt_sample(
+        rc = _lib.stanli_sample(
             self._m, seed, warmup, samples, delta,
             draws.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             err, len(err))
@@ -154,7 +154,7 @@ class Model:
         con = np.empty((samples, n_con))
         row = np.empty(n_con)
         for s in range(samples):
-            _lib.stanrt_constrain(
+            _lib.stanli_constrain(
                 self._m,
                 draws[s].ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
                 row.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))

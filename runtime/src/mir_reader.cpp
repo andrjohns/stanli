@@ -1,8 +1,8 @@
-#include <stanrt/mir.hpp>
+#include <stanli/mir.hpp>
 
 #include <stdexcept>
 
-namespace stanrt {
+namespace stanli {
 namespace mir {
 namespace {
 
@@ -364,4 +364,4 @@ Program read_program(const sexp::Node& root) {
 }
 
 }  // namespace mir
-}  // namespace stanrt
+}  // namespace stanli

@@ -51,7 +51,7 @@ def main():
         lib("eigen_*"), lib("boost_*"),
         lib("sundials_*") / "include", lib("tbb_*") / "include",
     ]
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanrt_verify_"))
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_verify_"))
 
     datas = {}
     for pj in sorted((pdb / "posteriors").glob("*.json")):
@@ -101,7 +101,7 @@ def main():
                                  capture_output=True, text=True).stdout.split()
             try:
                 got = subprocess.run(
-                    [str(REPO / "build/stanrt_check"), str(stan), str(dj),
+                    [str(REPO / "build/stanli_check"), str(stan), str(dj),
                      "--point", str(point)], capture_output=True, text=True,
                     cwd=REPO, timeout=300).stdout.split()
             except subprocess.TimeoutExpired:
@@ -116,12 +116,12 @@ def main():
         if not ref_ok and not got_ok:
             # Both engines reject every shared point: the model is invalid
             # there (an ODE solution dipping below a declared bound, say),
-            # so this is agreement, not a stanrt failure. Recorded
+            # so this is agreement, not a stanli failure. Recorded
             # separately and never counted as verified.
             results[model] = {"status": "REJECTED_BOTH", "max_rel": 0.0,
                               "max_ulp": 0, "n_values": 0, "point": point}
             write_results(results)
-            print(f"REJECTED_BOTH {model}: CmdStan and stanrt both reject "
+            print(f"REJECTED_BOTH {model}: CmdStan and stanli both reject "
                   f"every shared evaluation point")
             continue
         if not ref_ok or not got_ok:

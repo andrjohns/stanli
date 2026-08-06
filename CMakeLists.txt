@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(stanrt C CXX)
+project(stanli C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,7 +33,7 @@ target_compile_options(stanmath INTERFACE -ffp-contract=off)
 # (single-threaded until the payload ships real TBB).
 # SUNDIALS (CVODES) for the ODE integrators: the same translation units
 # CmdStan compiles, minus the profiler and the Fortran shims. Built once
-# into a static library and linked into both stanrt targets.
+# into a static library and linked into both stanli targets.
 file(GLOB SUNDIALS_SRC
   ${_sundials}/src/cvodes/*.c
   ${_sundials}/src/sundials/*.c
@@ -55,7 +55,7 @@ target_compile_options(sundials PRIVATE -w
   -include ${_sundials}/include/stan_sundials_printf_override.hpp)
 set_target_properties(sundials PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(stanrt_shared SHARED
+add_library(stanli_shared SHARED
   runtime/src/capi.cpp
   runtime/src/executor.cpp
   runtime/kernels/elementwise.cpp
@@ -71,41 +71,41 @@ add_library(stanrt_shared SHARED
   runtime/src/reroll.cpp
   runtime/src/data.cpp
   tests/tbb_stub.cpp)
-target_include_directories(stanrt_shared PUBLIC runtime/include)
-target_link_libraries(stanrt_shared PUBLIC stanmath sundials)
-set_target_properties(stanrt_shared PROPERTIES OUTPUT_NAME stanrt)
+target_include_directories(stanli_shared PUBLIC runtime/include)
+target_link_libraries(stanli_shared PUBLIC stanmath sundials)
+set_target_properties(stanli_shared PROPERTIES OUTPUT_NAME stanli)
 
 # Export only the C API. Everything else in here (stan-math, Eigen, the
 # whole embedded OCaml compiler) is an implementation detail, and leaving
 # 15k symbols exported costs 2.7 MB of symbol table, string table, and
 # export trie in the shipped library.
 if(APPLE)
-  target_link_options(stanrt_shared PRIVATE
+  target_link_options(stanli_shared PRIVATE
     "-Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.txt")
-  set_property(TARGET stanrt_shared APPEND PROPERTY LINK_DEPENDS
+  set_property(TARGET stanli_shared APPEND PROPERTY LINK_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.txt)
 elseif(UNIX)
-  target_link_options(stanrt_shared PRIVATE
+  target_link_options(stanli_shared PRIVATE
     "-Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.map")
-  set_property(TARGET stanrt_shared APPEND PROPERTY LINK_DEPENDS
+  set_property(TARGET stanli_shared APPEND PROPERTY LINK_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.map)
 endif()
 
 # In-process stanc3: link the OCaml-compiled embed object
 # (tools/stanc_embed/build.sh produces deps/stanc3/stanc_embed.o).
-set(STANRT_STANC_EMBED_OBJ "" CACHE FILEPATH
+set(STANLI_STANC_EMBED_OBJ "" CACHE FILEPATH
     "stanc_embed.o built by tools/stanc_embed/build.sh; enables in-process stanc")
-set(STANRT_OCAML_STDLIB "" CACHE PATH
+set(STANLI_OCAML_STDLIB "" CACHE PATH
     "OCaml stdlib dir (opam switch lib/ocaml) for caml/*.h")
-if(STANRT_STANC_EMBED_OBJ)
-  target_sources(stanrt_shared PRIVATE
-    runtime/src/stanc_embed_c.cpp ${STANRT_STANC_EMBED_OBJ})
-  target_include_directories(stanrt_shared PRIVATE ${STANRT_OCAML_STDLIB})
-  target_compile_definitions(stanrt_shared PRIVATE STANRT_EMBED_STANC)
-  target_link_libraries(stanrt_shared PUBLIC dl pthread)
+if(STANLI_STANC_EMBED_OBJ)
+  target_sources(stanli_shared PRIVATE
+    runtime/src/stanc_embed_c.cpp ${STANLI_STANC_EMBED_OBJ})
+  target_include_directories(stanli_shared PRIVATE ${STANLI_OCAML_STDLIB})
+  target_compile_definitions(stanli_shared PRIVATE STANLI_EMBED_STANC)
+  target_link_libraries(stanli_shared PUBLIC dl pthread)
 endif()
 
-add_library(stanrt STATIC
+add_library(stanli STATIC
   runtime/src/executor.cpp
   runtime/kernels/elementwise.cpp
   runtime/kernels/densities.cpp
@@ -119,44 +119,44 @@ add_library(stanrt STATIC
   runtime/src/lower.cpp
   runtime/src/reroll.cpp
   runtime/src/data.cpp)
-target_include_directories(stanrt PUBLIC runtime/include)
-target_link_libraries(stanrt PUBLIC stanmath sundials)
+target_include_directories(stanli PUBLIC runtime/include)
+target_link_libraries(stanli PUBLIC stanmath sundials)
 
 enable_testing()
 # Single-threaded tests stub the one TBB symbol stan-math's rev core needs.
-function(stanrt_add_test NAME)
+function(stanli_add_test NAME)
   add_executable(${NAME} tests/${NAME}.cpp tests/tbb_stub.cpp)
-  target_link_libraries(${NAME} PRIVATE stanrt)
+  target_link_libraries(${NAME} PRIVATE stanli)
   # Tests run from the repo root so fixture paths are stable.
   add_test(NAME ${NAME} COMMAND ${NAME}
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endfunction()
 
-add_executable(stanrt_run tools/stanrt_run.cpp tests/tbb_stub.cpp)
-target_link_libraries(stanrt_run PRIVATE stanrt)
-add_executable(stanrt_check tools/stanrt_check.cpp tests/tbb_stub.cpp)
-target_link_libraries(stanrt_check PRIVATE stanrt)
+add_executable(stanli_run tools/stanli_run.cpp tests/tbb_stub.cpp)
+target_link_libraries(stanli_run PRIVATE stanli)
+add_executable(stanli_check tools/stanli_check.cpp tests/tbb_stub.cpp)
+target_link_libraries(stanli_check PRIVATE stanli)
 add_executable(bench_grad tools/bench_grad.cpp tests/tbb_stub.cpp)
-target_link_libraries(bench_grad PRIVATE stanrt)
+target_link_libraries(bench_grad PRIVATE stanli)
 add_executable(bench_opcost tools/bench_opcost.cpp tests/tbb_stub.cpp)
-target_link_libraries(bench_opcost PRIVATE stanrt)
+target_link_libraries(bench_opcost PRIVATE stanli)
 add_executable(dump_ops tools/dump_ops.cpp tests/tbb_stub.cpp)
-target_link_libraries(dump_ops PRIVATE stanrt)
+target_link_libraries(dump_ops PRIVATE stanli)
 
-stanrt_add_test(test_smoke)
-stanrt_add_test(test_executor)
-stanrt_add_test(test_recorder)
-stanrt_add_test(test_densities)
-stanrt_add_test(test_matvec)
-stanrt_add_test(test_legacy)
-stanrt_add_test(test_eight_schools)
-stanrt_add_test(test_glm)
-stanrt_add_test(test_nuts)
-stanrt_add_test(test_sexp)
-stanrt_add_test(test_mir)
-stanrt_add_test(test_transforms)
-stanrt_add_test(test_eltwise)
-stanrt_add_test(test_lower)
-stanrt_add_test(test_data)
-stanrt_add_test(test_e2e)
-stanrt_add_test(test_reroll)
+stanli_add_test(test_smoke)
+stanli_add_test(test_executor)
+stanli_add_test(test_recorder)
+stanli_add_test(test_densities)
+stanli_add_test(test_matvec)
+stanli_add_test(test_legacy)
+stanli_add_test(test_eight_schools)
+stanli_add_test(test_glm)
+stanli_add_test(test_nuts)
+stanli_add_test(test_sexp)
+stanli_add_test(test_mir)
+stanli_add_test(test_transforms)
+stanli_add_test(test_eltwise)
+stanli_add_test(test_lower)
+stanli_add_test(test_data)
+stanli_add_test(test_e2e)
+stanli_add_test(test_reroll)

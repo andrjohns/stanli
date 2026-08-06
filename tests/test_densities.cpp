@@ -1,7 +1,7 @@
 // One-op graphs per density: value and every parameter gradient must match
 // an in-process var-path evaluation of the same call, bitwise.
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <stan/math.hpp>
 #include <cmath>
@@ -46,7 +46,7 @@ static RunResult run_graph(uint16_t opcode,
                            const std::vector<std::vector<double>>& vals,
                            const std::vector<bool>& params,
                            std::vector<int> idata = {}) {
-  using namespace stanrt;
+  using namespace stanli;
   Graph g;
   std::vector<int> slots;
   int64_t n_par = 0;
@@ -81,7 +81,7 @@ static RunResult run_graph(uint16_t opcode,
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
   using stan::math::var;
 
   // ---- normal_lpdf(y_pv, mu_ps, sigma_ps): all three parameters ----------

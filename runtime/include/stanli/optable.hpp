@@ -1,10 +1,10 @@
 // Opcode registry. Every op, native or legacy, presents the same interface.
-#ifndef STANRT_OPTABLE_HPP
-#define STANRT_OPTABLE_HPP
+#ifndef STANLI_OPTABLE_HPP
+#define STANLI_OPTABLE_HPP
 
-#include <stanrt/graph.hpp>
+#include <stanli/graph.hpp>
 
-namespace stanrt {
+namespace stanli {
 
 enum Opcode : uint16_t {
   OP_EXP = 1,
@@ -103,6 +103,6 @@ Kernel& kernel(uint16_t opcode);
 // Called by kernel TUs at static-init time.
 void register_kernel(uint16_t opcode, Kernel k);
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

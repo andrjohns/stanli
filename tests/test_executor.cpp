@@ -1,7 +1,7 @@
 // Executor forward/backward on a tiny graph: lp = exp(a) + b.
 // Gradient must be {exp(a), 1.0}, value exp(a) + b, both bitwise.
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <cmath>
 #include <cstdio>
@@ -15,7 +15,7 @@ static void expect_eq(const char* what, double got, double want) {
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
 
   Graph g;
   const int a = g.add_slot(1, /*is_param=*/true);

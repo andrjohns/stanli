@@ -6,16 +6,16 @@
 //   D. plain double math (value + 3 partials), the floor
 // A-C = executor loop + ctx assembly + dispatch; C-D = recorder/sink; E is
 // the executor overhead measured with a near-free kernel body.
-#include <stanrt/compile.hpp>
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <vector>
 
-using namespace stanrt;
+using namespace stanli;
 
 static constexpr int N = 4096;
 static constexpr int REPS = 2000;

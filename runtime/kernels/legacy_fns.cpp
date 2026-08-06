@@ -1,10 +1,10 @@
 // Proof-of-mechanism legacy ops. The M3 generator emits kernels of exactly
 // this shape for every signature without a native port.
-#include <stanrt/graph.hpp>
-#include <stanrt/legacy.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/legacy.hpp>
+#include <stanli/optable.hpp>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 void lse_fwd(KernelCtx& ctx) {
@@ -132,4 +132,4 @@ void register_legacy_kernels() {
   register_kernel(OP_LOG_MIX, Kernel{log_mix_fwd, log_mix_bwd, nullptr});
 }
 
-}  // namespace stanrt
+}  // namespace stanli

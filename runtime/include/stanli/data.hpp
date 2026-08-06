@@ -1,7 +1,7 @@
 // Runtime data container. Task 5 uses programmatic construction; Task 6 adds
 // JSON parsing (CmdStan conventions).
-#ifndef STANRT_DATA_HPP
-#define STANRT_DATA_HPP
+#ifndef STANLI_DATA_HPP
+#define STANLI_DATA_HPP
 
 #include <cstdint>
 #include <map>
@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 class DataMap {
  public:
@@ -65,6 +65,6 @@ class DataMap {
   std::map<std::string, Entry> m_;
 };
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

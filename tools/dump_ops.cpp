@@ -1,8 +1,8 @@
 // Spike: print the lowered op sequence of a model, to check how regular
 // the unrolled-loop region is (re-roll pass feasibility).
-#include <stanrt/compile.hpp>
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <cstdio>
 #include <fstream>
@@ -37,14 +37,14 @@ int main(int argc, char** argv) {
     return 2;
   }
   const int max_ops = argc > 3 ? std::atoi(argv[3]) : 200;
-  stanrt::DataMap data = stanrt::DataMap::from_json(slurp(argv[2]));
-  stanrt::CompiledModel cm = stanrt::compile_model(slurp(argv[1]), data);
-  const stanrt::Graph& g = cm.graph;
+  stanli::DataMap data = stanli::DataMap::from_json(slurp(argv[2]));
+  stanli::CompiledModel cm = stanli::compile_model(slurp(argv[1]), data);
+  const stanli::Graph& g = cm.graph;
   std::printf("slots=%zu ops=%zu result=%d\n", g.slots.size(), g.ops.size(),
               g.result_slot);
   constexpr size_t kNames = sizeof(NAMES) / sizeof(NAMES[0]);
   for (size_t i = 0; i < g.ops.size() && (int)i < max_ops; ++i) {
-    const stanrt::Op& op = g.ops[i];
+    const stanli::Op& op = g.ops[i];
     char namebuf[16];
     const char* name;
     if (op.opcode < kNames) {

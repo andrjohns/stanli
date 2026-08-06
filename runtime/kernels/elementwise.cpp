@@ -1,11 +1,11 @@
 // Native elementwise / structural ops with hand-written vjps.
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <cassert>
 #include <cmath>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 // OP_EXP: scalar out = exp(in). Partial is the output itself; no scratch.
@@ -224,4 +224,4 @@ void register_elementwise_kernels() {
   register_kernel(OP_REP_MAT, Kernel{rep_mat_fwd, rep_mat_bwd, nullptr});
 }
 
-}  // namespace stanrt
+}  // namespace stanli

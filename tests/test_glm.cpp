@@ -17,7 +17,7 @@ static void expect_eq(const std::string& what, double got, double want) {
 
 static void reference(const double* q, double* lp_out, double* grad_out) {
   using stan::math::var;
-  using stanrt::testmodels::LogisticGlm;
+  using stanli::testmodels::LogisticGlm;
   const int N = LogisticGlm::N, K = LogisticGlm::K;
 
   var alpha = q[0];
@@ -47,7 +47,7 @@ static void reference(const double* q, double* lp_out, double* grad_out) {
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
   auto m = testmodels::logistic_glm();
   Executor ex(std::move(m.graph));
   testmodels::fill_logistic_glm_data(m, ex);

@@ -6,15 +6,15 @@
 //
 // Matrices live in slots column-major, matching Eigen and the rest of the
 // pipeline, so a flat slot maps straight onto Map<MatrixXd>.
-#include <stanrt/graph.hpp>
-#include <stanrt/legacy.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/legacy.hpp>
+#include <stanli/optable.hpp>
 
 #include <stan/math.hpp>
 
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 using MatD = Eigen::MatrixXd;
@@ -457,4 +457,4 @@ void register_matrix_kernels() {
                   Kernel{nid_glm_fwd, nid_glm_bwd, no_scratch});
 }
 
-}  // namespace stanrt
+}  // namespace stanli

@@ -7,16 +7,16 @@
 // only if the executor gave it an adjoint buffer. Shape (scalar vs vector)
 // is the one compile-time axis; bind_args expands the 2^N combinations and
 // the argument lengths select one per call.
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
-#include <stanrt/recorder.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
+#include <stanli/recorder.hpp>
 
 // The full prim aggregate, not per-density headers: densities call helpers
 // like square() through two-phase lookup and rely on the whole overload set
 // being visible at instantiation, exactly as today's generated C++ does.
 #include <stan/math/prim.hpp>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 // Compile-time recursion over per-arg ACTIVITY (Mask bit: 1 = autodiff
@@ -331,4 +331,4 @@ void register_density_kernels() {
                          sum_in_lens});
 }
 
-}  // namespace stanrt
+}  // namespace stanli

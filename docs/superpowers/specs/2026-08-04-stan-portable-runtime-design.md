@@ -1,4 +1,4 @@
-# stanrt: a portable Stan runtime
+# stanli: a portable Stan runtime
 
 Status: approved in discussion 2026-08-04. Decisions below record that discussion.
 

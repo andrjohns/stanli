@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spike 1: re-roll ceiling. For each losing model, compare stanrt on the
+"""Spike 1: re-roll ceiling. For each losing model, compare stanli on the
 original (unrolled scalar loop) vs the hand-vectorized variant, interleaved
 A/B repeats, plus full-precision gradient parity. Run from worktree root."""
 import pathlib
@@ -13,7 +13,7 @@ REPO = pathlib.Path.cwd()
 PDB = REPO / "deps/posteriordb/posterior_database/models/stan"
 STANC = REPO / "deps/stanc3/stanc"
 BENCH = REPO / "build-rel/bench_grad"
-CHECK = REPO / "build-rel/stanrt_check"
+CHECK = REPO / "build-rel/stanli_check"
 
 MODELS = ["radon_pooled", "arK", "low_dim_gauss_mix"]
 EVALS = {"radon_pooled": 30000, "arK": 50000, "low_dim_gauss_mix": 30000}

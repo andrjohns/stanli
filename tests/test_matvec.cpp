@@ -1,7 +1,7 @@
 // OP_MATVEC: out = X * beta with X data (row-major), hand-written vjp.
 // lp = normal_lpdf(y | X*beta, 1.0); gradient vs var path, bitwise.
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <stan/math.hpp>
 #include <cstdio>
@@ -16,7 +16,7 @@ static void expect_eq(const std::string& what, double got, double want) {
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
   using stan::math::var;
   const int R = 5, C = 3;
   // Column-major X (Stan/Eigen convention), same logical matrix as before.

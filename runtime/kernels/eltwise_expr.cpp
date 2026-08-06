@@ -2,12 +2,12 @@
 // stan-math REV overloads' forward Eigen expressions and their backward
 // accumulation shapes (see constrain.cpp for why: packet math vs libm).
 // Shape dispatch is runtime: len==1 broadcasts.
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <stan/math/prim.hpp>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 using Arr = Eigen::Array<double, -1, 1>;
@@ -417,4 +417,4 @@ void register_eltwise_kernels() {
   register_kernel(OP_REP_VEC, Kernel{repv_fwd, repv_bwd, nullptr});
 }
 
-}  // namespace stanrt
+}  // namespace stanli

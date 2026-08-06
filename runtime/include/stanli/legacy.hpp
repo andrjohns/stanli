@@ -10,14 +10,14 @@
 // the nested tape allocates from the arena, so the native-op zero-allocation
 // property does not hold for legacy ops. Each one disappears from profiles
 // when its function gets a native port.
-#ifndef STANRT_LEGACY_HPP
-#define STANRT_LEGACY_HPP
+#ifndef STANLI_LEGACY_HPP
+#define STANLI_LEGACY_HPP
 
-#include <stanrt/graph.hpp>
+#include <stanli/graph.hpp>
 
 #include <stan/math.hpp>
 
-namespace stanrt {
+namespace stanli {
 
 // F: Eigen var vector -> var (scalar out) or var vector (vector out).
 template <typename F>
@@ -41,6 +41,6 @@ void legacy_bwd_vec_in(KernelCtx& ctx, F&& f) {
     ctx.in_adj[0].data[i] += x(i).adj();
 }
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

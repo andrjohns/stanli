@@ -12,12 +12,12 @@
 // reused by backward, exactly as the rev overloads reuse their arena copies.
 //
 // out = constrained values, out2 = summed log-jacobian term.
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <stan/math.hpp>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 using Arr = Eigen::Array<double, -1, 1>;
@@ -272,4 +272,4 @@ void register_constrain_kernels() {
                   Kernel{pos_ordered_fwd, pos_ordered_bwd, nullptr});
 }
 
-}  // namespace stanrt
+}  // namespace stanli

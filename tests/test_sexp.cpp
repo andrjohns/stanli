@@ -1,5 +1,5 @@
 // Sexp parser for stanc3 --debug-transformed-mir output.
-#include <stanrt/sexp.hpp>
+#include <stanli/sexp.hpp>
 
 #include <cstdio>
 #include <string>
@@ -13,8 +13,8 @@ static void check(bool ok, const std::string& what) {
 }
 
 int main() {
-  using stanrt::sexp::Node;
-  using stanrt::sexp::parse;
+  using stanli::sexp::Node;
+  using stanli::sexp::parse;
 
   {
     Node n = parse("(a (b \"c d\") <opaque>)");

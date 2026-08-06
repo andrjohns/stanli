@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Corpus coverage harness: run stanrt_check over every posteriordb
+"""Corpus coverage harness: run stanli_check over every posteriordb
 (model, dataset) pair and histogram the failures by missing feature.
 
 Usage: tools/corpus.py PDB_DIR [--filter SUBSTR]
@@ -16,7 +16,7 @@ import tempfile
 import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-CHECK = REPO / "build" / "stanrt_check"
+CHECK = REPO / "build" / "stanli_check"
 
 # Verification results written by tools/verify_sample.py. A model counts as
 # passing only if it appears here as VERIFIED; compiling and returning a
@@ -49,7 +49,7 @@ def main():
     pdb = pathlib.Path(sys.argv[1]) / "posterior_database"
     filt = sys.argv[sys.argv.index("--filter") + 1] if "--filter" in sys.argv else ""
     posteriors = sorted((pdb / "posteriors").glob("*.json"))
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanrt_corpus_"))
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_corpus_"))
 
     seen_models = set()
     results = {}
@@ -129,7 +129,7 @@ def main():
                 if v.get("status") == "REJECTED_BOTH"]
     if rejected:
         md += ["", "## Rejected by both engines", "",
-               "CmdStan and stanrt both reject every shared evaluation "
+               "CmdStan and stanli both reject every shared evaluation "
                "point for these models: the model is invalid there (an ODE "
                "solution dipping below a declared lower bound, for "
                "instance), so there is nothing to compare. Agreement, not "

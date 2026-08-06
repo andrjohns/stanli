@@ -1,15 +1,15 @@
 // Structured op graph: the runtime's IR and, during reverse mode, its tape.
 // M1 builds graphs programmatically; the stanc3 backend (M2) will emit the
 // same structure from MIR.
-#ifndef STANRT_GRAPH_HPP
-#define STANRT_GRAPH_HPP
+#ifndef STANLI_GRAPH_HPP
+#define STANLI_GRAPH_HPP
 
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 // A view of one contiguous buffer. len == 1 means scalar.
 struct Desc {
@@ -126,6 +126,6 @@ class Executor {
   int64_t arena_len_ = 0;
 };
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

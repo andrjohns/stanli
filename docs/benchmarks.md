@@ -3,7 +3,7 @@
 2026-08-06, Apple M-series (macOS arm64), clang, both sides -O3 and
 -ffp-contract=off, single-threaded. Both engines evaluate the sampling
 gradient (propto + jacobian) at the same deterministic unconstrained
-point. stanrt runs `tools/bench_grad.cpp`; CmdStan runs
+point. stanli runs `tools/bench_grad.cpp`; CmdStan runs
 `tools/bench_cmdstan_grad.cpp` compiled against the stanc-generated
 header, looping the same fresh-vars + grad + recover_memory cycle
 `stan::model::gradient` performs per leapfrog step. Reproduce the whole
@@ -11,7 +11,7 @@ table with `tools/bench_models.py deps/cmdstan deps/posteriordb`.
 
 ## Per-gradient latency
 
-| model | unconstrained params | stanrt ns/grad | CmdStan ns/grad | speedup | stanrt prep | CmdStan build |
+| model | unconstrained params | stanli ns/grad | CmdStan ns/grad | speedup | stanli prep | CmdStan build |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `radon_pooled` | 3 | 52730 | 325859 | 6.18x | 0.079 s | 6.2 s |
 | `arK` | 7 | 2440 | 11994 | 4.91x | 0.007 s | 6.4 s |
@@ -47,7 +47,7 @@ from 27,670 ops to 8 (0.91x -> 6.18x), `arK` from 3,164 to 21 (0.40x ->
 block. Anything the pass cannot prove safe it leaves alone, per region:
 cross-lane recurrences, partial/strided index progressions, outputs
 escaping their lane, opcodes outside its vocabulary. Set
-`STANRT_NO_REROLL=1` to disable it.
+`STANLI_NO_REROLL=1` to disable it.
 
 **The remaining loser, `low_dim_gauss_mix` (0.53x),** is the documented
 phase-2 case: its per-observation `log_mix(theta, normal_lpdf, ...)`
@@ -65,7 +65,7 @@ an indexed expression by copying its base, so reading `y[n]` in a loop
 copied the whole array each time and lowering was quadratic in the data
 size.
 
-Preparation time is the other axis: stanrt lowers a model in 4-200 ms,
+Preparation time is the other axis: stanli lowers a model in 4-200 ms,
 against a 6.2-7.6 s CmdStan compile (with a warm precompiled header, and
 after a multi-minute one-time `make build`). That gap is what
 time-to-first-draw is made of. Re-rolling also cut preparation time on
@@ -76,9 +76,9 @@ and sizes 8 ops instead of 27,670.
 
 | engine | stage | time |
 | --- | --- | --- |
-| stanrt | stanc + graph compile + bind | 0.014 s |
-| stanrt | NUTS 1000+1000 (incl. constraining draws) | 0.020 s |
-| stanrt | CLI total (`stanrt_run`, process start to CSV) | 0.24 s |
+| stanli | stanc + graph compile + bind | 0.014 s |
+| stanli | NUTS 1000+1000 (incl. constraining draws) | 0.020 s |
+| stanli | CLI total (`stanli_run`, process start to CSV) | 0.24 s |
 | CmdStan | model build (stanc + clang, warm PCH) | 4.62 s |
 | CmdStan | NUTS 1000+1000 (self-reported total) | 0.044 s |
 | CmdStan | build + run wall time | ~4.98 s |

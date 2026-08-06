@@ -2,7 +2,7 @@
 // gradient. Statistical checks with fixed seeds.
 #include "models.hpp"
 
-#include <stanrt/nuts.hpp>
+#include <stanli/nuts.hpp>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -19,7 +19,7 @@ static void expect_in(const std::string& what, double got, double lo,
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
 
   // ---- 10-dim standard normal: mean 0, sd 1 ------------------------------
   {

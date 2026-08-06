@@ -12,11 +12,11 @@
 // array literals, loops, and static branches. Anything outside that raises a
 // CompileError naming the construct, exactly like the lowering does, so an
 // unsupported RHS is a clear failure and never a silent wrong answer.
-#ifndef STANRT_MIR_EVAL_HPP
-#define STANRT_MIR_EVAL_HPP
+#ifndef STANLI_MIR_EVAL_HPP
+#define STANLI_MIR_EVAL_HPP
 
-#include <stanrt/compile.hpp>
-#include <stanrt/mir.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/mir.hpp>
 
 #include <stan/math.hpp>
 
@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 template <typename T>
 class MirEval {
@@ -62,7 +62,7 @@ class MirEval {
   };
 
   [[noreturn]] static void fail(const std::string& msg) {
-    throw CompileError("stanrt runtime: " + msg);
+    throw CompileError("stanli runtime: " + msg);
   }
 
   const std::map<std::string, const mir::FunDef*>& funs_;
@@ -280,6 +280,6 @@ class MirEval {
   }
 };
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

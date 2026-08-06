@@ -28,8 +28,8 @@
 // never per-model: cross-lane reads (parameter recurrences), partial or
 // strided INDEX progressions, outputs escaping the lane, opcodes outside
 // the vocabulary.
-#include <stanrt/optable.hpp>
-#include <stanrt/reroll.hpp>
+#include <stanli/optable.hpp>
+#include <stanli/reroll.hpp>
 
 #include <algorithm>
 #include <cstdlib>
@@ -37,7 +37,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 constexpr int64_t kMinLanes = 4;
@@ -120,7 +120,7 @@ RerollStats reroll(Graph& g,
   RerollStats st;
   st.ops_before = static_cast<int64_t>(g.ops.size());
   st.ops_after = st.ops_before;
-  if (std::getenv("STANRT_NO_REROLL")) return st;
+  if (std::getenv("STANLI_NO_REROLL")) return st;
 
   // The dedup'd constant pool: slot -> value, for len-1 fills.
   std::unordered_map<int, double> const_val;
@@ -440,4 +440,4 @@ RerollStats reroll(Graph& g,
   return st;
 }
 
-}  // namespace stanrt
+}  // namespace stanli

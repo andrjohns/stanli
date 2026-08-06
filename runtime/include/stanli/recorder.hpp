@@ -13,10 +13,10 @@
 // while stan-math is vendored read-only. No fvar code paths are otherwise
 // reachable: rvar has no .d_ member, and any template that tries to use one
 // fails to compile rather than misbehaving.
-#ifndef STANRT_RECORDER_HPP
-#define STANRT_RECORDER_HPP
+#ifndef STANLI_RECORDER_HPP
+#define STANLI_RECORDER_HPP
 
-#include <stanrt/graph.hpp>
+#include <stanli/graph.hpp>
 
 #include <stan/math/prim/meta.hpp>
 #include <stan/math/prim/fun/Eigen.hpp>
@@ -28,7 +28,7 @@
 #include <ostream>
 #include <type_traits>
 
-namespace stanrt {
+namespace stanli {
 
 // The recording scalar. Constructible from double (densities early-return
 // literal 0.0) but not convertible to double, so stan::is_constant<rvar>
@@ -74,37 +74,37 @@ inline sink*& active_sink() {
   return s;
 }
 
-}  // namespace stanrt
+}  // namespace stanli
 
 namespace stan {
 
 // Trait registration: rvar is an autodiff scalar whose partials are double.
 template <>
-struct is_fvar<stanrt::rvar, void> : std::true_type {};
+struct is_fvar<stanli::rvar, void> : std::true_type {};
 
 template <>
-struct partials_type<stanrt::rvar, void> {
+struct partials_type<stanli::rvar, void> {
   using type = double;
 };
 
 template <>
-struct scalar_type<stanrt::rvar, void> {
-  using type = stanrt::rvar;
+struct scalar_type<stanli::rvar, void> {
+  using type = stanli::rvar;
 };
 
 template <>
-struct base_type<stanrt::rvar, void> {
-  using type = stanrt::rvar;
+struct base_type<stanli::rvar, void> {
+  using type = stanli::rvar;
 };
 
 template <>
-struct value_type<stanrt::rvar, void> {
+struct value_type<stanli::rvar, void> {
   using type = double;
 };
 
 namespace math {
-inline double value_of(const stanrt::rvar& v) { return v.val_; }
-inline double value_of_rec(const stanrt::rvar& v) { return v.val_; }
+inline double value_of(const stanli::rvar& v) { return v.val_; }
+inline double value_of_rec(const stanli::rvar& v) { return v.val_; }
 }  // namespace math
 
 namespace math {
@@ -114,18 +114,18 @@ namespace internal {
 // hold one double behind a broadcast_array (a density assigning a length-1
 // expression collapses onto element 0, as the fwd/rev edges do).
 template <typename ViewElt>
-class ops_partials_edge<ViewElt, stanrt::rvar, void> {
+class ops_partials_edge<ViewElt, stanli::rvar, void> {
  public:
   double partial_{0};
   broadcast_array<double> partials_{partial_};
 
   ops_partials_edge() = default;
-  explicit ops_partials_edge(const stanrt::rvar& op)
+  explicit ops_partials_edge(const stanli::rvar& op)
       : partial_(0), partials_(partial_), operands_(op) {}
   ops_partials_edge(const ops_partials_edge& o)
       : partial_(o.partial_), partials_(partial_), operands_(o.operands_) {}
 
-  stanrt::rvar operands_{};
+  stanli::rvar operands_{};
 
   int size() const { return 1; }
   void emit(double* dst) const { dst[0] = partial_; }
@@ -182,7 +182,7 @@ struct rt_has_emit<E, std::void_t<decltype(std::declval<const E&>().emit(
 // specialization, build() copies partials out verbatim instead of
 // contracting them against a tangent.
 template <typename... Ops>
-class partials_propagator<stanrt::rvar, void, Ops...> {
+class partials_propagator<stanli::rvar, void, Ops...> {
  public:
   std::tuple<ops_partials_edge<double, std::decay_t<Ops>>...> edges_;
 
@@ -190,18 +190,18 @@ class partials_propagator<stanrt::rvar, void, Ops...> {
   explicit partials_propagator(Types&&... ops)
       : edges_(ops_partials_edge<double, std::decay_t<Ops>>(ops)...) {}
 
-  stanrt::rvar build(double value) {
-    stanrt::sink* s = stanrt::active_sink();
+  stanli::rvar build(double value) {
+    stanli::sink* s = stanli::active_sink();
     if (s != nullptr) {
       s->value = value;
       emit_all(s, std::index_sequence_for<Ops...>{});
     }
-    return stanrt::rvar(value);
+    return stanli::rvar(value);
   }
 
  private:
   template <std::size_t I>
-  void emit_one(stanrt::sink* s) {
+  void emit_one(stanli::sink* s) {
     using E = std::tuple_element_t<I, decltype(edges_)>;
     if constexpr (rt_has_emit<E>::value) {
       s->len[I] = std::get<I>(edges_).size();
@@ -212,7 +212,7 @@ class partials_propagator<stanrt::rvar, void, Ops...> {
   }
 
   template <std::size_t... I>
-  void emit_all(stanrt::sink* s, std::index_sequence<I...>) {
+  void emit_all(stanli::sink* s, std::index_sequence<I...>) {
     (void)std::initializer_list<int>{(emit_one<I>(s), 0)...};
   }
 };

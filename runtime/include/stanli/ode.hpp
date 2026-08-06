@@ -2,16 +2,16 @@
 // graph's user-data channel. Owns everything the integrator needs that is
 // fixed at lowering time: the right-hand side's MIR, the function table it
 // may call into, the solve times, the data arrays, and the tolerances.
-#ifndef STANRT_ODE_HPP
-#define STANRT_ODE_HPP
+#ifndef STANLI_ODE_HPP
+#define STANLI_ODE_HPP
 
-#include <stanrt/mir.hpp>
+#include <stanli/mir.hpp>
 
 #include <map>
 #include <string>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 struct OdeSpec {
   // The spec outlives lowering (the graph does), so it owns copies of the
@@ -40,6 +40,6 @@ struct OdeSpec {
   bool stiff = false;  // bdf when true, rk45 otherwise
 };
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

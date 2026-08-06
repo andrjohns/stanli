@@ -1,13 +1,13 @@
 // Shared helper: build and run a one-op graph, returning value + gradient.
-#ifndef STANRT_TESTS_GRAPH_HELPERS_HPP
-#define STANRT_TESTS_GRAPH_HELPERS_HPP
+#ifndef STANLI_TESTS_GRAPH_HELPERS_HPP
+#define STANLI_TESTS_GRAPH_HELPERS_HPP
 
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace testutil {
 
 struct RunResult {
@@ -91,6 +91,6 @@ inline RunResult run_op_sum(uint16_t opcode, int64_t out_len,
 }
 
 }  // namespace testutil
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

@@ -1,7 +1,7 @@
 // The recorder scalar must (a) reproduce var-path gradients bitwise through
 // unmodified stan-math templates and (b) support zero-copy promotion of a
 // double buffer to an rvar view.
-#include <stanrt/recorder.hpp>
+#include <stanli/recorder.hpp>
 
 #include <stan/math.hpp>
 #include <cstdio>
@@ -16,7 +16,7 @@ static void expect_eq(const char* what, double got, double want) {
 }
 
 int main() {
-  using stanrt::rvar;
+  using stanli::rvar;
   std::vector<double> ys{1.3, -0.4, 2.2, 0.1, -1.7};
   const int N = static_cast<int>(ys.size());
 
@@ -30,25 +30,25 @@ int main() {
   // Recorder path 1: copied rvar vector.
   double gy_copy[8]{}, gmu_copy = 0, gsig_copy = 0;
   {
-    stanrt::sink s;
+    stanli::sink s;
     s.buf[0] = gy_copy; s.buf[1] = &gmu_copy; s.buf[2] = &gsig_copy;
-    stanrt::active_sink() = &s;
+    stanli::active_sink() = &s;
     Eigen::Matrix<rvar, -1, 1> ry(N);
     for (int i = 0; i < N; ++i) ry(i) = rvar(ys[i]);
     stan::math::normal_lpdf<false>(ry, rvar(0.25), rvar(1.4));
-    stanrt::active_sink() = nullptr;
+    stanli::active_sink() = nullptr;
     expect_eq("copied value", s.value, vlp.val());
   }
 
   // Recorder path 2: zero-copy map over the double buffer.
   double gy_map[8]{}, gmu_map = 0, gsig_map = 0;
   {
-    stanrt::sink s;
+    stanli::sink s;
     s.buf[0] = gy_map; s.buf[1] = &gmu_map; s.buf[2] = &gsig_map;
-    stanrt::active_sink() = &s;
-    auto ry = stanrt::as_rvar(stanrt::Desc{ys.data(), N});
+    stanli::active_sink() = &s;
+    auto ry = stanli::as_rvar(stanli::Desc{ys.data(), N});
     stan::math::normal_lpdf<false>(ry, rvar(0.25), rvar(1.4));
-    stanrt::active_sink() = nullptr;
+    stanli::active_sink() = nullptr;
     expect_eq("mapped value", s.value, vlp.val());
   }
 
@@ -70,11 +70,11 @@ int main() {
   glp.grad();
   double ga = 0, gb = 0;
   {
-    stanrt::sink s;
+    stanli::sink s;
     s.buf[0] = nullptr; s.buf[1] = &ga; s.buf[2] = &gb;
-    stanrt::active_sink() = &s;
+    stanli::active_sink() = &s;
     stan::math::gamma_lpdf<false>(ymap, rvar(2.5), rvar(1.3));
-    stanrt::active_sink() = nullptr;
+    stanli::active_sink() = nullptr;
     expect_eq("gamma value", s.value, glp.val());
   }
   expect_eq("gamma d/dalpha", ga, va.adj());

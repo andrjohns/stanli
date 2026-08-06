@@ -1,6 +1,6 @@
 // C bridge to the embedded stanc3 (OCaml, linked in via
-// -output-complete-obj). Compiled into libstanrt only when the embed object
-// is available (STANRT_EMBED_STANC).
+// -output-complete-obj). Compiled into libstanli only when the embed object
+// is available (STANLI_EMBED_STANC).
 //
 // OCaml runtime notes: caml_startup runs once; callbacks must come from a
 // thread known to the OCaml runtime. v1 policy: all stanc calls happen on
@@ -15,11 +15,11 @@
 
 extern "C" {
 
-// "OK<sexp>" or "ERR<message>"; caller frees with stanrt_stanc_free.
-char* stanrt_stanc_tmir(const char* stan_code) {
+// "OK<sexp>" or "ERR<message>"; caller frees with stanli_stanc_free.
+char* stanli_stanc_tmir(const char* stan_code) {
   static std::once_flag once;
   std::call_once(once, [] {
-    static char arg0[] = "stanrt";
+    static char arg0[] = "stanli";
     static char* argv[] = {arg0, nullptr};
     caml_startup(argv);
   });
@@ -32,6 +32,6 @@ char* stanrt_stanc_tmir(const char* stan_code) {
   return strdup(String_val(res));
 }
 
-void stanrt_stanc_free(char* p) { std::free(p); }
+void stanli_stanc_free(char* p) { std::free(p); }
 
 }  // extern "C"

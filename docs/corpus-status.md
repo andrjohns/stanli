@@ -128,7 +128,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 
 ## Rejected by both engines
 
-CmdStan and stanrt both reject every shared evaluation point for these models: the model is invalid there (an ODE solution dipping below a declared lower bound, for instance), so there is nothing to compare. Agreement, not a gap, but not counted as verified either.
+CmdStan and stanli both reject every shared evaluation point for these models: the model is invalid there (an ODE solution dipping below a declared lower bound, for instance), so there is nothing to compare. Agreement, not a gap, but not counted as verified either.
 
 - `sir`
 

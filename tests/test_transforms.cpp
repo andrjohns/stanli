@@ -1,8 +1,8 @@
 // Constraint transform ops: constrained value, log-jacobian, and gradient
 // (through both the constrained value and the jacobian) vs stan-math's
 // *_constrain var path.
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <stan/math.hpp>
 #include <cstdio>
@@ -25,7 +25,7 @@ static void expect_eq(const std::string& what, double got, double want) {
 // keep Task 3 self-contained it is declared there but implemented here.)
 static void run_case(const std::string& tag, uint16_t opcode, int n,
                      const double* x0, double lb, double ub) {
-  using namespace stanrt;
+  using namespace stanli;
   using stan::math::var;
 
   Graph g;
@@ -82,11 +82,11 @@ static void run_case(const std::string& tag, uint16_t opcode, int n,
 int main() {
   const double xs[3] = {0.3, -1.2, 2.0};
   const double x1[1] = {0.7};
-  run_case("lower vec", stanrt::OP_CONSTRAIN_LOWER, 3, xs, 0.0, 0.0);
-  run_case("lower scalar", stanrt::OP_CONSTRAIN_LOWER, 1, x1, 2.5, 0.0);
-  run_case("upper vec", stanrt::OP_CONSTRAIN_UPPER, 3, xs, 1.5, 0.0);
-  run_case("lu vec", stanrt::OP_CONSTRAIN_LU, 3, xs, -1.0, 2.0);
-  run_case("lu scalar", stanrt::OP_CONSTRAIN_LU, 1, x1, 0.0, 1.0);
+  run_case("lower vec", stanli::OP_CONSTRAIN_LOWER, 3, xs, 0.0, 0.0);
+  run_case("lower scalar", stanli::OP_CONSTRAIN_LOWER, 1, x1, 2.5, 0.0);
+  run_case("upper vec", stanli::OP_CONSTRAIN_UPPER, 3, xs, 1.5, 0.0);
+  run_case("lu vec", stanli::OP_CONSTRAIN_LU, 3, xs, -1.0, 2.0);
+  run_case("lu scalar", stanli::OP_CONSTRAIN_LU, 1, x1, 0.0, 1.0);
 
   if (failures == 0) std::printf("test_transforms OK\n");
   return failures == 0 ? 0 : 1;

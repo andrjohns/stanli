@@ -1,4 +1,4 @@
-#include <stanrt/data.hpp>
+#include <stanli/data.hpp>
 
 #include "../third_party/nlohmann_json.hpp"
 
@@ -6,7 +6,7 @@
 #include <functional>
 #include <sstream>
 
-namespace stanrt {
+namespace stanli {
 
 using nlohmann::json;
 
@@ -128,4 +128,4 @@ DataMap DataMap::from_json_file(const std::string& path) {
   return from_json(ss.str());
 }
 
-}  // namespace stanrt
+}  // namespace stanli

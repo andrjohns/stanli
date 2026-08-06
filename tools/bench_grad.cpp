@@ -1,7 +1,7 @@
 // Per-gradient latency: compile model+data, evaluate log_prob gradient at a
 // fixed point N times, report ns/eval.
-#include <stanrt/compile.hpp>
-#include <stanrt/graph.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/graph.hpp>
 
 #include <chrono>
 #include <cstdio>
@@ -23,9 +23,9 @@ int main(int argc, char** argv) {
     return 2;
   }
   const int N = std::atoi(argv[3]);
-  stanrt::DataMap data = stanrt::DataMap::from_json(slurp(argv[2]));
-  stanrt::CompiledModel cm = stanrt::compile_model(slurp(argv[1]), data);
-  stanrt::Executor ex(std::move(cm.graph));
+  stanli::DataMap data = stanli::DataMap::from_json(slurp(argv[2]));
+  stanli::CompiledModel cm = stanli::compile_model(slurp(argv[1]), data);
+  stanli::Executor ex(std::move(cm.graph));
   cm.bind(ex);
   const int64_t n = ex.n_params();
   for (int64_t i = 0; i < n; ++i)

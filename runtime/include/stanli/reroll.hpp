@@ -2,16 +2,16 @@
 // consecutive lanes) into vectorized ops. Runs after lowering, before the
 // target-term reduction, so N scalar density terms can become one summed
 // vector-density term.
-#ifndef STANRT_REROLL_HPP
-#define STANRT_REROLL_HPP
+#ifndef STANLI_REROLL_HPP
+#define STANLI_REROLL_HPP
 
-#include <stanrt/graph.hpp>
+#include <stanli/graph.hpp>
 
 #include <cstdint>
 #include <utility>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 struct RerollStats {
   int regions = 0;
@@ -23,7 +23,7 @@ struct RerollStats {
 // `target_terms` entries produced by vectorized densities are replaced by
 // the single summed output slot (at the first lane's position). Slots are
 // appended to g.slots; callers with arrays parallel to slots must resize.
-// STANRT_NO_REROLL=1 disables the pass.
+// STANLI_NO_REROLL=1 disables the pass.
 //
 // `extra_roots` must list every slot something outside the op graph reads:
 // jacobian terms and constrained-parameter views, which the executor reads
@@ -35,6 +35,6 @@ RerollStats reroll(Graph& g,
                    std::vector<int>& target_terms,
                    const std::vector<int>& extra_roots);
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

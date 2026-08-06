@@ -1,8 +1,8 @@
 // End to end through the compiler: es.stan MIR + posteriordb JSON data ->
 // NUTS -> posterior checks. Mirrors M1's statistical test but with the graph
 // produced by the compiler instead of by hand.
-#include <stanrt/compile.hpp>
-#include <stanrt/nuts.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/nuts.hpp>
 
 #include <cmath>
 #include <cstdio>
@@ -27,7 +27,7 @@ static std::string slurp(const std::string& path) {
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
 
   DataMap data = DataMap::from_json_file("tests/fixtures/eight_schools.json");
   CompiledModel cm = compile_model(slurp("tests/fixtures/es.tmir.sexp"), data);

@@ -7,16 +7,16 @@
 // the initial state and parameters promoted, then seeds the flattened
 // solution's adjoints, which is exactly what CmdStan's generated code makes
 // stan-math do.
-#include <stanrt/graph.hpp>
-#include <stanrt/mir_eval.hpp>
-#include <stanrt/ode.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/mir_eval.hpp>
+#include <stanli/ode.hpp>
+#include <stanli/optable.hpp>
 
 #include <stan/math.hpp>
 
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 using stan::math::var;
@@ -105,4 +105,4 @@ void register_ode_kernels() {
   register_kernel(OP_ODE, Kernel{ode_fwd, ode_bwd, ode_scratch});
 }
 
-}  // namespace stanrt
+}  // namespace stanli

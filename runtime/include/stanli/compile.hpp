@@ -8,18 +8,18 @@
 // - transformed data expressions are unsupported.
 // - propto: all densities lower to propto=false kernels; lp differs from
 //   CmdStan's by a per-model constant, gradients are unaffected.
-#ifndef STANRT_COMPILE_HPP
-#define STANRT_COMPILE_HPP
+#ifndef STANLI_COMPILE_HPP
+#define STANLI_COMPILE_HPP
 
-#include <stanrt/data.hpp>
-#include <stanrt/graph.hpp>
+#include <stanli/data.hpp>
+#include <stanli/graph.hpp>
 
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 struct CompileError : std::runtime_error {
   explicit CompileError(const std::string& what) : std::runtime_error(what) {}
@@ -50,6 +50,6 @@ struct CompiledModel {
 
 CompiledModel compile_model(const std::string& tmir_text, const DataMap& data);
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

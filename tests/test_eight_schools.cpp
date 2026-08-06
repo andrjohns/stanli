@@ -19,7 +19,7 @@ static void expect_eq(const std::string& what, double got, double want) {
 // operations in graph op order.
 static void reference(const double* q, double* lp_out, double* grad_out) {
   using stan::math::var;
-  using stanrt::testmodels::EightSchools;
+  using stanli::testmodels::EightSchools;
   const int J = EightSchools::J;
 
   var mu = q[0];
@@ -55,7 +55,7 @@ static void reference(const double* q, double* lp_out, double* grad_out) {
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
   auto m = testmodels::eight_schools();
   Executor ex(std::move(m.graph));
   testmodels::fill_eight_schools_data(m, ex);

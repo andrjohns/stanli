@@ -1,5 +1,5 @@
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <cassert>
 #include <cstring>
@@ -7,7 +7,7 @@
 #include <string>
 #include <utility>
 
-namespace stanrt {
+namespace stanli {
 
 static Kernel g_table[OP_COUNT_];
 
@@ -153,4 +153,4 @@ double Executor::gradient(double* grad_out) {
   return v;
 }
 
-}  // namespace stanrt
+}  // namespace stanli

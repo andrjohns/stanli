@@ -1,8 +1,8 @@
 // Minimal s-expression parser for stanc3 --debug-transformed-mir output.
 // Atoms are bare tokens (including <opaque>) or double-quoted strings with
 // backslash escapes.
-#ifndef STANRT_SEXP_HPP
-#define STANRT_SEXP_HPP
+#ifndef STANLI_SEXP_HPP
+#define STANLI_SEXP_HPP
 
 #include <cstddef>
 #include <stdexcept>
@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace sexp {
 
 struct Node {
@@ -93,6 +93,6 @@ inline Node parse(std::string_view text) {
 }
 
 }  // namespace sexp
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

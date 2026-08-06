@@ -1,8 +1,8 @@
 // The graph compiler on eight schools: MIR text + data -> graph whose
 // log_prob gradient matches a var reference that mirrors the lowering's
 // evaluation order. Plus the unsupported-construct error path.
-#include <stanrt/compile.hpp>
-#include <stanrt/graph.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/graph.hpp>
 
 #include <stan/math.hpp>
 #include <cstdio>
@@ -86,7 +86,7 @@ static void reference(const double* q, double* lp_out, double* grad_out) {
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
 
   DataMap data;
   data.set_int("J", 8);

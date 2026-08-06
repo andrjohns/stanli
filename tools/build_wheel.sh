@@ -7,12 +7,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cmake --build build-rel -j8 --target stanrt_shared
+cmake --build build-rel -j8 --target stanli_shared
 
 mkdir -p python/stanli/_bin
 rm -f python/stanli/_bin/*
 LIB=""
-for cand in build-rel/libstanrt.dylib build-rel/libstanrt.so; do
+for cand in build-rel/libstanli.dylib build-rel/libstanli.so; do
   [ -f "$cand" ] && LIB=$cand && break
 done
 [ -n "$LIB" ] || { echo "no shared library in build-rel/"; exit 1; }

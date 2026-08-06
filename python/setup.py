@@ -47,12 +47,12 @@ setup(
     long_description_content_type="text/markdown",
     author="Sean Talts",
     license="BSD-3-Clause",
-    url="https://github.com/seantalts/stanrt",
+    url="https://github.com/seantalts/stanli",
     project_urls={
-        "Source": "https://github.com/seantalts/stanrt",
-        "Benchmarks": ("https://github.com/seantalts/stanrt/blob/main/"
+        "Source": "https://github.com/seantalts/stanli",
+        "Benchmarks": ("https://github.com/seantalts/stanli/blob/main/"
                        "docs/benchmarks.md"),
-        "Model coverage": ("https://github.com/seantalts/stanrt/blob/main/"
+        "Model coverage": ("https://github.com/seantalts/stanli/blob/main/"
                            "docs/corpus-status.md"),
     },
     python_requires=">=3.9",

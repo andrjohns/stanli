@@ -1,6 +1,6 @@
-#include <stanrt/nuts.hpp>
+#include <stanli/nuts.hpp>
 
-#include <stanrt/model_adapter.hpp>
+#include <stanli/model_adapter.hpp>
 
 #include <stan/callbacks/logger.hpp>
 #include <stan/mcmc/hmc/nuts/adapt_diag_e_nuts.hpp>
@@ -10,7 +10,7 @@
 
 #include <cmath>
 
-namespace stanrt {
+namespace stanli {
 
 std::vector<std::vector<double>> run_nuts(Executor& ex,
                                           const NutsConfig& cfg) {
@@ -49,4 +49,4 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
   return draws;
 }
 
-}  // namespace stanrt
+}  // namespace stanli

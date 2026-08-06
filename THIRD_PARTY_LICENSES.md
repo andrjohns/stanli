@@ -1,6 +1,6 @@
-# Third-party components in the stanrt binary
+# Third-party components in the stanli binary
 
-The stanrt shared library is self-contained: it links only the system C
+The stanli shared library is self-contained: it links only the system C
 and C++ runtimes, and everything else is compiled in. This file lists what
 is compiled in and under what terms, because distributing the binary
 distributes those components too.
@@ -24,8 +24,8 @@ Notes on the two that carry conditions beyond attribution:
 
 - **Eigen (MPL 2.0)** is a file-level copyleft: distributing the binary is
   fine, and modifications to Eigen's own files would have to be published.
-  stanrt does not modify Eigen.
+  stanli does not modify Eigen.
 - **OCaml runtime (LGPL 2.1)** ships with a linking exception written for
   exactly this case ("you may link this library into an executable and
   distribute that executable under terms of your choice"), so no relinking
-  obligation attaches to the stanrt binary.
+  obligation attaches to the stanli binary.

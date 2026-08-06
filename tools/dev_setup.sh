@@ -96,15 +96,15 @@ step "configuring and building (build/ dev, build-rel/ benchmarks)"
 EMBED_FLAGS=()
 if [ -f deps/stanc3/stanc_embed.o ] && have opam; then
   EMBED_FLAGS=(
-    "-DSTANRT_STANC_EMBED_OBJ=$REPO/deps/stanc3/stanc_embed.o"
-    "-DSTANRT_OCAML_STDLIB=$(opam var --switch="$OPAM_SWITCH" lib 2>/dev/null)/ocaml"
+    "-DSTANLI_STANC_EMBED_OBJ=$REPO/deps/stanc3/stanc_embed.o"
+    "-DSTANLI_OCAML_STDLIB=$(opam var --switch="$OPAM_SWITCH" lib 2>/dev/null)/ocaml"
   )
 fi
 cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   ${EMBED_FLAGS[@]+"${EMBED_FLAGS[@]}"}
 cmake --build build -j8
 cmake -B build-rel -DCMAKE_BUILD_TYPE=Release
-cmake --build build-rel -j8 --target bench_grad stanrt_run
+cmake --build build-rel -j8 --target bench_grad stanli_run
 
 step "running tests"
 ctest --test-dir build --output-on-failure

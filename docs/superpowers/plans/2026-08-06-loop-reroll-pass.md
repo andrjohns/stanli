@@ -6,13 +6,13 @@
 
 **Architecture:** The pass runs inside `Lowering::run()` after all statements lower but before `reduce_terms` builds the ADD_N tree, so N scalar density target terms can be swapped for one summed vector-density term. It operates on `Graph` + `CompiledModel::fills` + `target_terms` only (no Lowering internals), making it unit-testable on hand-built graphs. Detection is periodicity matching (validated against real graphs: period 2 radon_pooled, 16 arK, 7 low_dim_gauss_mix); inputs classify as lane-invariant / per-lane-const / lane-local / full-range INDEX progression; anything else bails per-region (never per-model).
 
-**Tech Stack:** C++17, existing stanrt kernels only (no new kernels in this plan). Vector shapes are runtime-dispatched by existing kernels (len==1 broadcasts), so widening a scalar op to a vector op keeps the same opcode.
+**Tech Stack:** C++17, existing stanli kernels only (no new kernels in this plan). Vector shapes are runtime-dispatched by existing kernels (len==1 broadcasts), so widening a scalar op to a vector op keeps the same opcode.
 
 ## Global Constraints
 
 - `-ffp-contract=off` project-wide; do not change compile flags.
 - Re-rolled models will NOT be bitwise vs CmdStan (summation order changes); differential verification must stay within the corpus rig's tolerance. Spike-measured deviation: ≤4.1e-15 relative.
-- `STANRT_NO_REROLL=1` env var must disable the pass entirely (A/B and bisection escape hatch).
+- `STANLI_NO_REROLL=1` env var must disable the pass entirely (A/B and bisection escape hatch).
 - No commit message attribution footers.
 - Baseline before this plan: 16/16 ctest green at main `1b629cf` + spike commit; corpus per docs: 119/120 evaluate, ~118 verified.
 - Bench protocol (macOS has no core pinning): interleave A/B binaries within one script, ≥3 reps, medians, ratios not absolutes; spot-check load (`ps aux -r | head`) before timing; treat >10% rep spread as a rerun signal.
@@ -28,13 +28,13 @@
 ### Task 1: Pass skeleton + radon-shape re-roll (INDEX elision, const materialization, density-to-target)
 
 **Files:**
-- Create: `runtime/include/stanrt/reroll.hpp`
+- Create: `runtime/include/stanli/reroll.hpp`
 - Create: `runtime/src/reroll.cpp`
 - Create: `tests/test_reroll.cpp`
-- Modify: `CMakeLists.txt` (add `runtime/src/reroll.cpp` to BOTH `stanrt_shared` and `stanrt` source lists; add `stanrt_add_test(test_reroll)`)
+- Modify: `CMakeLists.txt` (add `runtime/src/reroll.cpp` to BOTH `stanli_shared` and `stanli` source lists; add `stanli_add_test(test_reroll)`)
 
 **Interfaces:**
-- Produces: `RerollStats reroll(Graph& g, std::vector<std::pair<int, std::vector<double>>>& fills, std::vector<int>& target_terms)` in `namespace stanrt`, declared in `reroll.hpp`. `RerollStats { int regions; int64_t ops_before, ops_after; }`. Later tasks call exactly this.
+- Produces: `RerollStats reroll(Graph& g, std::vector<std::pair<int, std::vector<double>>>& fills, std::vector<int>& target_terms)` in `namespace stanli`, declared in `reroll.hpp`. `RerollStats { int regions; int64_t ops_before, ops_after; }`. Later tasks call exactly this.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -43,9 +43,9 @@
 ```cpp
 // Re-roll pass: unrolled scalar-loop regions collapse to vector ops with
 // gradients preserved (up to summation order, 1e-12 rel).
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
-#include <stanrt/reroll.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
+#include <stanli/reroll.hpp>
 
 #include <cmath>
 #include <cstdio>
@@ -67,7 +67,7 @@ static void expect_close(const char* what, double got, double want) {
   }
 }
 
-using namespace stanrt;
+using namespace stanli;
 using Fills = std::vector<std::pair<int, std::vector<double>>>;
 
 // Executes gradient at fixed params; returns {lp, grads...}.
@@ -152,27 +152,27 @@ Check while writing: confirm `OP_REP_VEC`'s actual input signature in `runtime/k
 - [ ] **Step 2: Add CMake entries, run test to verify it fails**
 
 Run: `cmake -B build-rel -DCMAKE_BUILD_TYPE=Release && cmake --build build-rel -j --target test_reroll`
-Expected: link error `undefined symbol: stanrt::reroll(...)` (or compile error: missing reroll.hpp).
+Expected: link error `undefined symbol: stanli::reroll(...)` (or compile error: missing reroll.hpp).
 
 - [ ] **Step 3: Implement the pass for this shape**
 
-`runtime/include/stanrt/reroll.hpp`:
+`runtime/include/stanli/reroll.hpp`:
 
 ```cpp
 // Re-roll pass: rewrites unrolled-loop regions (periodic op templates over
 // consecutive lanes) into vectorized ops. Runs after lowering, before the
 // target-term reduction, so N scalar density terms can become one summed
 // vector-density term.
-#ifndef STANRT_REROLL_HPP
-#define STANRT_REROLL_HPP
+#ifndef STANLI_REROLL_HPP
+#define STANLI_REROLL_HPP
 
-#include <stanrt/graph.hpp>
+#include <stanli/graph.hpp>
 
 #include <cstdint>
 #include <utility>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 struct RerollStats {
   int regions = 0;
@@ -188,7 +188,7 @@ RerollStats reroll(Graph& g,
                    std::vector<std::pair<int, std::vector<double>>>& fills,
                    std::vector<int>& target_terms);
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif
 ```
@@ -196,8 +196,8 @@ RerollStats reroll(Graph& g,
 `runtime/src/reroll.cpp` core (Task 1 scope — invariant inputs, per-lane consts, full-range INDEX elision, allowlisted densities with all lane outputs in target_terms):
 
 ```cpp
-#include <stanrt/optable.hpp>
-#include <stanrt/reroll.hpp>
+#include <stanli/optable.hpp>
+#include <stanli/reroll.hpp>
 
 #include <algorithm>
 #include <cstdlib>
@@ -206,7 +206,7 @@ RerollStats reroll(Graph& g,
 #include <unordered_set>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace {
 
 constexpr int kMinLanes = 4;
@@ -263,7 +263,7 @@ RerollStats reroll(Graph& g,
                    std::vector<int>& target_terms) {
   RerollStats st;
   st.ops_before = (int64_t)g.ops.size();
-  if (std::getenv("STANRT_NO_REROLL")) { st.ops_after = st.ops_before; return st; }
+  if (std::getenv("STANLI_NO_REROLL")) { st.ops_after = st.ops_before; return st; }
 
   // slot -> constant value (len-1 fills only; the dedup'd const pool).
   std::unordered_map<int, double> const_val;
@@ -466,7 +466,7 @@ RerollStats reroll(Graph& g,
   return st;
 }
 
-}  // namespace stanrt
+}  // namespace stanli
 ```
 
 NOTE the sketch above contains two known rough spots to clean while implementing (they are marked by nonsense placeholders that will not compile): the stray `for (size_t u : uses.count(o) ...)` line must be deleted (the real loop is the three lines below it), and the `term_set.erase(dead.begin()...)` line must be deleted (the full rebuild on the next line is the real code). Implement `build_uses` ONCE per region attempt, not per position. Add `#include <cstdint>` if the compiler complains.
@@ -481,7 +481,7 @@ Expected: `test_reroll OK`
 Run: `ctest --test-dir build-rel` — expected 17/17 (16 existing + test_reroll).
 
 ```bash
-git add runtime/include/stanrt/reroll.hpp runtime/src/reroll.cpp tests/test_reroll.cpp CMakeLists.txt
+git add runtime/include/stanli/reroll.hpp runtime/src/reroll.cpp tests/test_reroll.cpp CMakeLists.txt
 git commit -m "feat: re-roll pass, radon shape (INDEX elision, const vectors, summed vector density)"
 ```
 
@@ -691,9 +691,9 @@ static void test_bail_partial_range() {
   expect("partial ops unchanged", g.ops.size() == before);
 }
 
-// (d) STANRT_NO_REROLL disables the pass.
+// (d) STANLI_NO_REROLL disables the pass.
 static void test_env_disable() {
-  setenv("STANRT_NO_REROLL", "1", 1);
+  setenv("STANLI_NO_REROLL", "1", 1);
   const int L = 6;
   Graph g;
   Fills fills;
@@ -711,7 +711,7 @@ static void test_env_disable() {
   std::vector<int> tt = terms;
   RerollStats st = reroll(g, fills, tt);
   expect("env disables", st.regions == 0);
-  unsetenv("STANRT_NO_REROLL");
+  unsetenv("STANLI_NO_REROLL");
 }
 ```
 
@@ -739,7 +739,7 @@ git commit -m "test: re-roll bail-outs - recurrence, escaping density, partial r
 
 **Interfaces:**
 - Consumes: `reroll(...)`.
-- Produces: `compile_model()` output is re-rolled by default; `STANRT_NO_REROLL=1` reproduces the old graph exactly.
+- Produces: `compile_model()` output is re-rolled by default; `STANLI_NO_REROLL=1` reproduces the old graph exactly.
 
 - [ ] **Step 1: Write the fixtures**
 
@@ -801,7 +801,7 @@ Generate the `.tmir.sexp` files the same way `tools/gen_fixtures.sh` does for ex
 - [ ] **Step 2: Write the failing E2E test** (append to `tests/test_reroll.cpp`)
 
 ```cpp
-#include <stanrt/compile.hpp>
+#include <stanli/compile.hpp>
 #include <fstream>
 #include <sstream>
 
@@ -836,9 +836,9 @@ static void test_e2e_fixtures() {
   struct Case { const char* sexp; const char* json; const char* name; };
   for (const Case& c : {Case{"tests/fixtures/rloop.tmir.sexp", rdata, "rloop"},
                         Case{"tests/fixtures/arloop.tmir.sexp", adata, "arloop"}}) {
-    setenv("STANRT_NO_REROLL", "1", 1);
+    setenv("STANLI_NO_REROLL", "1", 1);
     const std::vector<double> want = e2e_grad(c.sexp, c.json);
-    unsetenv("STANRT_NO_REROLL");
+    unsetenv("STANLI_NO_REROLL");
     const std::vector<double> got = e2e_grad(c.sexp, c.json);
     expect((std::string(c.name) + " sizes").c_str(),
            got.size() == want.size());
@@ -858,14 +858,14 @@ Expected: FAIL — `compile_model` does not call `reroll` yet, so op counts matc
 
 - [ ] **Step 4: Wire the call site**
 
-In `lower.cpp` `run()` (line ~2170), and add `#include <stanrt/reroll.hpp>` at the top:
+In `lower.cpp` `run()` (line ~2170), and add `#include <stanli/reroll.hpp>` at the top:
 
 ```cpp
   CompiledModel run(const mir::Program& p) {
     for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
     bind_data(p);
     for (const auto& s : p.log_prob) lower_stmt(s);
-    reroll(g, out.fills, target_terms);   // no-op under STANRT_NO_REROLL=1
+    reroll(g, out.fills, target_terms);   // no-op under STANLI_NO_REROLL=1
     info.resize(g.slots.size());          // keep SlotInfo parallel: emit()
                                           // in reduce_terms reads info[o]
     std::vector<int> all = target_terms;
@@ -900,13 +900,13 @@ git commit -m "feat: run re-roll pass in lowering; end-to-end loop fixtures"
 - [ ] **Step 1: Full corpus differential verification**
 
 Run: `python3 tools/corpus.py deps/posteriordb` (read the script header first for the exact invocation the other agent uses; `tools/verify_sample.py` for per-model checks). Compare pass counts against the current baseline (119/120 evaluate, ~118 verified per docs/corpus-status.md).
-Expected: no model regresses from verified to failing. Bitwise count MAY drop (re-rolled models change summation order) — record which models moved tiers. Any *verification* failure: bisect with `STANRT_NO_REROLL=1`; if the pass caused it, that model's region is a classifier bug — reduce it to a unit test in `tests/test_reroll.cpp` before fixing.
+Expected: no model regresses from verified to failing. Bitwise count MAY drop (re-rolled models change summation order) — record which models moved tiers. Any *verification* failure: bisect with `STANLI_NO_REROLL=1`; if the pass caused it, that model's region is a classifier bug — reduce it to a unit test in `tests/test_reroll.cpp` before fixing.
 
 - [ ] **Step 2: Benchmark the three target models + regression sentinels**
 
 Protocol (no core pinning exists on macOS; this is the substitute):
 1. `ps aux -r | head -5` — note CPU-heavy neighbors (the other agent's builds).
-2. `python3 spikes/bench_spike.py` still measures orig-vs-handvec; for the pass, run `tools/bench_models.py deps/cmdstan deps/posteriordb radon_pooled arK low_dim_gauss_mix eight_schools_noncentered bym2_offset_only` twice: once normally, once with `STANRT_NO_REROLL=1` — interleaved if the machine is noisy.
+2. `python3 spikes/bench_spike.py` still measures orig-vs-handvec; for the pass, run `tools/bench_models.py deps/cmdstan deps/posteriordb radon_pooled arK low_dim_gauss_mix eight_schools_noncentered bym2_offset_only` twice: once normally, once with `STANLI_NO_REROLL=1` — interleaved if the machine is noisy.
 3. Accept if: radon_pooled ≥4x vs its no-reroll self, arK ≥10x, gauss_mix unchanged-or-better (its density lanes feed LOG_MIX and must bail in this phase), sentinels (eight_schools, bym2) within noise of no-reroll (their graphs contain no qualifying regions; the pass must not touch them — verify identical op counts via `dump_ops` if in doubt).
 
 - [ ] **Step 3: Update docs/benchmarks.md**

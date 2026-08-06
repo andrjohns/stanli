@@ -1,7 +1,7 @@
 // Reference driver: compiled per model against CmdStan's generated .hpp
 // (passed via -include). Evaluates log_prob_propto_jacobian (the sampling
-// semantics; stanrt lowers ~ statements propto with matched activity) and
-// its gradient at the deterministic stanrt_check point.
+// semantics; stanli lowers ~ statements propto with matched activity) and
+// its gradient at the deterministic stanli_check point.
 // Output: OK <lp> <g0> <g1> ...
 #include <stan/io/json/json_data.hpp>
 #include <stan/model/model_base.hpp>
@@ -17,7 +17,7 @@ stan::model::model_base& new_model(stan::io::var_context& data_context,
                                    unsigned int seed,
                                    std::ostream* msg_stream);
 
-// Same points as tools/stanrt_check.cpp; see the note there on why more
+// Same points as tools/stanli_check.cpp; see the note there on why more
 // than one exists.
 static double eval_point(int64_t i, int variant) {
   switch (variant) {

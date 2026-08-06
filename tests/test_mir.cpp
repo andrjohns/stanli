@@ -1,6 +1,6 @@
 // MIR reader over the transformed-MIR sexp of eight schools.
-#include <stanrt/mir.hpp>
-#include <stanrt/sexp.hpp>
+#include <stanli/mir.hpp>
+#include <stanli/sexp.hpp>
 
 #include <cstdio>
 #include <fstream>
@@ -24,7 +24,7 @@ static std::string slurp(const char* path) {
 }
 
 int main(int argc, char** argv) {
-  using namespace stanrt;
+  using namespace stanli;
   const char* fix = argc > 1 ? argv[1] : "tests/fixtures/es.tmir.sexp";
   const std::string text = slurp(fix);
   if (text.empty()) {

@@ -1,14 +1,14 @@
 // Hand-built model graphs shared by the parity and sampling tests. These are
 // what the stanc3 backend will emit mechanically in M2.
-#ifndef STANRT_TESTS_MODELS_HPP
-#define STANRT_TESTS_MODELS_HPP
+#ifndef STANLI_TESTS_MODELS_HPP
+#define STANLI_TESTS_MODELS_HPP
 
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 namespace testmodels {
 
 // Non-centered eight schools.
@@ -133,6 +133,6 @@ inline void fill_logistic_glm_data(const LogisticGlm& m, Executor& ex) {
 }
 
 }  // namespace testmodels
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

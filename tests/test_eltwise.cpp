@@ -32,7 +32,7 @@ template <typename F>
 static void check_case(const std::string& tag, uint16_t opcode, int64_t out_len,
                        const std::vector<std::vector<double>>& vals,
                        F&& ref_fn) {
-  auto r = stanrt::testutil::run_op_sum(opcode, out_len, vals,
+  auto r = stanli::testutil::run_op_sum(opcode, out_len, vals,
                                         std::vector<bool>(vals.size(), true));
   // Reference: promote all inputs to var, apply ref_fn, sum, grad.
   std::vector<VecV> vs;
@@ -48,7 +48,7 @@ static void check_case(const std::string& tag, uint16_t opcode, int64_t out_len,
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
   const int N = 4;
 
   // Binary: all shape combos. Scalars are length-1 slots; the var reference

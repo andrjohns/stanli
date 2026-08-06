@@ -1,12 +1,12 @@
-#ifndef STANRT_NUTS_HPP
-#define STANRT_NUTS_HPP
+#ifndef STANLI_NUTS_HPP
+#define STANLI_NUTS_HPP
 
-#include <stanrt/graph.hpp>
+#include <stanli/graph.hpp>
 
 #include <cstdint>
 #include <vector>
 
-namespace stanrt {
+namespace stanli {
 
 struct NutsConfig {
   uint32_t seed = 0;
@@ -20,6 +20,6 @@ struct NutsConfig {
 // post-warmup draw.
 std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg);
 
-}  // namespace stanrt
+}  // namespace stanli
 
 #endif

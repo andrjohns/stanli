@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Per-gradient benchmark across a set of posteriordb models: stanrt vs
+"""Per-gradient benchmark across a set of posteriordb models: stanli vs
 CmdStan, both at the same deterministic unconstrained point, both -O3 and
--ffp-contract=off. Also reports model-preparation time (stanrt lowering vs
+-ffp-contract=off. Also reports model-preparation time (stanli lowering vs
 CmdStan's stanc + clang compile), which is the time-to-first-draw term.
 
 Usage: tools/bench_models.py CMDSTAN_DIR PDB_DIR [model ...]
@@ -50,7 +50,7 @@ def main():
         lib("eigen_*"), lib("boost_*"),
         lib("sundials_*") / "include", lib("tbb_*") / "include",
     ]
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanrt_bench_"))
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_bench_"))
     stanc = REPO / "deps/stanc3/stanc"
 
     datas = {}
@@ -66,7 +66,7 @@ def main():
         with zipfile.ZipFile(dz) as z:
             dj.write_bytes(z.read(z.namelist()[0]))
 
-        # stanrt: stanc to MIR (subprocess here; the library embeds it), then
+        # stanli: stanc to MIR (subprocess here; the library embeds it), then
         # lower + bind, then time the gradient.
         sexp = tmp / f"{model}.sexp"
         t0 = time.perf_counter()
@@ -79,7 +79,7 @@ def main():
             [str(REPO / "build-rel/bench_grad"), str(sexp), str(dj), "1"],
             capture_output=True, text=True)
         if probe.returncode != 0:
-            print(f"SKIP {model}: stanrt bench failed")
+            print(f"SKIP {model}: stanli bench failed")
             continue
         n_params = int(probe.stdout.split()[-1]) if probe.stdout else 0
         n_evals = evals_for(n_params)
@@ -91,7 +91,7 @@ def main():
         rt_ns = float(out[0])
         t_rt_total = time.perf_counter() - t0
 
-        # stanrt preparation: lowering only (one eval run, minus the eval).
+        # stanli preparation: lowering only (one eval run, minus the eval).
         t0 = time.perf_counter()
         subprocess.run([str(REPO / "build-rel/bench_grad"), str(sexp),
                         str(dj), "1"], capture_output=True, text=True)
@@ -124,12 +124,12 @@ def main():
 
         rows.append((model, n_params, rt_ns, cs_ns, cs_ns / rt_ns,
                      t_lower, t_cs_stanc + t_cs_build))
-        print(f"{model}: n={n_params} stanrt={rt_ns:.0f}ns "
+        print(f"{model}: n={n_params} stanli={rt_ns:.0f}ns "
               f"cmdstan={cs_ns:.0f}ns speedup={cs_ns / rt_ns:.2f}x "
               f"prep {t_lower:.3f}s vs {t_cs_stanc + t_cs_build:.1f}s")
 
-    print("\n| model | unconstrained params | stanrt ns/grad | "
-          "CmdStan ns/grad | speedup | stanrt prep | CmdStan build |")
+    print("\n| model | unconstrained params | stanli ns/grad | "
+          "CmdStan ns/grad | speedup | stanli prep | CmdStan build |")
     print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for m, n, rt, cs_, sp, tl, tb in rows:
         print(f"| `{m}` | {n} | {rt:.0f} | {cs_:.0f} | {sp:.2f}x | "

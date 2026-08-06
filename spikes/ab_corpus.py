@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Full-corpus A/B for the re-roll pass: for every posteriordb (model,
-data) pair, compare stanrt_check output (lp + gradient at the
-deterministic point) with STANRT_NO_REROLL=1 vs the pass enabled, and
+data) pair, compare stanli_check output (lp + gradient at the
+deterministic point) with STANLI_NO_REROLL=1 vs the pass enabled, and
 count ops via dump_ops. The no-pass graph is the CmdStan-verified
 baseline, so A/B parity is transitive verification of the pass.
 
@@ -17,7 +17,7 @@ import tempfile
 import zipfile
 
 REPO = pathlib.Path.cwd()
-CHECK = REPO / "build-rel/stanrt_check"
+CHECK = REPO / "build-rel/stanli_check"
 DUMP = REPO / "build-rel/dump_ops"
 STANC = REPO / "deps/stanc3/stanc"
 TIMEOUT = 300
@@ -38,7 +38,7 @@ def main():
     pdb = pathlib.Path(sys.argv[1]) / "posterior_database"
     filt = (sys.argv[sys.argv.index("--filter") + 1]
             if "--filter" in sys.argv else "")
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanrt_ab_"))
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_ab_"))
 
     pairs = {}
     for pj in sorted((pdb / "posteriors").glob("*.json")):
@@ -60,7 +60,7 @@ def main():
         with zipfile.ZipFile(dz) as z:
             dj.write_bytes(z.read(z.namelist()[0]))
 
-        a = run([str(CHECK), str(stan), str(dj)], {"STANRT_NO_REROLL": "1"})
+        a = run([str(CHECK), str(stan), str(dj)], {"STANLI_NO_REROLL": "1"})
         b = run([str(CHECK), str(stan), str(dj)])
         if a is None or b is None:
             flags.append(f"{model}: TIMEOUT (a={'T' if a is None else 'ok'})")
@@ -95,7 +95,7 @@ def main():
         if r is not None and r.returncode == 0:
             sexp.write_text(r.stdout)
             da = run([str(DUMP), str(sexp), str(dj), "0"],
-                     {"STANRT_NO_REROLL": "1"})
+                     {"STANLI_NO_REROLL": "1"})
             db = run([str(DUMP), str(sexp), str(dj), "0"])
             if da and db and da.returncode == 0 and db.returncode == 0:
                 ops_a = int(da.stdout.split()[1].split("=")[1])

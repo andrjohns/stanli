@@ -1,7 +1,8 @@
-# stanrt
+# stanli
 
-A portable Stan runtime: op-graph executor over precompiled stan-math
-kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
+The Stan Language Interpreter: an op-graph executor over precompiled
+stan-math kernels. No C++ toolchain, no LLVM, no compilation on the
+user's machine.
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
   (gradient 1.1x-6.2x faster on seven of the eight benchmark models,
@@ -21,7 +22,7 @@ kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
 The premise: a Stan model does not need machine code generated for it.
 Every model is a composition of a fixed vocabulary of operations
 (densities, constraint transforms, linear algebra, elementwise math), so
-stanrt ships those operations precompiled and turns each model into data:
+stanli ships those operations precompiled and turns each model into data:
 a static graph of ops over flat buffers, built at load time and executed
 by a small interpreter. There is no JIT and no C++ codegen; "compiling" a
 model takes milliseconds.
@@ -44,7 +45,7 @@ Stage by stage:
 1. **stanc3, in process.** The real Stan compiler (OCaml) is compiled to
    a self-contained object (`-output-complete-obj`) and linked into the
    shared library. It parses, typechecks, and optimizes the model, and
-   stanrt consumes its transformed MIR directly. Full language fidelity
+   stanli consumes its transformed MIR directly. Full language fidelity
    without a subprocess or a vendored parser rewrite.
 
 2. **Lowering** (`runtime/src/lower.cpp`). A compile-time interpreter
@@ -65,7 +66,7 @@ Stage by stage:
    base vector, and N scalar density terms fused into one summed vector
    density. `radon_pooled` goes from 27,670 ops to 8. Whatever the pass
    cannot prove safe it leaves alone, one region at a time.
-   `STANRT_NO_REROLL=1` disables it.
+   `STANLI_NO_REROLL=1` disables it.
 
 4. **Execution** (`runtime/src/executor.cpp`). The op graph is the AD
    tape. The forward sweep computes the log density and stashes each
@@ -83,14 +84,14 @@ Stage by stage:
    tape replay drives unmodified stan-math prim/prob templates and
    deposits values and partials into the caller's buffers. Legacy ops
    make the whole library expressible; native kernels make the hot path
-   fast. Both are compiled once, when the stanrt binary is built.
+   fast. Both are compiled once, when the stanli binary is built.
 
 6. **Sampling** (`runtime/src/nuts.cpp`). Stan's own NUTS with
    diagonal-metric adaptation, driven through a thin model adapter that
    returns one precomputed-gradients vari per evaluation.
 
 7. **Distribution.** Everything above sits behind a C ABI
-   (`runtime/include/stanrt/capi.h`) in one shared library; the Python
+   (`runtime/include/stanli/capi.h`) in one shared library; the Python
    package is a ctypes wrapper around it. A platform wheel is one .whl
    containing one dylib.
 
@@ -103,7 +104,7 @@ in the wheel. Attributing its 12.7 MB of code and data by symbol:
 | --- | ---: | ---: |
 | embedded stanc3 (all OCaml) | 6.04 MB | 47.7% |
 | stan-math | 5.59 MB | 44.2% |
-| stanrt itself | 0.39 MB | 3.0% |
+| stanli itself | 0.39 MB | 3.0% |
 | Eigen (out-of-line) | 0.27 MB | 2.2% |
 | SUNDIALS | 0.17 MB | 1.3% |
 | Boost, nlohmann/json, NUTS, libc++, unattributed | 0.20 MB | 1.6% |
@@ -147,8 +148,8 @@ schools, and that trade is not taken.
 
 ## Python
 
-The Python package is published as **stanli**, the Stan Language
-Interpreter.
+A ctypes wrapper over the same shared library, published to PyPI as one
+platform wheel per platform.
 
 ```
 pip install stanli                 # or: ./tools/build_wheel.sh

@@ -6,21 +6,21 @@ using namespace stan::math;
 stan::math::profile_map profiles__;
 static constexpr std::array<const char*, 16> locations_array__ =
   {" (found before start of program)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 7, column 2 to column 10)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 8, column 2 to column 20)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 9, column 2 to column 24)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 12, column 2 to column 43)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 15, column 2 to column 20)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 16, column 2 to column 21)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 17, column 2 to column 29)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 18, column 2 to column 27)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 2, column 2 to column 17)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 3, column 9 to column 10)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 3, column 2 to column 14)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 4, column 18 to column 19)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 4, column 2 to column 27)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 9, column 9 to column 10)",
-  " (in '/Users/xitrium/claud/stanrt/tests/fixtures/es.stan', line 12, column 9 to column 10)"};
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 7, column 2 to column 10)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 8, column 2 to column 20)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 9, column 2 to column 24)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 12, column 2 to column 43)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 15, column 2 to column 20)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 16, column 2 to column 21)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 17, column 2 to column 29)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 18, column 2 to column 27)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 2, column 2 to column 17)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 3, column 9 to column 10)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 3, column 2 to column 14)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 4, column 18 to column 19)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 4, column 2 to column 27)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 9, column 9 to column 10)",
+  " (in '/Users/xitrium/claud/stanli/tests/fixtures/es.stan', line 12, column 9 to column 10)"};
 class es_model final : public model_base_crtp<es_model> {
  private:
   int J;

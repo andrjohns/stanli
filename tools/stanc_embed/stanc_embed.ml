@@ -1,6 +1,6 @@
-(* stanrt embedding entry point: Stan code -> transformed-MIR sexp string.
+(* stanli embedding entry point: Stan code -> transformed-MIR sexp string.
    Registered for C via Callback; built with -output-complete-obj so the
-   OCaml runtime rides inside one object file linked into libstanrt.
+   OCaml runtime rides inside one object file linked into libstanli.
    Return protocol: "OK<sexp>" or "ERR<message>". *)
 open Core
 

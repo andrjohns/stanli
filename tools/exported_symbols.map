@@ -1,4 +1,4 @@
 {
-  global: stanrt_*;
+  global: stanli_*;
   local: *;
 };

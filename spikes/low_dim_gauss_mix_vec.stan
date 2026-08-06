@@ -23,6 +23,6 @@ model {
   for (n in 1 : N) {
     target += log_sum_exp(la[n], lb[n]);
   }
-  // log(2*pi) as a literal: stanrt does not lower pi()
+  // log(2*pi) as a literal: stanli does not lower pi()
   target += -0.5 * N * 1.8378770664093454836;
 }

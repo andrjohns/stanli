@@ -1,8 +1,8 @@
 // Legacy ops: unmodified stan-math functions behind the op interface via a
 // nested var tape replayed at backward time. Scalar output (log_sum_exp) and
 // vector output (softmax, exercising output-adjoint seeding).
-#include <stanrt/graph.hpp>
-#include <stanrt/optable.hpp>
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 
 #include <stan/math.hpp>
 #include <cstdio>
@@ -17,7 +17,7 @@ static void expect_eq(const std::string& what, double got, double want) {
 }
 
 int main() {
-  using namespace stanrt;
+  using namespace stanli;
   using stan::math::var;
   const int N = 4;
   double vv[N] = {0.3, -1.2, 2.0, 0.4};

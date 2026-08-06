@@ -1,11 +1,11 @@
-// stanrt_run: model.stan + data.json -> posterior draws CSV on stdout.
+// stanli_run: model.stan + data.json -> posterior draws CSV on stdout.
 // The full user path: runs the stanc binary for MIR, compiles the graph,
 // samples with NUTS, emits constrained parameter draws.
 //
-// Usage: stanrt_run model.stan data.json [--seed N] [--warmup N]
+// Usage: stanli_run model.stan data.json [--seed N] [--warmup N]
 //        [--samples N] [--delta X] [--stanc PATH]
-#include <stanrt/compile.hpp>
-#include <stanrt/nuts.hpp>
+#include <stanli/compile.hpp>
+#include <stanli/nuts.hpp>
 
 #include <array>
 #include <cstdio>
@@ -33,13 +33,13 @@ static std::string run_stanc(const std::string& stanc,
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr,
-                 "usage: stanrt_run model.stan data.json [--seed N] "
+                 "usage: stanli_run model.stan data.json [--seed N] "
                  "[--warmup N] [--samples N] [--delta X] [--stanc PATH]\n");
     return 2;
   }
   std::string model = argv[1], datafile = argv[2];
   std::string stanc = "deps/stanc3/stanc";
-  stanrt::NutsConfig cfg;
+  stanli::NutsConfig cfg;
   cfg.seed = 1;
   cfg.warmup = 1000;
   cfg.samples = 1000;
@@ -54,12 +54,12 @@ int main(int argc, char** argv) {
   if (const char* env = std::getenv("STANC")) stanc = env;
 
   try {
-    stanrt::DataMap data = stanrt::DataMap::from_json_file(datafile);
-    stanrt::CompiledModel cm =
-        stanrt::compile_model(run_stanc(stanc, model), data);
-    stanrt::Executor ex(std::move(cm.graph));
+    stanli::DataMap data = stanli::DataMap::from_json_file(datafile);
+    stanli::CompiledModel cm =
+        stanli::compile_model(run_stanc(stanc, model), data);
+    stanli::Executor ex(std::move(cm.graph));
     cm.bind(ex);
-    auto draws = stanrt::run_nuts(ex, cfg);
+    auto draws = stanli::run_nuts(ex, cfg);
 
     // Header: constrained parameter names (flattened).
     std::string hdr;
@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
       std::printf("\n");
     }
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "stanrt_run: %s\n", e.what());
+    std::fprintf(stderr, "stanli_run: %s\n", e.what());
     return 1;
   }
   return 0;

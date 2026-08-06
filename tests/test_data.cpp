@@ -1,5 +1,5 @@
 // JSON data loading (CmdStan conventions): scalars, arrays, nested arrays.
-#include <stanrt/data.hpp>
+#include <stanli/data.hpp>
 
 #include <cstdio>
 #include <string>
@@ -13,7 +13,7 @@ static void check(bool ok, const std::string& what) {
 }
 
 int main() {
-  using stanrt::DataMap;
+  using stanli::DataMap;
 
   DataMap d = DataMap::from_json_file("tests/fixtures/eight_schools.json");
   check(d.at("J").is_int && d.at("J").i[0] == 8, "J int 8");
