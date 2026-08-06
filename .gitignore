@@ -9,3 +9,4 @@ compile_commands.json
 python/stanli/LICENSE
 python/stanli/THIRD_PARTY_LICENSES.md
 .cache/
+tests/fixtures/*.hpp

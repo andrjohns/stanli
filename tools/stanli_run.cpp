@@ -61,22 +61,35 @@ int main(int argc, char** argv) {
     cm.bind(ex);
     auto draws = stanli::run_nuts(ex, cfg);
 
-    // Header: constrained parameter names (flattened).
+    // Draws are written through the write_array graph when there is one --
+    // that is what supplies transformed parameters and generated quantities,
+    // and it fixes the column order to CmdStan's. Without it we can still
+    // report the constrained parameters the log_prob graph already computes.
+    const bool have_wa = cm.write_array && !cm.write_array->columns.empty();
+    if (cm.write_array && !cm.write_array->truncated.empty())
+      std::fprintf(stderr, "stanli_run: write_array truncated: %s\n",
+                   cm.write_array->truncated.c_str());
+    std::unique_ptr<stanli::Executor> wex;
+    if (have_wa) {
+      wex = std::make_unique<stanli::Executor>(
+          std::move(cm.write_array->graph));
+      cm.write_array->bind(*wex);
+    }
+    const auto& cols = have_wa ? cm.write_array->columns : cm.views;
+    stanli::Executor& out = have_wa ? *wex : ex;
+
     std::string hdr;
-    for (const auto& v : cm.views) {
-      for (int64_t i = 0; i < v.len; ++i) {
-        if (!hdr.empty()) hdr += ',';
-        hdr += v.len == 1 ? v.name
-                          : v.name + "." + std::to_string(i + 1);
-      }
+    for (const auto& n : stanli::CompiledModel::csv_names(cols)) {
+      if (!hdr.empty()) hdr += ',';
+      hdr += n;
     }
     std::printf("%s\n", hdr.c_str());
     for (const auto& q : draws) {
-      for (size_t i = 0; i < q.size(); ++i) ex.params_data()[i] = q[i];
-      ex.run_forward_only();
+      for (size_t i = 0; i < q.size(); ++i) out.params_data()[i] = q[i];
+      out.run_forward_only();
       bool first = true;
-      for (const auto& v : cm.views) {
-        const double* p = ex.value_ptr(v.slot);
+      for (const auto& v : cols) {
+        const double* p = out.value_ptr(v.slot);
         for (int64_t i = 0; i < v.len; ++i) {
           std::printf(first ? "%.17g" : ",%.17g", p[i]);
           first = false;

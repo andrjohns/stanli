@@ -53,9 +53,12 @@ int main(int argc, char** argv) {
   }
   std::string stanc = "deps/stanc3/stanc";
   int variant = 0;
-  for (int i = 3; i + 1 < argc; i += 2) {
-    if (std::string(argv[i]) == "--stanc") stanc = argv[i + 1];
-    if (std::string(argv[i]) == "--point") variant = std::atoi(argv[i + 1]);
+  bool columns_only = false;
+  for (int i = 3; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--columns") columns_only = true;
+    else if (a == "--stanc" && i + 1 < argc) stanc = argv[++i];
+    else if (a == "--point" && i + 1 < argc) variant = std::atoi(argv[++i]);
   }
   if (const char* env = std::getenv("STANC")) stanc = env;
 
@@ -83,6 +86,28 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // --columns: the CSV header the write_array graph would write, for
+  // comparison against CmdStan's (spikes/wa_header_check.py).
+  if (columns_only) {
+    if (!cm.write_array || cm.write_array->columns.empty()) {
+      std::printf("NO_COLUMNS %s\n",
+                  cm.write_array ? cm.write_array->truncated.c_str()
+                                 : "no generate_quantities section");
+      return 1;
+    }
+    std::string h;
+    for (const auto& n :
+         stanli::CompiledModel::csv_names(cm.write_array->columns)) {
+      if (!h.empty()) h += ',';
+      h += n;
+    }
+    std::printf("%s\n", h.c_str());
+    if (!cm.write_array->truncated.empty())
+      std::fprintf(stderr, "TRUNCATED %s\n",
+                   cm.write_array->truncated.c_str());
+    return 0;
+  }
+
   try {
     stanli::Executor ex(std::move(cm.graph));
     cm.bind(ex);
@@ -103,6 +128,34 @@ int main(int argc, char** argv) {
     std::printf("OK %.17g", lp);
     for (double g : grad) std::printf(" %.17g", g);
     std::printf("\n");
+
+    // The write_array graph, exercised at the same point. Reported on stderr
+    // so the machine-readable stdout contract is unchanged; this is what the
+    // corpus sweep reads to say how many models get their transformed
+    // parameters and generated quantities.
+    if (!cm.write_array) {
+      std::fprintf(stderr, "WA none\n");
+    } else if (cm.write_array->columns.empty()) {
+      std::fprintf(stderr, "WA empty %s\n", cm.write_array->truncated.c_str());
+    } else {
+      stanli::Executor wex(std::move(cm.write_array->graph));
+      cm.write_array->bind(wex);
+      for (int64_t i = 0; i < wex.n_params(); ++i)
+        wex.params_data()[i] = eval_point(i, variant);
+      wex.run_forward_only();
+      int64_t width = 0, bad = 0;
+      for (const auto& c : cm.write_array->columns) {
+        const double* p = wex.value_ptr(c.slot);
+        for (int64_t i = 0; i < c.len; ++i, ++width)
+          if (!std::isfinite(p[i])) ++bad;
+      }
+      std::fprintf(stderr, "WA %zu vars %lld values %lld nonfinite %s\n",
+                   cm.write_array->columns.size(), (long long)width,
+                   (long long)bad,
+                   cm.write_array->truncated.empty()
+                       ? "complete"
+                       : ("truncated: " + cm.write_array->truncated).c_str());
+    }
   } catch (const std::exception& e) {
     std::printf("EVAL_FAIL %s\n", e.what());
     return 1;

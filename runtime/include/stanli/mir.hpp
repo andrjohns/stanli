@@ -83,6 +83,12 @@ struct Program {
   std::vector<std::pair<std::string, SizedType>> input_vars;
   std::vector<Stmt> prepare_data;
   std::vector<Stmt> log_prob;
+  // stanc3's `generate_quantities` is the whole write_array body: it re-reads
+  // the unconstrained draw, recomputes the transformed parameters, runs the
+  // generated quantities block, and marks each CSV column with an
+  // FnWriteParam. Gated on emit_transformed_parameters__ /
+  // emit_generated_quantities__, which the lowering pins to 1.
+  std::vector<Stmt> generate_quantities;
   std::vector<FunDef> fun_defs;
 };
 

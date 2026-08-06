@@ -90,7 +90,20 @@ Stage by stage:
    diagonal-metric adaptation, driven through a thin model adapter that
    returns one precomputed-gradients vari per evaluation.
 
-7. **Distribution.** Everything above sits behind a C ABI
+7. **Writing draws.** The log_prob graph deliberately does not compute
+   transformed parameters the target never reads, and never sees
+   generated quantities at all, so a second graph does: the MIR's
+   `generate_quantities` section lowers, through the same machinery and
+   the same passes, into a forward-only graph that takes an unconstrained
+   draw and produces every CSV column CmdStan would write, in CmdStan's
+   order and under CmdStan's naming (`theta.1.1` for array elements,
+   column-major for matrices). 93 of the 119 compiling corpus models get
+   theirs in full; the rest stop at an RNG call or at generated
+   quantities that branch on a parameter, and emit the prefix that did
+   lower along with the reason they stopped
+   (`spikes/wa_coverage.py`, `spikes/wa_header_check.py`).
+
+8. **Distribution.** Everything above sits behind a C ABI
    (`runtime/include/stanli/capi.h`) in one shared library; the Python
    package is a ctypes wrapper around it. A platform wheel is one .whl
    containing one dylib.

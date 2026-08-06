@@ -53,6 +53,12 @@ struct Lowering {
   std::set<std::string> int_locals;  // SInt locals in log_prob (data-only)
   std::vector<int64_t> decl_dims_pending;  // shape of the last ODE result
   int udf_depth = 0;
+  // int_env as bind_data left it, before either section's locals and loop
+  // variables were folded in; the write_array lowering starts from this.
+  std::map<std::string, long> int_env_data;
+  // Lowering generate_quantities rather than log_prob: parameters are columns
+  // to emit, not values to differentiate.
+  bool in_write_array = false;
 
   explicit Lowering(const DataMap& d) : data(d) {}
 
@@ -844,6 +850,7 @@ struct Lowering {
       if (e.is_int && e.i.size() == 1 && e.dims.empty())
         int_env[name] = e.i[0];
     }
+    int_env_data = int_env;
   }
 
   // Lazily materialize an env value as a data slot when log_prob uses it.
@@ -1907,7 +1914,10 @@ struct Lowering {
 
     if (tr.kind == mir::Transform::Identity) {
       scope[s.decl_id] = raw;
-      out.views.push_back({s.decl_id, raw, raw_len});
+      // In write_array mode the column order is dictated by the FnWriteParam
+      // statements, which come later and cover transformed parameters and
+      // generated quantities too; declaration order would be wrong.
+      if (!in_write_array) out.views.push_back({s.decl_id, raw, raw_len});
       return;
     }
     uint16_t opcode = 0;
@@ -1952,7 +1962,7 @@ struct Lowering {
     Val con = emit(opcode, ins, con_len, psi, tr_idata, jac);
     jac_slots.push_back(jac);
     scope[s.decl_id] = con.slot;
-    out.views.push_back({s.decl_id, con.slot, con_len});
+    if (!in_write_array) out.views.push_back({s.decl_id, con.slot, con_len});
   }
 
   std::map<std::string, std::vector<int64_t>> decl_dims;
@@ -2122,6 +2132,50 @@ struct Lowering {
         // Compiler-internal checks (FnCheck / FnValidateSize): sizes are
         // enforced at data binding; value checks are skipped in M2.
         if (s.fn_name == "FnCheck" || s.fn_name == "FnValidateSize") return;
+        if (s.fn_name == "FnWriteParam") {
+          // One CSV column, at the point the emission happens: this is what
+          // fixes the column order to CmdStan's. Arrays of containers are
+          // emitted one element at a time -- `array[K] simplex[K] theta`
+          // arrives as K writes of `theta[k]` -- and CmdStan names those
+          // columns outer-index-first, theta.1.1 .. theta.1.K, theta.2.1 ...
+          // so the index path becomes part of the column name.
+          if (s.fn_args.size() != 1) fail("FnWriteParam arity", s.raw);
+          std::vector<long> ixs;
+          const mir::Expr* base = &s.fn_args[0];
+          while (base->kind == mir::Expr::Indexed) {
+            for (size_t k = base->args.size(); k-- > 1;) {
+              if (base->args[k].name != "IndexSingle")
+                fail("FnWriteParam under a non-scalar index", s.raw);
+              ixs.push_back(eval_int(base->args[k].args[0]));
+            }
+            base = &base->args[0];
+          }
+          if (base->kind != mir::Expr::Var)
+            fail("FnWriteParam of a non-variable", s.raw);
+          std::string name = base->name;
+          for (auto it = ixs.rbegin(); it != ixs.rend(); ++it)
+            name += "." + std::to_string(*it);
+          const Val v = lower_expr(s.fn_args[0]);
+          // stanc peels the array dimensions, so what is left here is a
+          // scalar, a vector/row_vector, or a matrix -- and its type decides
+          // how CmdStan indexes the columns.
+          using Naming = CompiledModel::ParamView::Naming;
+          const std::string& t = s.fn_args[0].type_;
+          CompiledModel::ParamView pv{name, v.slot, info[v.slot].len};
+          if (t == "UReal" || t == "UInt" || t == "UComplex") {
+            pv.naming = Naming::Scalar;
+          } else if (t == "UMatrix") {
+            pv.rows = info[v.slot].rows;
+            if (pv.rows <= 0)
+              fail("FnWriteParam of a matrix with unknown shape: " + name,
+                   s.raw);
+            pv.naming = Naming::Matrix;
+          } else {
+            pv.naming = Naming::Container;
+          }
+          out.views.push_back(pv);
+          return;
+        }
         fail("unsupported statement function " + s.fn_name);
       case mir::Stmt::For: {
         const long lo = eval_int(s.lower), hi = eval_int(s.upper);
@@ -2169,6 +2223,42 @@ struct Lowering {
     return terms[0];
   }
 
+  // The write_array graph: same unconstrained draw in, every CSV column out.
+  // Forward-only, so no target, no jacobian, no adjoints -- but the same
+  // lowering, and the same passes, because generated quantities are unrolled
+  // over the data exactly like the model block is.
+  CompiledModel::WriteArray run_write_array(const mir::Program& p) {
+    for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
+    in_write_array = true;
+    // stanc3 guards the two emission groups on these flags; the sampler wants
+    // both, so pin them and let the data-only IfElse fold them away.
+    int_env["emit_transformed_parameters__"] = 1;
+    int_env["emit_generated_quantities__"] = 1;
+    CompiledModel::WriteArray wa;
+    try {
+      for (const auto& s : p.generate_quantities) lower_stmt(s);
+    } catch (const CompileError& e) {
+      // Whatever lowered before the failure is still correct and still worth
+      // emitting: an `normal_rng` late in generated quantities should not
+      // cost us the transformed parameters ahead of it.
+      wa.truncated = e.what();
+    }
+    std::vector<int> roots = jac_slots;
+    for (const auto& v : out.views) roots.push_back(v.slot);
+    make_inplace_updates(g, roots);
+    forward_stores_to_loads(g, roots);
+    reroll(g, out.fills, target_terms, roots);
+    info.resize(g.slots.size());
+    // Nothing reads a result here, but forward() asserts a scalar result
+    // slot, so point it at one.
+    g.result_slot = const_slot(0.0);
+    wa.n_unconstrained = out.n_unconstrained;
+    wa.graph = std::move(g);
+    wa.columns = std::move(out.views);
+    wa.fills = std::move(out.fills);
+    return wa;
+  }
+
   CompiledModel run(const mir::Program& p) {
     for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
     bind_data(p);
@@ -2202,7 +2292,28 @@ struct Lowering {
 CompiledModel compile_model(const std::string& tmir_text, const DataMap& data) {
   mir::Program prog = mir::read_program(sexp::parse(tmir_text));
   Lowering lo(data);
-  return lo.run(prog);
+  CompiledModel cm = lo.run(prog);
+  if (!prog.generate_quantities.empty()) {
+    // A second lowering, over the transformed data the first one already
+    // interpreted: re-running prepare_data would double preparation time on
+    // the models where preparation is the cost (nn_rbm1bJ100, 20.7 s).
+    Lowering wa(data);
+    wa.env = lo.env;
+    wa.int_env = lo.int_env_data;
+    CompiledModel::WriteArray w = wa.run_write_array(prog);
+    if (w.n_unconstrained != cm.n_unconstrained) {
+      // The two graphs read the same draw; if they disagree on its length the
+      // write_array cannot be driven at all. Keep the model, drop the columns,
+      // and say so rather than emitting a silently misaligned CSV.
+      w.truncated = "write_array reads " + std::to_string(w.n_unconstrained) +
+                    " unconstrained values, log_prob reads " +
+                    std::to_string(cm.n_unconstrained) +
+                    (w.truncated.empty() ? "" : "; " + w.truncated);
+      w.columns.clear();
+    }
+    cm.write_array = std::move(w);
+  }
+  return cm;
 }
 
 }  // namespace stanli

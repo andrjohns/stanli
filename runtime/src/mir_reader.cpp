@@ -310,6 +310,11 @@ Stmt read_stmt(const Node& n) {
     if (kind.head_is("CompilerInternal")) {
       const Node& internal = kind[1];
       s.fn_name = internal.is_atom() ? internal.atom : internal[0].atom;
+      // FnWriteParam names its column in the payload, not in the (empty)
+      // argument list: (FnWriteParam (unconstrain_opt ()) (var <expr>)).
+      if (!internal.is_atom())
+        if (const Node* v = field(internal, "var"))
+          s.fn_args.push_back(read_expr((*v)[1]));
     } else if (kind.head_is("StanLib")) {
       s.fn_name = kind[1].atom;
     } else {
@@ -360,6 +365,8 @@ Program read_program(const sexp::Node& root) {
   const Node* lp = field(root, "log_prob");
   if (!lp) throw std::runtime_error("mir: no log_prob section");
   read_stmt_list((*lp)[1], prog.log_prob);
+  if (const Node* gq = field(root, "generate_quantities"))
+    read_stmt_list((*gq)[1], prog.generate_quantities);
   return prog;
 }
 

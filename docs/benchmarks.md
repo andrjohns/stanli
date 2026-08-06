@@ -110,6 +110,14 @@ the correct depth, versus CmdStan's 974,872 post-warmup leapfrogs in
 117.7 s. The per-gradient and preparation columns are unaffected. Numbers
 here are pending a re-run.
 
+They were also unequal work in a second way: stanli computed no
+transformed parameters and no generated quantities, so on the models with
+a generated quantities block (`diamonds`, `accel_splines`,
+`covid19imperial_v2` among the biggest apparent sampling wins) CmdStan
+was doing per-draw work stanli skipped. The write_array graph closes that
+for 93 of the 119 compiling models; the rest stop at an RNG call in
+generated quantities, which stanli cannot yet evaluate.
+
 | engine | stage | time |
 | --- | --- | --- |
 | stanli | stanc + graph compile + bind | 0.014 s |
