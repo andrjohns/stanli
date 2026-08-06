@@ -101,6 +101,13 @@
   "n_values": 2,
   "status": "VERIFIED"
  },
+ "accel_gp": {
+  "max_rel": 2.447297575943384e-15,
+  "max_ulp": 17,
+  "n_values": 67,
+  "point": 0,
+  "status": "VERIFIED"
+ },
  "accel_splines": {
   "max_rel": 6.61e-15,
   "max_ulp": 119,
@@ -171,6 +178,13 @@
   "max_rel": 0.0,
   "max_ulp": 4568827796563958854,
   "n_values": 3,
+  "status": "VERIFIED"
+ },
+ "dogs_nonhierarchical": {
+  "max_rel": 7.437150827885549e-16,
+  "max_ulp": 5,
+  "n_values": 66,
+  "point": 0,
   "status": "VERIFIED"
  },
  "dugongs_model": {
@@ -335,6 +349,13 @@
   "max_ulp": 0,
   "n_values": 4,
   "status": "VERIFIED"
+ },
+ "kronecker_gp": {
+  "max_rel": 0.00712566332105925,
+  "max_ulp": 49679536742171,
+  "n_values": 439,
+  "point": 0,
+  "status": "MISMATCH"
  },
  "ldaK2": {
   "max_rel": 9.55e-15,

@@ -150,6 +150,11 @@ void weibull_fwd(KernelCtx& ctx) {
       ctx, [](const auto&... a) { stan::math::weibull_lpdf<true>(a...); },
       [](const auto&... a) { stan::math::weibull_lpdf<false>(a...); });
 }
+void logistic_fwd(KernelCtx& ctx) {
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::logistic_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::logistic_lpdf<false>(a...); });
+}
 void lognormal_fwd(KernelCtx& ctx) {
   density_fwd_v<3>(
       ctx, [](const auto&... a) { stan::math::lognormal_lpdf<true>(a...); },
@@ -313,6 +318,8 @@ void register_density_kernels() {
                   Kernel{poisson_fwd, density_bwd<1>, sum_in_lens});
   register_kernel(OP_NEG_BINOMIAL_2_LPMF,
                   Kernel{neg_binomial_2_fwd, density_bwd<2>, sum_in_lens});
+  register_kernel(OP_LOGISTIC_LPDF,
+                  Kernel{logistic_fwd, density_bwd<3>, sum_in_lens});
   register_kernel(OP_WEIBULL_LPDF,
                   Kernel{weibull_fwd, density_bwd<3>, sum_in_lens});
   register_kernel(OP_BINOMIAL_LPMF,

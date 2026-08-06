@@ -1,7 +1,7 @@
 # Corpus status
 
-Evaluating: 115/120
-Differentially verified against CmdStan: 114/120
+Evaluating: 118/120
+Differentially verified against CmdStan: 116/120
 
 A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Models that evaluate but are not verified are listed separately and are not counted.
 
@@ -24,6 +24,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `Rate_4_model` | 3 | 1.3e-16 | 1 |
 | `Rate_5_model` | 2 | 0 (bitwise) | 0 |
 | `Survey_model` | 2 | 0 (bitwise) | 0 |
+| `accel_gp` | 67 | 2.4e-15 | 17 |
 | `accel_splines` | 83 | 6.6e-15 | 119 |
 | `arK` | 8 | 1.7e-16 | 1 |
 | `arma11` | 5 | 0 (bitwise) | 0 |
@@ -36,6 +37,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `dogs` | 4 | 1.4e-15 | 11 |
 | `dogs_hierarchical` | 3 | 1.4e-16 | 1 |
 | `dogs_log` | 3 | 0 (bitwise) | 4568827796563958854 |
+| `dogs_nonhierarchical` | 66 | 7.4e-16 | 5 |
 | `dugongs_model` | 5 | 1.9e-16 | 1 |
 | `earn_height` | 4 | 0 (bitwise) | 0 |
 | `eight_schools_centered` | 11 | 0 (bitwise) | 0 |
@@ -130,12 +132,10 @@ CmdStan and stanrt both reject every shared evaluation point for these models: t
 
 ## Evaluate but not verified
 
+- `kronecker_gp`: max rel diff 7.1e-03
 - `multi_occupancy`: max rel diff 3.5e-01
 
 ## Failures
 
-- `accel_gp`: COMPILE_FAIL stanrt compile: prepare_data: unknown variable x (type )
-- `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: Plus__: incompatible lengths
-- `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported function eigenvectors_sym
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `sir`: EVAL_FAIL poisson_lpmf: Rate parameter is -4.42014e-10, but must be nonnegative!

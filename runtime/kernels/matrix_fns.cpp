@@ -38,12 +38,19 @@ void nary_bwd(KernelCtx& ctx, F&& f) {
     for (int64_t i = 0; i < ctx.in[k].len; ++i) xs[k](i) = ctx.in[k].data[i];
   }
   auto out = f(xs);
+  // Seed without copying the result: several rev overloads return a
+  // var_value<Matrix> (SoA), and assigning that into a Matrix<var> copies
+  // values into fresh vars, silently dropping the tape connection. Seeding
+  // through stan-math ops on whatever type came back keeps it.
   var j;
   if constexpr (std::is_same_v<std::decay_t<decltype(out)>, var>) {
     j = out * ctx.out_adj;
   } else {
-    CMapV seed(ctx.out_adj_vec.data, ctx.out_adj_vec.len);
-    j = stan::math::dot_product(seed, out);
+    MatD seed(out.rows(), out.cols());
+    for (Eigen::Index c = 0, k = 0; c < out.cols(); ++c)
+      for (Eigen::Index r = 0; r < out.rows(); ++r, ++k)
+        seed(r, c) = ctx.out_adj_vec.data[k];
+    j = stan::math::sum(stan::math::elt_multiply(out, seed));
   }
   stan::math::grad(j.vi_);
   for (int k = 0; k < ctx.n_in; ++k) {
@@ -73,12 +80,9 @@ void gp_cov_fwd(KernelCtx& ctx) {
 void gp_cov_bwd(KernelCtx& ctx) {
   const int64_t N = ctx.idata[0];
   auto pts = gp_points(ctx);
+  (void)N;
   nary_bwd(ctx, [&](std::vector<VarV>& xs) {
-    VarM c = stan::math::gp_exp_quad_cov(pts, xs[1](0), xs[2](0));
-    VarV flat(N * N);
-    for (int64_t j = 0; j < N; ++j)
-      for (int64_t i = 0; i < N; ++i) flat(j * N + i) = c(i, j);
-    return flat;
+    return stan::math::gp_exp_quad_cov(pts, xs[1](0), xs[2](0));
   });
 }
 
@@ -107,11 +111,7 @@ void chol_bwd(KernelCtx& ctx) {
     VarM a(n, n);
     for (int64_t j = 0; j < n; ++j)
       for (int64_t i = 0; i < n; ++i) a(i, j) = xs[0](j * n + i);
-    VarM l = stan::math::cholesky_decompose(a);
-    VarV flat(n * n);
-    for (int64_t j = 0; j < n; ++j)
-      for (int64_t i = 0; i < n; ++i) flat(j * n + i) = l(i, j);
-    return flat;
+    return stan::math::cholesky_decompose(a);
   });
 }
 
@@ -401,6 +401,38 @@ void transpose_bwd(KernelCtx& ctx) {
       ctx.in_adj[0].data[j * r + i] += ctx.out_adj_vec.data[i * c + j];
 }
 
+// ---- symmetric eigendecomposition ----------------------------------------
+// idata = {n}. Values ascending, vectors as columns, matching Eigen's
+// SelfAdjointEigenSolver, which is what stan-math uses.
+void eigvals_fwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  MatD a = CMapM(ctx.in[0].data, n, n);
+  Eigen::Map<VecD>(ctx.out.data, n) = stan::math::eigenvalues_sym(a);
+}
+void eigvals_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  nary_bwd(ctx, [&](std::vector<VarV>& xs) {
+    VarM a(n, n);
+    for (int64_t j = 0; j < n; ++j)
+      for (int64_t i = 0; i < n; ++i) a(i, j) = xs[0](j * n + i);
+    return stan::math::eigenvalues_sym(a);
+  });
+}
+void eigvecs_fwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  MatD a = CMapM(ctx.in[0].data, n, n);
+  MapM(ctx.out.data, n, n) = stan::math::eigenvectors_sym(a);
+}
+void eigvecs_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  nary_bwd(ctx, [&](std::vector<VarV>& xs) {
+    VarM a(n, n);
+    for (int64_t j = 0; j < n; ++j)
+      for (int64_t i = 0; i < n; ++i) a(i, j) = xs[0](j * n + i);
+    return stan::math::eigenvectors_sym(a);
+  });
+}
+
 int64_t no_scratch(const Op&, const Slot*) { return 0; }
 
 }  // namespace
@@ -414,6 +446,10 @@ void register_matrix_kernels() {
                   Kernel{mnc_fwd, mnc_bwd, no_scratch});
   register_kernel(OP_MULTI_NORMAL_LPDF, Kernel{mn_fwd, mn_bwd, no_scratch});
   register_kernel(OP_GEMM, Kernel{gemm_fwd, gemm_bwd, no_scratch});
+  register_kernel(OP_EIGENVALUES_SYM,
+                  Kernel{eigvals_fwd, eigvals_bwd, no_scratch});
+  register_kernel(OP_EIGENVECTORS_SYM,
+                  Kernel{eigvecs_fwd, eigvecs_bwd, no_scratch});
   register_kernel(OP_TRANSPOSE,
                   Kernel{transpose_fwd, transpose_bwd, no_scratch});
   register_kernel(OP_LKJ_CORR_CHOL_LPDF, Kernel{lkj_fwd, lkj_bwd, no_scratch});

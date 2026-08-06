@@ -4,6 +4,7 @@
 #include <stanrt/optable.hpp>
 #include <stanrt/sexp.hpp>
 
+#include <stan/math/prim/fun/constants.hpp>
 #include <stan/math/prim/prob/student_t_lccdf.hpp>
 
 #include <functional>
@@ -100,6 +101,15 @@ struct Lowering {
             e.args[2].name == "IndexSingle" && en->dims.size() == 2)
           return en->i.at((eval_int(e.args[2].args[0]) - 1) * en->dims[0] +
                           (eval_int(e.args[1].args[0]) - 1));
+        // dims(x)[k] and friends: evaluate the base as a compile-time
+        // sequence, then index it.
+        {
+          std::vector<int> vals = const_ints(e.args[0]);
+          if (e.args.size() == 2 && e.args[1].name == "IndexSingle") {
+            const long ix = eval_int(e.args[1].args[0]);
+            if (ix >= 1 && (size_t)ix <= vals.size()) return vals[ix - 1];
+          }
+        }
         fail("unsupported int index expression", e.raw);
       }
       case mir::Expr::FunApp:
@@ -552,6 +562,18 @@ struct Lowering {
             r.i.push_back((int)d);
             r.r.push_back((double)d);
           }
+          return r;
+        }
+        if (e.name == "pi" && e.args.empty()) {
+          r.r = {stan::math::pi()};
+          return r;
+        }
+        if (e.name == "e" && e.args.empty()) {
+          r.r = {stan::math::e()};
+          return r;
+        }
+        if (e.name == "machine_precision" && e.args.empty()) {
+          r.r = {std::numeric_limits<double>::epsilon()};
           return r;
         }
         if (e.name == "negative_infinity") {
@@ -1168,10 +1190,31 @@ struct Lowering {
       // shape and size queries inside the body (dims, size, rows) resolve
       // at compile time just as they do in transformed data.
       env.vars.erase(name);
-      if (e.args[i].data_only) {
+      // Bind whenever the argument's value is computable at compile time,
+      // not just when the MIR flags it DataOnly: a function may take a data
+      // array without the `data` qualifier, and its body still asks for
+      // shapes and sizes. Parameter expressions simply fail to evaluate
+      // (their names are not in the data environment), so this cannot bind
+      // something that varies.
+      {
         try {
-          env.vars[name] = td_eval(e.args[i]);
+          DataMap::Entry en = td_eval(e.args[i]);
+          if (en.dims.size() > 1) decl_dims[name] = en.dims;
+          env.vars[name] = std::move(en);
         } catch (const CompileError&) {
+          // Not interpretable, but a data-only value still has a constant
+          // slot; bind that so shape and size queries inside the body work.
+          if (!binds[i].is_int && binds[i].v.slot >= 0) {
+            auto it = slot_values.find(binds[i].v.slot);
+            if (it != slot_values.end()) {
+              DataMap::Entry en;
+              en.r = it->second;
+              en.dims = {(int64_t)en.r.size()};
+              if (binds[i].v.si.rows > 0)
+                en.dims = {binds[i].v.si.rows, binds[i].v.si.cols};
+              env.vars[name] = std::move(en);
+            }
+          }
         }
       }
       if (binds[i].is_int) {
@@ -1255,6 +1298,7 @@ struct Lowering {
          {OP_BERNOULLI_LOGIT_GLM_LPMF, 4, 1, true}},
         {"dirichlet_lpdf", {OP_DIRICHLET_LPDF, 2, 0}},
         {"weibull_lpdf", {OP_WEIBULL_LPDF, 3, 0}},
+        {"logistic_lpdf", {OP_LOGISTIC_LPDF, 3, 0}},
     };
     auto dit = kDens.find(e.name);
     if (dit != kDens.end()) {
@@ -1307,6 +1351,15 @@ struct Lowering {
     if (e.name == "Times__") {
       Val a = lower_expr(e.args[0]);
       Val b = lower_expr(e.args[1]);
+      // Scalar on either side is an elementwise scale, whatever shape the
+      // other operand carries.
+      if (info[a.slot].len == 1 || info[b.slot].len == 1) {
+        const Val& shaped = info[a.slot].len == 1 ? b : a;
+        SlotInfo si = shaped.si;
+        si.data_like = info[a.slot].data_like && info[b.slot].data_like;
+        return emit(OP_MUL, {a.slot, b.slot},
+                    std::max(info[a.slot].len, info[b.slot].len), si);
+      }
       if (a.si.rows > 0) {
         if (info[a.slot].data_like && b.si.rows == 0) {
           // Data matrix * vector keeps the tuned MATVEC kernel (its
@@ -1331,6 +1384,15 @@ struct Lowering {
         Val v = emit(OP_GEMM, {a.slot, b.slot}, a.si.rows * cb, si,
                      {(int)a.si.rows, (int)a.si.cols, (int)cb});
         return v;
+      }
+      // vector * row_vector with a matrix result is an outer product.
+      if (b.si.rows == 0 && e.type_ == "UMatrix") {
+        const int64_t nr = info[a.slot].len, nc = info[b.slot].len;
+        SlotInfo si;
+        si.rows = nr;
+        si.cols = nc;
+        return emit(OP_GEMM, {a.slot, b.slot}, nr * nc, si,
+                    {(int)nr, 1, (int)nc});
       }
       // row_vector * vector with scalar result type is an inner product.
       if ((e.type_ == "UReal" || e.type_ == "UInt") &&
@@ -1376,11 +1438,6 @@ struct Lowering {
       return emit(uit->second, {a.slot}, info[a.slot].len, si);
     }
     if (e.name == "PPlus__") return lower_expr(e.args[0]);
-    if (e.name == "Transpose__") {
-      Val a = lower_expr(e.args[0]);
-      if (a.si.rows == 0) return a;  // vector transpose: same flat storage
-      fail("matrix transpose unsupported in M2");
-    }
     if (e.name == "logit") {
       Val a = lower_expr(e.args[0]);
       return emit(OP_LOGIT, {a.slot}, info[a.slot].len);
@@ -1446,7 +1503,8 @@ struct Lowering {
       Val ga = emit(OP_GATHER, {lg.slot}, (int64_t)idata.size(), {}, idata);
       return emit(OP_SUM_VEC, {ga.slot}, 1);
     }
-    if (e.name == "Transpose__" && e.args.size() == 1) {
+    if ((e.name == "Transpose__" || e.name == "transpose") &&
+        e.args.size() == 1) {
       Val a = lower_expr(e.args[0]);
       // Vector <-> row_vector transpose is a type change, not a layout one.
       if (a.si.rows == 0) return a;
@@ -1679,6 +1737,37 @@ struct Lowering {
       decl_dims_pending = {N, S};
       return v;
     }
+    if ((e.name == "eigenvalues_sym" || e.name == "eigenvectors_sym") &&
+        e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (a.si.rows == 0) fail(e.name + ": needs a matrix", e.raw);
+      const int64_t n = a.si.rows;
+      if (e.name == "eigenvalues_sym")
+        return emit(OP_EIGENVALUES_SYM, {a.slot}, n, {}, {(int)n});
+      SlotInfo si;
+      si.rows = n;
+      si.cols = n;
+      return emit(OP_EIGENVECTORS_SYM, {a.slot}, n * n, si, {(int)n});
+    }
+    if (e.name == "quad_form_diag" && e.args.size() == 2) {
+      // quad_form_diag(M, v) = diag(v) * M * diag(v).
+      Val m = lower_expr(e.args[0]);
+      Val v = lower_expr(e.args[1]);
+      if (m.si.rows == 0) fail("quad_form_diag: needs a matrix", e.raw);
+      const int64_t n = info[v.slot].len;
+      SlotInfo dsi;
+      dsi.rows = n;
+      dsi.cols = n;
+      dsi.data_like = info[v.slot].data_like;
+      Val d = emit(OP_DIAG_MATRIX, {v.slot}, n * n, dsi);
+      SlotInfo si;
+      si.rows = n;
+      si.cols = n;
+      Val left = emit(OP_GEMM, {d.slot, m.slot}, n * n, si,
+                      {(int)n, (int)n, (int)n});
+      return emit(OP_GEMM, {left.slot, d.slot}, n * n, si,
+                  {(int)n, (int)n, (int)n});
+    }
     if (e.name == "dot_self") {
       Val a = lower_expr(e.args[0]);
       return emit(OP_DOT, {a.slot, a.slot}, 1);
@@ -1870,7 +1959,10 @@ struct Lowering {
           // Int locals are always data-only in Stan; keep them in int_env
           // so size expressions and indices resolve at compile time.
           int_locals.insert(s.decl_id);
-          if (s.has_init) int_env[s.decl_id] = eval_int_td(s.init);
+          // eval_int, not the interpreter directly: the initializer may be
+          // a shape query on a slot-bound value (rows(lscale) inside an
+          // inlined function), which only eval_int can answer.
+          if (s.has_init) int_env[s.decl_id] = eval_int(s.init);
         } else if (s.has_init) {
           decl_dims_pending.clear();
           scope[s.decl_id] = lower_expr(s.init).slot;
@@ -1896,7 +1988,7 @@ struct Lowering {
         return;
       case mir::Stmt::Assignment: {
         if (s.lhs_idx.empty() && int_locals.count(s.lhs)) {
-          int_env[s.lhs] = eval_int_td(s.rhs);
+          int_env[s.lhs] = eval_int(s.rhs);
           return;
         }
         if (!s.lhs_idx.empty()) {
