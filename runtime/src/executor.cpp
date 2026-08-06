@@ -1,7 +1,9 @@
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
+#include <stanli/packet.hpp>
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -15,6 +17,14 @@ Kernel& kernel(uint16_t opcode) {
   assert(opcode < OP_COUNT_);
   return g_table[opcode];
 }
+
+static bool g_packet_math = [] {
+  const char* e = std::getenv("STANLI_PACKET_MATH");
+  return e == nullptr || (e[0] != '0' || e[1] != '\0');
+}();
+
+bool packet_math() { return g_packet_math; }
+void set_packet_math(bool on) { g_packet_math = on; }
 
 const char* opcode_name(uint16_t opcode) {
   static const char* const names[] = {

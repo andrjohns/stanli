@@ -41,10 +41,13 @@ def main():
     pdb = pathlib.Path(sys.argv[1]) / "posterior_database"
     filt = (sys.argv[sys.argv.index("--filter") + 1]
             if "--filter" in sys.argv else "")
-    disable = {v: "1" for v in (
-        sys.argv[sys.argv.index("--disable") + 1].split(",")
-        if "--disable" in sys.argv
-        else ["STANLI_NO_REROLL", "STANLI_NO_INPLACE"])}
+    # Each entry is VAR or VAR=VALUE (default value "1").
+    disable = {}
+    for v in (sys.argv[sys.argv.index("--disable") + 1].split(",")
+              if "--disable" in sys.argv
+              else ["STANLI_NO_REROLL", "STANLI_NO_INPLACE"]):
+        k, _, val = v.partition("=")
+        disable[k] = val or "1"
     print(f"A = passes off ({', '.join(disable)}), B = passes on")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_ab_"))
 

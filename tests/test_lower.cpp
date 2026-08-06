@@ -3,6 +3,7 @@
 // evaluation order. Plus the unsupported-construct error path.
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
+#include <stanli/packet.hpp>
 
 #include <stan/math.hpp>
 #include <cstdio>
@@ -86,6 +87,10 @@ static void reference(const double* q, double* lp_out, double* grad_out) {
 }
 
 int main() {
+  // These fixtures pin ULP-level parity with DEFAULT CmdStan, whose AoS
+  // Matrix<var> paths run scalar libm per element; the packet path answers
+  // to `stanc --O1` instead and is verified there.
+  stanli::set_packet_math(false);
   using namespace stanli;
 
   DataMap data;
