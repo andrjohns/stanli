@@ -1,17 +1,19 @@
-# stanrt
+# stanli
+
+The Stan Language Interpreter.
 
 Compile and sample Stan models with no C++ toolchain on the machine.
 
-`pip install stanrt` gives you one shared library containing the Stan
+`pip install stanli` gives you one shared library containing the Stan
 compiler, the Stan math library, and Stan's NUTS sampler. Models are
 turned into a graph of precompiled operations at load time, so preparing a
 model takes milliseconds instead of a multi-second C++ compile, and
 nothing is built on the user's machine.
 
 ```python
-import stanrt
+import stanli
 
-model = stanrt.Model(stan_file="eight_schools.stan", data="data.json")
+model = stanli.Model(stan_file="eight_schools.stan", data="data.json")
 draws = model.sample(seed=1, warmup=1000, samples=1000)
 draws["mu"].mean()
 ```
@@ -19,7 +21,7 @@ draws["mu"].mean()
 ## What it is
 
 Every Stan model is a composition of a fixed vocabulary of operations:
-densities, constraint transforms, linear algebra, elementwise math. stanrt
+densities, constraint transforms, linear algebra, elementwise math. stanli
 ships those precompiled and turns each model into data — a static graph
 over flat buffers — rather than generating and compiling C++ per model.
 The graph doubles as the autodiff tape: the forward sweep computes the log

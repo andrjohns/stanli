@@ -9,21 +9,21 @@ cd "$(dirname "$0")/.."
 
 cmake --build build-rel -j8 --target stanrt_shared
 
-mkdir -p python/stanrt/_bin
-rm -f python/stanrt/_bin/*
+mkdir -p python/stanli/_bin
+rm -f python/stanli/_bin/*
 LIB=""
 for cand in build-rel/libstanrt.dylib build-rel/libstanrt.so; do
   [ -f "$cand" ] && LIB=$cand && break
 done
 [ -n "$LIB" ] || { echo "no shared library in build-rel/"; exit 1; }
-cp "$LIB" python/stanrt/_bin/
-strip -x "python/stanrt/_bin/$(basename "$LIB")" 2>/dev/null || true
-cp THIRD_PARTY_LICENSES.md LICENSE python/stanrt/
+cp "$LIB" python/stanli/_bin/
+strip -x "python/stanli/_bin/$(basename "$LIB")" 2>/dev/null || true
+cp THIRD_PARTY_LICENSES.md LICENSE python/stanli/
 
 # Without the embedded compiler the package needs the stanc binary instead.
 if [ ! -f deps/stanc3/stanc_embed.o ]; then
-  cp deps/stanc3/stanc python/stanrt/_bin/stanc
-  chmod +x python/stanrt/_bin/stanc
+  cp deps/stanc3/stanc python/stanli/_bin/stanc
+  chmod +x python/stanli/_bin/stanc
 fi
 
 case "$(uname -s)-$(uname -m)" in

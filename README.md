@@ -81,14 +81,16 @@ Stage by stage:
 
 ## Python
 
+The Python package is published as **stanli**, the Stan Language
+Interpreter.
+
 ```
-./tools/build_wheel.sh          # builds dist/stanrt-*.whl for this platform
-pip install dist/stanrt-*.whl
+pip install stanli                 # or: ./tools/build_wheel.sh
 ```
 
 ```python
-import stanrt
-m = stanrt.Model(stan_file="model.stan", data="data.json")
+import stanli
+m = stanli.Model(stan_file="model.stan", data={"J": 8, "y": y, "sigma": s})
 draws = m.sample(seed=1, warmup=1000, samples=1000)
 draws["mu"].mean()
 ```

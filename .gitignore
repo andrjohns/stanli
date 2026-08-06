@@ -2,9 +2,9 @@ deps/*
 !deps/fetch.sh
 build/
 build-rel/
-python/stanrt/_bin/
+python/stanli/_bin/
 dist/
 *.egg-info/
 compile_commands.json
-python/stanrt/LICENSE
-python/stanrt/THIRD_PARTY_LICENSES.md
+python/stanli/LICENSE
+python/stanli/THIRD_PARTY_LICENSES.md

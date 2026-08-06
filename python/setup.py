@@ -39,10 +39,10 @@ except ImportError:  # building without the wheel package
 
 
 setup(
-    name="stanrt",
+    name="stanli",
     version="0.1.0",
-    description=("Portable Stan runtime: compile and sample Stan models "
-                 "with no C++ toolchain"),
+    description=("Stan Language Interpreter: compile and sample Stan "
+                 "models with no C++ toolchain"),
     long_description=(HERE / "README.md").read_text(),
     long_description_content_type="text/markdown",
     author="Sean Talts",
@@ -57,8 +57,9 @@ setup(
     },
     python_requires=">=3.9",
     install_requires=["numpy>=1.22"],
-    packages=["stanrt"],
-    package_data={"stanrt": ["_bin/*", "THIRD_PARTY_LICENSES.md"]},
+    packages=["stanli"],
+    package_data={"stanli": ["_bin/*", "LICENSE",
+                         "THIRD_PARTY_LICENSES.md"]},
     include_package_data=True,
     distclass=BinaryDistribution,
     cmdclass=CMDCLASS,

@@ -1,4 +1,4 @@
-"""stanrt: portable Stan runtime.
+"""stanli: the Stan Language Interpreter.
 
 Compiles a .stan model via the bundled stanc3 binary (subprocess), lowers it
 in-process through the bundled shared library, and samples with NUTS. No C++
