@@ -42,12 +42,10 @@
 #include <vector>
 
 namespace stanli {
-namespace {
 
-// Ops whose backward only routes adjoints -- it never reads the values of
-// the input it routes them to. Verified individually in
-// runtime/kernels/elementwise.cpp; anything not on this list is assumed to
-// need its inputs intact during the reverse sweep.
+// Declared in the header. tests/test_pass_safety.cpp checks every opcode
+// this returns true for, by poisoning inputs between forward and backward
+// and requiring the adjoints to be unchanged.
 bool backward_ignores_input_values(uint16_t oc) {
   switch (oc) {
     case OP_INDEX:
@@ -61,8 +59,6 @@ bool backward_ignores_input_values(uint16_t oc) {
       return false;
   }
 }
-
-}  // namespace
 
 int make_inplace_updates(Graph& g, const std::vector<int>& roots) {
   if (std::getenv("STANLI_NO_INPLACE")) return 0;

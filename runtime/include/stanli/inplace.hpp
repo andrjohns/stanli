@@ -18,6 +18,15 @@ namespace stanli {
 // terms, constrained-parameter views, the result): they are never
 // overwritten and never renamed. Returns the number of writes rewritten.
 // STANLI_NO_INPLACE=1 disables the pass.
+// True for ops whose backward only routes adjoints and never reads the
+// values of its inputs. The destructive rewrite below is sound only for
+// vectors whose earlier readers all satisfy this: a backward pass runs
+// after every write has landed, and kernels like log_sum_exp rebuild
+// their var tape from the input buffer at that point. Exposed so
+// tests/test_pass_safety.cpp can check every opcode claimed here really
+// has the property, by poisoning inputs between the sweeps.
+bool backward_ignores_input_values(uint16_t opcode);
+
 int make_inplace_updates(Graph& g, const std::vector<int>& roots);
 
 // Store-to-load forwarding, plus the dead ops it exposes. `mu[n] = e;` and
