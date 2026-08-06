@@ -18,7 +18,7 @@ pip install stanli
   time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
   (118/120 posteriordb models differentially verified against CmdStan's
-  log_prob and full gradient, 44 of them bitwise identical, worst
+  log_prob and full gradient, 45 of them bitwise identical, worst
   relative deviation 2.6e-12; per-model accuracy in relative terms and
   ULPs is listed there)
 - Install size: one 13.8 MB shared library, a 4.9 MB wheel. Breakdown

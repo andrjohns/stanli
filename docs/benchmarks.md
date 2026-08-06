@@ -170,7 +170,7 @@ per-gradient table.
 
 Every model in the passing set is differentially verified against
 CmdStan's `log_prob_propto_jacobian` and full gradient at the shared
-point: 118/120 verified, 44 of them bitwise identical, worst relative
+point: 118/120 verified, 45 of them bitwise identical, worst relative
 deviation 2.6e-12 (`tools/verify_sample.py`, `docs/corpus-status.md`).
 Re-rolled models change summation order relative to CmdStan's scalar
 loop, so they verify at tolerance rather than bitwise: across the corpus

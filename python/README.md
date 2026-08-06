@@ -65,7 +65,7 @@ Nothing here ships on "looks close".
 
 **118 of 120 posteriordb models** are differentially verified against
 CmdStan: same model, same data, same evaluation point, comparing the log
-density and every single gradient component. **44 agree bitwise.** The worst
+density and every single gradient component. **45 agree bitwise.** The worst
 deviation across the entire corpus is **2.6e-12 relative**.
 
 The two exceptions are documented rather than hidden. `sir`'s ODE solution
@@ -101,6 +101,15 @@ cost per *op*, and a vectorized statement over N elements amortizes that to
 nothing. The one loss is honest and understood: `low_dim_gauss_mix` writes
 `log_mix(theta, normal_lpdf(...), ...)` per observation, a shape the
 re-rolling pass correctly refuses to vectorize today.
+
+ODE models are the other place stanli is still behind. An ODE right-hand
+side is the one user function that cannot be inlined at lowering time,
+since the integrator picks the times; it now compiles into a flat register
+machine instead of being tree-walked, and the forward sweep keeps the
+sensitivities it was already computing instead of solving twice. Together
+that is 29x to 39x faster than the tree-walking interpreter it replaces,
+which puts `lotka_volterra` and `soil_incubation` at 0.58x and 0.63x of
+CmdStan rather than 0.015x.
 
 Method and full table:
 [docs/benchmarks.md](https://github.com/seantalts/stanli/blob/main/docs/benchmarks.md)
