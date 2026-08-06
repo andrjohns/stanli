@@ -24,9 +24,16 @@ struct RerollStats {
 // the single summed output slot (at the first lane's position). Slots are
 // appended to g.slots; callers with arrays parallel to slots must resize.
 // STANRT_NO_REROLL=1 disables the pass.
+//
+// `extra_roots` must list every slot something outside the op graph reads:
+// jacobian terms and constrained-parameter views, which the executor reads
+// directly and which therefore have no consuming op to find. The pass
+// refuses to fold a region that would stop writing one. Passing an
+// incomplete list is a miscompile, so this is not defaulted.
 RerollStats reroll(Graph& g,
                    std::vector<std::pair<int, std::vector<double>>>& fills,
-                   std::vector<int>& target_terms);
+                   std::vector<int>& target_terms,
+                   const std::vector<int>& extra_roots);
 
 }  // namespace stanrt
 

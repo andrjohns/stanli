@@ -2172,7 +2172,11 @@ struct Lowering {
     for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
     bind_data(p);
     for (const auto& s : p.log_prob) lower_stmt(s);
-    reroll(g, out.fills, target_terms);  // no-op under STANRT_NO_REROLL=1
+    // Jacobian terms and constrained-parameter views are read straight out
+    // of the arena, so no op consumes them and the pass cannot infer them.
+    std::vector<int> roots = jac_slots;
+    for (const auto& v : out.views) roots.push_back(v.slot);
+    reroll(g, out.fills, target_terms, roots);  // off under STANRT_NO_REROLL
     info.resize(g.slots.size());  // keep SlotInfo parallel: emit() in
                                   // reduce_terms reads info[o] by slot id
     std::vector<int> all = target_terms;

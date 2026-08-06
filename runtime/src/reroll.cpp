@@ -115,7 +115,8 @@ bool ops_match(const Graph& g, const Op& a, const Op& b) {
 
 RerollStats reroll(Graph& g,
                    std::vector<std::pair<int, std::vector<double>>>& fills,
-                   std::vector<int>& target_terms) {
+                   std::vector<int>& target_terms,
+                   const std::vector<int>& extra_roots) {
   RerollStats st;
   st.ops_before = static_cast<int64_t>(g.ops.size());
   st.ops_after = st.ops_before;
@@ -135,6 +136,11 @@ RerollStats reroll(Graph& g,
       uses[g.ops[u].in[j]].push_back(u);
 
   std::unordered_set<int> term_set(target_terms.begin(), target_terms.end());
+
+  // Slots read from outside the op graph (jacobian terms, constrained
+  // parameter views). They have no consuming op, so `uses` cannot see
+  // them; folding a lane that writes one would leave it unwritten.
+  std::unordered_set<int> root_set(extra_roots.begin(), extra_roots.end());
 
   // Scan-cost control: after a hard classification failure (prefix 0,
   // lane-independent evidence) the run gets one more attempt one lane in,
@@ -250,12 +256,13 @@ RerollStats reroll(Graph& g,
           // instead be target terms (with no op consumers at all).
           int64_t br_term = Luse;     // lanes whose out IS a term
           int64_t br_nonterm = Luse;  // lanes whose out is NOT a term
-          int64_t br_internal = Luse; // lanes whose consumers stay inside
+          int64_t br_internal = Luse; // lanes whose out does not escape
           for (int64_t l = 0; l < Luse; ++l) {
             const int o = op_at(p, l).out;
             const bool is_term = term_set.count(o) != 0;
             if (!is_term && br_term == Luse) br_term = l;
             if (is_term && br_nonterm == Luse) br_nonterm = l;
+            if (br_internal == Luse && root_set.count(o) != 0) br_internal = l;
             if (br_internal == Luse) {
               auto uit = uses.find(o);
               if (uit != uses.end())
@@ -296,9 +303,11 @@ RerollStats reroll(Graph& g,
               prefix = std::min(prefix, std::min(cand, io_ok));
             }
           } else if (is_density(t.opcode)) {
-            if (br_term < Luse) {
+            if (br_term < Luse || br_internal < Luse) {
+              // br_internal here can only mean an extra root: a term
+              // density has no op consumers to escape to.
               ok = false;
-              prefix = std::min(prefix, br_term);
+              prefix = std::min(prefix, std::min(br_term, br_internal));
             } else {
               auto uit = uses.find(t.out);
               if (uit != uses.end() && !uit->second.empty()) {

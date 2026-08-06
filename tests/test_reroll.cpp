@@ -85,7 +85,7 @@ static void test_radon_shape() {
 
   std::vector<int> tt = terms;
   Fills f2 = fills;
-  RerollStats st = reroll(g, f2, tt);
+  RerollStats st = reroll(g, f2, tt, {});
   expect("radon regions==1", st.regions == 1);
   // 1 REP_VEC survives; 8 INDEX + 8 NORMAL collapse to 1 NORMAL.
   expect("radon ops==2", g.ops.size() == 2);
@@ -150,7 +150,7 @@ static void test_ark_shape() {
 
   std::vector<int> tt = terms;
   Fills f2 = fills;
-  RerollStats st = reroll(g, f2, tt);
+  RerollStats st = reroll(g, f2, tt, {});
   expect("ark regions==1", st.regions == 1);
   // 2 hoisted INDEX + 2 vec MUL + 2 vec ADD + 1 vec NORMAL = 7 ops.
   expect("ark ops==7", g.ops.size() == 7);
@@ -182,7 +182,7 @@ static void test_bail_recurrence() {
   }
   std::vector<int> tt = terms;
   const size_t before = g.ops.size();
-  RerollStats st = reroll(g, fills, tt);
+  RerollStats st = reroll(g, fills, tt, {});
   expect("recurrence not rerolled", st.regions == 0);
   expect("recurrence ops unchanged", g.ops.size() == before);
 }
@@ -210,7 +210,7 @@ static void test_bail_nonterm_density() {
   }
   std::vector<int> tt = terms;
   const size_t before = g.ops.size();
-  RerollStats st = reroll(g, fills, tt);
+  RerollStats st = reroll(g, fills, tt, {});
   expect("nonterm density not rerolled", st.regions == 0);
   expect("nonterm ops unchanged", g.ops.size() == before);
 }
@@ -240,7 +240,7 @@ static void test_bail_partial_range() {
   }
   std::vector<int> tt = terms;
   const size_t before = g.ops.size();
-  RerollStats st = reroll(g, fills, tt);
+  RerollStats st = reroll(g, fills, tt, {});
   expect("partial range not rerolled", st.regions == 0);
   expect("partial ops unchanged", g.ops.size() == before);
 }
@@ -264,7 +264,7 @@ static void test_env_disable() {
   }
   std::vector<int> tt = terms;
   const size_t before = g.ops.size();
-  RerollStats st = reroll(g, fills, tt);
+  RerollStats st = reroll(g, fills, tt, {});
   expect("env disables", st.regions == 0);
   expect("env ops unchanged", g.ops.size() == before);
   unsetenv("STANRT_NO_REROLL");
@@ -309,7 +309,7 @@ static void test_first_lane_anomalous() {
 
   std::vector<int> tt = terms;
   Fills f2 = fills;
-  RerollStats st = reroll(g, f2, tt);
+  RerollStats st = reroll(g, f2, tt, {});
   expect("anomalous regions==1", st.regions == 1);
   // MUL + lane-0 NORMAL survive scalar; lanes 1..7 collapse to 1 vec op.
   expect("anomalous ops==3", g.ops.size() == 3);
@@ -364,7 +364,7 @@ static void test_block_structured() {
 
   std::vector<int> tt = terms;
   Fills f2 = fills;
-  RerollStats st = reroll(g, f2, tt);
+  RerollStats st = reroll(g, f2, tt, {});
   expect("block regions==3", st.regions == NB);
   expect("block ops==3", g.ops.size() == (size_t)NB);  // 1 vec NORMAL each
   expect("block terms==3", tt.size() == (size_t)NB);
@@ -440,6 +440,54 @@ static void test_e2e_fixtures() {
   }
 }
 
+// (e) a lane output that is a graph root the pass is not told about. The
+// executor reads jacobian slots and constrained-parameter views directly,
+// with no consuming op, so `uses` cannot see them: a region that folds one
+// away would silently stop writing a slot something still reads. Same
+// graph twice, the second time declaring one lane's intermediate a root.
+static void test_bail_extra_root() {
+  const auto build = [](Graph& g, Fills& fills, std::vector<int>& terms) {
+    const int L = 6;
+    const int alpha = g.add_slot(1, true);
+    const int sigma = g.add_slot(1, true);
+    std::vector<int> scaled(L);
+    auto cslot = [&](double v) {
+      const int s = g.add_slot(1, false);
+      fills.emplace_back(s, std::vector<double>{v});
+      return s;
+    };
+    for (int l = 0; l < L; ++l) {
+      scaled[l] = g.add_slot(1, false);
+      g.add_op(OP_MUL, {alpha, cslot(0.3 + 0.1 * l)}, scaled[l]);
+      const int lp = g.add_slot(1, false);
+      const int id =
+          g.add_op(OP_NORMAL_LPDF, {cslot(0.2 * l), scaled[l], sigma}, lp);
+      g.ops[id].variant = 0x06;
+      terms.push_back(lp);
+    }
+    return scaled;
+  };
+
+  {  // control: nothing else reads the intermediates, so it re-rolls
+    Graph g;
+    Fills fills;
+    std::vector<int> tt;
+    build(g, fills, tt);
+    RerollStats st = reroll(g, fills, tt, {});
+    expect("extra-root control rerolls", st.regions == 1);
+  }
+  {  // one lane's intermediate is a root: the region must not fold it away
+    Graph g;
+    Fills fills;
+    std::vector<int> tt;
+    const std::vector<int> scaled = build(g, fills, tt);
+    const size_t before = g.ops.size();
+    RerollStats st = reroll(g, fills, tt, {scaled[2]});
+    expect("extra root not rerolled", st.regions == 0);
+    expect("extra root ops unchanged", g.ops.size() == before);
+  }
+}
+
 int main() {
   test_radon_shape();
   test_ark_shape();
@@ -449,6 +497,7 @@ int main() {
   test_env_disable();
   test_first_lane_anomalous();
   test_block_structured();
+  test_bail_extra_root();
   test_e2e_fixtures();
   if (failures) { std::printf("%d failures\n", failures); return 1; }
   std::printf("test_reroll OK\n");
