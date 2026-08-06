@@ -20,6 +20,16 @@ namespace stanli {
 // STANLI_NO_INPLACE=1 disables the pass.
 int make_inplace_updates(Graph& g, const std::vector<int>& roots);
 
+// Store-to-load forwarding, plus the dead ops it exposes. `mu[n] = e;` and
+// a read of `mu[n]` in the same iteration lower to a write immediately
+// followed by an OP_INDEX of the element just written; the read is
+// replaced by the written value directly. When nothing then reads the
+// vector, its writes are dead and go too, which is what leaves the plain
+// per-lane arithmetic the re-roll pass can vectorize. Returns the number
+// of ops removed. Disabled with the writes themselves under
+// STANLI_NO_INPLACE.
+int forward_stores_to_loads(Graph& g, const std::vector<int>& roots);
+
 }  // namespace stanli
 
 #endif

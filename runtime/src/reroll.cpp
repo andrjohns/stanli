@@ -93,6 +93,8 @@ struct Pos {
   bool index_elision = false;  // OP_INDEX, idata==lane, base len==lanes
   bool hoist = false;          // all inputs + idata invariant: emit once
   bool term_density = false;   // density, every lane's out a target term
+  int slice_start = -1;        // OP_INDEX over a contiguous window
+  std::vector<int> gather_idx; // OP_INDEX with a data-driven index
 };
 
 // Structural template match; idata may differ across lanes only for
@@ -287,20 +289,33 @@ RerollStats reroll(Graph& g,
             }
             const int64_t blen = g.slots[t.in[0]].len;
             const int64_t io_ok = std::min(br_internal, br_nonterm);
-            if (ap.ins[0].kind == InKind::kInvariant && br_prog == Luse &&
-                blen == Luse && io_ok == Luse) {
-              ap.index_elision = true;
-            } else if (ap.ins[0].kind == InKind::kInvariant &&
-                       br_iinv == Luse && io_ok == Luse) {
-              ap.hoist = true;
+            // Contiguous ascending run (idata[l] == idata[0] + l) and
+            // in-range indices: the two cheaper rewrites below.
+            int64_t br_run = Luse;
+            bool in_range = true;
+            for (int64_t l = 0; l < Luse; ++l) {
+              const int v = op_at(p, l).idata[0];
+              if (v != t.idata[0] + l && br_run == Luse) br_run = l;
+              if (v < 0 || v >= blen) in_range = false;
+            }
+            if (ap.ins[0].kind != InKind::kInvariant || io_ok < Luse) {
+              ok = false;
+              prefix = std::min(prefix, io_ok);
+            } else if (br_prog == Luse && blen == Luse) {
+              ap.index_elision = true;  // reads the whole base, in order
+            } else if (br_iinv == Luse) {
+              ap.hoist = true;  // same element every lane
+            } else if (br_run == Luse && t.idata[0] + Luse <= blen) {
+              ap.slice_start = t.idata[0];  // contiguous window -> OP_SLICE
+            } else if (in_range) {
+              // Arbitrary data-driven index (`alpha[county_idx[n]]`, the
+              // hierarchical idiom) -> one OP_GATHER over the lane indices.
+              ap.gather_idx.reserve((size_t)Luse);
+              for (int64_t l = 0; l < Luse; ++l)
+                ap.gather_idx.push_back(op_at(p, l).idata[0]);
             } else {
               ok = false;
-              // Elision works at exactly len(base) lanes if the
-              // progression covers them; hoisting at the idata-invariant
-              // prefix. Either is bounded by output discipline.
-              int64_t cand = br_iinv;
-              if (blen <= br_prog) cand = std::max(cand, blen);
-              prefix = std::min(prefix, std::min(cand, io_ok));
+              prefix = 0;  // out-of-range index: not ours to rewrite
             }
           } else if (is_density(t.opcode)) {
             if (br_term < Luse || br_internal < Luse) {
@@ -377,6 +392,27 @@ RerollStats reroll(Graph& g,
         if (ap.hoist) {
           result.push_back(t);
           pos_out[(size_t)p] = t.out;
+          continue;
+        }
+        if (ap.slice_start >= 0 || !ap.gather_idx.empty()) {
+          // One vector read replaces the lanes' scalar reads. Both kernels
+          // scatter their adjoints back into the base, gather in ascending
+          // lane order so repeated indices accumulate like the var path.
+          Op rd;
+          rd.opcode = ap.slice_start >= 0 ? OP_SLICE : OP_GATHER;
+          rd.n_in = 1;
+          rd.in[0] = t.in[0];
+          rd.out = g.add_slot(Luse, false);
+          std::vector<int> idata;
+          if (ap.slice_start >= 0)
+            idata.push_back(ap.slice_start);
+          else
+            idata = std::move(ap.gather_idx);
+          g.idata_pool.push_back(std::move(idata));
+          rd.idata = g.idata_pool.back().data();
+          rd.n_idata = (int64_t)g.idata_pool.back().size();
+          pos_out[(size_t)p] = rd.out;
+          result.push_back(rd);
           continue;
         }
         Op op = t;  // opcode, variant, idata carry over

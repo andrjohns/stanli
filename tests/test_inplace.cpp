@@ -186,8 +186,128 @@ static void test_bail_root() {
   expect("root blocks one write", n_inplace == L - 2);
 }
 
+// The hmm_example shape, and the reason a last-use rule alone is not
+// enough: `acc` is filled element by element, read WHOLE by log_sum_exp,
+// then refilled for the next time step. log_sum_exp's backward replays
+// the function on its input values (legacy_bwd_vec_in), so those values
+// must still be there during the reverse sweep -- a destructive refill
+// would hand it the next step's numbers. Caught by the corpus A/B: 8
+// models, deviations up to 1.7e+05 relative.
+static void test_bail_value_reading_consumer() {
+  const int K = 2, T = 4;
+  Graph g;
+  Fills fills;
+  const int mu = g.add_slot(1, true);
+  const int acc0 = g.add_slot(K, false);
+  fills.emplace_back(acc0, std::vector<double>((size_t)K, 0.0));
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> terms;
+  int acc = acc0;
+  for (int t = 0; t < T; ++t) {
+    for (int k = 0; k < K; ++k) {
+      const int v = g.add_slot(1, false);
+      // The spread WITHIN a step must vary across steps, or every step's
+      // softmax is the same and replaying on the wrong values still gives
+      // the right gradient -- the bug would hide.
+      g.add_op(OP_MUL, {mu, cslot(0.3 + 0.9 * t * (k + 1))}, v);
+      const int nxt = g.add_slot(K, false);
+      g.add_op(OP_SET_INDEX, {acc, v}, nxt, {k});
+      acc = nxt;
+    }
+    const int lse = g.add_slot(1, false);
+    g.add_op(OP_LOG_SUM_EXP, {acc}, lse);  // reads the WHOLE vector
+    terms.push_back(lse);
+  }
+  Graph ref = g;
+  reduce_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  const int n_inplace = make_inplace_updates(g, {});
+  // The exact boundary: each step's FIRST write must copy, which is what
+  // preserves the previous step's buffer for that step's log_sum_exp
+  // backward; the second write may then destroy that fresh copy, because
+  // this step's log_sum_exp has not read it yet. One in-place per step.
+  expect("one destructive write per step", n_inplace == T);
+  int copies = 0;
+  for (const Op& op : g.ops) copies += op.opcode == OP_SET_INDEX;
+  expect("one preserved copy per step", copies == T);
+  reduce_into_result(g, terms);
+  const std::vector<double> got = run_grad_twice(std::move(g), fills);
+  expect("hmm sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("hmm v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// The radon shape end to end: write mu[n], read it straight back, and
+// never touch mu again. Both the write and the read should disappear,
+// leaving arithmetic the re-roll pass can vectorize.
+static void test_store_to_load_forwarding() {
+  const int L = 8;
+  Fills fills;
+  std::vector<int> terms;
+  int n_vec = 0;
+  Graph g = build_chain(L, fills, terms, &n_vec);
+
+  Graph ref = g;
+  reduce_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  make_inplace_updates(g, {});
+  const int removed = forward_stores_to_loads(g, {});
+  // L read-backs plus the L writes they made redundant.
+  expect("forwarded and swept 2L ops", removed == 2 * L);
+  for (const Op& op : g.ops) {
+    expect("no writes left", op.opcode != OP_SET_INDEX &&
+                                 op.opcode != OP_SET_INDEX_INPLACE);
+    expect("no reads left", op.opcode != OP_INDEX);
+  }
+  reduce_into_result(g, terms);
+  const std::vector<double> got = run_grad_twice(std::move(g), fills);
+  expect("fwd sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("fwd v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// When the vector IS read as a whole afterwards, its writes are live and
+// must survive, even though the per-element read-backs still forward.
+static void test_keeps_live_writes() {
+  const int L = 6;
+  Fills fills;
+  std::vector<int> terms;
+  int n_vec = 0;
+  Graph g = build_chain(L, fills, terms, &n_vec);
+  int final_vec = -1;
+  for (const Op& op : g.ops)
+    if (op.opcode == OP_SET_INDEX) final_vec = op.out;
+  const int lse = g.add_slot(1, false);
+  g.add_op(OP_LOG_SUM_EXP, {final_vec}, lse);  // whole-vector read
+  terms.push_back(lse);
+
+  Graph ref = g;
+  reduce_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  make_inplace_updates(g, {});
+  forward_stores_to_loads(g, {});
+  int writes = 0;
+  for (const Op& op : g.ops)
+    writes += op.opcode == OP_SET_INDEX || op.opcode == OP_SET_INDEX_INPLACE;
+  expect("live writes kept", writes == L);
+  reduce_into_result(g, terms);
+  const std::vector<double> got = run_grad_twice(std::move(g), fills);
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("live v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
 int main() {
   test_chain_collapses();
+  test_store_to_load_forwarding();
+  test_keeps_live_writes();
+  test_bail_value_reading_consumer();
   test_bail_later_reader();
   test_bail_root();
   if (failures) { std::printf("%d failures\n", failures); return 1; }

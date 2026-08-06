@@ -44,6 +44,17 @@ static std::vector<double> run_grad(Graph g, const Fills& fills) {
   return out;
 }
 
+// Chained ADD_N reduction, as lower.cpp's reduce_terms does.
+static void reduce_terms_into_result(Graph& g, const std::vector<int>& terms) {
+  int acc = terms[0];
+  for (size_t k = 1; k < terms.size(); ++k) {
+    const int s = g.add_slot(1, false);
+    g.add_op(OP_ADD_N, {acc, terms[k]}, s);
+    acc = s;
+  }
+  g.result_slot = acc;
+}
+
 // radon shape: mu = vector intermediate written by an op; per lane
 // {INDEX(mu,n); NORMAL(y_const_n, idx, sigma)}, lp -> target term.
 // y consts deliberately share slots (dedup pool) between lanes 1 and 5.
@@ -215,9 +226,10 @@ static void test_bail_nonterm_density() {
   expect("nonterm ops unchanged", g.ops.size() == before);
 }
 
-// (c) partial-range INDEX progression (0..L-1 over a longer base): bail.
-static void test_bail_partial_range() {
-  const int L = 6;
+// (c) partial-range INDEX progression (a contiguous window of a longer
+// base): one OP_SLICE, which is cheaper than a gather -- no index array.
+static void test_partial_range_slices() {
+  const int L = 6, START = 2;
   Graph g;
   Fills fills;
   const int alpha = g.add_slot(1, true);
@@ -232,17 +244,72 @@ static void test_bail_partial_range() {
   std::vector<int> terms;
   for (int l = 0; l < L; ++l) {
     const int idx = g.add_slot(1, false);
-    g.add_op(OP_INDEX, {base}, idx, {l});
+    g.add_op(OP_INDEX, {base}, idx, {START + l});
     const int lp = g.add_slot(1, false);
     const int id = g.add_op(OP_NORMAL_LPDF, {cslot(0.2 * l), idx, sigma}, lp);
     g.ops[id].variant = 0x06;
     terms.push_back(lp);
   }
+  Graph ref = g;
+  reduce_terms_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
   std::vector<int> tt = terms;
-  const size_t before = g.ops.size();
-  RerollStats st = reroll(g, fills, tt, {});
-  expect("partial range not rerolled", st.regions == 0);
-  expect("partial ops unchanged", g.ops.size() == before);
+  Fills f2 = fills;
+  RerollStats st = reroll(g, f2, tt, {});
+  expect("partial range rerolled", st.regions == 1);
+  int slices = 0;
+  for (const Op& op : g.ops) slices += op.opcode == OP_SLICE;
+  expect("window becomes a slice", slices == 1);
+  expect("slice ops==3", g.ops.size() == 3);  // REP_VEC + SLICE + NORMAL
+  reduce_terms_into_result(g, tt);
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("slice v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// A data-driven index (`alpha[county_idx[n]]`, the hierarchical idiom,
+// repeats and all) becomes one OP_GATHER over the lane indices.
+static void test_data_index_gathers() {
+  const int L = 9, J = 4;
+  const int idx[L] = {0, 1, 2, 3, 0, 1, 2, 3, 0};  // repeats, wraps
+  Graph g;
+  Fills fills;
+  const int alpha = g.add_slot(J, true);
+  const int sigma = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int a = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {alpha}, a, {idx[l]});
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {cslot(0.3 * l - 1.0), a, sigma},
+                            lp);
+    g.ops[id].variant = 0x06;
+    terms.push_back(lp);
+  }
+  Graph ref = g;
+  reduce_terms_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  RerollStats st = reroll(g, f2, tt, {});
+  expect("gather regions==1", st.regions == 1);
+  int gathers = 0;
+  for (const Op& op : g.ops) gathers += op.opcode == OP_GATHER;
+  expect("index becomes a gather", gathers == 1);
+  expect("gather ops==2", g.ops.size() == 2);  // GATHER + vector NORMAL
+  reduce_terms_into_result(g, tt);
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  // Repeated indices mean the gather's scatter-add accumulates several
+  // lanes into one alpha element: the value that matters most here.
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("gather v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
 // (d) STANLI_NO_REROLL disables the pass.
@@ -365,9 +432,12 @@ static void test_block_structured() {
   std::vector<int> tt = terms;
   Fills f2 = fills;
   RerollStats st = reroll(g, f2, tt, {});
-  expect("block regions==3", st.regions == NB);
-  expect("block ops==3", g.ops.size() == (size_t)NB);  // 1 vec NORMAL each
-  expect("block terms==3", tt.size() == (size_t)NB);
+  // The cycling index (0..B-1 restarting per block) is now a single
+  // data-driven gather over all NB*B lanes, so the blocks fuse into ONE
+  // region instead of one region per block.
+  expect("block regions==1", st.regions == 1);
+  expect("block ops==2", g.ops.size() == 2);  // GATHER + vector NORMAL
+  expect("block terms==1", tt.size() == 1);
   int acc = tt[0];
   for (size_t k = 1; k < tt.size(); ++k) {
     const int s = g.add_slot(1, false);
@@ -493,7 +563,8 @@ int main() {
   test_ark_shape();
   test_bail_recurrence();
   test_bail_nonterm_density();
-  test_bail_partial_range();
+  test_partial_range_slices();
+  test_data_index_gathers();
   test_env_disable();
   test_first_lane_anomalous();
   test_block_structured();

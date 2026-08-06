@@ -2183,6 +2183,9 @@ struct Lowering {
     update_roots.insert(update_roots.end(), target_terms.begin(),
                         target_terms.end());
     make_inplace_updates(g, update_roots);  // off under STANLI_NO_INPLACE
+    // Deleting the write/read-back pairs first is what leaves a plain
+    // arithmetic lane for reroll to vectorize.
+    forward_stores_to_loads(g, update_roots);
     reroll(g, out.fills, target_terms, roots);  // off under STANLI_NO_REROLL
     info.resize(g.slots.size());  // keep SlotInfo parallel: emit() in
                                   // reduce_terms reads info[o] by slot id
