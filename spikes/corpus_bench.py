@@ -31,13 +31,24 @@ COLS = ["model", "params", "stanli_prep_s", "stanli_ns_grad",
         "cmdstan_sample_s", "note"]
 
 
-def run(cmd, timeout, cwd=None):
+# Returns (result, status): status is "ok", "fail" (non-zero exit) or
+# "timeout". Collapsing the last two loses the distinction between "this
+# model is too slow" and "this model does not run", which is exactly the
+# thing a corpus sweep exists to tell apart.
+def run2(cmd, timeout, cwd=None):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=timeout, cwd=cwd, env=dict(os.environ))
-        return r if r.returncode == 0 else None
-    except (subprocess.TimeoutExpired, OSError):
-        return None
+        return (r, "ok") if r.returncode == 0 else (r, "fail")
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    except OSError:
+        return None, "fail"
+
+
+def run(cmd, timeout, cwd=None):
+    r, _ = run2(cmd, timeout, cwd)
+    return r
 
 
 def evals_for(n):
@@ -101,12 +112,16 @@ def main():
                 if g:
                     row["stanli_ns_grad"] = f"{float(g.stdout.split()[0]):.0f}"
                 t0 = time.perf_counter()
-                s = run([str(RUN), str(stan), str(dj), "--warmup", "1000",
-                         "--samples", "1000", "--seed", "1"], timeout)
-                if s:
+                s, st = run2([str(RUN), str(stan), str(dj), "--warmup",
+                              "1000", "--samples", "1000", "--seed", "1"],
+                             timeout)
+                if st == "ok":
                     row["stanli_sample_s"] = f"{time.perf_counter() - t0:.2f}"
-                else:
+                elif st == "timeout":
                     notes.append("stanli_sample_timeout")
+                else:
+                    err = (s.stderr.strip().splitlines() or [""])[-1][:60]
+                    notes.append(f"stanli_sample_fail({err})")
 
         # ---- CmdStan: real model binary, built the way users build it ----
         work = tmp / model
@@ -147,14 +162,14 @@ def main():
                     if g:
                         row["cmdstan_ns_grad"] = f"{float(g.stdout.split()[0]):.0f}"
             t0 = time.perf_counter()
-            s = run([str(exe), "sample", "num_warmup=1000",
-                     "num_samples=1000", "random", "seed=1",
-                     "data", f"file={dj}",
-                     "output", f"file={work}/out.csv"], timeout)
-            if s:
+            s, st = run2([str(exe), "sample", "num_warmup=1000",
+                          "num_samples=1000", "random", "seed=1",
+                          "data", f"file={dj}",
+                          "output", f"file={work}/out.csv"], timeout)
+            if st == "ok":
                 row["cmdstan_sample_s"] = f"{time.perf_counter() - t0:.2f}"
             else:
-                notes.append("cmdstan_sample_timeout")
+                notes.append(f"cmdstan_sample_{st}")
 
         row["note"] = ",".join(notes)
         with out_path.open("a") as f:
