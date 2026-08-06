@@ -113,8 +113,9 @@ int main() {
   }
 
   std::printf("\nlog_sum_exp(vector) -- no partials machinery in prim, so"
-              " the recorder cannot serve it\n");
-  std::printf("%8s %11s %11s %11s\n", "N", "native", "varmat", "AoS");
+              " the recorder cannot serve it.\n\"kernel\" is whatever"
+              " OP_LOG_SUM_EXP is registered as today.\n");
+  std::printf("%8s %11s %11s %11s\n", "N", "kernel", "varmat", "AoS");
   for (int64_t n : {8LL, 256LL, 4096LL}) {
     std::vector<double> x((size_t)n), out{0.0}, adj((size_t)n, 0.0),
         scratch((size_t)n, 0.0), out_adj{1.0};

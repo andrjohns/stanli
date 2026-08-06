@@ -1,29 +1,29 @@
-// log_sum_exp / log_mix, natively.
+// log_sum_exp / log_mix.
 //
-// These were legacy ops: their backward spun up a `nested_rev_autodiff`,
-// built vars, called grad(), and tore the tape down again -- per scalar op,
-// per gradient evaluation. That is the pointer-chasing var tape stanli
-// exists to avoid, reintroduced in the hot loop of every mixture and HMM
-// model (40,636 of these ops across 9 corpus models).
+// These were legacy ops whose backward replayed on `Matrix<var>`: N varis
+// reached through N pointers, built and torn down per op per gradient.
+// That is the AoS var tape stanli exists to avoid, sitting in the hot loop
+// of every mixture and HMM model (40,636 ops across 9 corpus models).
 //
-// The partials are elementary, so the forward stashes them in scratch the
-// way the density kernels do and the backward becomes a few multiply-adds.
-// That also makes the backward independent of the input VALUES, which lets
-// these ops join the destructive-update whitelist in inplace.cpp -- the
-// HMM forward algorithm writes `acc[j]` element by element and reads it
-// whole, exactly the pattern that whitelist gates.
+// stan-math still computes every derivative here -- nothing is
+// hand-differentiated. Two things changed:
 //
-//   log_sum_exp(x)      out = m + log(sum exp(x-m)),  d/dx_i = exp(x_i-out)
-//   log_sum_exp(a,b)    the same, two scalars
-//   log_mix(t,a,b)      out = log(t*e^a + (1-t)*e^b)
-//                       d/dt = e^(a-out) - e^(b-out)
-//                       d/da = e^(log(t)+a-out),  d/db = e^(log1m(t)+b-out)
+//   * the operand is `var_value<VectorXd>` (varmat, SoA) rather than
+//     `Matrix<var>`, which is what `stanc --O1` reaches for and roughly
+//     twice as fast: 3.39 vs 6.68 ns/element (tools/bench_varmat.cpp), and
+//   * the replay runs in the FORWARD sweep and stashes the partials, so
+//     the backward is a scale of what stan-math already returned.
+//
+// The second point is not just bookkeeping: a backward that reads only
+// scratch cannot be broken by a destructive write to its input, which is
+// what puts these ops on the whitelist in inplace.cpp and lets the HMM
+// forward algorithm -- fill `acc` element by element, read it whole --
+// take the in-place path.
 #include <stanli/graph.hpp>
+#include <stanli/legacy.hpp>
 #include <stanli/optable.hpp>
 
-#include <stan/math/prim.hpp>
-
-#include <cmath>
+#include <stan/math.hpp>
 
 namespace stanli {
 namespace {
@@ -34,14 +34,8 @@ int64_t lse_scratch(const Op& op, const Slot* slots) {
 }
 
 void lse_fwd(KernelCtx& ctx) {
-  const int64_t n = ctx.in[0].len;
-  const double* x = ctx.in[0].data;
-  const double out = stan::math::log_sum_exp(
-      Eigen::Map<const Eigen::VectorXd>(x, n));
-  ctx.out.data[0] = out;
-  // exp(x_i - out) is the softmax, and the partial. Infinite inputs give
-  // the same 0/1 split stan-math's rev overload produces.
-  for (int64_t i = 0; i < n; ++i) ctx.scratch[i] = std::exp(x[i] - out);
+  ctx.out.data[0] = legacy_fwd_partials_vec(
+      ctx, [](const auto& x) { return stan::math::log_sum_exp(x); });
 }
 
 void lse_bwd(KernelCtx& ctx) {
@@ -55,31 +49,24 @@ void lse_bwd(KernelCtx& ctx) {
 int64_t lse2_scratch(const Op&, const Slot*) { return 2; }
 
 void lse2_fwd(KernelCtx& ctx) {
-  const double a = ctx.in[0].data[0], b = ctx.in[1].data[0];
-  const double out = stan::math::log_sum_exp(a, b);
-  ctx.out.data[0] = out;
-  ctx.scratch[0] = std::exp(a - out);
-  ctx.scratch[1] = std::exp(b - out);
+  ctx.out.data[0] = legacy_fwd_partials_scalars<2>(ctx, [](const auto& a) {
+    return stan::math::log_sum_exp(a[0], a[1]);
+  });
 }
 
 void lse2_bwd(KernelCtx& ctx) {
-  if (ctx.in_adj[0].data)
-    ctx.in_adj[0].data[0] += ctx.out_adj * ctx.scratch[0];
-  if (ctx.in_adj[1].data)
-    ctx.in_adj[1].data[0] += ctx.out_adj * ctx.scratch[1];
+  for (int k = 0; k < 2; ++k)
+    if (ctx.in_adj[k].data)
+      ctx.in_adj[k].data[0] += ctx.out_adj * ctx.scratch[k];
 }
 
 // ---- log_mix(theta, a, b) -------------------------------------------------
 int64_t log_mix_scratch(const Op&, const Slot*) { return 3; }
 
 void log_mix_fwd(KernelCtx& ctx) {
-  const double t = ctx.in[0].data[0];
-  const double a = ctx.in[1].data[0], b = ctx.in[2].data[0];
-  const double out = stan::math::log_mix(t, a, b);
-  ctx.out.data[0] = out;
-  ctx.scratch[0] = std::exp(a - out) - std::exp(b - out);       // d/dtheta
-  ctx.scratch[1] = std::exp(std::log(t) + a - out);             // d/da
-  ctx.scratch[2] = std::exp(stan::math::log1m(t) + b - out);    // d/db
+  ctx.out.data[0] = legacy_fwd_partials_scalars<3>(ctx, [](const auto& a) {
+    return stan::math::log_mix(a[0], a[1], a[2]);
+  });
 }
 
 void log_mix_bwd(KernelCtx& ctx) {

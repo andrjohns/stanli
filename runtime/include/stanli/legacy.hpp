@@ -17,16 +17,25 @@
 
 #include <stan/math.hpp>
 
+#include <array>
+
 namespace stanli {
 
-// F: Eigen var vector -> var (scalar out) or var vector (vector out).
+// Replays f on a varmat operand -- `var_value<VectorXd>`, one vari over a
+// contiguous value/adjoint pair -- rather than `Matrix<var>`, which is N
+// separate varis reached through N pointers. This is stan-math's own SoA
+// representation, the one `stanc --O1` exists to reach, and its rev
+// overloads are the vectorized implementations. Measured on log_sum_exp:
+// 3.39 ns/element against 6.68 for the AoS form (tools/bench_varmat.cpp).
+//
+// F: var_value<VectorXd> -> var (scalar out) or a var vector (vector out).
 template <typename F>
 void legacy_bwd_vec_in(KernelCtx& ctx, F&& f) {
   if (ctx.in_adj[0].data == nullptr) return;
   stan::math::nested_rev_autodiff nested;
   using stan::math::var;
-  Eigen::Matrix<var, -1, 1> x(ctx.in[0].len);
-  for (int64_t i = 0; i < ctx.in[0].len; ++i) x(i) = ctx.in[0].data[i];
+  stan::math::var_value<Eigen::VectorXd> x(
+      Eigen::Map<const Eigen::VectorXd>(ctx.in[0].data, ctx.in[0].len));
   auto out = f(x);
   var j;
   if constexpr (std::is_same_v<std::decay_t<decltype(out)>, var>) {
@@ -37,8 +46,39 @@ void legacy_bwd_vec_in(KernelCtx& ctx, F&& f) {
     j = stan::math::dot_product(seed, out);
   }
   stan::math::grad(j.vi_);
-  for (int64_t i = 0; i < ctx.in[0].len; ++i)
-    ctx.in_adj[0].data[i] += x(i).adj();
+  Eigen::Map<Eigen::VectorXd>(ctx.in_adj[0].data, ctx.in[0].len) += x.adj();
+}
+
+// Value + partials for a SCALAR-output function, computed by stan-math in
+// the FORWARD sweep and stashed in scratch. The chain rule for a scalar
+// output is just a scale, so seeding with 1.0 here and multiplying by the
+// output adjoint later is equivalent to replaying with the real seed --
+// and it leaves the backward reading only scratch, never the input
+// values. That is what lets these ops sit on the destructive-update
+// whitelist in inplace.cpp (see backward_ignores_input_values).
+template <typename F>
+double legacy_fwd_partials_vec(KernelCtx& ctx, F&& f) {
+  stan::math::nested_rev_autodiff nested;
+  stan::math::var_value<Eigen::VectorXd> x(
+      Eigen::Map<const Eigen::VectorXd>(ctx.in[0].data, ctx.in[0].len));
+  stan::math::var j = f(x);
+  const double value = j.val();
+  stan::math::grad(j.vi_);
+  Eigen::Map<Eigen::VectorXd>(ctx.scratch, ctx.in[0].len) = x.adj();
+  return value;
+}
+
+// The same, for a handful of scalar operands.
+template <int NArgs, typename F>
+double legacy_fwd_partials_scalars(KernelCtx& ctx, F&& f) {
+  stan::math::nested_rev_autodiff nested;
+  std::array<stan::math::var, NArgs> a;
+  for (int k = 0; k < NArgs; ++k) a[k] = ctx.in[k].data[0];
+  stan::math::var j = f(a);
+  const double value = j.val();
+  stan::math::grad(j.vi_);
+  for (int k = 0; k < NArgs; ++k) ctx.scratch[k] = a[k].adj();
+  return value;
 }
 
 }  // namespace stanli

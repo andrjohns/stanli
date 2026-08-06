@@ -99,6 +99,24 @@ void diag_bwd(KernelCtx& ctx) {
     ctx.in_adj[0].data[i] += ctx.out_adj_vec.data[i * n + i];
 }
 
+// Single matrix input, matrix output, replayed on a varmat operand:
+// `var_value<MatrixXd>` is one vari over contiguous value and adjoint
+// blocks, so the flat arena slot maps straight in with no per-element
+// promotion, and stan-math's varmat rev overload (what `stanc --O1`
+// reaches for) runs instead of the AoS one. Column-major throughout,
+// matching the slot layout.
+template <typename F>
+void matvar_bwd(KernelCtx& ctx, int64_t n, F&& f) {
+  if (ctx.in_adj[0].data == nullptr) return;
+  stan::math::nested_rev_autodiff nested;
+  stan::math::var_value<Eigen::MatrixXd> a(CMapM(ctx.in[0].data, n, n));
+  auto out = f(a);
+  stan::math::var j = stan::math::sum(stan::math::elt_multiply(
+      out, stan::math::to_matrix(CMapM(ctx.out_adj_vec.data, n, n))));
+  stan::math::grad(j.vi_);
+  MapM(ctx.in_adj[0].data, n, n) += a.adj();
+}
+
 // ---- cholesky_decompose(A) ------------------------------------------------
 void chol_fwd(KernelCtx& ctx) {
   const int64_t n = ctx.idata[0];
@@ -107,10 +125,7 @@ void chol_fwd(KernelCtx& ctx) {
 }
 void chol_bwd(KernelCtx& ctx) {
   const int64_t n = ctx.idata[0];
-  nary_bwd(ctx, [&](std::vector<VarV>& xs) {
-    VarM a(n, n);
-    for (int64_t j = 0; j < n; ++j)
-      for (int64_t i = 0; i < n; ++i) a(i, j) = xs[0](j * n + i);
+  matvar_bwd(ctx, n, [](const auto& a) {
     return stan::math::cholesky_decompose(a);
   });
 }
