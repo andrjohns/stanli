@@ -5,6 +5,7 @@
 #include <stanli/optable.hpp>
 #include <stanli/reroll.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -473,7 +474,11 @@ Built build(int L, int start, int stride = 1) {
   const int J = 5;
   b.a = g.add_slot(J, true);
   b.sigma = g.add_slot(1, true);
-  const int64_t vlen = start + (int64_t)L * stride;
+  // stride 1: exactly the window, so the start==0 case covers the vector
+  // and exercises the no-store elision. Otherwise: big enough for the comb.
+  const int64_t last = start + (int64_t)(L - 1) * stride;
+  const int64_t vlen = stride == 1 ? start + (int64_t)L
+                                   : std::max((int64_t)start, last) + 1;
   b.y_hat = g.add_slot(vlen, false);
   b.fills.emplace_back(b.y_hat, std::vector<double>((size_t)vlen, 0.0));
   const int ydata = g.add_slot(vlen, false);
@@ -536,13 +541,30 @@ static void test_write_fusion() {
 // outside the graph entirely.
 static void test_write_fusion_bails() {
   using namespace writefuse;
-  {  // a stride the vector store cannot express
+  {  // a strided run fuses into OP_SET_SLICE_STRIDED, gradients preserved
     Built b = build(8, 0, 2);
+    Graph ref = b.g;
+    reduce_terms_into_result(ref, b.terms);
+    const std::vector<double> want = run_grad(std::move(ref), b.fills);
+    Fills f2 = b.fills;
+    std::vector<int> tt = b.terms;
+    reroll(b.g, f2, tt, {});
+    expect("strided writes fused",
+           count(b.g, OP_SET_INDEX_INPLACE) == 0 &&
+               count(b.g, OP_SET_SLICE_STRIDED) == 1);
+    reduce_terms_into_result(b.g, tt);
+    const std::vector<double> got = run_grad(std::move(b.g), f2);
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close(("strided v" + std::to_string(i)).c_str(), got[i],
+                   want[i]);
+  }
+  {  // indices marching backwards: no positive stride, no fusion
+    Built b = build(8, 14, -2);
     Fills f2 = b.fills;
     std::vector<int> tt = b.terms;
     const size_t before = b.g.ops.size();
     reroll(b.g, f2, tt, {});
-    expect("strided writes not fused",
+    expect("descending writes not fused",
            count(b.g, OP_SET_INDEX_INPLACE) == 8 && b.g.ops.size() == before);
   }
   {  // the vector is a root: something outside the graph reads it
@@ -554,16 +576,44 @@ static void test_write_fusion_bails() {
     expect("root vector not fused",
            count(b.g, OP_SET_INDEX_INPLACE) == 8 && b.g.ops.size() == before);
   }
-  {  // a later op writes the vector again
-    Built b = build(8, 0);
-    const int extra = b.g.add_slot(1, false);
-    b.fills.emplace_back(extra, std::vector<double>{2.5});
-    b.g.add_op(OP_SET_INDEX_INPLACE, {b.y_hat, extra}, b.y_hat, {0});
-    Fills f2 = b.fills;
-    std::vector<int> tt = b.terms;
-    reroll(b.g, f2, tt, {});
-    expect("later writer blocks fusion",
-           count(b.g, OP_SET_INDEX_INPLACE) == 9);
+  {  // a later op writes the vector again: the run still fuses, into the
+     // STORE form, and the later write chains onto the store's output --
+     // the interleaved-block shape (dogs) in miniature.
+    Graph g;
+    Fills fills;
+    const int a = g.add_slot(5, true), sigma = g.add_slot(1, true);
+    const int yh = g.add_slot(8, false);
+    fills.emplace_back(yh, std::vector<double>(8, 0.0));
+    const int yd = g.add_slot(8, false);
+    fills.emplace_back(yd, std::vector<double>(8, 0.75));
+    for (int l = 0; l < 8; ++l) {
+      const int v = g.add_slot(1, false);
+      g.add_op(OP_INDEX, {a}, v, {l % 5});
+      g.add_op(OP_SET_INDEX_INPLACE, {yh, v}, yh, {l});
+    }
+    const int extra = g.add_slot(1, false);
+    fills.emplace_back(extra, std::vector<double>{2.5});
+    g.add_op(OP_SET_INDEX_INPLACE, {yh, extra}, yh, {0});
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {yd, yh, sigma}, lp);
+    g.ops[(size_t)id].variant = 0x06;
+    std::vector<int> terms{lp};
+
+    Graph ref = g;
+    reduce_terms_into_result(ref, terms);
+    const std::vector<double> want = run_grad(std::move(ref), fills);
+
+    Fills f2 = fills;
+    std::vector<int> tt = terms;
+    reroll(g, f2, tt, {});
+    expect("later writer forces the store form",
+           count(g, OP_SET_SLICE) == 1 && count(g, OP_GATHER) == 1);
+    expect("later write chains, not blocks",
+           count(g, OP_SET_INDEX_INPLACE) == 1);
+    reduce_terms_into_result(g, tt);
+    const std::vector<double> got = run_grad(std::move(g), f2);
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close(("chain v" + std::to_string(i)).c_str(), got[i], want[i]);
   }
   {  // something reads the vector while it is still half-written
     Built b = build(8, 0);
@@ -594,6 +644,56 @@ static void test_write_fusion_bails() {
            count(g2, OP_SET_INDEX_INPLACE) == 8);
     (void)g;
   }
+}
+
+// (k) The losscurve shape: a run whose value chain is scalar end to end,
+// because its lane-varying inputs all come from HOISTED producers. Widening
+// such an op hands the kernels scalar inputs with a vector output, and their
+// scalar-x-scalar paths write element 0 only -- the rest of the window
+// filled with arena zeros. Found by the corpus A/B (losscurve_sislob,
+// deviation 1.14e+00); the fix keeps the chain scalar and broadcasts at the
+// store.
+static void test_write_fusion_scalar_chain() {
+  const int L = 8;
+  Graph g;
+  Fills fills;
+  const int a = g.add_slot(5, true), sigma = g.add_slot(1, true);
+  const int yh = g.add_slot(L + 4, false);
+  fills.emplace_back(yh, std::vector<double>((size_t)L + 4, 0.25));
+  const int yd = g.add_slot(L + 4, false);
+  fills.emplace_back(yd, std::vector<double>((size_t)L + 4, 0.75));
+  const int c2 = g.add_slot(1, false);
+  fills.emplace_back(c2, std::vector<double>{1.75});
+  for (int l = 0; l < L; ++l) {
+    // Same element of `a` every lane -> the INDEX hoists; the MUL's inputs
+    // are then a hoisted scalar and an invariant scalar.
+    const int v = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {a}, v, {2});
+    const int m = g.add_slot(1, false);
+    g.add_op(OP_MUL, {v, c2}, m);
+    g.add_op(OP_SET_INDEX_INPLACE, {yh, m}, yh, {l});
+  }
+  const int lp = g.add_slot(1, false);
+  const int id = g.add_op(OP_NORMAL_LPDF, {yd, yh, sigma}, lp);
+  g.ops[(size_t)id].variant = 0x06;
+  std::vector<int> terms{lp};
+
+  Graph ref = g;
+  reduce_terms_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  Fills f2 = fills;
+  std::vector<int> tt = terms;
+  RerollStats st = reroll(g, f2, tt, {});
+  expect("scalar-chain region rewrote", st.regions == 1);
+  int repv = 0;
+  for (const Op& op : g.ops) repv += op.opcode == OP_REP_VEC;
+  expect("scalar value broadcast once", repv == 1);
+  reduce_terms_into_result(g, tt);
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("scalar-chain v" + std::to_string(i)).c_str(), got[i],
+                 want[i]);
 }
 
 // ---- end to end through compile_model ------------------------------------
@@ -716,6 +816,7 @@ int main() {
   test_bail_extra_root();
   test_write_fusion();
   test_write_fusion_bails();
+  test_write_fusion_scalar_chain();
   test_e2e_fixtures();
   if (failures) { std::printf("%d failures\n", failures); return 1; }
   std::printf("test_reroll OK\n");

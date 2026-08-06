@@ -13,8 +13,8 @@ pip install stanli
 ```
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
-  (gradient 1.1x-6.2x faster on nine of the ten benchmark models,
-  0.53x on the one that still defeats the re-roll pass;
+  (gradient 1.0x-6.3x on eleven of the thirteen benchmark models, 0.78x
+  and 0.65x on the two that still defeat the re-roll pass;
   time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
   (118/120 posteriordb models differentially verified against CmdStan's
@@ -69,7 +69,10 @@ Stage by stage:
    (`runtime/src/ode_prog.cpp`), which is worth 29-39x on the models
    that use one.
 
-3. **Re-rolling** (`runtime/src/reroll.cpp`). Unrolling is what makes
+3. **Graph passes** (`runtime/src/reroll.cpp` and friends; a
+   plain-language guide to all of them is in
+   [runtime/src/OPTIMIZATIONS.md](runtime/src/OPTIMIZATIONS.md)).
+   Unrolling is what makes
    the graph concrete, but a model written as a per-observation loop
    arrives as N copies of one small op template, and the interpreter's
    cost is per op. This pass finds those periodic regions and rewrites
@@ -234,21 +237,15 @@ the corpus status).
 ## Roadmap
 
 1. Widening the re-roll pass. It handles lanes whose density output
-   feeds the target directly, and lanes that fill a vector one element
-   at a time. Three gaps remain, in rough order of what they cost:
-   a **strided** element-write run (`dogs` writes `p[j, t]` down a
-   column, so its indices advance by the row count and there is no
-   strided vector store to fuse into); a **per-lane integer outcome**
-   (`y[i, j] ~ bernoulli_logit(...)` carries its observation as an
-   immediate, so the lanes do not even match as a template); and
-   density outputs that feed an op instead of the target, which is
-   `low_dim_gauss_mix` (0.53x) writing `log_mix(theta,
-   normal_lpdf(...), ...)` per observation and needs an elementwise-lp
-   density variant plus batched `log_sum_exp`/`log_mix` kernels. Unary
-   math opcodes (exp, log, inv_logit) are also outside the widening
-   vocabulary, which bounds how many corpus models the pass can reach.
-   Fusing adjacent elementwise chains into one pass over the arena is
-   the follow-on.
+   feeds the target directly, lanes that fill a vector one element at a
+   time (contiguous, strided, or interleaved runs), per-lane integer
+   lpmf outcomes, and the unary math ops. The remaining gap is density
+   outputs that feed an op instead of the target: `low_dim_gauss_mix`
+   (0.78x) writes `log_mix(theta, normal_lpdf(...), ...)` per
+   observation and needs an elementwise-lp density variant plus batched
+   `log_sum_exp`/`log_mix` kernels, and the lda/mixture family is the
+   same shape. Fusing adjacent elementwise chains into one pass over
+   the arena is the follow-on.
 2. Windows wheels, and a CRAN shim package. The macOS (arm64, x86_64) and
    Linux (x86_64, aarch64) wheels are built and published by
    `.github/workflows/wheels.yml` on a version tag; Windows needs opam's

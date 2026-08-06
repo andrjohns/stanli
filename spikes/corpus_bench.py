@@ -10,8 +10,15 @@ useful and a rerun can skip what is already there.
 
 Usage: python3 spikes/corpus_bench.py deps/cmdstan deps/posteriordb OUT.tsv
                                       [--filter SUBSTR] [--timeout SEC]
+                                      [--stanli-only]
 Run from the worktree root with build-rel/ built. Expect hours: CmdStan
 builds a binary per model.
+
+--stanli-only re-measures the stanli columns of every EXISTING row in place
+and keeps the CmdStan columns as they are. That is the refresh mode for a
+stanli-side change (a new graph pass, a sampler fix): the CmdStan numbers
+are unaffected and rebuilding 120 model binaries to reproduce them is the
+expensive part of a full run.
 """
 import json
 import os
@@ -63,14 +70,20 @@ def main():
             if "--filter" in sys.argv else "")
     timeout = int(sys.argv[sys.argv.index("--timeout") + 1]
                   if "--timeout" in sys.argv else 900)
+    stanli_only = "--stanli-only" in sys.argv
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_cb_"))
 
     done = set()
+    old_rows = {}
     if out_path.exists():
         for line in out_path.read_text().splitlines()[1:]:
-            done.add(line.split("\t")[0])
+            parts = line.split("\t")
+            done.add(parts[0])
+            old_rows[parts[0]] = dict(zip(COLS, parts))
     else:
         out_path.write_text("\t".join(COLS) + "\n")
+    if stanli_only:
+        done = set()  # revisit every row; CmdStan columns carry over
 
     pairs = {}
     for pj in sorted((pdb / "posteriors").glob("*.json")):
@@ -122,6 +135,25 @@ def main():
                 else:
                     err = (s.stderr.strip().splitlines() or [""])[-1][:60]
                     notes.append(f"stanli_sample_fail({err})")
+
+        if stanli_only:
+            old = old_rows.get(model, {})
+            for c in ("cmdstan_build_s", "cmdstan_ns_grad",
+                      "cmdstan_sample_s"):
+                row[c] = old.get(c, "")
+            notes += [n for n in old.get("note", "").split(",")
+                      if n.startswith("cmdstan")]
+            row["note"] = ",".join(n for n in notes if n)
+            old_rows[model] = row
+            # Rewrite in place so a partial refresh is still a coherent file.
+            with out_path.open("w") as f:
+                f.write("\t".join(COLS) + "\n")
+                for m in sorted(old_rows):
+                    f.write("\t".join(str(old_rows[m].get(c, ""))
+                                      for c in COLS) + "\n")
+            print(f"{model}: stanli {row['stanli_ns_grad']}ns/"
+                  f"{row['stanli_sample_s']}s  {row['note']}", flush=True)
+            continue
 
         # ---- CmdStan: real model binary, built the way users build it ----
         work = tmp / model

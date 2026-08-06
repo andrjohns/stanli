@@ -40,6 +40,7 @@ namespace stanli {
   X(OP_SET_INDEX_INPLACE)                                                 \
   X(OP_SLICE)                                                             \
   X(OP_SET_SLICE)                                                         \
+  X(OP_SET_SLICE_STRIDED)                                                 \
   X(OP_SLICE_STRIDED)                                                     \
   X(OP_GATHER)                                                            \
   X(OP_CONCAT2)                                                           \

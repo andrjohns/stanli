@@ -220,6 +220,38 @@ void set_slice_bwd(KernelCtx& ctx) {
       ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[start + i];
 }
 
+// OP_SET_SLICE_STRIDED: out = copy(in[0]) with
+// out[start + i*stride] = in[1][i], idata = {start, stride}. The write-side
+// mirror of OP_SLICE_STRIDED: a loop filling a column-major matrix row by
+// row advances its flat index by the row count.
+void set_slice_strided_fwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0], stride = ctx.idata[1];
+  for (int64_t i = 0; i < ctx.out.len; ++i) ctx.out.data[i] = ctx.in[0].data[i];
+  for (int64_t i = 0; i < ctx.in[1].len; ++i)
+    ctx.out.data[start + i * stride] = ctx.in[1].data[i];
+}
+void set_slice_strided_bwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0], stride = ctx.idata[1],
+                len = ctx.in[1].len;
+  if (ctx.in_adj[1].data)
+    for (int64_t i = 0; i < len; ++i)
+      ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[start + i * stride];
+  if (ctx.in_adj[0].data) {
+    // Everything except the overwritten comb of positions passes through.
+    // Walk the comb alongside the vector rather than add-then-subtract:
+    // (x + a) - a is not x in floating point once x + a rounds.
+    int64_t next = start, k = 0;
+    for (int64_t i = 0; i < ctx.out.len; ++i) {
+      if (i == next && k < len) {
+        next += stride;
+        ++k;
+        continue;
+      }
+      ctx.in_adj[0].data[i] += ctx.out_adj_vec.data[i];
+    }
+  }
+}
+
 }  // namespace
 
 // Called from Executor's constructor path; a static registrar object in a
@@ -237,6 +269,9 @@ void register_elementwise_kernels() {
                          nullptr});
   register_kernel(OP_SLICE, Kernel{slice_fwd, slice_bwd, nullptr});
   register_kernel(OP_SET_SLICE, Kernel{set_slice_fwd, set_slice_bwd, nullptr});
+  register_kernel(OP_SET_SLICE_STRIDED,
+                  Kernel{set_slice_strided_fwd, set_slice_strided_bwd,
+                         nullptr});
   register_kernel(OP_SLICE_STRIDED,
                   Kernel{slice_strided_fwd, slice_strided_bwd, nullptr});
   register_kernel(OP_GATHER, Kernel{gather_fwd, gather_bwd, nullptr});

@@ -65,15 +65,44 @@ bool is_density(uint16_t oc) {
   }
 }
 
+// lpmfs whose integer outcome rides in idata, one value per scalar lane, and
+// whose vector instantiation takes the outcomes as one idata array (see
+// densities.cpp: Eigen::Map<const VectorXi>(ctx.idata, n_idata)). Lanes of
+// these match as a template even though their immediates differ; fusing them
+// concatenates the immediates.
+bool is_idata_outcome_density(uint16_t oc) {
+  switch (oc) {
+    case OP_BERNOULLI_LPMF:
+    case OP_BERNOULLI_LOGIT_LPMF:
+    case OP_POISSON_LPMF:
+    case OP_POISSON_LOG_LPMF:
+    case OP_NEG_BINOMIAL_2_LPMF:
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Ops whose forward and backward shape-dispatch at runtime (len-1
-// broadcasts), so widening scalar lanes to one vector op is the same
-// opcode (eltwise_expr.cpp).
+// broadcasts for the binaries, ctx.out.len loops with scalar/vector adjoint
+// dispatch for the unaries), so widening scalar lanes to one vector op is
+// the same opcode (eltwise_expr.cpp).
 bool is_widenable(uint16_t oc) {
   switch (oc) {
     case OP_ADD:
     case OP_SUB:
     case OP_MUL:
     case OP_DIV:
+    case OP_NEG:
+    case OP_EXPV:
+    case OP_LOGV:
+    case OP_INV_LOGIT:
+    case OP_SQRT:
+    case OP_SQUARE:
+    case OP_LOG1M:
+    case OP_TANHV:
+    case OP_LOG_INV_LOGIT:
+    case OP_LOG1M_INV_LOGIT:
       return true;
     default:
       return false;
@@ -95,8 +124,11 @@ struct Pos {
   bool term_density = false;   // density, every lane's out a target term
   int slice_start = -1;        // OP_INDEX over a contiguous window
   std::vector<int> gather_idx; // OP_INDEX with a data-driven index
-  int store_vec = -1;          // element write filling a contiguous window
-  int store_start = 0;         //   of this vector, starting here
+  int store_vec = -1;          // element write filling a window of this
+  int store_start = 0;         //   vector, starting here,
+  int store_stride = 1;        //   advancing by this much per lane
+  bool store_written_after = false;  // someone writes the vector later
+  std::vector<int> outcome_idata;  // lpmf: per-lane integer outcomes
 };
 
 bool is_element_store(const Op& op) {
@@ -114,10 +146,12 @@ bool ops_match(const Graph& g, const Op& a, const Op& b) {
     if (g.slots[a.in[j]].len != g.slots[b.in[j]].len) return false;
   if (g.slots[a.out].len != g.slots[b.out].len) return false;
   // Element writes carry their destination index the same way reads do, so
-  // the immediate is allowed to advance across lanes for both.
+  // the immediate is allowed to advance across lanes for both; lpmf lanes
+  // carry their integer outcome there and fuse by concatenating them.
   if (a.opcode == OP_INDEX || a.opcode == OP_SET_INDEX ||
       a.opcode == OP_SET_INDEX_INPLACE)
     return a.n_idata == 1 && b.n_idata == 1;
+  if (is_idata_outcome_density(a.opcode)) return a.n_idata == b.n_idata;
   if (a.n_idata != b.n_idata) return false;
   for (int64_t k = 0; k < a.n_idata; ++k)
     if (a.idata[k] != b.idata[k]) return false;
@@ -188,7 +222,9 @@ RerollStats reroll(Graph& g,
       bool candidate = false;
       for (int p = 0; p < P && !candidate; ++p) {
         const Op& t = g.ops[i + p];
-        candidate = (is_density(t.opcode) && term_set.count(t.out) != 0) ||
+        candidate = ((is_density(t.opcode) ||
+                      is_idata_outcome_density(t.opcode)) &&
+                     term_set.count(t.out) != 0) ||
                     is_element_store(t);
       }
       if (!candidate) continue;
@@ -343,45 +379,59 @@ RerollStats reroll(Graph& g,
           } else if (is_element_store(t)) {
             // `mu[n] = ...` under an unrolled loop, after the destructive
             // rewrite: N writes into one vector, each at its own index. When
-            // those indices march contiguously the whole run collapses into
-            // a single vector store -- or into nothing at all, when the run
-            // covers the vector and the vectorized values can simply BE it.
+            // those indices march by a constant stride the whole run
+            // collapses into a single vector store -- or into nothing at
+            // all, when a contiguous run covers the vector and the
+            // vectorized values can simply BE it.
             //
             // The output escaping the lane is the point here, so the usual
             // escape test does not apply. What does: the vector must be the
-            // same one every lane, no one else may read it while it is
-            // half-written, and nothing may write it after the run, since
-            // later readers get redirected to the fused value.
+            // same one every lane, and no one else may read it while it is
+            // half-written. Writes AFTER the run are fine -- every later
+            // reference, read or write, is renamed to the store's output, so
+            // interleaved runs (dogs fills a matrix in 30 column-comb
+            // blocks) chain through fresh slots block by block -- but they
+            // do rule out the store-free form, whose "output" is a slot
+            // nobody may touch again.
             const int vec = t.in[0];
             const int64_t blen = g.slots[vec].len;
-            int64_t br_run = Luse;
-            for (int64_t l = 0; l < Luse; ++l)
-              if (op_at(p, l).idata[0] != t.idata[0] + l) {
+            // Indices must march by a constant positive stride: 1 is the
+            // vector case, larger is a column-major matrix filled along its
+            // minor axis (dogs writes p[j, t] with t inner, so the flat
+            // index advances by the row count).
+            const int64_t stride =
+                Luse >= 2 ? op_at(p, 1).idata[0] - t.idata[0] : 1;
+            int64_t br_run = stride >= 1 ? Luse : 0;
+            for (int64_t l = 0; l < br_run; ++l)
+              if (op_at(p, l).idata[0] != t.idata[0] + l * stride) {
                 br_run = l;
                 break;
               }
             bool clean = ap.ins[0].kind == InKind::kInvariant &&
                          (ap.ins[1].kind == InKind::kLaneLocal ||
                           ap.ins[1].kind == InKind::kConstLanes) &&
-                         t.idata[0] >= 0 && t.idata[0] + br_run <= blen &&
+                         t.idata[0] >= 0 && br_run > 0 &&
+                         t.idata[0] + (br_run - 1) * stride < blen &&
                          !root_set.count(vec) && !term_set.count(vec);
+            bool written_after = false;
             if (clean && ap.ins[1].kind == InKind::kLaneLocal) {
               // When the value comes from an elided index the fused value IS
               // that op's base -- a pre-existing slot rather than a fresh
               // one. Redirecting the vector's readers to it is only sound
-              // while nobody writes it after the run.
+              // while nobody writes it after the run, so a later writer
+              // forces the store form.
               const Pos& prod = pos[(size_t)ap.ins[1].producer_pos];
               if (prod.index_elision) {
                 const int base = op_at(ap.ins[1].producer_pos, 0).in[0];
                 auto wit = writers.find(base);
                 if (wit != writers.end())
                   for (size_t u : wit->second)
-                    if (u >= region_end) clean = false;
+                    if (u >= region_end) written_after = true;
               }
             }
             if (clean) {
-              // Everything touching `vec` from the region's start onward must
-              // be one of this region's own writes.
+              // Everything touching `vec` INSIDE the region must be one of
+              // this region's own writes; anything after it gets renamed.
               auto in_region_write = [&](size_t u) {
                 return u >= i && u < region_end &&
                        (u - i) % (size_t)P == (size_t)p;
@@ -393,8 +443,11 @@ RerollStats reroll(Graph& g,
                     clean = false;
               auto wit = writers.find(vec);
               if (wit != writers.end())
-                for (size_t u : wit->second)
-                  if (u >= i && !in_region_write(u)) clean = false;
+                for (size_t u : wit->second) {
+                  if (u >= i && u < region_end && !in_region_write(u))
+                    clean = false;
+                  if (u >= region_end) written_after = true;
+                }
             }
             if (!clean || br_run < Luse) {
               ok = false;
@@ -402,9 +455,12 @@ RerollStats reroll(Graph& g,
             } else {
               ap.store_vec = vec;
               ap.store_start = (int)t.idata[0];
+              ap.store_stride = (int)stride;
+              ap.store_written_after = written_after;
               any_store = true;
             }
-          } else if (is_density(t.opcode)) {
+          } else if (is_density(t.opcode) ||
+                     is_idata_outcome_density(t.opcode)) {
             if (br_term < Luse || br_internal < Luse) {
               // br_internal here can only mean an extra root: a term
               // density has no op consumers to escape to.
@@ -415,9 +471,25 @@ RerollStats reroll(Graph& g,
               if (uit != uses.end() && !uit->second.empty()) {
                 ok = false;
                 prefix = 0;  // a term that is also an op input
+              } else if (is_idata_outcome_density(t.opcode) &&
+                         t.n_idata != 1) {
+                ok = false;
+                prefix = 0;  // already a vector op; nothing to fuse
+              } else if (all_inputs_invariant &&
+                         !is_idata_outcome_density(t.opcode)) {
+                // L identical lanes (the const pool dedup'd even the data
+                // argument): the "fused" density would compute one lane's
+                // lp where the target owes L of them.
+                ok = false;
+                prefix = 0;
               } else {
                 ap.term_density = true;
                 any_term_density = true;
+                if (is_idata_outcome_density(t.opcode)) {
+                  ap.outcome_idata.reserve((size_t)Luse);
+                  for (int64_t l = 0; l < Luse; ++l)
+                    ap.outcome_idata.push_back(op_at(p, l).idata[0]);
+                }
               }
             }
           } else if (all_inputs_invariant) {
@@ -490,33 +562,57 @@ RerollStats reroll(Graph& g,
             W = g.add_slot(Luse, false);
             fills.emplace_back(W, ap.ins[1].values);
           }
+          // Every lane writing the same scalar (the value chain stayed
+          // scalar because all its inputs were lane-invariant): the store
+          // wants a vector, so broadcast it into one.
+          if (g.slots[W].len == 1 && Luse > 1) {
+            Op rv;
+            rv.opcode = OP_REP_VEC;
+            rv.n_in = 1;
+            rv.in[0] = W;
+            rv.out = g.add_slot(Luse, false);
+            result.push_back(rv);
+            W = rv.out;
+          }
           const int vec = ap.store_vec;
           int replacement = W;
-          if (ap.store_start != 0 || Luse != g.slots[vec].len) {
-            // A window rather than the whole vector: the untouched elements
-            // still have to come from somewhere, so this is a real store.
+          if (ap.store_written_after || ap.store_stride != 1 ||
+              ap.store_start != 0 || Luse != g.slots[vec].len) {
+            // A window (or a comb) rather than the whole vector: the
+            // untouched elements still have to come from somewhere, so this
+            // is a real store.
             Op sv;
-            sv.opcode = OP_SET_SLICE;
+            sv.opcode =
+                ap.store_stride == 1 ? OP_SET_SLICE : OP_SET_SLICE_STRIDED;
             sv.n_in = 2;
             sv.in[0] = vec;
             sv.in[1] = W;
             sv.out = g.add_slot(g.slots[vec].len, false);
-            g.idata_pool.push_back(std::vector<int>{ap.store_start});
+            std::vector<int> sidata{ap.store_start};
+            if (ap.store_stride != 1) sidata.push_back(ap.store_stride);
+            g.idata_pool.push_back(std::move(sidata));
             sv.idata = g.idata_pool.back().data();
-            sv.n_idata = 1;
+            sv.n_idata = (int64_t)g.idata_pool.back().size();
             result.push_back(sv);
             replacement = sv.out;
           }
-          // Later readers of the vector read the fused value instead. Ops
-          // before the region are untouched -- they saw the pre-write
-          // contents and still do -- and classification already established
-          // that nothing writes the vector from here on.
-          for (size_t u = i + (size_t)P * (size_t)Luse; u < g.ops.size(); ++u)
+          // Every later reference to the vector -- read or write -- now
+          // means the fused value. Renaming the writes too is what lets
+          // interleaved runs chain: the next block's element writes land on
+          // this block's store output, and when that block fuses in its turn
+          // it repeats the process on a fresh slot. Ops before the region
+          // are untouched; they saw the pre-write contents and still do.
+          for (size_t u = i + (size_t)P * (size_t)Luse; u < g.ops.size(); ++u) {
             for (int j = 0; j < g.ops[u].n_in; ++j)
               if (g.ops[u].in[j] == vec) {
                 g.ops[u].in[j] = replacement;
                 uses[replacement].push_back(u);
               }
+            if (g.ops[u].out == vec) {
+              g.ops[u].out = replacement;
+              writers[replacement].push_back(u);
+            }
+          }
           pos_out[(size_t)p] = replacement;
           continue;
         }
@@ -542,25 +638,64 @@ RerollStats reroll(Graph& g,
           continue;
         }
         Op op = t;  // opcode, variant, idata carry over
+        bool all_scalar = true;
         for (int j = 0; j < t.n_in; ++j) {
           switch (ap.ins[j].kind) {
             case InKind::kInvariant:
+              if (g.slots[t.in[j]].len != 1) all_scalar = false;
               break;
             case InKind::kLaneLocal:
               op.in[j] = pos_out[(size_t)ap.ins[j].producer_pos];
+              if (g.slots[op.in[j]].len != 1) all_scalar = false;
               break;
             case InKind::kConstLanes: {
               const int cs = g.add_slot(Luse, false);
               fills.emplace_back(cs, ap.ins[j].values);
               op.in[j] = cs;
+              all_scalar = false;
               break;
             }
             case InKind::kBad:
               break;  // unreachable: classification succeeded
           }
         }
+        // A widened op whose mapped inputs are all len-1 computes the same
+        // value in every lane -- its lane-varying inputs came from HOISTED
+        // producers, which are scalars. Widening it anyway hands the kernels
+        // scalar inputs with a vector output, and their scalar-x-scalar
+        // paths write element 0 only (found by the corpus A/B on
+        // losscurve_sislob: a cohort's lm window filled with arena zeros).
+        // Keep it scalar; consumers broadcast, and the store materializes.
+        if (!ap.term_density && all_scalar) {
+          pos_out[(size_t)p] = op.out;  // t's own (lane 0) output slot
+          result.push_back(op);
+          continue;
+        }
         if (ap.term_density) {
-          op.out = g.add_slot(1, false);
+          if (all_scalar && ap.outcome_idata.empty()) {
+            // Every lane's density is the same scalar (lane-varying inputs
+            // all came from hoisted producers): the target owes L copies of
+            // it, and L times one lane is that, exactly -- the density
+            // backward sees out_adj = L and scales its partials to match.
+            result.push_back(op);  // scalar density, out = t.out
+            Op mul;
+            mul.opcode = OP_MUL;
+            mul.n_in = 2;
+            mul.in[0] = op.out;
+            const int lc = g.add_slot(1, false);
+            fills.emplace_back(lc, std::vector<double>{(double)Luse});
+            mul.in[1] = lc;
+            mul.out = g.add_slot(1, false);
+            op = mul;  // the term-swap below installs mul.out as the term
+          } else {
+            op.out = g.add_slot(1, false);
+          }
+          if (!ap.outcome_idata.empty()) {
+            // The fused lpmf's outcome vector is the lanes' immediates.
+            g.idata_pool.push_back(std::move(ap.outcome_idata));
+            op.idata = g.idata_pool.back().data();
+            op.n_idata = (int64_t)g.idata_pool.back().size();
+          }
           // Swap the Luse lane terms for the one summed term, at the
           // first lane's position.
           std::unordered_set<int> dead;

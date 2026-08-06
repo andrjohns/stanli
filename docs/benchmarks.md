@@ -13,16 +13,23 @@ table with `tools/bench_models.py deps/cmdstan deps/posteriordb`.
 
 | model | unconstrained params | stanli ns/grad | CmdStan ns/grad | speedup | stanli prep | CmdStan build |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `radon_pooled` | 3 | 53108 | 328107 | 6.18x | 0.081 s | 6.4 s |
-| `radon_hierarchical_intercept_centered` | 391 | 112087 | 574179 | 5.12x | 0.174 s | 6.9 s |
-| `arK` | 7 | 2458 | 11860 | 4.83x | 0.007 s | 6.6 s |
-| `radon_county_intercept` | 388 | 90357 | 431480 | 4.78x | 0.128 s | 6.6 s |
-| `bym2_offset_only` | 3845 | 40023 | 125379 | 3.13x | 0.047 s | 7.8 s |
-| `eight_schools_noncentered` | 10 | 281 | 638 | 2.27x | 0.004 s | 6.9 s |
-| `kidscore_momiq` | 3 | 1906 | 3867 | 2.03x | 0.006 s | 6.5 s |
-| `lsat_model` | 1006 | 46571 | 91202 | 1.96x | 0.053 s | 7.3 s |
-| `wells_dist100ars_model` | 3 | 17341 | 18393 | 1.06x | 0.026 s | 6.8 s |
-| `low_dim_gauss_mix` | 5 | 186415 | 98905 | 0.53x | 0.196 s | 6.8 s |
+| `radon_pooled` | 3 | 53135 | 335094 | 6.31x | 0.081 s | 6.4 s |
+| `arK` | 7 | 2312 | 12103 | 5.24x | 0.007 s | 6.6 s |
+| `radon_hierarchical_intercept_centered` | 391 | 112979 | 577041 | 5.11x | 0.180 s | 7.0 s |
+| `radon_county_intercept` | 388 | 89787 | 431045 | 4.80x | 0.131 s | 6.7 s |
+| `eight_schools_noncentered` | 10 | 227 | 731 | 3.22x | 0.004 s | 7.1 s |
+| `election88_full` | 90 | 296982 | 913325 | 3.08x | 0.377 s | 7.6 s |
+| `bym2_offset_only` | 3845 | 41173 | 109977 | 2.67x | 0.047 s | 8.2 s |
+| `kidscore_momiq` | 3 | 1878 | 3827 | 2.04x | 0.007 s | 6.6 s |
+| `lsat_model` | 1006 | 46852 | 90536 | 1.93x | 0.054 s | 7.3 s |
+| `wells_dist100ars_model` | 3 | 17635 | 18426 | 1.04x | 0.025 s | 6.8 s |
+| `radon_county` | 389 | 84342 | 82266 | 0.98x | 0.104 s | 6.8 s |
+| `low_dim_gauss_mix` | 5 | 127461 | 99933 | 0.78x | 0.146 s | 7.0 s |
+| `dogs` | 3 | 97660 | 63172 | 0.65x | 0.157 s | 7.5 s |
+
+(`radon_county`, `election88_full` and `dogs` joined the table when the
+write-fusion, constant-folding and bind-time-context work below moved
+them; the first two used to be 0.36x and 0.39x.)
 
 **Where the wins come from: op granularity.** The interpreter's cost is
 per op, not per element: ~17-20 ns for a scalar density op forward +
@@ -92,18 +99,28 @@ from outside the graph. `radon_county` goes from 25,152 ops to **10**
 each. 57 of the 120 corpus models now change under the passes, against 28
 before.
 
-Still refused, and worth naming: a strided run. `dogs` writes
-`p[j, t]` down a column of a 30x25 matrix, so its indices advance by 30
-rather than by 1, and there is no strided vector store to fuse into
-(there is a strided *read*). That is the next kernel.
+Three follow-ons closed the `dogs` family (0.65x -> 2.8x, 12,751 ops ->
+261). A **strided** run — indices advancing by the matrix's row count,
+`p[j, t]` filled down columns — fuses into `OP_SET_SLICE_STRIDED`, and
+interleaved runs over one vector chain block by block: each block's store
+output becomes the vector every later reference, read or write, is
+renamed to, so the next block fuses onto it in turn. **Per-lane integer
+outcomes** fuse too: an lpmf lane carries its observation as an
+immediate, so the lanes match as a template up to that immediate and the
+fused vector op's outcome array is just their concatenation (the vector
+kernels already take outcomes exactly that way). And the **unary math
+ops** (exp, log, inv_logit, sqrt, ...) joined the widening vocabulary,
+since their kernels were already shape-dispatching on `out.len`.
 
-**The remaining loser, `low_dim_gauss_mix` (0.53x),** is the documented
-phase-2 case: its per-observation `log_mix(theta, normal_lpdf, ...)`
-means the density outputs feed an op instead of the target, so the pass
-correctly bails. It needs an elementwise-lp density variant plus a
-batched `log_sum_exp`/`log_mix` kernel; the hand-vectorized spike puts
-the available win at 2x+ (parity with CmdStan just from vectorizing the
-two normal chains, more with the batched kernel).
+**The remaining losers.** `low_dim_gauss_mix` (0.78x, up from 0.53x on
+per-op overhead work alone) is the documented phase-2 case: its
+per-observation `log_mix(theta, normal_lpdf, ...)` means the density
+outputs feed an op instead of the target, so the pass correctly bails.
+It needs an elementwise-lp density variant plus a batched
+`log_sum_exp`/`log_mix` kernel; the hand-vectorized spike puts the
+available win at 2x+. `dogs` (0.65x) writes its transformed-parameter
+matrix down columns, a strided run the store fusion below cannot yet
+express, and its bernoulli lanes carry per-lane integer outcomes.
 
 **ODE models: the right-hand side was an interpreter.** Every user function
 is inlined at lowering time except one -- an ODE right-hand side has to stay

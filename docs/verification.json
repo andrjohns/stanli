@@ -189,8 +189,8 @@
   "status": "VERIFIED"
  },
  "dogs": {
-  "max_rel": 1.4431924746105812e-15,
-  "max_ulp": 11,
+  "max_rel": 4.605114374019914e-15,
+  "max_ulp": 26,
   "n_values": 4,
   "point": 0,
   "status": "VERIFIED"
@@ -203,8 +203,8 @@
   "status": "VERIFIED"
  },
  "dogs_log": {
-  "max_rel": 0.0,
-  "max_ulp": 4568827796563958854,
+  "max_rel": 1.4657853198175627e-15,
+  "max_ulp": 4568827796563958882,
   "n_values": 3,
   "point": 0,
   "status": "VERIFIED"
