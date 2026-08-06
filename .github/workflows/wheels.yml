@@ -31,47 +31,88 @@ env:
   # it, so bumping it there and here invalidates the cache exactly once.
   STANC3_SRC_SHA: ac69570adecc41925b4ad72b6b2681c98c09c57d
   OCAML_VERSION: 5.5.0
+  OPAM_VERSION: 2.5.2
 
 jobs:
   build:
     name: ${{ matrix.plat }}
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
+    env:
+      # CMake reads this, so the library's minimum OS matches the version
+      # the wheel tag promises. Without it the runner's own OS version
+      # becomes the floor and the tag quietly lies.
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             plat: macosx_11_0_arm64
-          - os: macos-13
+            macos_target: '11.0'
+            opam_arch: arm64-macos
+          - os: macos-15-intel
             plat: macosx_10_15_x86_64
+            macos_target: '10.15'
+            opam_arch: x86_64-macos
           - os: ubuntu-24.04
             plat: manylinux_2_28_x86_64
             container: quay.io/pypa/manylinux_2_28_x86_64
+            opam_arch: x86_64-linux
           - os: ubuntu-24.04-arm
             plat: manylinux_2_28_aarch64
             container: quay.io/pypa/manylinux_2_28_aarch64
+            opam_arch: arm64-linux
     steps:
       - uses: actions/checkout@v4
 
       # 11 MB object, ~30 minutes to build. Keyed on the stanc3 commit and
-      # the OCaml version, so a hit skips the entire opam path below.
+      # the OCaml version, so a hit skips the entire opam path below. The
+      # caml/ headers ride along because the link needs them and a hit
+      # means no opam switch exists to take them from.
       - name: Restore the embedded stanc3 object
         id: stanc-cache
         uses: actions/cache@v4
         with:
-          path: deps/stanc3/stanc_embed.o
+          path: |
+            deps/stanc3/stanc_embed.o
+            deps/ocaml-include
           key: stanc-embed-${{ matrix.plat }}-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}
 
       - name: System packages (manylinux)
         if: matrix.container != ''
         run: |
-          dnf install -y bubblewrap unzip which diffutils patch
-          curl -fsSL https://opam.ocaml.org/install.sh | sh -s /usr/local/bin
+          dnf install -y unzip which diffutils patch rsync
+          # The manylinux image keeps its interpreters out of PATH; pick one
+          # explicitly rather than inheriting AlmaLinux's system python3.
+          echo /opt/python/cp312-cp312/bin >> "$GITHUB_PATH"
 
       - name: System packages (macOS)
         if: matrix.container == ''
-        run: brew install opam cmake
+        run: brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      # Not the runner's system python: Homebrew marks it externally
+      # managed, so pip refuses to install the build tooling into it.
+      - uses: actions/setup-python@v5
+        if: matrix.container == ''
+        with:
+          python-version: '3.12'
+
+      # The pinned release binary, not install.sh: the installer prompts for
+      # its target directory and takes no positional argument, so it is not
+      # usable unattended. Same binary on all four platforms.
+      - name: opam ${{ env.OPAM_VERSION }}
+        run: |
+          url=https://github.com/ocaml/opam/releases/download
+          curl -fsSL -o /tmp/opam \
+            "$url/$OPAM_VERSION/opam-$OPAM_VERSION-${{ matrix.opam_arch }}"
+          chmod +x /tmp/opam
+          sudo install -m 755 /tmp/opam /usr/local/bin/opam 2>/dev/null ||
+            install -m 755 /tmp/opam /usr/local/bin/opam
+          opam --version
+
+      - name: Build tooling
+        run: python3 -m pip install --upgrade pip setuptools wheel
 
       - name: Vendored dependencies
         run: ./deps/fetch.sh
@@ -80,7 +121,10 @@ jobs:
         if: steps.stanc-cache.outputs.cache-hit != 'true'
         run: |
           opam init --bare --disable-sandboxing --no-setup -y
-          ./tools/dev_setup.sh --embed
+          ./tools/dev_setup.sh --embed --no-build
+          mkdir -p deps/ocaml-include
+          cp -R "$(opam var lib --switch=stanc3-55)/ocaml/caml" \
+                deps/ocaml-include/
         env:
           OPAMYES: '1'
 
@@ -88,7 +132,7 @@ jobs:
         run: |
           cmake -B build-rel -DCMAKE_BUILD_TYPE=Release \
             -DSTANLI_STANC_EMBED_OBJ="$PWD/deps/stanc3/stanc_embed.o" \
-            -DSTANLI_OCAML_STDLIB="$(opam var lib --switch=stanc3-55)/ocaml"
+            -DSTANLI_OCAML_STDLIB="$PWD/deps/ocaml-include"
           cmake --build build-rel -j
 
       - name: Tests
@@ -96,6 +140,35 @@ jobs:
 
       - name: Wheel
         run: ./tools/build_wheel.sh
+
+      # The tag is a promise about the oldest system the library runs on,
+      # and nothing so far has checked it. glibc is the only versioned
+      # dependency left after the static C++ runtime, so the highest
+      # GLIBC_* symbol the library imports is the whole answer.
+      - name: The manylinux tag is true
+        if: matrix.container != ''
+        run: |
+          so=python/stanli/_bin/libstanli.so
+          need=$(objdump -T "$so" | grep -o 'GLIBC_[0-9.]*' |
+                 sort -uV | tail -1)
+          echo "highest glibc symbol required: $need"
+          [ "$(printf '%s\nGLIBC_2.28\n' "$need" | sort -V | tail -1)" \
+            = GLIBC_2.28 ]
+          ! objdump -T "$so" | grep -q GLIBCXX_ ||
+            { echo "dynamic libstdc++ leaked into the library"; exit 1; }
+          ldd "$so"
+
+      # Same question on macOS: the deployment target has to match the tag,
+      # or the wheel installs on machines that cannot dlopen it.
+      - name: The macOS tag is true
+        if: matrix.container == ''
+        run: |
+          dylib=python/stanli/_bin/libstanli.dylib
+          got=$(otool -l "$dylib" |
+                awk '/LC_BUILD_VERSION/,/minos/ {if ($1=="minos") print $2}' |
+                head -1)
+          echo "minos $got, tag promises $MACOSX_DEPLOYMENT_TARGET"
+          [ "$got" = "$MACOSX_DEPLOYMENT_TARGET" ]
 
       # The library is the whole wheel, so proving it loads and samples is
       # the only smoke test worth running here.
@@ -126,6 +199,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read   # naming any permission zeroes the rest, so restate it
       id-token: write  # PyPI trusted publishing; no API token in secrets
     steps:
       - uses: actions/checkout@v4
@@ -135,6 +209,15 @@ jobs:
           path: dist
           pattern: wheel-*
           merge-multiple: true
+
+      # PyPI silently falls back to plain text if the description fails to
+      # render, and the version is permanent once uploaded. Check before,
+      # not after.
+      - name: The project page renders
+        run: |
+          python3 -m pip install --upgrade twine
+          twine check --strict dist/*.whl
+          ls -la dist/
 
       # setup.py holds the version; the tag has to agree with it, or a
       # mistyped tag silently publishes the wrong number.

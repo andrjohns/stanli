@@ -6,6 +6,7 @@
 #   tools/dev_setup.sh --embed    + OCaml toolchain and in-process stanc3
 #   tools/dev_setup.sh --corpus   + posteriordb and the CmdStan verify rig
 #   tools/dev_setup.sh --all      everything
+#   tools/dev_setup.sh --no-build stop before cmake (CI builds separately)
 #
 # Core needs: git, curl, cmake, a C++17 clang, python3.
 # --embed adds: opam (OCaml 5.5.0 switch built automatically).
@@ -22,12 +23,14 @@ OCAML_VERSION=5.5.0
 
 WANT_EMBED=0
 WANT_CORPUS=0
+WANT_BUILD=1
 for arg in "$@"; do
   case "$arg" in
     --embed) WANT_EMBED=1 ;;
     --corpus) WANT_CORPUS=1 ;;
     --all) WANT_EMBED=1; WANT_CORPUS=1 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --no-build) WANT_BUILD=0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)"; exit 2 ;;
   esac
 done
@@ -92,22 +95,26 @@ if [ "$WANT_EMBED" = 1 ]; then
 fi
 
 # --- cmake builds ----------------------------------------------------------
-step "configuring and building (build/ dev, build-rel/ benchmarks)"
-EMBED_FLAGS=()
-if [ -f deps/stanc3/stanc_embed.o ] && have opam; then
-  EMBED_FLAGS=(
-    "-DSTANLI_STANC_EMBED_OBJ=$REPO/deps/stanc3/stanc_embed.o"
-    "-DSTANLI_OCAML_STDLIB=$(opam var --switch="$OPAM_SWITCH" lib 2>/dev/null)/ocaml"
-  )
-fi
-cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  ${EMBED_FLAGS[@]+"${EMBED_FLAGS[@]}"}
-cmake --build build -j8
-cmake -B build-rel -DCMAKE_BUILD_TYPE=Release
-cmake --build build-rel -j8 --target bench_grad stanli_run
+if [ "$WANT_BUILD" = 1 ]; then
+  step "configuring and building (build/ dev, build-rel/ benchmarks)"
+  EMBED_FLAGS=()
+  if [ -f deps/stanc3/stanc_embed.o ] && have opam; then
+    EMBED_FLAGS=(
+      "-DSTANLI_STANC_EMBED_OBJ=$REPO/deps/stanc3/stanc_embed.o"
+      "-DSTANLI_OCAML_STDLIB=$(opam var --switch="$OPAM_SWITCH" lib 2>/dev/null)/ocaml"
+    )
+  fi
+  cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    ${EMBED_FLAGS[@]+"${EMBED_FLAGS[@]}"}
+  cmake --build build -j8
+  cmake -B build-rel -DCMAKE_BUILD_TYPE=Release
+  cmake --build build-rel -j8 --target bench_grad stanli_run
 
-step "running tests"
-ctest --test-dir build --output-on-failure
+  step "running tests"
+  ctest --test-dir build --output-on-failure
+else
+  step "--no-build: skipping cmake and tests"
+fi
 
 # --- corpus + differential verification rig (optional) ---------------------
 if [ "$WANT_CORPUS" = 1 ]; then
