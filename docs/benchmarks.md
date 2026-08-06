@@ -102,6 +102,13 @@ vs the unrolled graph is 4.1e-15 relative (`spikes/ab_corpus.py`
 compares every corpus model pass-on vs pass-off and flags any
 divergence).
 
+All six were then re-run through the CmdStan rig directly rather than
+resting on that transitive argument, and all six still verify:
+`radon_pooled` 2.1e-14 (140 ulp, against 135 before the pass), `arK`
+9.6e-16 (5 ulp, against 1), `rats_model` 2.4e-16 (2 ulp),
+`soil_incubation` 1.3e-16 (1 ulp), and both `covid19imperial` variants
+8.2e-16 (7 ulp), unchanged.
+
 ## Reproducing
 
 ```

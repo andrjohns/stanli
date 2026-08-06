@@ -4,13 +4,16 @@ A portable Stan runtime: op-graph executor over precompiled stan-math
 kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
-  (gradient 1.9x-3.0x faster on vectorized models, 0.4x-0.9x on
-  explicit scalar loops; time-to-first-draw ~20x faster)
+  (gradient 1.1x-6.2x faster on seven of the eight benchmark models,
+  0.53x on the one that still defeats the re-roll pass;
+  time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
   (118/120 posteriordb models differentially verified against CmdStan's
   log_prob and full gradient, 44 of them bitwise identical, worst
   relative deviation 2.6e-12; per-model accuracy in relative terms and
   ULPs is listed there)
+- Install size: one 13.8 MB shared library, a 4.9 MB wheel. Breakdown
+  in [Binary size](#binary-size) below.
 - Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
 
 ## Architecture
@@ -52,14 +55,26 @@ Stage by stage:
    per-argument-activity instantiations CmdStan's generated C++ uses, so
    dropped constants and skipped data partials match exactly.
 
-3. **Execution** (`runtime/src/executor.cpp`). The op graph is the AD
+3. **Re-rolling** (`runtime/src/reroll.cpp`). Unrolling is what makes
+   the graph concrete, but a model written as a per-observation loop
+   arrives as N copies of one small op template, and the interpreter's
+   cost is per op. This pass finds those periodic regions and rewrites
+   them into the vectorized ops the kernels already support: constant
+   vectors materialized from the const pool, invariant ops hoisted,
+   elementwise lanes widened, index progressions collapsed into their
+   base vector, and N scalar density terms fused into one summed vector
+   density. `radon_pooled` goes from 27,670 ops to 8. Whatever the pass
+   cannot prove safe it leaves alone, one region at a time.
+   `STANRT_NO_REROLL=1` disables it.
+
+4. **Execution** (`runtime/src/executor.cpp`). The op graph is the AD
    tape. The forward sweep computes the log density and stashes each
    op's partials in per-op scratch; the reverse sweep runs the ops
    backward, contracting adjoints. Steady-state gradient evaluation
    performs zero allocation, which is where the speedup over the
    pointer-chasing var tape comes from.
 
-4. **Kernels** (`runtime/kernels/`). Two tiers behind one interface.
+5. **Kernels** (`runtime/kernels/`). Two tiers behind one interface.
    Native kernels are hand-written forward/backward pairs that mirror
    the exact Eigen expressions of stan-math's rev overloads, so
    gradients match CmdStan bitwise (FP contraction pinned off
@@ -70,14 +85,49 @@ Stage by stage:
    make the whole library expressible; native kernels make the hot path
    fast. Both are compiled once, when the stanrt binary is built.
 
-5. **Sampling** (`runtime/src/nuts.cpp`). Stan's own NUTS with
+6. **Sampling** (`runtime/src/nuts.cpp`). Stan's own NUTS with
    diagonal-metric adaptation, driven through a thin model adapter that
    returns one precomputed-gradients vari per evaluation.
 
-6. **Distribution.** Everything above sits behind a C ABI
+7. **Distribution.** Everything above sits behind a C ABI
    (`runtime/include/stanrt/capi.h`) in one shared library; the Python
    package is a ctypes wrapper around it. A platform wheel is one .whl
    containing one dylib.
+
+## Binary size
+
+One self-contained shared library, 13.8 MB installed, 4.9 MB compressed
+in the wheel. Attributing its 12.7 MB of code and data by symbol:
+
+| | | |
+| --- | ---: | ---: |
+| embedded stanc3 (all OCaml) | 6.04 MB | 47.7% |
+| stan-math | 5.59 MB | 44.2% |
+| stanrt itself | 0.39 MB | 3.0% |
+| Eigen (out-of-line) | 0.27 MB | 2.2% |
+| SUNDIALS | 0.17 MB | 1.3% |
+| Boost, nlohmann/json, NUTS, libc++, unattributed | 0.20 MB | 1.6% |
+
+The interpreter and NUTS together are about 410 KB. Nearly all of the
+rest is the Stan compiler and the math library, which is the trade the
+design makes: ship every kernel and the compiler once so that nothing is
+built on the user's machine.
+
+Within the OCaml half, stanc3's own modules are 2.74 MB and its
+dependencies 3.01 MB (Jane Street Base and Core 1.66 MB, OCaml stdlib
+1.07 MB, Yojson and Menhir 0.28 MB). The OCaml C runtime itself is only
+290 KB, and a third of that is link tables rather than code.
+
+Two things the linker cannot do here. `ocamlopt` does not set
+`MH_SUBSECTIONS_VIA_SYMBOLS` on its output (and this switch was built
+without `--enable-function-sections`), so `-dead_strip` cannot reach
+inside the compiler object at all: the whole 11 MB is one indivisible
+atom, and stripping recovers 117 KB, all of it from the C++ side.
+Module-level selection does work, and already happens at link time
+(`base.a` is 3.8 MB on disk, of which 1.6 MB is linked). Bytecode is the
+one large lever measured so far: `(modes (byte object))` produces a 10.5
+MB library, 3.7 MB smaller, at the cost of roughly 8x slower model
+compilation (2 ms to 18 ms for eight schools). That trade is not taken.
 
 ## Python
 
@@ -130,7 +180,7 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 16/16 tests green; 119/120 posteriordb models
+macOS arm64 / clang: 17/17 tests green; 119/120 posteriordb models
 compile and evaluate, 118 of them CmdStan-verified. Of the two that are
 not: `sir`'s ODE solution dips ~1e-9 below a declared lower bound at
 every shared evaluation point and CmdStan rejects it there too, and
@@ -142,12 +192,17 @@ for the numbers.
 
 ## Roadmap
 
-1. Re-rolling unrolled scalar loops into vectorized ops, and fusing
-   adjacent elementwise chains into one pass over the arena. The
-   benchmarks show this is the largest win available: models written as
-   explicit per-observation loops currently run 0.4x-0.9x CmdStan
-   because each unrolled iteration pays a full op dispatch, while
-   vectorized models run 1.9x-3.0x.
+1. Widening the re-roll pass. It now handles the shapes where every
+   lane's density output feeds the target directly, which covered
+   `radon_pooled` and `arK`. The remaining benchmark loser,
+   `low_dim_gauss_mix` (0.53x), writes `log_mix(theta, normal_lpdf(...),
+   ...)` per observation, so the density outputs feed an op instead of
+   the target and the pass correctly refuses. Closing it needs an
+   elementwise-lp density variant plus batched `log_sum_exp`/`log_mix`
+   kernels. Unary math opcodes (exp, log, inv_logit) are also outside
+   the widening vocabulary today, which bounds how many corpus models
+   the pass can reach. Fusing adjacent elementwise chains into one pass
+   over the arena is the follow-on.
 2. Linux + x86 wheels with CI owning the opam + cmake build
    (cibuildwheel); CRAN shim package.
 3. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the

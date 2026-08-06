@@ -133,8 +133,8 @@
   "status": "VERIFIED"
  },
  "arK": {
-  "max_rel": 1.6744743502728306e-16,
-  "max_ulp": 1,
+  "max_rel": 9.615546007341388e-16,
+  "max_ulp": 5,
   "n_values": 8,
   "point": 0,
   "status": "VERIFIED"
@@ -665,8 +665,8 @@
   "status": "VERIFIED"
  },
  "radon_pooled": {
-  "max_rel": 2.0528533599351115e-14,
-  "max_ulp": 135,
+  "max_rel": 2.128884965858633e-14,
+  "max_ulp": 140,
   "n_values": 4,
   "point": 0,
   "status": "VERIFIED"
@@ -714,7 +714,7 @@
   "status": "VERIFIED"
  },
  "rats_model": {
-  "max_rel": 2.4179236476993606e-16,
+  "max_rel": 2.417982456027364e-16,
   "max_ulp": 2,
   "n_values": 66,
   "point": 0,

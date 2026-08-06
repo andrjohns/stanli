@@ -26,7 +26,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `Survey_model` | 2 | 0 (bitwise) | 0 |
 | `accel_gp` | 67 | 2.4e-15 | 17 |
 | `accel_splines` | 83 | 6.6e-15 | 119 |
-| `arK` | 8 | 1.7e-16 | 1 |
+| `arK` | 8 | 9.6e-16 | 5 |
 | `arma11` | 5 | 0 (bitwise) | 0 |
 | `blr` | 7 | 5.1e-16 | 3 |
 | `bones_model` | 14 | 1.5e-16 | 1 |
@@ -101,7 +101,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `radon_hierarchical_intercept_noncentered` | 392 | 1.2e-14 | 70 |
 | `radon_partially_pooled_centered` | 390 | 6.9e-15 | 42 |
 | `radon_partially_pooled_noncentered` | 390 | 2.2e-15 | 14 |
-| `radon_pooled` | 4 | 2.1e-14 | 135 |
+| `radon_pooled` | 4 | 2.1e-14 | 140 |
 | `radon_variable_intercept_centered` | 391 | 1.2e-14 | 75 |
 | `radon_variable_intercept_noncentered` | 391 | 1.2e-14 | 73 |
 | `radon_variable_intercept_slope_centered` | 778 | 1.1e-14 | 68 |
