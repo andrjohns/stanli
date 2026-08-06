@@ -4,6 +4,14 @@ The Stan Language Interpreter: an op-graph executor over precompiled
 stan-math kernels. No C++ toolchain, no LLVM, no compilation on the
 user's machine.
 
+[![PyPI](https://img.shields.io/pypi/v/stanli.svg)](https://pypi.org/project/stanli/)
+[![wheels](https://github.com/seantalts/stanli/actions/workflows/wheels.yml/badge.svg)](https://github.com/seantalts/stanli/actions/workflows/wheels.yml)
+[![License](https://img.shields.io/pypi/l/stanli.svg)](LICENSE)
+
+```
+pip install stanli
+```
+
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
   (gradient 1.1x-6.2x faster on seven of the eight benchmark models,
   0.53x on the one that still defeats the re-roll pass;
@@ -198,6 +206,30 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
+## Releasing
+
+`.github/workflows/wheels.yml` builds all four wheels (macOS arm64 and
+x86_64, manylinux_2_28 x86_64 and aarch64) on every push and pull request,
+so the release path is the path that is already exercised continuously.
+Each build links the embedded stanc3 object (cached, since it takes half
+an hour to produce), runs the test suite, checks that the platform tag
+matches what the library actually requires, and installs the wheel into a
+clean venv to sample eight schools.
+
+To cut a release: bump `version` in `python/setup.py`, add the entry to
+`CHANGELOG.md`, then tag. The publish job fires only on `refs/tags/v*`,
+asserts the tag agrees with the packaged version, and uploads through
+PyPI trusted publishing, so no API token exists anywhere in the repo or
+its secrets.
+
+```
+git tag -a v0.1.0 -m "stanli 0.1.0" && git push origin v0.1.0
+```
+
+No sdist is published. Building from source needs a 30-minute OCaml
+toolchain step, so an sdist would only turn "no wheel for your platform"
+into a confusing build failure.
+
 ## Verification policy
 
 Nothing ships on "looks close". Kernel gradients are bitwise-tested
@@ -233,8 +265,11 @@ for the numbers.
    the widening vocabulary today, which bounds how many corpus models
    the pass can reach. Fusing adjacent elementwise chains into one pass
    over the arena is the follow-on.
-2. Linux + x86 wheels with CI owning the opam + cmake build
-   (cibuildwheel); CRAN shim package.
+2. Windows wheels, and a CRAN shim package. The macOS (arm64, x86_64) and
+   Linux (x86_64, aarch64) wheels are built and published by
+   `.github/workflows/wheels.yml` on a version tag; Windows needs opam's
+   native Windows support for the stanc3 object and a mingw-w64 toolchain,
+   since stan-math does not build under MSVC.
 3. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
    kernels mirror CmdStan's default AoS arithmetic, which is scalar for
    transcendentals and reductions (strided var access defeats Eigen's

@@ -43,13 +43,18 @@ setup(
     version="0.1.0",
     description=("Stan Language Interpreter: compile and sample Stan "
                  "models with no C++ toolchain"),
-    long_description=(HERE / "README.md").read_text(),
+    long_description=(HERE / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     author="Sean Talts",
     license="BSD-3-Clause",
+    # Copied in by tools/build_wheel.sh; this puts it in .dist-info too.
+    license_files=["stanli/LICENSE"],
     url="https://github.com/seantalts/stanli",
     project_urls={
         "Source": "https://github.com/seantalts/stanli",
+        "Issues": "https://github.com/seantalts/stanli/issues",
+        "Changelog": ("https://github.com/seantalts/stanli/blob/main/"
+                      "CHANGELOG.md"),
         "Benchmarks": ("https://github.com/seantalts/stanli/blob/main/"
                        "docs/benchmarks.md"),
         "Model coverage": ("https://github.com/seantalts/stanli/blob/main/"
@@ -63,17 +68,24 @@ setup(
     include_package_data=True,
     distclass=BinaryDistribution,
     cmdclass=CMDCLASS,
-    keywords=["stan", "bayesian", "mcmc", "nuts", "statistics"],
+    keywords=["stan", "bayesian", "mcmc", "nuts", "hmc", "statistics",
+              "probabilistic-programming", "inference", "autodiff"],
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: BSD License",
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3 :: Only",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
+        "Programming Language :: C++",
         "Topic :: Scientific/Engineering :: Mathematics",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Operating System :: MacOS :: MacOS X",
+        "Operating System :: POSIX :: Linux",
     ],
 )
