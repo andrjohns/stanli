@@ -496,9 +496,17 @@
   "status": "VERIFIED"
  },
  "nn_rbm1bJ10": {
-  "max_rel": 4.57e-16,
+  "max_rel": 4.566867888685823e-16,
   "max_ulp": 3,
   "n_values": 7952,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "nn_rbm1bJ100": {
+  "max_rel": 1.1136404876326746e-13,
+  "max_ulp": 735,
+  "n_values": 79412,
+  "point": 0,
   "status": "VERIFIED"
  },
  "normal_mixture": {

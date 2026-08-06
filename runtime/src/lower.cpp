@@ -255,7 +255,18 @@ struct Lowering {
         return r;
       }
       case mir::Expr::Indexed: {
-        DataMap::Entry base = td_eval(e.args[0]);
+        // Index a named value in place. Evaluating the base by value copies
+        // the whole array per read, which is quadratic when a loop indexes
+        // a large data array (60k-row models spent minutes here).
+        const DataMap::Entry* base_ptr = nullptr;
+        DataMap::Entry base_storage;
+        if (e.args[0].kind == mir::Expr::Var)
+          base_ptr = env.find(e.args[0].name);
+        if (base_ptr == nullptr) {
+          base_storage = td_eval(e.args[0]);
+          base_ptr = &base_storage;
+        }
+        const DataMap::Entry& base = *base_ptr;
         if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
             base.dims.size() <= 1) {
           const long ix = eval_int_td(e.args[1].args[0]);

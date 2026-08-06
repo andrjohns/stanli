@@ -1,6 +1,6 @@
 # Corpus status
 
-Evaluating: 118/120
+Evaluating: 119/120
 Differentially verified against CmdStan: 116/120
 
 A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Models that evaluate but are not verified are listed separately and are not counted.
@@ -134,8 +134,8 @@ CmdStan and stanrt both reject every shared evaluation point for these models: t
 
 - `kronecker_gp`: max rel diff 7.1e-03
 - `multi_occupancy`: max rel diff 3.5e-01
+- `nn_rbm1bJ100`: not yet run through verify_sample.py
 
 ## Failures
 
-- `nn_rbm1bJ100`: EVAL_FAIL timeout
 - `sir`: EVAL_FAIL poisson_lpmf: Rate parameter is -4.42014e-10, but must be nonnegative!
