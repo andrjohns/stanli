@@ -1,7 +1,7 @@
 # Corpus status
 
 Evaluating: 119/120
-Differentially verified against CmdStan: 116/120
+Differentially verified against CmdStan: 118/120
 
 A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Models that evaluate but are not verified are listed separately and are not counted.
 
@@ -29,7 +29,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `arK` | 8 | 1.7e-16 | 1 |
 | `arma11` | 5 | 0 (bitwise) | 0 |
 | `blr` | 7 | 5.1e-16 | 3 |
-| `bones_model` | 14 | 1.4e-16 | 1 |
+| `bones_model` | 14 | 1.5e-16 | 1 |
 | `bym2_offset_only` | 3846 | 2.0e-15 | 18 |
 | `covid19imperial_v2` | 52 | 8.2e-16 | 7 |
 | `covid19imperial_v3` | 52 | 8.2e-16 | 7 |
@@ -65,7 +65,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `kidscore_momhsiq` | 5 | 0 (bitwise) | 0 |
 | `kidscore_momiq` | 4 | 0 (bitwise) | 0 |
 | `kilpisjarvi` | 4 | 0 (bitwise) | 0 |
-| `ldaK2` | 8 | 9.5e-15 | 57 |
+| `ldaK2` | 8 | 9.6e-15 | 57 |
 | `ldaK5` | 7715 | 1.8e-15 | 15 |
 | `log10earn_height` | 4 | 0 (bitwise) | 0 |
 | `logearn_height` | 4 | 4.3e-16 | 2 |
@@ -82,12 +82,14 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `losscurve_sislob` | 16 | 0 (bitwise) | 0 |
 | `lotka_volterra` | 9 | 4.6e-16 | 4 |
 | `low_dim_gauss_mix` | 6 | 0 (bitwise) | 0 |
-| `low_dim_gauss_mix_collapse` | 6 | 1.0e-15 | 8 |
+| `low_dim_gauss_mix_collapse` | 6 | 1.1e-15 | 8 |
 | `lsat_model` | 1007 | 1.3e-16 | 1 |
 | `mesquite` | 9 | 0 (bitwise) | 0 |
+| `multi_occupancy` | 107 | 4.8e-15 | 29 |
 | `nes` | 11 | 0 (bitwise) | 0 |
 | `nes_logit_model` | 3 | 0 (bitwise) | 0 |
 | `nn_rbm1bJ10` | 7952 | 4.6e-16 | 3 |
+| `nn_rbm1bJ100` | 79412 | 1.1e-13 | 735 |
 | `normal_mixture` | 4 | 5.6e-16 | 4 |
 | `normal_mixture_k` | 15 | 1.1e-14 | 57 |
 | `one_comp_mm_elim_abs` | 5 | 6.9e-15 | 256 |
@@ -112,7 +114,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `seeds_stanified_model` | 27 | 0 (bitwise) | 0 |
 | `sesame_one_pred_a` | 4 | 0 (bitwise) | 0 |
 | `soil_incubation` | 7 | 1.3e-16 | 1 |
-| `state_space_stochastic_level_stochastic_seasonal` | 390 | 8.6e-16 | 6 |
+| `state_space_stochastic_level_stochastic_seasonal` | 390 | 8.7e-16 | 6 |
 | `surgical_model` | 15 | 0 (bitwise) | 0 |
 | `wells_daae_c_model` | 7 | 8.6e-15 | 55 |
 | `wells_dae_c_model` | 6 | 9.2e-14 | 446 |
@@ -133,8 +135,7 @@ CmdStan and stanrt both reject every shared evaluation point for these models: t
 ## Evaluate but not verified
 
 - `kronecker_gp`: max rel diff 7.1e-03
-- `multi_occupancy`: max rel diff 3.5e-01
-- `nn_rbm1bJ100`: not yet run through verify_sample.py
+  - lp matches CmdStan to 1e-13 and 436/438 gradients match; the two that flow through eigenvectors_sym differ by 0.7%. The covariance at this data has 8 of 29 eigenvalue gaps below 1e-12 (smallest 6.5e-17), and eigenvector derivatives scale as 1/(lambda_i - lambda_j), so last-bit differences in the input are amplified by ~1e16. Every component op (eigen decomposition, transpose, matrix product, the whole chain with one operand held constant) matches CmdStan bitwise in isolation.
 
 ## Failures
 

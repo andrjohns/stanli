@@ -1,104 +1,121 @@
 {
  "2pl_latent_reg_irt": {
-  "max_rel": 1.97e-15,
+  "max_rel": 1.970818854445716e-15,
   "max_ulp": 64,
   "n_values": 532,
+  "point": 0,
   "status": "VERIFIED"
  },
  "GLMM1_model": {
-  "max_rel": 6.05e-15,
+  "max_rel": 6.0541819272325976e-15,
   "max_ulp": 43,
   "n_values": 238,
+  "point": 0,
   "status": "VERIFIED"
  },
  "GLMM_Poisson_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 46,
+  "point": 0,
   "status": "VERIFIED"
  },
  "GLM_Binomial_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "GLM_Poisson_model": {
-  "max_rel": 1.16e-16,
+  "max_rel": 1.1623849757747407e-16,
   "max_ulp": 1,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "M0_model": {
-  "max_rel": 6.95e-15,
+  "max_rel": 6.945942619199284e-15,
   "max_ulp": 61,
   "n_values": 3,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Mb_model": {
-  "max_rel": 1.21e-14,
+  "max_rel": 1.2076379071657548e-14,
   "max_ulp": 68,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Mh_model": {
-  "max_rel": 2.49e-15,
+  "max_rel": 2.493692530572302e-15,
   "max_ulp": 19,
   "n_values": 389,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Mt_model": {
-  "max_rel": 1.7e-15,
+  "max_rel": 1.70457561034682e-15,
   "max_ulp": 10,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Mtbh_model": {
-  "max_rel": 1.22e-15,
+  "max_rel": 1.2171903248037838e-15,
   "max_ulp": 10,
   "n_values": 155,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Mth_model": {
-  "max_rel": 2.38e-15,
+  "max_rel": 2.3779393215585117e-15,
   "max_ulp": 96,
   "n_values": 395,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Rate_1_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 2,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Rate_2_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 3,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Rate_3_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 2,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Rate_4_model": {
-  "max_rel": 1.28e-16,
+  "max_rel": 1.2833986099877406e-16,
   "max_ulp": 1,
   "n_values": 3,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Rate_5_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 2,
+  "point": 0,
   "status": "VERIFIED"
  },
  "Survey_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 2,
+  "point": 0,
   "status": "VERIFIED"
  },
  "accel_gp": {
@@ -109,75 +126,87 @@
   "status": "VERIFIED"
  },
  "accel_splines": {
-  "max_rel": 6.61e-15,
+  "max_rel": 6.6058269965196814e-15,
   "max_ulp": 119,
   "n_values": 83,
+  "point": 0,
   "status": "VERIFIED"
  },
  "arK": {
-  "max_rel": 1.67e-16,
+  "max_rel": 1.6744743502728306e-16,
   "max_ulp": 1,
   "n_values": 8,
+  "point": 0,
   "status": "VERIFIED"
  },
  "arma11": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "blr": {
-  "max_rel": 5.07e-16,
+  "max_rel": 5.07247517111007e-16,
   "max_ulp": 3,
   "n_values": 7,
+  "point": 0,
   "status": "VERIFIED"
  },
  "bones_model": {
-  "max_rel": 1.45e-16,
+  "max_rel": 1.4502254306022434e-16,
   "max_ulp": 1,
   "n_values": 14,
+  "point": 0,
   "status": "VERIFIED"
  },
  "bym2_offset_only": {
-  "max_rel": 2.04e-15,
+  "max_rel": 2.0425123145886983e-15,
   "max_ulp": 18,
   "n_values": 3846,
+  "point": 0,
   "status": "VERIFIED"
  },
  "covid19imperial_v2": {
-  "max_rel": 8.16e-16,
+  "max_rel": 8.157260222756722e-16,
   "max_ulp": 7,
   "n_values": 52,
+  "point": 0,
   "status": "VERIFIED"
  },
  "covid19imperial_v3": {
-  "max_rel": 8.16e-16,
+  "max_rel": 8.157260222756722e-16,
   "max_ulp": 7,
   "n_values": 52,
+  "point": 0,
   "status": "VERIFIED"
  },
  "diamonds": {
-  "max_rel": 2.6e-12,
+  "max_rel": 2.6015481865636527e-12,
   "max_ulp": 16248,
   "n_values": 27,
+  "point": 0,
   "status": "VERIFIED"
  },
  "dogs": {
-  "max_rel": 1.44e-15,
+  "max_rel": 1.4431924746105812e-15,
   "max_ulp": 11,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "dogs_hierarchical": {
-  "max_rel": 1.38e-16,
+  "max_rel": 1.3822793456779697e-16,
   "max_ulp": 1,
   "n_values": 3,
+  "point": 0,
   "status": "VERIFIED"
  },
  "dogs_log": {
   "max_rel": 0.0,
   "max_ulp": 4568827796563958854,
   "n_values": 3,
+  "point": 0,
   "status": "VERIFIED"
  },
  "dogs_nonhierarchical": {
@@ -188,63 +217,73 @@
   "status": "VERIFIED"
  },
  "dugongs_model": {
-  "max_rel": 1.91e-16,
+  "max_rel": 1.9132397933870497e-16,
   "max_ulp": 1,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "earn_height": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "eight_schools_centered": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 11,
+  "point": 0,
   "status": "VERIFIED"
  },
  "eight_schools_noncentered": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 11,
+  "point": 0,
   "status": "VERIFIED"
  },
  "election88_full": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 91,
+  "point": 0,
   "status": "VERIFIED"
  },
  "garch11": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "gp_pois_regr": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 14,
+  "point": 0,
   "status": "VERIFIED"
  },
  "gp_regr": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "gpcm_latent_reg_irt": {
-  "max_rel": 1.48e-14,
+  "max_rel": 1.4812172919344156e-14,
   "max_ulp": 3928,
   "n_values": 531,
+  "point": 0,
   "status": "VERIFIED"
  },
  "grsm_latent_reg_irt": {
-  "max_rel": 1.27e-15,
+  "max_rel": 1.2708353893627528e-15,
   "max_ulp": 11,
   "n_values": 409,
+  "point": 0,
   "status": "VERIFIED"
  },
  "hier_2pl": {
@@ -258,96 +297,112 @@
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 934,
+  "point": 0,
   "status": "VERIFIED"
  },
  "hmm_drive_0": {
-  "max_rel": 1.18e-16,
+  "max_rel": 1.179284751926406e-16,
   "max_ulp": 1,
   "n_values": 7,
+  "point": 0,
   "status": "VERIFIED"
  },
  "hmm_drive_1": {
-  "max_rel": 1.44e-16,
+  "max_rel": 1.4354415423243967e-16,
   "max_ulp": 1,
   "n_values": 7,
+  "point": 0,
   "status": "VERIFIED"
  },
  "hmm_example": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "hmm_gaussian": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 15,
+  "point": 0,
   "status": "VERIFIED"
  },
  "iohmm_reg": {
-  "max_rel": 2.31e-14,
+  "max_rel": 2.3092638912203256e-14,
   "max_ulp": 2768,
   "n_values": 30,
+  "point": 0,
   "status": "VERIFIED"
  },
  "irt_2pl": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 145,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kidscore_interaction": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kidscore_interaction_c": {
-  "max_rel": 4.69e-14,
+  "max_rel": 4.687140302713552e-14,
   "max_ulp": 330,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kidscore_interaction_c2": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kidscore_interaction_z": {
-  "max_rel": 5.59e-14,
+  "max_rel": 5.593884229701321e-14,
   "max_ulp": 363,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kidscore_mom_work": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kidscore_momhs": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kidscore_momhsiq": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kidscore_momiq": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kilpisjarvi": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "kronecker_gp": {
@@ -358,141 +413,164 @@
   "status": "MISMATCH"
  },
  "ldaK2": {
-  "max_rel": 9.55e-15,
+  "max_rel": 9.550489752710598e-15,
   "max_ulp": 57,
   "n_values": 8,
+  "point": 0,
   "status": "VERIFIED"
  },
  "ldaK5": {
-  "max_rel": 1.77e-15,
+  "max_rel": 1.773009765728503e-15,
   "max_ulp": 15,
   "n_values": 7715,
+  "point": 0,
   "status": "VERIFIED"
  },
  "log10earn_height": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logearn_height": {
-  "max_rel": 4.29e-16,
+  "max_rel": 4.2934293822456485e-16,
   "max_ulp": 2,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logearn_height_male": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logearn_interaction": {
-  "max_rel": 2.61e-16,
+  "max_rel": 2.6082673809169275e-16,
   "max_ulp": 2,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logearn_interaction_z": {
-  "max_rel": 1.13e-15,
+  "max_rel": 1.1343714804034292e-15,
   "max_ulp": 9,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logearn_logheight_male": {
-  "max_rel": 2.12e-16,
+  "max_rel": 2.119765286892635e-16,
   "max_ulp": 1,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logistic_regression_rhs": {
-  "max_rel": 6.59e-16,
+  "max_rel": 6.592010755002513e-16,
   "max_ulp": 5,
   "n_values": 3076,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logmesquite": {
-  "max_rel": 3.88e-16,
+  "max_rel": 3.882708715150133e-16,
   "max_ulp": 3,
   "n_values": 9,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logmesquite_logva": {
-  "max_rel": 1.29e-16,
+  "max_rel": 1.285478096770169e-16,
   "max_ulp": 1,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logmesquite_logvas": {
-  "max_rel": 2e-16,
+  "max_rel": 1.9989188407240724e-16,
   "max_ulp": 1,
   "n_values": 9,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logmesquite_logvash": {
-  "max_rel": 3.44e-16,
+  "max_rel": 3.4423261026136313e-16,
   "max_ulp": 2,
   "n_values": 8,
+  "point": 0,
   "status": "VERIFIED"
  },
  "logmesquite_logvolume": {
-  "max_rel": 1.74e-16,
+  "max_rel": 1.7384996146279896e-16,
   "max_ulp": 1,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "losscurve_sislob": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 16,
+  "point": 0,
   "status": "VERIFIED"
  },
  "lotka_volterra": {
   "max_rel": 4.595354240455513e-16,
   "max_ulp": 4,
   "n_values": 9,
+  "point": 0,
   "status": "VERIFIED"
  },
  "low_dim_gauss_mix": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "low_dim_gauss_mix_collapse": {
-  "max_rel": 1.05e-15,
+  "max_rel": 1.0544259136946482e-15,
   "max_ulp": 8,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "lsat_model": {
-  "max_rel": 1.3e-16,
+  "max_rel": 1.297383578817877e-16,
   "max_ulp": 1,
   "n_values": 1007,
+  "point": 0,
   "status": "VERIFIED"
  },
  "mesquite": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 9,
+  "point": 0,
   "status": "VERIFIED"
  },
  "multi_occupancy": {
-  "max_rel": 0.347,
-  "max_ulp": 9131625815604088826,
+  "max_rel": 4.833372437940825e-15,
+  "max_ulp": 29,
   "n_values": 107,
-  "status": "MISMATCH"
+  "point": 0,
+  "status": "VERIFIED"
  },
  "nes": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 11,
+  "point": 0,
   "status": "VERIFIED"
  },
  "nes_logit_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 3,
+  "point": 0,
   "status": "VERIFIED"
  },
  "nn_rbm1bJ10": {
@@ -510,141 +588,164 @@
   "status": "VERIFIED"
  },
  "normal_mixture": {
-  "max_rel": 5.63e-16,
+  "max_rel": 5.626212130074487e-16,
   "max_ulp": 4,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "normal_mixture_k": {
-  "max_rel": 1.1e-14,
+  "max_rel": 1.0954537776412756e-14,
   "max_ulp": 57,
   "n_values": 15,
+  "point": 0,
   "status": "VERIFIED"
  },
  "one_comp_mm_elim_abs": {
   "max_rel": 6.8833827526759706e-15,
   "max_ulp": 256,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "pilots": {
-  "max_rel": 1.44e-16,
+  "max_rel": 1.440544395073718e-16,
   "max_ulp": 1,
   "n_values": 19,
+  "point": 0,
   "status": "VERIFIED"
  },
  "prophet": {
-  "max_rel": 8.14e-15,
+  "max_rel": 8.140703995943674e-15,
   "max_ulp": 46,
   "n_values": 63,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_county": {
-  "max_rel": 1.11e-16,
+  "max_rel": 1.1102230246251565e-16,
   "max_ulp": 272,
   "n_values": 390,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_county_intercept": {
-  "max_rel": 6.27e-15,
+  "max_rel": 6.26954916969231e-15,
   "max_ulp": 38,
   "n_values": 389,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_hierarchical_intercept_centered": {
-  "max_rel": 1.8e-15,
+  "max_rel": 1.8042579412649363e-15,
   "max_ulp": 11,
   "n_values": 392,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_hierarchical_intercept_noncentered": {
-  "max_rel": 1.17e-14,
+  "max_rel": 1.17186676503871e-14,
   "max_ulp": 70,
   "n_values": 392,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_partially_pooled_centered": {
-  "max_rel": 6.87e-15,
+  "max_rel": 6.873772368783629e-15,
   "max_ulp": 42,
   "n_values": 390,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_partially_pooled_noncentered": {
-  "max_rel": 2.18e-15,
+  "max_rel": 2.1820118364402026e-15,
   "max_ulp": 14,
   "n_values": 390,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_pooled": {
-  "max_rel": 2.05e-14,
+  "max_rel": 2.0528533599351115e-14,
   "max_ulp": 135,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_variable_intercept_centered": {
-  "max_rel": 1.16e-14,
+  "max_rel": 1.1608063086485264e-14,
   "max_ulp": 75,
   "n_values": 391,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_variable_intercept_noncentered": {
-  "max_rel": 1.23e-14,
+  "max_rel": 1.2345892532327205e-14,
   "max_ulp": 73,
   "n_values": 391,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_variable_intercept_slope_centered": {
-  "max_rel": 1.11e-14,
+  "max_rel": 1.107000230484942e-14,
   "max_ulp": 68,
   "n_values": 778,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_variable_intercept_slope_noncentered": {
-  "max_rel": 2.4e-15,
+  "max_rel": 2.400225957419574e-15,
   "max_ulp": 14,
   "n_values": 778,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_variable_slope_centered": {
-  "max_rel": 1.45e-14,
+  "max_rel": 1.4518512875731515e-14,
   "max_ulp": 92,
   "n_values": 391,
+  "point": 0,
   "status": "VERIFIED"
  },
  "radon_variable_slope_noncentered": {
-  "max_rel": 1.12e-14,
+  "max_rel": 1.1234915944923256e-14,
   "max_ulp": 74,
   "n_values": 391,
+  "point": 0,
   "status": "VERIFIED"
  },
  "rats_model": {
-  "max_rel": 2.42e-16,
+  "max_rel": 2.4179236476993606e-16,
   "max_ulp": 2,
   "n_values": 66,
+  "point": 0,
   "status": "VERIFIED"
  },
  "seeds_centered_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 27,
+  "point": 0,
   "status": "VERIFIED"
  },
  "seeds_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 27,
+  "point": 0,
   "status": "VERIFIED"
  },
  "seeds_stanified_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 27,
+  "point": 0,
   "status": "VERIFIED"
  },
  "sesame_one_pred_a": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "sir": {
@@ -662,69 +763,80 @@
   "status": "VERIFIED"
  },
  "state_space_stochastic_level_stochastic_seasonal": {
-  "max_rel": 8.65e-16,
+  "max_rel": 8.651030440464789e-16,
   "max_ulp": 6,
   "n_values": 390,
+  "point": 0,
   "status": "VERIFIED"
  },
  "surgical_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 15,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_daae_c_model": {
-  "max_rel": 8.56e-15,
+  "max_rel": 8.561952644149155e-15,
   "max_ulp": 55,
   "n_values": 7,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_dae_c_model": {
-  "max_rel": 9.15e-14,
+  "max_rel": 9.154671126231747e-14,
   "max_ulp": 446,
   "n_values": 6,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_dae_inter_model": {
-  "max_rel": 2.71e-14,
+  "max_rel": 2.705742544770234e-14,
   "max_ulp": 224,
   "n_values": 8,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_dae_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_dist": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 3,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_dist100_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 3,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_dist100ars_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 4,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_interaction_c_model": {
-  "max_rel": 6.58e-15,
+  "max_rel": 6.577085061717487e-15,
   "max_ulp": 39,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  },
  "wells_interaction_model": {
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 5,
+  "point": 0,
   "status": "VERIFIED"
  }
 }

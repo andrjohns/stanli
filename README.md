@@ -7,9 +7,10 @@ kernels. No C++ toolchain, no LLVM, no compilation on the user's machine.
   (gradient 1.9x-3.0x faster on vectorized models, 0.4x-0.9x on
   explicit scalar loops; time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
-  (110/120 posteriordb models differentially verified against CmdStan's
-  log_prob and gradients, per-model accuracy in relative terms and ULPs;
-  43 are bitwise identical)
+  (118/120 posteriordb models differentially verified against CmdStan's
+  log_prob and full gradient, 44 of them bitwise identical, worst
+  relative deviation 2.6e-12; per-model accuracy in relative terms and
+  ULPs is listed there)
 - Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
 
 ## Architecture
@@ -127,25 +128,27 @@ evaluate, and verify. Details in
 
 ## Status
 
-macOS arm64 / clang: 16/16 tests green; 110/120 posteriordb models
-CmdStan-verified (43 bitwise). Sampling-semantics gradients (propto with
+macOS arm64 / clang: 16/16 tests green; 119/120 posteriordb models
+compile and evaluate, 118 of them CmdStan-verified. Of the two that are
+not: `sir`'s ODE solution dips ~1e-9 below a declared lower bound at
+every shared evaluation point and CmdStan rejects it there too, and
+`kronecker_gp` matches on lp and 436 of 438 gradients but differs on the
+two that flow through eigenvectors of a nearly degenerate covariance
+(see the note in the corpus status). Sampling-semantics gradients (propto with
 per-argument activity) landed; see [docs/benchmarks.md](docs/benchmarks.md)
 for the numbers.
 
 ## Roadmap
 
-1. Corpus tail: GLM/multivariate densities, cholesky transforms, GP
-   covariance ops, ODE integrators (legacy nested replay), graph-level
-   loops for the unroll-bound models.
-2. Re-rolling unrolled scalar loops into vectorized ops, and fusing
+1. Re-rolling unrolled scalar loops into vectorized ops, and fusing
    adjacent elementwise chains into one pass over the arena. The
    benchmarks show this is the largest win available: models written as
    explicit per-observation loops currently run 0.4x-0.9x CmdStan
    because each unrolled iteration pays a full op dispatch, while
    vectorized models run 1.9x-3.0x.
-3. Linux + x86 wheels with CI owning the opam + cmake build
+2. Linux + x86 wheels with CI owning the opam + cmake build
    (cibuildwheel); CRAN shim package.
-4. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
+3. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
    kernels mirror CmdStan's default AoS arithmetic, which is scalar for
    transcendentals and reductions (strided var access defeats Eigen's
    packet math). stan-math's `var_value<Matrix>` overloads compute over

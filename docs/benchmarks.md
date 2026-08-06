@@ -47,6 +47,14 @@ Vectorizing the kernels themselves via stan-math's varmat overloads (see
 the README roadmap) helps the winning column further but does nothing for
 these three.
 
+Model preparation scales too: the largest model in the corpus
+(`nn_rbm1bJ100`, MNIST, 60,000 rows, 79,411 parameters) lowers to a
+192,030-op graph in 20.7 s and evaluates its gradient in 0.43 s. That
+number used to be unbounded: the transformed-data interpreter evaluated
+an indexed expression by copying its base, so reading `y[n]` in a loop
+copied the whole array each time and lowering was quadratic in the data
+size.
+
 Preparation time is the other axis: stanrt lowers a model in 5-440 ms,
 against a 6.4-8.1 s CmdStan compile (with a warm precompiled header, and
 after a multi-minute one-time `make build`). That gap is what
@@ -74,8 +82,8 @@ per-gradient table.
 
 Every model in the passing set is differentially verified against
 CmdStan's `log_prob_propto_jacobian` and full gradient at the shared
-point: 105/105 verified, 41 of them bitwise identical, worst relative
-deviation 9.2e-14 (`tools/verify_sample.py`, `docs/corpus-status.md`).
+point: 118/120 verified, 44 of them bitwise identical, worst relative
+deviation 2.6e-12 (`tools/verify_sample.py`, `docs/corpus-status.md`).
 
 ## Reproducing
 

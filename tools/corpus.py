@@ -24,6 +24,21 @@ CHECK = REPO / "build" / "stanrt_check"
 VERIFY_JSON = REPO / "docs" / "verification.json"
 
 
+# Context for models that evaluate but do not match, so the reason is not
+# lost between runs.
+NOTES = {
+    "kronecker_gp":
+        "lp matches CmdStan to 1e-13 and 436/438 gradients match; the two "
+        "that flow through eigenvectors_sym differ by 0.7%. The covariance "
+        "at this data has 8 of 29 eigenvalue gaps below 1e-12 (smallest "
+        "6.5e-17), and eigenvector derivatives scale as 1/(lambda_i - "
+        "lambda_j), so last-bit differences in the input are amplified by "
+        "~1e16. Every component op (eigen decomposition, transpose, matrix "
+        "product, the whole chain with one operand held constant) matches "
+        "CmdStan bitwise in isolation.",
+}
+
+
 def load_verification():
     if not VERIFY_JSON.exists():
         return {}
@@ -128,6 +143,8 @@ def main():
             why = (f"max rel diff {v['max_rel']:.1e}" if v
                    else "not yet run through verify_sample.py")
             md.append(f"- `{m}`: {why}")
+            if m in NOTES:
+                md.append(f"  - {NOTES[m]}")
     md += ["", "## Failures", ""]
     for model, (s, msg) in sorted(results.items()):
         if s != "OK":
