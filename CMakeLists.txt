@@ -1,4 +1,23 @@
 cmake_minimum_required(VERSION 3.16)
+
+# Before project(): the deployment target is baked in at compiler-probe
+# time. Left alone it defaults to whatever the build machine runs, so the
+# wheel would claim a floor it does not honor. Must agree with the
+# platform tags in tools/build_wheel.sh. MACOSX_DEPLOYMENT_TARGET in the
+# environment still wins.
+execute_process(COMMAND uname -s OUTPUT_VARIABLE _host_os
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(_host_os STREQUAL "Darwin" AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET}
+                             AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  execute_process(COMMAND uname -m OUTPUT_VARIABLE _host_arch
+                  OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(_host_arch STREQUAL "arm64")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "" FORCE)
+  else()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "" FORCE)
+  endif()
+endif()
+
 project(stanli C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -91,6 +110,13 @@ elseif(UNIX)
     "-Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.map")
   set_property(TARGET stanli_shared APPEND PROPERTY LINK_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.map)
+  # The wheel is one library dropped onto an unknown machine, and a
+  # dynamic libstdc++ would make it require whatever GLIBCXX version the
+  # build container's toolchain happened to emit. Statically linking the
+  # C++ runtime leaves glibc as the only versioned dependency, which is
+  # what the manylinux tag is actually promising.
+  target_link_options(stanli_shared PRIVATE
+    -static-libstdc++ -static-libgcc)
 endif()
 
 # In-process stanc3: link the OCaml-compiled embed object
