@@ -51,18 +51,22 @@ jobs:
             plat: macosx_11_0_arm64
             macos_target: '11.0'
             opam_arch: arm64-macos
+            build_jobs: 4
           - os: macos-15-intel
             plat: macosx_10_15_x86_64
             macos_target: '10.15'
             opam_arch: x86_64-macos
+            build_jobs: 4
           - os: ubuntu-24.04
             plat: manylinux_2_28_x86_64
             container: quay.io/pypa/manylinux_2_28_x86_64
             opam_arch: x86_64-linux
+            build_jobs: 2
           - os: ubuntu-24.04-arm
             plat: manylinux_2_28_aarch64
             container: quay.io/pypa/manylinux_2_28_aarch64
             opam_arch: arm64-linux
+            build_jobs: 2
     steps:
       - uses: actions/checkout@v4
 
@@ -133,7 +137,10 @@ jobs:
           cmake -B build-rel -DCMAKE_BUILD_TYPE=Release \
             -DSTANLI_STANC_EMBED_OBJ="$PWD/deps/stanc3/stanc_embed.o" \
             -DSTANLI_OCAML_STDLIB="$PWD/deps/ocaml-include"
-          cmake --build build-rel -j
+          # Bounded, not bare -j: that means unlimited to make, and a
+          # stan-math translation unit peaks around 2 GB, so the x86_64
+          # container built itself to death (exit 137).
+          cmake --build build-rel -j ${{ matrix.build_jobs }}
 
       - name: Tests
         run: ctest --test-dir build-rel --output-on-failure
