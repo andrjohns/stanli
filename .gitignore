@@ -6,3 +6,5 @@ python/stanrt/_bin/
 dist/
 *.egg-info/
 compile_commands.json
+python/stanrt/LICENSE
+python/stanrt/THIRD_PARTY_LICENSES.md
