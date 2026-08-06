@@ -352,6 +352,34 @@ static void test_native_lse_allows_destructive() {
     expect_close(("nlse v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
+// The other half of the O(N^2) fix: the dead intermediate slots of a
+// collapsed chain must stop occupying arena. bind_() sizes the arenas from
+// slot lengths, not from which slots ops still reference, so without the
+// dead-slot sweep the memory stayed quadratic even after the ops collapsed
+// (2.58 GB on radon_county_intercept, unchanged by the pass until the sweep
+// landed).
+static void test_dead_slots_freed() {
+  const int N = 64;
+  Fills fills;
+  std::vector<int> terms;
+  int n_vec_slots = 0;
+  Graph g = build_chain(N, fills, terms, &n_vec_slots);
+  const int64_t before = [&] {
+    int64_t s = 0;
+    for (const auto& sl : g.slots) s += sl.len;
+    return s;
+  }();
+  std::vector<int> roots = terms;
+  make_inplace_updates(g, roots);
+  forward_stores_to_loads(g, roots);
+  int64_t after = 0;
+  for (const auto& sl : g.slots) after += sl.len;
+  // The chain alone held N vectors of length N. Afterwards the total must
+  // be linear in N -- a generous constant, but nowhere near N*N/2.
+  expect("chain arena was quadratic", before > (int64_t)N * N / 2);
+  expect("dead slots freed (arena linear)", after < (int64_t)(8 * N + 64));
+}
+
 int main() {
   test_chain_collapses();
   test_native_lse_allows_destructive();
@@ -360,6 +388,7 @@ int main() {
   test_bail_value_reading_consumer();
   test_bail_later_reader();
   test_bail_root();
+  test_dead_slots_freed();
   if (failures) { std::printf("%d failures\n", failures); return 1; }
   std::printf("test_inplace OK\n");
   return 0;

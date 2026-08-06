@@ -40,9 +40,17 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
     for (int attempt = 0; attempt < kMaxInitAttempts && !ok; ++attempt) {
       for (int64_t i = 0; i < n; ++i) q(i) = init_dist(rng);
       for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = q(i);
-      const double lp = ex.gradient(grad.data());
-      ok = std::isfinite(lp);
-      for (int64_t i = 0; ok && i < n; ++i) ok = std::isfinite(grad[(size_t)i]);
+      // A density that rejects its argument outright (stan-math throws on a
+      // NaN location, an out-of-support outcome) counts as a rejected draw,
+      // exactly as CmdStan's initialize treats it -- not as a fatal error.
+      try {
+        const double lp = ex.gradient(grad.data());
+        ok = std::isfinite(lp);
+        for (int64_t i = 0; ok && i < n; ++i)
+          ok = std::isfinite(grad[(size_t)i]);
+      } catch (const std::exception&) {
+        ok = false;
+      }
     }
     if (!ok)
       throw std::runtime_error(
