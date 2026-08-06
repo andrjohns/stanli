@@ -2,6 +2,7 @@
 #include <stanrt/mir.hpp>
 #include <stanrt/ode.hpp>
 #include <stanrt/optable.hpp>
+#include <stanrt/reroll.hpp>
 #include <stanrt/sexp.hpp>
 
 #include <stan/math/prim/fun/constants.hpp>
@@ -2171,6 +2172,9 @@ struct Lowering {
     for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
     bind_data(p);
     for (const auto& s : p.log_prob) lower_stmt(s);
+    reroll(g, out.fills, target_terms);  // no-op under STANRT_NO_REROLL=1
+    info.resize(g.slots.size());  // keep SlotInfo parallel: emit() in
+                                  // reduce_terms reads info[o] by slot id
     std::vector<int> all = target_terms;
     all.insert(all.end(), jac_slots.begin(), jac_slots.end());
     g.result_slot = reduce_terms(all);

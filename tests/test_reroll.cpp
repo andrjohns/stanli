@@ -1,5 +1,6 @@
 // Re-roll pass: unrolled scalar-loop regions collapse to vector ops with
 // gradients preserved (up to summation order, 1e-12 rel).
+#include <stanrt/compile.hpp>
 #include <stanrt/graph.hpp>
 #include <stanrt/optable.hpp>
 #include <stanrt/reroll.hpp>
@@ -7,6 +8,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -267,6 +270,65 @@ static void test_env_disable() {
   unsetenv("STANRT_NO_REROLL");
 }
 
+// ---- end to end through compile_model ------------------------------------
+
+static std::string slurp(const char* p) {
+  std::ifstream f(p);
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  return ss.str();
+}
+
+static std::vector<double> e2e_grad(const char* sexp, const char* json,
+                                    size_t* n_ops) {
+  DataMap data = DataMap::from_json(json);
+  CompiledModel cm = compile_model(slurp(sexp), data);
+  *n_ops = cm.graph.ops.size();
+  Executor ex(std::move(cm.graph));
+  cm.bind(ex);
+  for (int64_t i = 0; i < ex.n_params(); ++i)
+    ex.params_data()[i] = 0.1 + 0.05 * (i % 7) - 0.15 * (i % 3);
+  std::vector<double> out(1 + ex.n_params());
+  out[0] = ex.gradient(out.data() + 1);
+  return out;
+}
+
+static void test_e2e_fixtures() {
+  const char* rdata =
+      "{\"N\":16,\"x\":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,"
+      "1.3,1.4,1.5,1.6],"
+      "\"y\":[1.1,0.9,1.3,0.7,1.0,1.2,0.8,1.05,0.95,1.15,0.85,1.0,1.1,"
+      "0.92,1.08,0.98]}";
+  const char* adata =
+      "{\"K\":2,\"T\":12,\"y\":[0.3,0.5,0.2,0.6,0.4,0.55,0.35,0.45,0.5,"
+      "0.42,0.48,0.44]}";
+  struct Case {
+    const char* sexp;
+    const char* json;
+    const char* name;
+  };
+  const Case cases[] = {
+      {"tests/fixtures/rloop.tmir.sexp", rdata, "rloop"},
+      {"tests/fixtures/arloop.tmir.sexp", adata, "arloop"},
+  };
+  for (const Case& c : cases) {
+    size_t ops_unrolled = 0, ops_rerolled = 0;
+    setenv("STANRT_NO_REROLL", "1", 1);
+    const std::vector<double> want = e2e_grad(c.sexp, c.json, &ops_unrolled);
+    unsetenv("STANRT_NO_REROLL");
+    const std::vector<double> got = e2e_grad(c.sexp, c.json, &ops_rerolled);
+    expect((std::string(c.name) + " sizes").c_str(),
+           got.size() == want.size());
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close((std::string(c.name) + " v" + std::to_string(i)).c_str(),
+                   got[i], want[i]);
+    std::printf("%s: %zu ops -> %zu ops\n", c.name, ops_unrolled,
+                ops_rerolled);
+    expect((std::string(c.name) + " shrinks 4x").c_str(),
+           ops_rerolled < ops_unrolled / 4);
+  }
+}
+
 int main() {
   test_radon_shape();
   test_ark_shape();
@@ -274,6 +336,7 @@ int main() {
   test_bail_nonterm_density();
   test_bail_partial_range();
   test_env_disable();
+  test_e2e_fixtures();
   if (failures) { std::printf("%d failures\n", failures); return 1; }
   std::printf("test_reroll OK\n");
   return 0;
