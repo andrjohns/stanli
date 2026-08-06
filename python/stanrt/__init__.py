@@ -67,6 +67,29 @@ def _stanc_mir(model_path: pathlib.Path) -> str:
     return r.stdout
 
 
+def _data_to_json(data) -> str:
+    """Accept what callers naturally have: a dict, a path, or JSON text.
+
+    numpy arrays are converted, since data almost always arrives as one.
+    """
+    if data is None:
+        return "{}"
+    if isinstance(data, pathlib.Path):
+        return data.read_text()
+    if isinstance(data, str):
+        stripped = data.lstrip()
+        if stripped.startswith("{"):
+            return data
+        return pathlib.Path(data).read_text()
+
+    def encode(value):
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        raise TypeError(f"cannot serialise {type(value).__name__} as Stan data")
+
+    return json.dumps(data, default=encode)
+
+
 class Model:
     """A compiled (model, data) pair."""
 
@@ -75,10 +98,7 @@ class Model:
             if stan_file is None:
                 raise ValueError("provide stan_file or stan_code")
             stan_code = pathlib.Path(stan_file).read_text()
-        if isinstance(data, (str, pathlib.Path)):
-            data_json = pathlib.Path(data).read_text()
-        else:
-            data_json = json.dumps(data or {})
+        data_json = _data_to_json(data)
 
         err = ctypes.create_string_buffer(8192)
         if _lib.stanrt_has_embedded_stanc():
