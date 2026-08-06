@@ -107,6 +107,23 @@ void set_index_bwd(KernelCtx& ctx) {
   if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += ctx.out_adj_vec.data[f];
 }
 
+// OP_SET_INDEX_INPLACE: same update, but out IS in[0] (one slot, so one
+// arena buffer and one adjoint buffer). Sound only where the graph pass
+// proved this write is the last use of that vector, so destroying the old
+// element is unobservable.
+void set_index_inplace_fwd(KernelCtx& ctx) {
+  ctx.out.data[ctx.idata[0]] = ctx.in[1].data[0];
+}
+// in[0].adj and out.adj alias, so the elementwise `in.adj += out.adj` of
+// the copying form is already done. Element f is the exception: it belongs
+// to the written value, not to the overwritten vector, so hand it over and
+// clear it.
+void set_index_inplace_bwd(KernelCtx& ctx) {
+  const int64_t f = ctx.idata[0];
+  if (ctx.in_adj[1].data) ctx.in_adj[1].data[0] += ctx.out_adj_vec.data[f];
+  ctx.out_adj_vec.data[f] = 0.0;
+}
+
 // OP_SLICE: out = in[start .. start+out.len), idata = {start}.
 void slice_fwd(KernelCtx& ctx) {
   const int64_t start = ctx.idata[0];
@@ -215,6 +232,9 @@ void register_elementwise_kernels() {
   register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
   register_kernel(OP_INDEX, Kernel{index_fwd, index_bwd, nullptr});
   register_kernel(OP_SET_INDEX, Kernel{set_index_fwd, set_index_bwd, nullptr});
+  register_kernel(OP_SET_INDEX_INPLACE,
+                  Kernel{set_index_inplace_fwd, set_index_inplace_bwd,
+                         nullptr});
   register_kernel(OP_SLICE, Kernel{slice_fwd, slice_bwd, nullptr});
   register_kernel(OP_SET_SLICE, Kernel{set_slice_fwd, set_slice_bwd, nullptr});
   register_kernel(OP_SLICE_STRIDED,

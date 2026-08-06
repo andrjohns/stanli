@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Full-corpus A/B for the re-roll pass: for every posteriordb (model,
+"""Full-corpus A/B for the graph passes: for every posteriordb (model,
 data) pair, compare stanli_check output (lp + gradient at the
-deterministic point) with STANLI_NO_REROLL=1 vs the pass enabled, and
-count ops via dump_ops. The no-pass graph is the CmdStan-verified
-baseline, so A/B parity is transitive verification of the pass.
+deterministic point) with the passes disabled vs enabled, and count ops
+via dump_ops. The passes-off graph is the CmdStan-verified baseline, so
+A/B parity is transitive verification of the passes.
 
 Usage: python3 spikes/ab_corpus.py deps/posteriordb [--filter SUBSTR]
+                                   [--disable VAR[,VAR...]]
+Default disables every pass at once (re-roll and in-place), which is the
+end-to-end check; pass one variable to attribute a divergence.
 Run from the worktree root with build-rel/ built.
 """
 import json
@@ -38,6 +41,11 @@ def main():
     pdb = pathlib.Path(sys.argv[1]) / "posterior_database"
     filt = (sys.argv[sys.argv.index("--filter") + 1]
             if "--filter" in sys.argv else "")
+    disable = {v: "1" for v in (
+        sys.argv[sys.argv.index("--disable") + 1].split(",")
+        if "--disable" in sys.argv
+        else ["STANLI_NO_REROLL", "STANLI_NO_INPLACE"])}
+    print(f"A = passes off ({', '.join(disable)}), B = passes on")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_ab_"))
 
     pairs = {}
@@ -60,7 +68,7 @@ def main():
         with zipfile.ZipFile(dz) as z:
             dj.write_bytes(z.read(z.namelist()[0]))
 
-        a = run([str(CHECK), str(stan), str(dj)], {"STANLI_NO_REROLL": "1"})
+        a = run([str(CHECK), str(stan), str(dj)], disable)
         b = run([str(CHECK), str(stan), str(dj)])
         if a is None or b is None:
             flags.append(f"{model}: TIMEOUT (a={'T' if a is None else 'ok'})")
@@ -94,8 +102,7 @@ def main():
         ops_a = ops_b = -1
         if r is not None and r.returncode == 0:
             sexp.write_text(r.stdout)
-            da = run([str(DUMP), str(sexp), str(dj), "0"],
-                     {"STANLI_NO_REROLL": "1"})
+            da = run([str(DUMP), str(sexp), str(dj), "0"], disable)
             db = run([str(DUMP), str(sexp), str(dj), "0"])
             if da and db and da.returncode == 0 and db.returncode == 0:
                 ops_a = int(da.stdout.split()[1].split("=")[1])
@@ -108,9 +115,9 @@ def main():
 
     print(f"\nboth-fail (known gaps): {n_same_fail}")
     print(f"OK, graph untouched:    {n_ok_same_graph}")
-    print(f"OK, re-rolled:          {n_ok_rerolled}")
+    print(f"OK, graph changed:      {n_ok_rerolled}")
     print(f"worst deviation:        {worst[0]:.2e} ({worst[1]})")
-    print("\nre-rolled models (ops before -> after, deviation):")
+    print("\nmodels changed by the passes (ops before -> after, deviation):")
     for m, oa, ob, dev in sorted(rerolled, key=lambda r: r[1] - r[2],
                                  reverse=True):
         print(f"  {m:40s} {oa:7d} -> {ob:6d}  {dev:.2e}")

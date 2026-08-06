@@ -1,4 +1,5 @@
 #include <stanli/compile.hpp>
+#include <stanli/inplace.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/ode.hpp>
 #include <stanli/optable.hpp>
@@ -2176,6 +2177,12 @@ struct Lowering {
     // of the arena, so no op consumes them and the pass cannot infer them.
     std::vector<int> roots = jac_slots;
     for (const auto& v : out.views) roots.push_back(v.slot);
+    // Target terms have no consuming op yet either: reduce_terms builds
+    // their ADD_N tree below, after the passes have run.
+    std::vector<int> update_roots = roots;
+    update_roots.insert(update_roots.end(), target_terms.begin(),
+                        target_terms.end());
+    make_inplace_updates(g, update_roots);  // off under STANLI_NO_INPLACE
     reroll(g, out.fills, target_terms, roots);  // off under STANLI_NO_REROLL
     info.resize(g.slots.size());  // keep SlotInfo parallel: emit() in
                                   // reduce_terms reads info[o] by slot id

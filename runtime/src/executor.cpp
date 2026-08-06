@@ -16,6 +16,16 @@ Kernel& kernel(uint16_t opcode) {
   return g_table[opcode];
 }
 
+const char* opcode_name(uint16_t opcode) {
+  static const char* const names[] = {
+      "OP_NONE_",
+#define STANLI_OPCODE_NAME(name) #name,
+      STANLI_OPCODE_LIST(STANLI_OPCODE_NAME)
+#undef STANLI_OPCODE_NAME
+  };
+  return opcode < OP_COUNT_ ? names[opcode] : "OP_?";
+}
+
 void register_kernel(uint16_t opcode, Kernel k) {
   assert(opcode < OP_COUNT_);
   g_table[opcode] = k;
