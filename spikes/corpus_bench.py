@@ -119,8 +119,11 @@ def main():
         if b is None:
             notes.append("cmdstan_build_fail")
         else:
+            # CmdStan's make compiles the generated header without leaving
+            # it behind, so emit our own copy for the gradient driver.
             hpp = work / f"{model}.hpp"
-            if hpp.exists():
+            if run([str(STANC), str(work / f"{model}.stan"), f"--o={hpp}"],
+                   timeout) and hpp.exists():
                 math = cs / "stan" / "lib" / "stan_math"
                 inc = [cs / "stan" / "src", math,
                        next((cs / "stan" / "lib").glob("rapidjson_*")),
