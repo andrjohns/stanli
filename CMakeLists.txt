@@ -75,6 +75,22 @@ target_include_directories(stanrt_shared PUBLIC runtime/include)
 target_link_libraries(stanrt_shared PUBLIC stanmath sundials)
 set_target_properties(stanrt_shared PROPERTIES OUTPUT_NAME stanrt)
 
+# Export only the C API. Everything else in here (stan-math, Eigen, the
+# whole embedded OCaml compiler) is an implementation detail, and leaving
+# 15k symbols exported costs 2.7 MB of symbol table, string table, and
+# export trie in the shipped library.
+if(APPLE)
+  target_link_options(stanrt_shared PRIVATE
+    "-Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.txt")
+  set_property(TARGET stanrt_shared APPEND PROPERTY LINK_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.txt)
+elseif(UNIX)
+  target_link_options(stanrt_shared PRIVATE
+    "-Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.map")
+  set_property(TARGET stanrt_shared APPEND PROPERTY LINK_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.map)
+endif()
+
 # In-process stanc3: link the OCaml-compiled embed object
 # (tools/stanc_embed/build.sh produces deps/stanc3/stanc_embed.o).
 set(STANRT_STANC_EMBED_OBJ "" CACHE FILEPATH

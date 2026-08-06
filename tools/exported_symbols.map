@@ -1,0 +1,4 @@
+{
+  global: stanrt_*;
+  local: *;
+};
