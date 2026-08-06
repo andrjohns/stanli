@@ -146,6 +146,8 @@ add_executable(bench_opcost tools/bench_opcost.cpp tests/tbb_stub.cpp)
 target_link_libraries(bench_opcost PRIVATE stanli)
 add_executable(bench_packet tools/bench_packet.cpp)
 target_link_libraries(bench_packet PRIVATE stanmath)
+add_executable(bench_density tools/bench_density.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_density PRIVATE stanli)
 add_executable(dump_ops tools/dump_ops.cpp tests/tbb_stub.cpp)
 target_link_libraries(dump_ops PRIVATE stanli)
 
