@@ -34,8 +34,8 @@ struct MirRhs {
     using T = stan::return_type_t<T_y, T_param>;
     std::vector<T> tv{T(t)}, yv(y.begin(), y.end()),
         thv(theta.begin(), theta.end()), xrv(x_r.begin(), x_r.end());
-    MirEval<T> ev(*spec->funs);
-    return ev.call(*spec->rhs, {tv, yv, thv, xrv}, {x_i});
+    MirEval<T> ev(*spec->funs());
+    return ev.call(*spec->rhs(), {tv, yv, thv, xrv}, {x_i});
   }
 };
 
@@ -55,11 +55,22 @@ std::vector<std::vector<T>> solve(const OdeSpec& s, const std::vector<T>& z0,
                                         s.max_steps);
 }
 
+// The forward pass solves the SAME coupled system CmdStan does (states plus
+// sensitivities), not the plain state system: the adaptive step controller
+// sees the coupled error estimate, so at the loose tolerances these models
+// use, a states-only solve lands on visibly different values (measured 3e-2
+// relative on lotka_volterra, whose atol is 1e-3).
 void ode_fwd(KernelCtx& ctx) {
   const OdeSpec& s = *static_cast<const OdeSpec*>(ctx.udata);
-  std::vector<double> z0(ctx.in[0].data, ctx.in[0].data + ctx.in[0].len);
-  std::vector<double> th(ctx.in[1].data, ctx.in[1].data + ctx.in[1].len);
-  auto sol = solve(s, z0, th);
+  stan::math::nested_rev_autodiff nested;
+  std::vector<var> z0(ctx.in[0].data, ctx.in[0].data + ctx.in[0].len);
+  std::vector<var> th(ctx.in[1].data, ctx.in[1].data + ctx.in[1].len);
+  auto solv = solve(s, z0, th);
+  std::vector<std::vector<double>> sol(solv.size());
+  for (size_t n = 0; n < solv.size(); ++n) {
+    sol[n].resize(solv[n].size());
+    for (size_t k = 0; k < solv[n].size(); ++k) sol[n][k] = solv[n][k].val();
+  }
   const int64_t S = ctx.in[0].len;
   for (size_t n = 0; n < sol.size(); ++n)
     for (int64_t k = 0; k < S; ++k) ctx.out.data[n * S + k] = sol[n][k];

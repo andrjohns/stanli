@@ -419,6 +419,12 @@
   "n_values": 16,
   "status": "VERIFIED"
  },
+ "lotka_volterra": {
+  "max_rel": 4.595354240455513e-16,
+  "max_ulp": 4,
+  "n_values": 9,
+  "status": "VERIFIED"
+ },
  "low_dim_gauss_mix": {
   "max_rel": 0.0,
   "max_ulp": 0,

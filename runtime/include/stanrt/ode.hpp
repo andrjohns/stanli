@@ -14,8 +14,23 @@
 namespace stanrt {
 
 struct OdeSpec {
-  const mir::FunDef* rhs = nullptr;
-  const std::map<std::string, const mir::FunDef*>* funs = nullptr;
+  // The spec outlives lowering (the graph does), so it owns copies of the
+  // functions it may call rather than pointing into the parsed program.
+  std::map<std::string, mir::FunDef> owned;
+  std::map<std::string, const mir::FunDef*> funs_map;
+  std::string rhs_name;
+
+  void adopt(const std::map<std::string, const mir::FunDef*>& src) {
+    for (const auto& [name, def] : src) owned[name] = *def;
+    for (const auto& [name, def] : owned) funs_map[name] = &def;
+  }
+  const mir::FunDef* rhs() const {
+    auto it = owned.find(rhs_name);
+    return it == owned.end() ? nullptr : &it->second;
+  }
+  const std::map<std::string, const mir::FunDef*>* funs() const {
+    return &funs_map;
+  }
   double t0 = 0;
   std::vector<double> ts;
   std::vector<double> x_r;

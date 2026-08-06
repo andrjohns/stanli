@@ -1568,8 +1568,8 @@ struct Lowering {
       auto fit = fun_defs.find(e.args[0].name);
       if (fit == fun_defs.end())
         fail(e.name + ": unknown right-hand side " + e.args[0].name, e.raw);
-      spec->rhs = fit->second;
-      spec->funs = &fun_defs;
+      spec->adopt(fun_defs);
+      spec->rhs_name = e.args[0].name;
       spec->stiff = e.name.find("bdf") != std::string::npos;
       spec->t0 = td_eval(e.args[2]).r.at(0);
       DataMap::Entry ts = td_eval(e.args[3]);

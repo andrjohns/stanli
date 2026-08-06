@@ -51,7 +51,9 @@ class MirEval {
     } catch (Return& r) {
       return std::move(r.v);
     }
-    fail("ODE function returned no value: " + f.name);
+    fail("ODE function returned no value: " + f.name + " (" +
+         std::to_string(f.body.size()) + " statements, " +
+         std::to_string(f.arg_names.size()) + " args)");
   }
 
  private:

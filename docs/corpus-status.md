@@ -1,7 +1,7 @@
 # Corpus status
 
-Evaluating: 111/120
-Differentially verified against CmdStan: 110/120
+Evaluating: 112/120
+Differentially verified against CmdStan: 111/120
 
 A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Models that evaluate but are not verified are listed separately and are not counted.
 
@@ -77,6 +77,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `logmesquite_logvash` | 8 | 3.4e-16 | 2 |
 | `logmesquite_logvolume` | 4 | 1.7e-16 | 1 |
 | `losscurve_sislob` | 16 | 0 (bitwise) | 0 |
+| `lotka_volterra` | 9 | 4.6e-16 | 4 |
 | `low_dim_gauss_mix` | 6 | 0 (bitwise) | 0 |
 | `low_dim_gauss_mix_collapse` | 6 | 1.0e-15 | 8 |
 | `lsat_model` | 1007 | 1.3e-16 | 1 |
@@ -128,8 +129,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 - `dogs_nonhierarchical`: COMPILE_FAIL stanrt compile: Times__: inner dimension mismatch
 - `hier_2pl`: COMPILE_FAIL stanrt compile: multi_normal_cholesky_lpdf: needs a matrix argument
 - `kronecker_gp`: COMPILE_FAIL stanrt compile: unsupported function eigenvectors_sym
-- `lotka_volterra`: COMPILE_FAIL stanrt compile: unsupported index expression: base=z [IndexAll] [IndexSingle] type=
 - `nn_rbm1bJ100`: EVAL_FAIL timeout
-- `one_comp_mm_elim_abs`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
-- `sir`: COMPILE_FAIL stanrt compile: unsupported function kind for FnMakeArray
+- `one_comp_mm_elim_abs`: EVAL_FAIL stanrt runtime: function unsupported in an ODE function: Greater__
+- `sir`: COMPILE_FAIL stanrt compile: unsupported function to_matrix
 - `soil_incubation`: COMPILE_FAIL stanrt compile: unknown variable x_r
