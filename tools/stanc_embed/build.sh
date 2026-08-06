@@ -10,8 +10,12 @@ SWITCH=${2:-stanc3-55}
 mkdir -p "$SRC/src/stanc_embed"
 cp tools/stanc_embed/stanc_embed.ml tools/stanc_embed/dune "$SRC/src/stanc_embed/"
 eval "$(opam env --switch="$SWITCH")"
-(cd "$SRC" && dune build src/stanc_embed/stanc_embed.exe.o 2>&1 | tail -5 ||
- dune build src/stanc_embed 2>&1 | tail -5)
-OBJ=$(find "$SRC/_build" -name "stanc_embed*.o" | head -1)
+# Release profile: dune's dev profile links the inline-test and expect-test
+# runners into every library, which ride into the shipped binary for no
+# reason. Worth 364 KB of the final shared library.
+(cd "$SRC" && dune build --profile release src/stanc_embed/stanc_embed.exe.o \
+   2>&1 | tail -5 ||
+ dune build --profile release src/stanc_embed 2>&1 | tail -5)
+OBJ=$(find "$SRC/_build" -path '*/src/stanc_embed/stanc_embed*.o' | head -1)
 cp "$OBJ" deps/stanc3/stanc_embed.o
 echo "embedded stanc object: deps/stanc3/stanc_embed.o ($(du -h deps/stanc3/stanc_embed.o | cut -f1))"
