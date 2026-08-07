@@ -29,7 +29,7 @@ pip install stanli
   <!--gen:corpus_bitwise-->45<!--/gen--> of them bitwise identical, worst
   relative deviation <!--gen:corpus_worst-->2.6e-12<!--/gen-->; per-model
   accuracy in relative terms and ULPs is listed there)
-- Install size: one 13.8 MB shared library, a 4.9 MB wheel. Breakdown
+- Install size: one 19.1 MB shared library, a 6.7 MB wheel. Breakdown
   in [Binary size](#binary-size) below.
 - How this is possible, for statisticians:
   [docs/how-it-works.md](docs/how-it-works.md)
@@ -139,17 +139,32 @@ Stage by stage:
 
 ## Binary size
 
-One self-contained shared library, 13.8 MB installed, 4.9 MB compressed
-in the wheel. Attributing its 12.7 MB of code and data by symbol:
+One self-contained shared library, 19.1 MB installed, 6.7 MB compressed
+in the wheel. Attributing its 18.8 MB of code and data by symbol:
 
 | | | |
 | --- | ---: | ---: |
-| embedded stanc3 (all OCaml) | 6.04 MB | 47.7% |
-| stan-math | 5.59 MB | 44.2% |
-| stanli itself | 0.39 MB | 3.0% |
-| Eigen (out-of-line) | 0.27 MB | 2.2% |
-| SUNDIALS | 0.17 MB | 1.3% |
-| Boost, nlohmann/json, NUTS, libc++, unattributed | 0.20 MB | 1.6% |
+| stan-math | 10.15 MB | 54.0% |
+| embedded stanc3 (all OCaml) | 5.73 MB | 30.5% |
+| Boost, nlohmann/json, NUTS, libc++, unattributed | 1.43 MB | 7.6% |
+| stanli itself | 0.76 MB | 4.0% |
+| Eigen (out-of-line) | 0.62 MB | 3.3% |
+| SUNDIALS | 0.10 MB | 0.6% |
+
+stan-math is the majority of it, and densities are the majority of that.
+A distribution is instantiated once per activity mask -- which arguments
+are autodiff -- twice for propto and again for the elementwise form, so
+4 * 2^N templates per distribution, about 630 KB of object each. That is
+the standing cost of shipping precompiled math: CmdStan instantiates
+only the combination your model uses, and pays for it with a per-model
+compile. The library grew from 13.8 MB when the scalar density
+vocabulary went from 13 distributions to 27; the long tail of them takes
+a smaller form (see STANLI_SCALAR_DENSITY_LIST in optable.hpp), which
+saved 4.4 MB of the 10.5 that adding them cost.
+
+The 34 scalar math functions added alongside them cost 0.03 MB between
+them, because an elementwise kernel with a hand-written derivative
+instantiates nothing.
 
 The interpreter and NUTS together are about 410 KB. Nearly all of the
 rest is the Stan compiler and the math library, which is the trade the

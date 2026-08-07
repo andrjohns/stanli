@@ -31,6 +31,30 @@
   print nothing, so one bad `lognormal_rng` on a marginal ODE solution
   discarded every draw of an otherwise good chain.
 
+- 34 scalar math functions and 14 more distributions. `lgamma`, `log1p`,
+  `Phi`, `inv_Phi`, `erf`, `expm1`, `digamma`, the trig and hyperbolic
+  families, `floor`/`ceil`/`round`, `inv`/`inv_sqrt`/`inv_square` and the
+  rest now work on the parameter path and in transformed data and
+  generated quantities, taking coverage of stanc3's scalar function list
+  from 13 of 103 to 47 of 103. The distributions are `chi_square`,
+  `inv_chi_square`, `scaled_inv_chi_square`, `frechet`, `gumbel`,
+  `loglogistic`, `pareto`, `pareto_type_2`, `rayleigh`, `skew_normal`,
+  `von_mises`, `exp_mod_normal`, `beta_proportion` and
+  `skew_double_exponential`. Every one is bitwise identical to CmdStan,
+  checked by `harnesses/fn_sweep.py`, which generates a model per
+  function from stanc3's own signature list and compares against the
+  same reference driver the corpus uses.
+
+- The library is 19.1 MB installed, up from 13.8. Distributions are what
+  cost: each is instantiated once per activity mask, twice for propto and
+  again for the elementwise form, about 630 KB apiece, which is what a
+  precompiled library pays so that no model has to be compiled. The long
+  tail of them now takes a smaller form -- with propto off no terms are
+  dropped, so one binding covers every mask -- which returned 4.4 MB of
+  the 10.5 the additions cost, and leaves the distributions models
+  actually use running exactly as fast as before. The 34 scalar
+  functions cost 0.03 MB between them.
+
 - Two kernels stopped doing twice the work. `normal_id_glm_lpdf` built a
   var tape in the forward, threw it away, and built it again in the
   backward to differentiate it; it now differentiates once and stashes
