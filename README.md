@@ -6,6 +6,11 @@ user's machine.
 
 [![PyPI](https://img.shields.io/pypi/v/stanli.svg)](https://pypi.org/project/stanli/)
 [![wheels](https://github.com/seantalts/stanli/actions/workflows/wheels.yml/badge.svg)](https://github.com/seantalts/stanli/actions/workflows/wheels.yml)
+
+**Try it in your browser, no install:**
+[seantalts.github.io/stanli](https://seantalts.github.io/stanli/) --
+Stan source to posterior draws in a few hundred milliseconds, entirely
+client side.
 [![License](https://img.shields.io/pypi/l/stanli.svg)](LICENSE)
 
 ```
@@ -178,8 +183,9 @@ stanc binary as a subprocess.
 ## Browser (WASM)
 
 The same runtime compiles to WebAssembly and runs full Stan in a browser
-tab with no server: stanc3's js_of_ocaml build compiles the model to MIR
-in JS, and stanli.wasm lowers it and samples. Eight schools goes from
+tab with no server: **[seantalts.github.io/stanli](https://seantalts.github.io/stanli/)**.
+stanc3's js_of_ocaml build compiles the model to MIR in JS, and
+stanli.wasm lowers it and samples. Eight schools goes from
 Stan source to 1,000 posterior draws in about 120 ms in-tab. 118 of the
 119 compiling corpus models replay against the CmdStan references from
 inside WASM (`tools/wasm_check.sh` adapts `verify_refs.py`; the one

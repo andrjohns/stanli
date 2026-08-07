@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace stanli {
@@ -31,11 +32,18 @@ struct SamplerStats {
   std::vector<std::array<double, 7>> rows;
 };
 
+// Optional per-transition observer for streaming consumers (the browser
+// worker's live plots): called after every transition with the phase and
+// the current unconstrained point.
+using DrawObserver =
+    std::function<void(int64_t i, bool warmup, const double* q)>;
+
 // Adaptive diagonal-metric NUTS (stan::mcmc::adapt_diag_e_nuts) over the
 // executor's log_prob_grad. Returns one unconstrained parameter vector per
 // post-warmup draw. `stats`, when non-null, receives one row per draw.
 std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg,
-                                          SamplerStats* stats = nullptr);
+                                          SamplerStats* stats = nullptr,
+                                          const DrawObserver& observe = {});
 
 }  // namespace stanli
 

@@ -18,7 +18,8 @@ namespace stanli {
 
 std::vector<std::vector<double>> run_nuts(Executor& ex,
                                           const NutsConfig& cfg,
-                                          SamplerStats* stats) {
+                                          SamplerStats* stats,
+                                          const DrawObserver& observe) {
   // CmdStan's generator, seeded CmdStan's way: same engine (mixmax in this
   // Stan version, ecuyer1988 in older ones -- create_rng is what tracks
   // that), same (0, 1, seed, chain) construction, chain 1 as the default
@@ -99,7 +100,14 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
   sampler.engage_adaptation();
 
   stan::mcmc::sample s(q, 0, 0);
-  for (int i = 0; i < cfg.warmup; ++i) s = sampler.transition(s, logger);
+  Eigen::VectorXd qw(n);
+  for (int i = 0; i < cfg.warmup; ++i) {
+    s = sampler.transition(s, logger);
+    if (observe) {
+      s.cont_params(qw);
+      observe(i, true, qw.data());
+    }
+  }
   sampler.disengage_adaptation();
 
   std::vector<std::vector<double>> draws;
@@ -114,6 +122,7 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
     s = sampler.transition(s, logger);
     s.cont_params(qd);
     draws.emplace_back(qd.data(), qd.data() + n);
+    if (observe) observe(i, false, draws.back().data());
     if (stats) {
       // get_sampler_params yields stepsize__, treedepth__, n_leapfrog__,
       // divergent__, energy__ in that order (stan::mcmc::base_nuts).

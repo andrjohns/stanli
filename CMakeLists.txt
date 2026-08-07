@@ -49,6 +49,11 @@ target_compile_definitions(stanmath INTERFACE _REENTRANT BOOST_DISABLE_ASSERTS)
 target_compile_options(stanmath INTERFACE -ffp-contract=off)
 if(EMSCRIPTEN)
   target_compile_options(stanmath INTERFACE -fwasm-exceptions)
+  # The density kernels instantiate every activity mask times every shape
+  # times summed/elementwise: 21 MB of object at -O3. The browser build
+  # trades their straight-line speed for size.
+  set_source_files_properties(runtime/kernels/densities.cpp
+    PROPERTIES COMPILE_OPTIONS -Oz)
   # stan-math's rev core includes TBB 2020 headers unconditionally, and
   # that TBB predates wasm: its machine layer selects by OS macro and
   # errors out on anything unknown. Steer it to the portable
@@ -196,8 +201,9 @@ if(EMSCRIPTEN)
     "SHELL:-s MAXIMUM_MEMORY=4GB"
     "SHELL:-s STACK_SIZE=8MB"
     "SHELL:-s ENVIRONMENT=web,worker,node"
-    "SHELL:-s EXPORTED_FUNCTIONS=_stanli_model_new,_stanli_model_new_from_stan,_stanli_has_embedded_stanc,_stanli_model_free,_stanli_n_unconstrained,_stanli_grad,_stanli_sample,_stanli_n_constrained,_stanli_constrained_name,_stanli_constrain,_stanli_wa_n_columns,_stanli_wa_column_name,_stanli_wa_seed,_stanli_wa_row,_malloc,_free"
-    "SHELL:-s EXPORTED_RUNTIME_METHODS=cwrap,UTF8ToString,stringToNewUTF8,HEAPF64")
+    "SHELL:-s EXPORTED_FUNCTIONS=_stanli_model_new,_stanli_model_new_from_stan,_stanli_has_embedded_stanc,_stanli_model_free,_stanli_n_unconstrained,_stanli_grad,_stanli_sample,_stanli_n_constrained,_stanli_constrained_name,_stanli_constrain,_stanli_wa_n_columns,_stanli_wa_column_name,_stanli_wa_seed,_stanli_wa_row,_stanli_sample_stream,_malloc,_free"
+    "SHELL:-s EXPORTED_RUNTIME_METHODS=cwrap,UTF8ToString,stringToNewUTF8,HEAPF64,addFunction,removeFunction"
+    "SHELL:-s ALLOW_TABLE_GROWTH=1")
 endif()
 
 if(NOT EMSCRIPTEN)

@@ -29,6 +29,10 @@ function getWorker() {
  * @param {number} [opts.samples=1000]
  * @param {number} [opts.delta=0.8]    Adaptation target acceptance.
  * @param {function(string)} [opts.onProgress]  Stage announcements.
+ * @param {function(Object)} [opts.onLive]  Streaming draws while NUTS
+ *   runs: {liveMeta: {names, warmup, samples}} once per call, then
+ *   {live: {phase: "warmup"|"sampling", i, nCon?, rows?}} where rows is
+ *   a transferred ArrayBuffer of constrained draws, nCon wide.
  * @returns {Promise<{names: string[], samples: number,
  *                    columns: Object<string, Float64Array>,
  *                    ms: {stanc: number, lower: number, sample: number,
@@ -43,6 +47,10 @@ export function sample(opts) {
       const m = e.data;
       if (m.status) {
         if (opts.onProgress) opts.onProgress(m.status);
+        return;
+      }
+      if (m.liveMeta || m.live) {
+        if (opts.onLive) opts.onLive(m);
         return;
       }
       w.onmessage = null;

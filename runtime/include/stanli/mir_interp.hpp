@@ -1074,10 +1074,16 @@ class MirInterp {
           o.r[i * a.dims[1] + j] = a.r[j * a.dims[0] + i];
       return o;
     }
-    if (e.name == "to_vector") {
+    if (e.name == "to_vector" || e.name == "to_row_vector") {
       Value a = eval(e.args[0]);
       a.dims = {(int64_t)a.r.size()};
       a.is_int = false;
+      return a;
+    }
+    if (e.name == "to_array_1d") {
+      // Flattening is the identity on this storage.
+      Value a = eval(e.args[0]);
+      a.dims = {(int64_t)std::max(a.r.size(), a.i.size())};
       return a;
     }
     if (e.name == "rows" || e.name == "cols" || e.name == "size" ||

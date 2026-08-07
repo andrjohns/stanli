@@ -32,11 +32,44 @@ onmessage = async (e) => {
 
     const n = Number(M._stanli_n_unconstrained(model));
     const samples = req.samples | 0;
-    say("NUTS: " + req.warmup + " warmup + " + samples + " draws");
+    const warmup = req.warmup | 0;
+    say("NUTS: " + warmup + " warmup + " + samples + " draws");
     const drawsPtr = M._malloc(8 * samples * n);
-    const rc = M._stanli_sample(model, req.seed >>> 0, req.warmup | 0,
-                                samples, +req.delta, drawsPtr, errPtr,
-                                errLen);
+
+    // Stream: every draw lands in the buffer before its callback, so the
+    // page can plot the chain as it grows. Constrained rows batch in
+    // chunks of 20 to keep message traffic sane.
+    const nLive = Number(M._stanli_n_constrained(model));
+    const liveNames = [];
+    for (let i = 0; i < nLive; ++i)
+      liveNames.push(
+          M.UTF8ToString(M._stanli_constrained_name(model, BigInt(i))));
+    postMessage({ liveMeta: { names: liveNames, warmup, samples } });
+    const liveRowPtr = M._malloc(8 * nLive);
+    let pend = [];
+    const cbPtr = M.addFunction((i, wu) => {
+      if (wu) {
+        if (i % 25 === 0 || i + 1 === warmup)
+          postMessage({ live: { phase: "warmup", i: i + 1 } });
+        return;
+      }
+      M._stanli_constrain(model, drawsPtr + 8 * i * n, liveRowPtr);
+      const row = new Float64Array(nLive);
+      row.set(M.HEAPF64.subarray(liveRowPtr / 8, liveRowPtr / 8 + nLive));
+      pend.push(row);
+      if (pend.length >= 20 || i + 1 === samples) {
+        const chunk = new Float64Array(pend.length * nLive);
+        pend.forEach((r, k) => chunk.set(r, k * nLive));
+        pend = [];
+        postMessage({ live: { phase: "sampling", i: i + 1, nCon: nLive,
+                              rows: chunk.buffer } }, [chunk.buffer]);
+      }
+    }, "viii");
+    const rc = M._stanli_sample_stream(model, req.seed >>> 0, warmup,
+                                       samples, +req.delta, drawsPtr,
+                                       cbPtr, 0, errPtr, errLen);
+    M.removeFunction(cbPtr);
+    M._free(liveRowPtr);
     if (rc !== 0) throw new Error(M.UTF8ToString(errPtr));
     const tSample = performance.now();
 

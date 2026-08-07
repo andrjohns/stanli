@@ -13,6 +13,7 @@
   }
   h1 { font-size: 1.3rem; margin: 0 0 .2rem; }
   .sub { opacity: .7; margin: 0 0 1rem; }
+  .sub a { color: inherit; }
   .cols { display: flex; gap: 1rem; flex-wrap: wrap; }
   .cols > div { flex: 1 1 320px; display: flex; flex-direction: column; }
   label { font-weight: 600; font-size: .85rem; margin-bottom: .25rem; }
@@ -21,31 +22,37 @@
     border: 1px solid #8884; border-radius: 6px; padding: .5rem;
     background: transparent; color: inherit; resize: vertical;
   }
-  #code { height: 320px; } #data { height: 320px; }
+  #code { height: 300px; } #data { height: 300px; }
   .bar { display: flex; gap: .8rem; align-items: center; margin: .8rem 0;
          flex-wrap: wrap; }
   .bar label { margin: 0; font-weight: 400; }
-  .bar input { width: 5.5rem; font: inherit; background: transparent;
-               color: inherit; border: 1px solid #8884; border-radius: 4px;
-               padding: .2rem .35rem; }
+  .bar input, .bar select {
+    font: inherit; background: transparent; color: inherit;
+    border: 1px solid #8884; border-radius: 4px; padding: .2rem .35rem;
+  }
+  .bar input { width: 4.6rem; }
   button {
     font: 600 .95rem system-ui; padding: .45rem 1.1rem; border-radius: 6px;
     border: 1px solid #4a7; background: #4a7; color: #fff; cursor: pointer;
   }
+  button.plain { background: transparent; color: inherit;
+                 border-color: #8886; font-weight: 400; }
   button:disabled { opacity: .5; cursor: default; }
   #status { font-size: .85rem; opacity: .75; min-height: 1.2em; }
   #err { color: #c33; white-space: pre-wrap; font-family: ui-monospace,
          monospace; font-size: .8rem; }
   table { border-collapse: collapse; margin-top: .8rem; font-size: .85rem;
           font-variant-numeric: tabular-nums; }
-  th, td { padding: .25rem .7rem; border-bottom: 1px solid #8883;
+  th, td { padding: .25rem .6rem; border-bottom: 1px solid #8883;
            text-align: right; }
   th:first-child, td:first-child { text-align: left;
            font-family: ui-monospace, monospace; }
   tr { cursor: pointer; }
   tr:hover td { background: #8881; }
-  #hist { margin-top: .8rem; border: 1px solid #8883; border-radius: 6px;
-          width: 100%; max-width: 640px; height: 180px; }
+  td.bad { color: #c33; font-weight: 600; }
+  .plots { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: .8rem; }
+  .plots canvas { border: 1px solid #8883; border-radius: 6px;
+                  max-width: 100%; }
   .times { font-size: .8rem; opacity: .7; margin-top: .5rem; }
 </style>
 </head>
@@ -53,7 +60,10 @@
 <h1>stanli: full Stan in the browser</h1>
 <p class="sub">stanc3 (OCaml&rarr;JS) compiles the model, stanli.wasm
 lowers it to an op graph and runs NUTS. No server, no C++ toolchain;
-everything below happens in this tab.</p>
+everything below happens in this tab.
+<a href="https://github.com/seantalts/stanli">github.com/seantalts/stanli</a>
+&middot; <a href="https://www.npmjs.com/package/stanli">npm</a>
+&middot; <a href="https://pypi.org/project/stanli/">PyPI</a></p>
 
 <div class="cols">
   <div><label for="code">model.stan</label>
@@ -64,22 +74,44 @@ everything below happens in this tab.</p>
 
 <div class="bar">
   <button id="run">Run NUTS</button>
+  <label>model <select id="preset">
+    <option value="es">eight schools</option>
+    <option value="reg">linear regression</option>
+    <option value="mix">gaussian mixture</option>
+  </select></label>
+  <label>chains <input id="chains" value="4"></label>
   <label>warmup <input id="warmup" value="1000"></label>
   <label>samples <input id="samples" value="1000"></label>
   <label>seed <input id="seed" value="1"></label>
   <label>delta <input id="delta" value="0.8"></label>
+  <button id="csv" class="plain" hidden>Download CSV</button>
   <span id="status"></span>
 </div>
 <div id="err"></div>
 <div id="out"></div>
-<canvas id="hist" width="640" height="180" hidden></canvas>
+<div class="plots">
+  <canvas id="trace" width="620" height="180" hidden></canvas>
+  <canvas id="hist" width="420" height="180" hidden></canvas>
+</div>
 <div class="times" id="times"></div>
 
 <script type="module">
 import { sample } from "./stanli.mjs";
 const $ = (id) => document.getElementById(id);
 
-$("code").value = `data {
+// ---- presets ---------------------------------------------------------------
+// Synthetic data comes from a fixed linear congruential stream so the
+// page is self-contained and reproducible.
+function lcg(seed) {
+  let s = seed >>> 0;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+}
+function normalish(u) {  // sum of uniforms: good enough for fake data
+  return (u() + u() + u() + u() + u() + u() - 3) / 0.7071;
+}
+const PRESETS = {
+  es: {
+    code: `data {
   int<lower=0> J;
   array[J] real y;
   array[J] real<lower=0> sigma;
@@ -97,30 +129,130 @@ model {
   tau ~ cauchy(0, 5);
   theta_tilde ~ normal(0, 1);
   y ~ normal(theta, sigma);
-}`;
-$("data").value = `{"J": 8,
+}`,
+    data: () => `{"J": 8,
  "y": [28, 8, -3, 7, -1, 1, 18, 12],
- "sigma": [15, 10, 16, 11, 9, 11, 10, 18]}`;
+ "sigma": [15, 10, 16, 11, 9, 11, 10, 18]}`,
+  },
+  reg: {
+    code: `data {
+  int<lower=0> N;
+  vector[N] x;
+  vector[N] y;
+}
+parameters {
+  real alpha;
+  real beta;
+  real<lower=0> sigma;
+}
+model {
+  alpha ~ normal(0, 5);
+  beta ~ normal(0, 5);
+  sigma ~ cauchy(0, 2);
+  y ~ normal(alpha + beta * x, sigma);
+}
+generated quantities {
+  array[N] real y_rep = normal_rng(to_array_1d(alpha + beta * x), sigma);
+}`,
+    data: () => {
+      const u = lcg(11), x = [], y = [];
+      for (let i = 0; i < 40; ++i) {
+        const xi = -2 + 4 * u();
+        x.push(+xi.toFixed(3));
+        y.push(+(1.5 + 0.8 * xi + 0.5 * normalish(u)).toFixed(3));
+      }
+      return JSON.stringify({ N: 40, x, y }, null, 1);
+    },
+  },
+  mix: {
+    code: `data {
+  int<lower=0> N;
+  vector[N] y;
+}
+parameters {
+  real<lower=0, upper=1> theta;
+  ordered[2] mu;
+  vector<lower=0>[2] sigma;
+}
+model {
+  theta ~ beta(2, 2);
+  mu ~ normal(0, 5);
+  sigma ~ cauchy(0, 2);
+  for (n in 1:N)
+    target += log_mix(theta,
+                      normal_lpdf(y[n] | mu[1], sigma[1]),
+                      normal_lpdf(y[n] | mu[2], sigma[2]));
+}`,
+    data: () => {
+      const u = lcg(23), y = [];
+      for (let i = 0; i < 120; ++i)
+        y.push(+((u() < 0.4 ? -2 : 2.5) + 0.8 * normalish(u)).toFixed(3));
+      return JSON.stringify({ N: 120, y }, null, 1);
+    },
+  },
+};
+function applyPreset(name) {
+  $("code").value = PRESETS[name].code;
+  $("data").value = PRESETS[name].data();
+}
+$("preset").onchange = () => applyPreset($("preset").value);
+applyPreset("es");
 
-let result = null;
+// ---- run -------------------------------------------------------------------
+// fit = {names, samples, chains: [{name: Float64Array} per chain]}
+let fit = null;
 
 $("run").onclick = async () => {
   $("run").disabled = true;
   $("err").textContent = "";
   $("out").innerHTML = "";
   $("times").textContent = "";
+  $("csv").hidden = true;
+  $("trace").hidden = true;
   $("hist").hidden = true;
+  const nChains = Math.max(1, parseInt($("chains").value, 10) || 4);
+  const seed = parseInt($("seed").value, 10) || 1;
+  const opts = {
+    code: $("code").value,
+    data: $("data").value,
+    warmup: parseInt($("warmup").value, 10) || 1000,
+    samples: parseInt($("samples").value, 10) || 1000,
+    delta: parseFloat($("delta").value) || 0.8,
+  };
   try {
-    result = await sample({
-      code: $("code").value,
-      data: $("data").value,
-      seed: parseInt($("seed").value, 10) || 1,
-      warmup: parseInt($("warmup").value, 10) || 1000,
-      samples: parseInt($("samples").value, 10) || 1000,
-      delta: parseFloat($("delta").value) || 0.8,
-      onProgress: (s) => { $("status").textContent = s; },
-    });
-    render(result.ms);
+    const chains = [];
+    const ms = { stanc: 0, lower: 0, sample: 0, total: 0 };
+    const live = { names: null, done: [], cur: [] };
+    for (let c = 0; c < nChains; ++c) {
+      const r = await sample({
+        ...opts, seed: seed + c,
+        onProgress: (s) =>
+            { $("status").textContent = `chain ${c + 1}/${nChains}: ${s}`; },
+        onLive: (m) => {
+          if (m.liveMeta) { live.names = m.liveMeta.names; return; }
+          const lv = m.live;
+          if (lv.phase === "warmup") {
+            $("status").textContent =
+                `chain ${c + 1}/${nChains}: warmup ${lv.i}`;
+            return;
+          }
+          const chunk = new Float64Array(lv.rows);
+          for (let k = 0; k < chunk.length / lv.nCon; ++k)
+            live.cur.push(chunk.subarray(k * lv.nCon, (k + 1) * lv.nCon));
+          $("status").textContent =
+              `chain ${c + 1}/${nChains}: sampling ${lv.i}`;
+          liveTrace(live, c, nChains);
+        },
+      });
+      live.done.push(live.cur);
+      live.cur = [];
+      chains.push(r);
+      for (const k of Object.keys(ms)) ms[k] += r.ms[k];
+    }
+    fit = { names: chains[0].names, samples: chains[0].samples,
+            chains: chains.map((r) => r.columns) };
+    render(ms, nChains);
+    $("csv").hidden = false;
   } catch (e) {
     $("err").textContent = String(e.message || e);
   }
@@ -128,39 +260,158 @@ $("run").onclick = async () => {
   $("status").textContent = "";
 };
 
-function colStats(name) {
-  const xs = result.columns[name];
-  const n = xs.length;
-  const sorted = Float64Array.from(xs).sort();
-  let s = 0; for (const x of xs) s += x;
-  const mean = s / n;
-  let v = 0; for (const x of xs) v += (x - mean) * (x - mean);
-  const q = (p) => sorted[Math.min(n - 1, Math.floor(p * n))];
-  return { mean, sd: Math.sqrt(v / (n - 1)),
-           q5: q(0.05), q50: q(0.5), q95: q(0.95) };
+// ---- summaries -------------------------------------------------------------
+function allDraws(name) {
+  const parts = fit.chains.map((c) => c[name]);
+  const out = new Float64Array(parts.length * fit.samples);
+  parts.forEach((p, i) => out.set(p, i * fit.samples));
+  return out;
+}
+function meanOf(xs) { let s = 0; for (const x of xs) s += x; return s / xs.length; }
+function varOf(xs, m) {
+  let s = 0; for (const x of xs) s += (x - m) * (x - m);
+  return s / (xs.length - 1);
 }
 
-function render(ms) {
+// Split-chain R-hat and a Geyer-style bulk ESS over the split chains:
+// the standard diagnostics, on plain (not rank-normalized) draws.
+function splitChains(name) {
+  const half = Math.floor(fit.samples / 2);
+  const seqs = [];
+  for (const c of fit.chains) {
+    const xs = c[name];
+    seqs.push(xs.subarray(0, half), xs.subarray(fit.samples - half));
+  }
+  return seqs;
+}
+function rhatEss(name) {
+  const seqs = splitChains(name);
+  const m = seqs.length, n = seqs[0].length;
+  const means = seqs.map(meanOf);
+  const vars = seqs.map((s, i) => varOf(s, means[i]));
+  const W = meanOf(vars);
+  const B = n * varOf(means, meanOf(means));
+  const varplus = ((n - 1) / n) * W + B / n;
+  if (!(W > 0)) return { rhat: NaN, ess: NaN };
+  const rhat = Math.sqrt(varplus / W);
+  // Autocovariance averaged over sequences, summed in Geyer's initial
+  // positive pairs.
+  const maxLag = Math.min(n - 1, 500);
+  const acov = new Float64Array(maxLag + 1);
+  for (let s = 0; s < m; ++s) {
+    const xs = seqs[s], mu = means[s];
+    for (let t = 0; t <= maxLag; ++t) {
+      let a = 0;
+      for (let i = 0; i + t < n; ++i) a += (xs[i] - mu) * (xs[i + t] - mu);
+      acov[t] += a / n / m;
+    }
+  }
+  const rho = (t) => 1 - (W - acov[t]) / varplus;
+  let sumRho = 0;
+  for (let t = 1; t + 1 <= maxLag; t += 2) {
+    const pair = rho(t) + rho(t + 1);
+    if (pair < 0) break;
+    sumRho += pair;
+  }
+  const ess = (m * n) / (1 + 2 * sumRho);
+  return { rhat, ess: Math.min(ess, m * n) };
+}
+function colStats(name) {
+  const xs = allDraws(name);
+  const sorted = Float64Array.from(xs).sort();
+  const mean = meanOf(xs);
+  const q = (p) => sorted[Math.min(xs.length - 1, Math.floor(p * xs.length))];
+  return { mean, sd: Math.sqrt(varOf(xs, mean)),
+           q5: q(0.05), q50: q(0.5), q95: q(0.95), ...rhatEss(name) };
+}
+
+function render(ms, nChains) {
   const f = (x) => (Math.abs(x) >= 1000 ? x.toFixed(0) : x.toPrecision(4));
   let html = "<table><tr><th>parameter</th><th>mean</th><th>sd</th>" +
-             "<th>5%</th><th>50%</th><th>95%</th></tr>";
-  result.names.forEach((n) => {
+             "<th>5%</th><th>50%</th><th>95%</th><th>R&#770;</th>" +
+             "<th>ESS</th></tr>";
+  fit.names.forEach((n) => {
     const st = colStats(n);
+    const badR = st.rhat > 1.01 ? ' class="bad"' : "";
     html += `<tr data-n="${n}"><td>${n}</td><td>${f(st.mean)}</td>` +
             `<td>${f(st.sd)}</td><td>${f(st.q5)}</td>` +
-            `<td>${f(st.q50)}</td><td>${f(st.q95)}</td></tr>`;
+            `<td>${f(st.q50)}</td><td>${f(st.q95)}</td>` +
+            `<td${badR}>${st.rhat.toFixed(3)}</td>` +
+            `<td>${st.ess.toFixed(0)}</td></tr>`;
   });
   $("out").innerHTML = html + "</table>";
   $("times").textContent =
+      `${nChains} chain${nChains > 1 ? "s" : ""}: ` +
       `stanc ${ms.stanc.toFixed(0)} ms, lower ${ms.lower.toFixed(0)} ms, ` +
       `sample ${ms.sample.toFixed(0)} ms, total ${ms.total.toFixed(0)} ms ` +
-      `(click a row for its histogram)`;
+      `(click a row for trace + histogram)`;
   for (const tr of $("out").querySelectorAll("tr[data-n]"))
-    tr.onclick = () => hist(tr.dataset.n);
+    tr.onclick = () => { tracePlot(tr.dataset.n); histPlot(tr.dataset.n); };
 }
 
-function hist(name) {
-  const xs = result.columns[name];
+// ---- plots -----------------------------------------------------------------
+const CHAIN_COLORS = ["#4a7", "#47a", "#a47", "#a74", "#7a4", "#74a"];
+
+// The live view while NUTS runs: the first parameter's trace, finished
+// chains solid and the growing chain drawn as it streams in.
+function liveTrace(live, chainIdx, nChains) {
+  if (!live.names || !live.names.length) return;
+  const c = $("trace"), g = c.getContext("2d");
+  c.hidden = false;
+  const seqs = [...live.done, live.cur].filter((s) => s.length > 1);
+  if (!seqs.length) return;
+  let lo = Infinity, hi = -Infinity;
+  for (const s of seqs)
+    for (const row of s) {
+      const v = row[0];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+  if (!(hi > lo)) { lo -= 1; hi += 1; }
+  const total = Math.max(...seqs.map((s) => s.length));
+  g.clearRect(0, 0, c.width, c.height);
+  const X = (i) => 4 + (c.width - 8) * i / Math.max(total - 1, 1);
+  const Y = (v) => c.height - 22 - (c.height - 36) * (v - lo) / (hi - lo);
+  seqs.forEach((s, si) => {
+    g.strokeStyle = CHAIN_COLORS[si % CHAIN_COLORS.length];
+    g.globalAlpha = 0.8;
+    g.beginPath();
+    for (let i = 0; i < s.length; ++i)
+      i ? g.lineTo(X(i), Y(s[i][0])) : g.moveTo(X(i), Y(s[i][0]));
+    g.stroke();
+  });
+  g.globalAlpha = 1;
+  g.fillStyle = getComputedStyle(document.body).color;
+  g.font = "12px system-ui";
+  g.fillText(`${live.names[0]}  live, chain ${chainIdx + 1}/${nChains}`,
+             6, 14);
+}
+function tracePlot(name) {
+  const c = $("trace"), g = c.getContext("2d");
+  c.hidden = false;
+  g.clearRect(0, 0, c.width, c.height);
+  let lo = Infinity, hi = -Infinity;
+  for (const ch of fit.chains)
+    for (const x of ch[name]) { if (x < lo) lo = x; if (x > hi) hi = x; }
+  if (!(hi > lo)) { lo -= 1; hi += 1; }
+  const X = (i) => 4 + (c.width - 8) * i / (fit.samples - 1);
+  const Y = (v) => c.height - 22 - (c.height - 36) * (v - lo) / (hi - lo);
+  fit.chains.forEach((ch, ci) => {
+    g.strokeStyle = CHAIN_COLORS[ci % CHAIN_COLORS.length];
+    g.globalAlpha = 0.8;
+    g.beginPath();
+    const xs = ch[name];
+    for (let i = 0; i < xs.length; ++i)
+      i ? g.lineTo(X(i), Y(xs[i])) : g.moveTo(X(i), Y(xs[i]));
+    g.stroke();
+  });
+  g.globalAlpha = 1;
+  g.fillStyle = getComputedStyle(document.body).color;
+  g.font = "12px system-ui";
+  g.fillText(name + "  trace, " + fit.chains.length + " chains", 6, 14);
+}
+function histPlot(name) {
+  const xs = allDraws(name);
   let lo = Infinity, hi = -Infinity;
   for (const x of xs) { if (x < lo) lo = x; if (x > hi) hi = x; }
   if (!(hi > lo)) { lo -= 1; hi += 1; }
@@ -179,10 +430,25 @@ function hist(name) {
   });
   g.fillStyle = getComputedStyle(document.body).color;
   g.font = "12px system-ui";
-  g.textAlign = "left";
   g.fillText(name + "  [" + lo.toPrecision(3) + ", " +
              hi.toPrecision(3) + "]", 6, 14);
 }
+
+// ---- CSV -------------------------------------------------------------------
+$("csv").onclick = () => {
+  const lines = ["chain," + fit.names.join(",")];
+  fit.chains.forEach((ch, ci) => {
+    for (let s = 0; s < fit.samples; ++s)
+      lines.push((ci + 1) + "," +
+                 fit.names.map((n) => ch[n][s]).join(","));
+  });
+  const blob = new Blob([lines.join("\n") + "\n"], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "stanli-draws.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
 </script>
 </body>
 </html>

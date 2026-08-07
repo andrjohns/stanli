@@ -49,6 +49,16 @@ int64_t stanli_n_constrained(const stanli_model* m);
 const char* stanli_constrained_name(const stanli_model* m, int64_t i);
 int stanli_constrain(stanli_model* m, const double* q, double* out);
 
+/* Streaming variant of stanli_sample: `cb`, when non-null, fires after
+ * every transition. During warmup (`warmup` nonzero) the buffer is
+ * untouched; after it, draw `i` is written to `draws` before its
+ * callback, so rows [0, i] are readable mid-run. */
+typedef void (*stanli_draw_cb)(int32_t i, int32_t warmup, void* user);
+int stanli_sample_stream(stanli_model* m, uint32_t seed, int warmup,
+                         int samples, double delta, double* draws,
+                         stanli_draw_cb cb, void* user,
+                         char* err, size_t err_len);
+
 /* write_array: every CSV column CmdStan would emit for one draw --
  * constrained parameters, transformed parameters, generated quantities,
  * in CmdStan's column order. n_columns is 0 when the model has no

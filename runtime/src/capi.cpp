@@ -182,14 +182,31 @@ int stanli_grad(stanli_model* m, const double* q, double* lp, double* grad) {
 
 int stanli_sample(stanli_model* m, uint32_t seed, int warmup, int samples,
                   double delta, double* draws, char* err, size_t err_len) {
+  return stanli_sample_stream(m, seed, warmup, samples, delta, draws,
+                              nullptr, nullptr, err, err_len);
+}
+
+int stanli_sample_stream(stanli_model* m, uint32_t seed, int warmup,
+                         int samples, double delta, double* draws,
+                         stanli_draw_cb cb, void* user, char* err,
+                         size_t err_len) {
   try {
     stanli::NutsConfig cfg;
     cfg.seed = seed;
     cfg.warmup = warmup;
     cfg.samples = samples;
     cfg.delta = delta;
-    auto out = stanli::run_nuts(*m->ex, cfg);
     const int64_t n = m->ex->n_params();
+    stanli::DrawObserver observe;
+    if (cb) {
+      // Each post-warmup draw lands in the caller's buffer before its
+      // callback fires, so a streaming consumer can read rows [0, i].
+      observe = [&](int64_t i, bool wu, const double* q) {
+        if (!wu) std::memcpy(draws + i * n, q, sizeof(double) * n);
+        cb((int32_t)i, wu ? 1 : 0, user);
+      };
+    }
+    auto out = stanli::run_nuts(*m->ex, cfg, nullptr, observe);
     for (size_t s = 0; s < out.size(); ++s)
       std::memcpy(draws + s * n, out[s].data(), sizeof(double) * n);
     return 0;
