@@ -233,7 +233,7 @@ evaluate, and verify. Details in
 
 ## Status
 
-25/25 tests green, built and tested in CI on macOS (arm64, x86_64) and
+26/26 tests green, built and tested in CI on macOS (arm64, x86_64) and
 manylinux (x86_64, aarch64). 119/120 posteriordb models compile and
 evaluate, <!--gen:corpus_verified_n-->118<!--/gen--> of them
 CmdStan-verified. Of the two that are not: `sir`'s

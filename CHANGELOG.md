@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.2.0
+
+- Generated quantities and transformed parameters now come out of all
+  119 compiling corpus models, up from 93. Where the write_array graph
+  cannot express the section (RNG draws, integer draws that then size or
+  index things, branches on draw-computed values), a per-draw
+  interpreter runs the whole section instead: constrained parameters
+  feed in by name, RNG calls draw from a seeded stream through
+  stan-math, and `integrate_ode` inside generated quantities works. The
+  graph stays the fast path and the sampler is untouched.
+- Parameter-dependent branches compile. `if (theta > 0)` and
+  `theta > 0 ? a : b` in the model block were compile errors, since an
+  op graph cannot pick an arm at evaluation time. The conditional
+  region now compiles to a small register program run by one op; its
+  backward replays under nested autodiff, evaluating exactly the arm
+  CmdStan's generated C++ would.
+- The differential corpus oracle runs in CI on every push, on all four
+  platforms: recorded CmdStan values for the log density and every
+  gradient component replay against each build (measured worst
+  deviation 2.6e-12 against a 1e-9 gate). write_array values joined the
+  oracle for the 20 models whose generated quantities are
+  deterministic. Recording them caught and fixed two interpreter bugs:
+  uninitialized reals are NaN as in CmdStan, and batched simplex
+  parameters were read transposed.
+- Faster: kernel contexts and dispatch resolve once at bind time, the
+  executor sweeps unroll 4x, mixture lanes fuse into batched
+  elementwise-density and log_mix kernels, and element-store runs fuse
+  into vector stores. Median per-gradient 2.00x CmdStan across the
+  corpus, 92 of 119 models at parity or better; the ten benchmark
+  models span 1.0x-6.1x, and `low_dim_gauss_mix` (0.53x in 0.1.0) is
+  now 1.11x. Re-roll's write-fusion renames lazily, fixing a
+  compile-time blowup on models that refill one small vector tens of
+  thousands of times.
+- Initialization draws that produce a non-finite log density are
+  rejected and retried, as CmdStan does.
+- One MIR interpreter serves transformed data, ODE right-hand sides,
+  and interpreted generated quantities with one shared vocabulary, and
+  the ODE register machine and the tape-island program are one machine
+  with one instruction set.
+- Python: `Model.log_prob_grad` raises on a failed evaluation instead
+  of returning an uninitialized gradient buffer, and rejects
+  wrong-sized points with `ValueError`.
+- Tools: per-opcode profiling behind `STANLI_PROFILE=1`, a
+  sampler-level differential harness (`tools/sampler_trace.py`), a
+  contributor map in `docs/hacking.md`, and doc numbers generated from
+  the measured artifacts and checked in CI.
+
+Still true from 0.1.0: `sample()` in Python returns declared parameters
+only; transformed parameters and generated quantities reach the CSV of
+`stanli_run` but not the Python API yet. No variational inference, no
+optimization, no multi-chain threading, no Windows wheel.
+
 ## 0.1.0
 
 First public release.
