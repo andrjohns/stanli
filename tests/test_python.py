@@ -45,6 +45,35 @@ def test_failing_gradient_raises():
     raise AssertionError("expected RuntimeError from a failing gradient")
 
 
+def test_sample_returns_transformed_parameters():
+    # es.stan declares `vector[J] theta` in transformed parameters; the
+    # write_array path must surface it alongside the declared parameters.
+    m = stanli.Model(stan_file=FIXTURES / "es.stan",
+                     data=FIXTURES / "eight_schools.json")
+    d = m.sample(seed=1, warmup=200, samples=100)
+    for col in ("mu", "tau", "theta.1", "theta.8"):
+        assert col in d, sorted(d)[:12]
+    assert abs(d["theta.1"].mean()) < 30.0
+
+
+def test_sample_returns_generated_quantities():
+    # RNG draws and draw-dependent branches run through the interpreted
+    # write_array; the columns and the seeded RNG stream must both reach
+    # Python.
+    code = (FIXTURES / "gqrng.stan").read_text()
+    m = stanli.Model(stan_code=code, data={"N": 5})
+    d = m.sample(seed=7, warmup=200, samples=50)
+    for col in ("sigma", "yrep", "crep", "branchy", "p"):
+        assert col in d, sorted(d)
+    crep = d["crep"]
+    assert ((crep == np.floor(crep)) & (crep >= 0) & (crep <= 5)).all()
+    assert (d["p"] == 6.0).all()
+    assert d["yrep"].std() > 0.0
+    d2 = stanli.Model(stan_code=code, data={"N": 5}).sample(
+        seed=7, warmup=200, samples=50)
+    assert (d["yrep"] == d2["yrep"]).all(), "same seed, different GQ draws"
+
+
 def test_wrong_size_raises():
     m = stanli.Model(
         stan_code="parameters { real x; } model { x ~ normal(0, 1); }")

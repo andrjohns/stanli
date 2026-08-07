@@ -104,6 +104,10 @@ $("data").value = `{"J": 8,
 
 const worker = new Worker("worker.js");
 let result = null;
+worker.onerror = (e) => {
+  $("run").disabled = false;
+  $("err").textContent = "worker: " + (e.message || "failed to load");
+};
 
 $("run").onclick = () => {
   $("run").disabled = true;

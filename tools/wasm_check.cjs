@@ -79,8 +79,26 @@ createStanli().then((M) => {
     parts.push(fmt(g));
   }
   console.log(parts.join(" "));
-  if (waValues)
-    console.log("WANAMES FAIL wasm capi has no write_array\nWAVALS FAIL");
+  if (waValues) {
+    const nWa = Number(M._stanli_wa_n_columns(m));
+    if (nWa <= 0) {
+      console.log("WANAMES FAIL no write_array\nWAVALS FAIL");
+    } else {
+      const names = [];
+      for (let i = 0; i < nWa; ++i)
+        names.push(M.UTF8ToString(M._stanli_wa_column_name(m, BigInt(i))));
+      M._stanli_wa_seed(m, 1234);
+      const waPtr = M._malloc(8 * nWa);
+      if (M._stanli_wa_row(m, qPtr, waPtr) !== 0) {
+        console.log("WANAMES FAIL wa_row failed\nWAVALS FAIL");
+      } else {
+        const vals = [];
+        for (let i = 0; i < nWa; ++i) vals.push(fmt(M.HEAPF64[waPtr / 8 + i]));
+        console.log("WANAMES " + names.join(","));
+        console.log("WAVALS " + vals.join(" "));
+      }
+    }
+  }
   process.exitCode = 0;
 }).catch((e) => {
   console.log("EVAL_FAIL " + String(e).split("\n")[0]);

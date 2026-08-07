@@ -54,6 +54,15 @@ def _load_lib():
                                                ctypes.c_char_p,
                                                ctypes.c_char_p,
                                                ctypes.c_size_t]
+    lib.stanli_wa_n_columns.restype = ctypes.c_int64
+    lib.stanli_wa_n_columns.argtypes = [ctypes.c_void_p]
+    lib.stanli_wa_column_name.restype = ctypes.c_char_p
+    lib.stanli_wa_column_name.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+    lib.stanli_wa_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.stanli_wa_row.restype = ctypes.c_int
+    lib.stanli_wa_row.argtypes = [ctypes.c_void_p,
+                                  ctypes.POINTER(ctypes.c_double),
+                                  ctypes.POINTER(ctypes.c_double)]
     return lib
 
 
@@ -151,7 +160,14 @@ class Model:
         return lp.value, grad
 
     def sample(self, *, seed=1, warmup=1000, samples=1000, delta=0.8):
-        """NUTS draws as {name: array} of constrained parameters."""
+        """NUTS draws as {name: array} of CSV columns.
+
+        Models with a generate_quantities section return every column
+        CmdStan's CSV would carry: constrained parameters, transformed
+        parameters, and generated quantities, with RNG draws streamed
+        from `seed`. Models without one return the constrained
+        parameters.
+        """
         n = self.n_unconstrained
         draws = np.empty((samples, n))
         err = ctypes.create_string_buffer(4096)
@@ -161,6 +177,26 @@ class Model:
             err, len(err))
         if rc != 0:
             raise RuntimeError(err.value.decode())
+
+        n_wa = _lib.stanli_wa_n_columns(self._m)
+        if n_wa > 0:
+            names = [_lib.stanli_wa_column_name(self._m, i).decode()
+                     for i in range(n_wa)]
+            _lib.stanli_wa_seed(self._m, seed)
+            out = np.empty((samples, n_wa))
+            row = np.empty(n_wa)
+            for s in range(samples):
+                if _lib.stanli_wa_row(
+                        self._m,
+                        draws[s].ctypes.data_as(
+                            ctypes.POINTER(ctypes.c_double)),
+                        row.ctypes.data_as(
+                            ctypes.POINTER(ctypes.c_double))) != 0:
+                    raise RuntimeError(
+                        f"write_array failed on draw {s}")
+                out[s] = row
+            return {name: out[:, i] for i, name in enumerate(names)}
+
         n_con = len(self.constrained_names)
         con = np.empty((samples, n_con))
         row = np.empty(n_con)

@@ -40,15 +40,29 @@ onmessage = async (e) => {
     if (rc !== 0) throw new Error(M.UTF8ToString(errPtr));
     const tSample = performance.now();
 
-    say("constraining draws");
-    const nCon = Number(M._stanli_n_constrained(model));
+    say("computing CSV columns");
+    // write_array supplies every CmdStan CSV column (constrained params,
+    // transformed parameters, generated quantities with seeded RNG);
+    // models without a generate_quantities section fall back to the
+    // constrained view.
+    const nWa = Number(M._stanli_wa_n_columns(model));
+    const useWa = nWa > 0;
+    const nCon = useWa ? nWa : Number(M._stanli_n_constrained(model));
     const names = [];
     for (let i = 0; i < nCon; ++i)
-      names.push(M.UTF8ToString(M._stanli_constrained_name(model, BigInt(i))));
+      names.push(M.UTF8ToString(
+          useWa ? M._stanli_wa_column_name(model, BigInt(i))
+                : M._stanli_constrained_name(model, BigInt(i))));
+    if (useWa) M._stanli_wa_seed(model, req.seed >>> 0);
     const cols = new Float64Array(nCon * samples);
     const rowPtr = M._malloc(8 * nCon);
     for (let s = 0; s < samples; ++s) {
-      M._stanli_constrain(model, drawsPtr + 8 * s * n, rowPtr);
+      if (useWa) {
+        if (M._stanli_wa_row(model, drawsPtr + 8 * s * n, rowPtr) !== 0)
+          throw new Error("write_array failed on draw " + s);
+      } else {
+        M._stanli_constrain(model, drawsPtr + 8 * s * n, rowPtr);
+      }
       for (let i = 0; i < nCon; ++i)
         cols[i * samples + s] = M.HEAPF64[rowPtr / 8 + i];
     }

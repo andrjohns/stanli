@@ -49,6 +49,18 @@ int64_t stanli_n_constrained(const stanli_model* m);
 const char* stanli_constrained_name(const stanli_model* m, int64_t i);
 int stanli_constrain(stanli_model* m, const double* q, double* out);
 
+/* write_array: every CSV column CmdStan would emit for one draw --
+ * constrained parameters, transformed parameters, generated quantities,
+ * in CmdStan's column order. n_columns is 0 when the model has no
+ * generate_quantities section (use stanli_constrain then). RNG calls in
+ * generated quantities draw from one stream; seed it per chain with
+ * stanli_wa_seed before the first row. wa_row evaluates at unconstrained
+ * q and writes n_columns doubles; returns 0 on success. */
+int64_t stanli_wa_n_columns(const stanli_model* m);
+const char* stanli_wa_column_name(const stanli_model* m, int64_t i);
+void stanli_wa_seed(stanli_model* m, uint32_t seed);
+int stanli_wa_row(stanli_model* m, const double* q, double* out);
+
 #ifdef __cplusplus
 }
 #endif
