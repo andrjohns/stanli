@@ -96,6 +96,16 @@ model's *shape*, not its size:
   side was interpreted per call; with it compiled (below) they sit at
   ~0.6x, the residue being our per-call dispatch against CmdStan's
   fully inlined right-hand side inside the same CVODES solver.
+- **Two models that are neither** — the worst rows in the table — and
+  `STANLI_PROFILE=1` says plainly what each is. `diamonds` (0.48x)
+  spends **92.6%** of its gradient inside a single op,
+  `OP_NORMAL_ID_GLM_LPDF` (45 us forward, 35 us backward, one call):
+  there is no graph problem to fix, the gap is inside that one kernel.
+  `Mtbh_model` (0.45x) spends **36%** in `OP_SET_SLICE_STRIDED`, 146
+  calls moving 106,580 elements, most of it in the backward: the
+  in-place rule below rewrites element writes (`OP_SET_INDEX`) but not
+  slice writes, so a model that fills a matrix column by column still
+  copies the whole matrix per column. Both are open.
 
 **Where the wins come from: op granularity.** The interpreter's cost is
 per op, not per element: ~17-20 ns for a scalar density op forward +
