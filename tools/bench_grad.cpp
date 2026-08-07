@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -27,6 +28,10 @@ int main(int argc, char** argv) {
   stanli::CompiledModel cm = stanli::compile_model(slurp(argv[1]), data);
   stanli::Executor ex(std::move(cm.graph));
   cm.bind(ex);
+  // STANLI_PROFILE=1: per-opcode time/count/element accounting on stderr.
+  // Enabled for the measured loop only, so warmup does not pollute it.
+  const char* prof_env = std::getenv("STANLI_PROFILE");
+  const bool profile = prof_env && prof_env[0] != '0';
   const int64_t n = ex.n_params();
   for (int64_t i = 0; i < n; ++i)
     ex.params_data()[i] = 0.1 + 0.05 * (i % 7) - 0.15 * (i % 3);
@@ -43,9 +48,11 @@ int main(int argc, char** argv) {
         break;
     }
   }
+  if (profile) ex.set_profile(true);
   auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < N; ++i) sink += ex.gradient(grad.data());
   auto t1 = std::chrono::steady_clock::now();
+  if (profile) std::fprintf(stderr, "%s", ex.profile_report().c_str());
   const double ns =
       std::chrono::duration<double, std::nano>(t1 - t0).count() / N;
   // Forward-only, for splitting a cost between the two sweeps.

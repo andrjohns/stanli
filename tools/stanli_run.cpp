@@ -59,6 +59,10 @@ int main(int argc, char** argv) {
         stanli::compile_model(run_stanc(stanc, model), data);
     stanli::Executor ex(std::move(cm.graph));
     cm.bind(ex);
+    // STANLI_PROFILE=1: per-opcode accounting for the whole sampling run,
+    // printed to stderr alongside the gradient-evaluation count.
+    const char* prof_env = std::getenv("STANLI_PROFILE");
+    if (prof_env && prof_env[0] != '0') ex.set_profile(true);
     auto draws = stanli::run_nuts(ex, cfg);
 
     // Draws are written through the write_array graph when there is one --
@@ -103,6 +107,8 @@ int main(int argc, char** argv) {
     // claims and can move in opposite directions.
     std::fprintf(stderr, "stanli_run: %lld gradient evaluations\n",
                  (long long)ex.n_grad_evals());
+    const std::string prof = ex.profile_report();
+    if (!prof.empty()) std::fprintf(stderr, "%s", prof.c_str());
   } catch (const std::exception& e) {
     std::fprintf(stderr, "stanli_run: %s\n", e.what());
     return 1;

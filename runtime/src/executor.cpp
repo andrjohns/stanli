@@ -2,7 +2,10 @@
 #include <stanli/optable.hpp>
 #include <stanli/packet.hpp>
 
+#include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -161,8 +164,60 @@ KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
   return ctx;
 }
 
+void Executor::set_profile(bool on) {
+  profile_ = on;
+  if (on && prof_.empty()) prof_.resize(OP_COUNT_);
+}
+
+std::string Executor::profile_report() const {
+  int64_t grand = 0;
+  for (const auto& e : prof_) grand += e.fwd_ns + e.bwd_ns;
+  if (grand == 0) return "";
+  // Opcodes by total time, descending.
+  std::vector<uint16_t> order;
+  for (uint16_t op = 0; op < prof_.size(); ++op)
+    if (prof_[op].calls > 0) order.push_back(op);
+  std::sort(order.begin(), order.end(), [&](uint16_t a, uint16_t b) {
+    return prof_[a].fwd_ns + prof_[a].bwd_ns >
+           prof_[b].fwd_ns + prof_[b].bwd_ns;
+  });
+  char line[160];
+  std::string out;
+  std::snprintf(line, sizeof line, "%-22s %10s %12s %12s %6s %12s\n",
+                "opcode", "calls", "fwd ns", "bwd ns", "%", "elems");
+  out += line;
+  for (uint16_t op : order) {
+    const ProfEntry& e = prof_[op];
+    std::snprintf(line, sizeof line,
+                  "%-22s %10lld %12lld %12lld %5.1f%% %12lld\n",
+                  opcode_name(op), (long long)e.calls, (long long)e.fwd_ns,
+                  (long long)e.bwd_ns,
+                  100.0 * (double)(e.fwd_ns + e.bwd_ns) / (double)grand,
+                  (long long)e.elems);
+    out += line;
+  }
+  std::snprintf(line, sizeof line, "%-22s %10s %12lld ns total\n", "", "",
+                (long long)grand);
+  out += line;
+  return out;
+}
+
 void Executor::run_forward_only() {
   const size_t n = graph_.ops.size();
+  if (profile_) {
+    for (size_t i = 0; i < n; ++i) {
+      const uint16_t op = graph_.ops[i].opcode;
+      const auto t0 = std::chrono::steady_clock::now();
+      kernel(op).forward(ctx_[i]);
+      const auto t1 = std::chrono::steady_clock::now();
+      ProfEntry& e = prof_[op];
+      ++e.calls;
+      e.fwd_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      t1 - t0).count();
+      e.elems += ctx_[i].out.len;
+    }
+    return;
+  }
   for (size_t i = 0; i < n; ++i)
     kernel(graph_.ops[i].opcode).forward(ctx_[i]);
 }
@@ -187,6 +242,14 @@ double Executor::gradient(double* grad_out) {
     // which kernels take by value.
     if (ctx.out_adj_vec.len == 1) ctx.out_adj = ctx.out_adj_vec.data[0];
     if (out2_adj_ptr_[i]) ctx.out2_adj = *out2_adj_ptr_[i];
+    if (profile_) {
+      const auto t0 = std::chrono::steady_clock::now();
+      k.backward(ctx);
+      prof_[graph_.ops[i].opcode].bwd_ns +=
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - t0).count();
+      continue;
+    }
     k.backward(ctx);
   }
   std::memcpy(grad_out, adjoints_.data(), sizeof(double) * n_params_);

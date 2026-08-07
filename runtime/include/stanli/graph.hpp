@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace stanli {
@@ -112,9 +113,25 @@ class Executor {
   double gradient(double* grad_out);
   int64_t n_grad_evals() const { return n_grad_evals_; }
 
+  // Opt-in per-opcode accounting (calls, forward/backward ns, elements).
+  // Off by default and off the fast path when off; STANLI_PROFILE=1 makes
+  // the CLI tools enable it and print the report. Toggling off stops
+  // accumulation but keeps what was collected.
+  void set_profile(bool on);
+  // Human-readable table sorted by total time; empty when nothing was
+  // collected.
+  std::string profile_report() const;
+
  private:
   void bind_();
   KernelCtx make_ctx_(const Op& op, bool backward);
+
+  struct ProfEntry {
+    int64_t calls = 0;       // forward invocations
+    int64_t fwd_ns = 0;
+    int64_t bwd_ns = 0;
+    int64_t elems = 0;       // output elements per forward call, summed
+  };
 
   Graph graph_;
   std::vector<double> values_;
@@ -127,6 +144,8 @@ class Executor {
   std::vector<KernelCtx> ctx_;
   std::vector<double*> out2_adj_ptr_;  // parallel to ops; null when no out2
   std::vector<char> written_;  // slot carries adjoint (param or op output)
+  bool profile_ = false;
+  std::vector<ProfEntry> prof_;  // indexed by opcode; empty until enabled
   int64_t n_grad_evals_ = 0;
   int64_t n_params_ = 0;
   int64_t arena_len_ = 0;
