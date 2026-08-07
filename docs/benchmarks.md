@@ -435,7 +435,10 @@ is a property of the posterior, not of either sampler. `hmm_gaussian`
 (0.69x per gradient, 0.03x sampling) is the same shape with a sharper
 edge: at that seed CmdStan's run has *every* post-warmup draw divergent,
 so its 18.75 s is a chain that is not sampling at all. Read the sampling
-column as indicative and the gradient column as the measurement.
+column as indicative and the gradient column as the measurement. (It is
+also older than the gradient column in one way: it was measured before
+the sampler moved to CmdStan's generator, so the seed that produced each
+row's draws is not the seed that would produce them today.)
 Regenerate with `python3 tools/corpus_table.py docs/corpus-bench.tsv`.
 
 | model | params | CmdStan ns/grad | grad speedup | CmdStan sample | sample speedup |
