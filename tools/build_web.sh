@@ -11,9 +11,16 @@ cmake --build build-wasm -j8 --target stanli_wasm
 
 if [ ! -f deps/stanc3-src/_build/default/src/stancjs/stancjs.bc.js ]; then
   (cd deps/stanc3-src && eval "$(opam env --switch=stanc3-55)" \
-    && dune build src/stancjs/stancjs.bc.js)
+    && dune build --profile release src/stancjs/stancjs.bc.js)
 fi
 
-cp build-wasm/stanli.js build-wasm/stanli.wasm web/
-cp deps/stanc3-src/_build/default/src/stancjs/stancjs.bc.js web/
+# js/ is the npm package: wrapper + worker + the three artifacts.
+cp build-wasm/stanli.js build-wasm/stanli.wasm js/
+rm -f js/stancjs.bc.js
+cp deps/stanc3-src/_build/default/src/stancjs/stancjs.bc.js js/
+chmod +w js/stancjs.bc.js
+
+# web/ is the demo page, assembled as a consumer of the package.
+cp js/index.mjs web/stanli.mjs
+cp js/worker.js js/stanli.js js/stanli.wasm js/stancjs.bc.js web/
 ls -la web/

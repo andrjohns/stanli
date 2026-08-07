@@ -75,8 +75,8 @@ everything below happens in this tab.</p>
 <canvas id="hist" width="640" height="180" hidden></canvas>
 <div class="times" id="times"></div>
 
-<script>
-"use strict";
+<script type="module">
+import { sample } from "./stanli.mjs";
 const $ = (id) => document.getElementById(id);
 
 $("code").value = `data {
@@ -102,50 +102,41 @@ $("data").value = `{"J": 8,
  "y": [28, 8, -3, 7, -1, 1, 18, 12],
  "sigma": [15, 10, 16, 11, 9, 11, 10, 18]}`;
 
-const worker = new Worker("worker.js");
 let result = null;
-worker.onerror = (e) => {
-  $("run").disabled = false;
-  $("err").textContent = "worker: " + (e.message || "failed to load");
-};
 
-$("run").onclick = () => {
+$("run").onclick = async () => {
   $("run").disabled = true;
   $("err").textContent = "";
   $("out").innerHTML = "";
   $("times").textContent = "";
   $("hist").hidden = true;
-  worker.postMessage({
-    cmd: "run",
-    code: $("code").value,
-    dataJson: $("data").value,
-    seed: parseInt($("seed").value, 10) || 1,
-    warmup: parseInt($("warmup").value, 10) || 1000,
-    samples: parseInt($("samples").value, 10) || 1000,
-    delta: parseFloat($("delta").value) || 0.8,
-  });
-};
-
-worker.onmessage = (e) => {
-  const m = e.data;
-  if (m.status) { $("status").textContent = m.status; return; }
+  try {
+    result = await sample({
+      code: $("code").value,
+      data: $("data").value,
+      seed: parseInt($("seed").value, 10) || 1,
+      warmup: parseInt($("warmup").value, 10) || 1000,
+      samples: parseInt($("samples").value, 10) || 1000,
+      delta: parseFloat($("delta").value) || 0.8,
+      onProgress: (s) => { $("status").textContent = s; },
+    });
+    render(result.ms);
+  } catch (e) {
+    $("err").textContent = String(e.message || e);
+  }
   $("run").disabled = false;
   $("status").textContent = "";
-  if (m.error) { $("err").textContent = m.error; return; }
-  result = { names: m.done.names, samples: m.done.samples,
-             cols: new Float64Array(m.done.columns) };
-  render(m.done.ms);
 };
 
-function colStats(i) {
-  const { samples, cols } = result;
-  const xs = cols.subarray(i * samples, (i + 1) * samples);
+function colStats(name) {
+  const xs = result.columns[name];
+  const n = xs.length;
   const sorted = Float64Array.from(xs).sort();
   let s = 0; for (const x of xs) s += x;
-  const mean = s / samples;
+  const mean = s / n;
   let v = 0; for (const x of xs) v += (x - mean) * (x - mean);
-  const q = (p) => sorted[Math.min(samples - 1, Math.floor(p * samples))];
-  return { mean, sd: Math.sqrt(v / (samples - 1)),
+  const q = (p) => sorted[Math.min(n - 1, Math.floor(p * n))];
+  return { mean, sd: Math.sqrt(v / (n - 1)),
            q5: q(0.05), q50: q(0.5), q95: q(0.95) };
 }
 
@@ -153,9 +144,9 @@ function render(ms) {
   const f = (x) => (Math.abs(x) >= 1000 ? x.toFixed(0) : x.toPrecision(4));
   let html = "<table><tr><th>parameter</th><th>mean</th><th>sd</th>" +
              "<th>5%</th><th>50%</th><th>95%</th></tr>";
-  result.names.forEach((n, i) => {
-    const st = colStats(i);
-    html += `<tr data-i="${i}"><td>${n}</td><td>${f(st.mean)}</td>` +
+  result.names.forEach((n) => {
+    const st = colStats(n);
+    html += `<tr data-n="${n}"><td>${n}</td><td>${f(st.mean)}</td>` +
             `<td>${f(st.sd)}</td><td>${f(st.q5)}</td>` +
             `<td>${f(st.q50)}</td><td>${f(st.q95)}</td></tr>`;
   });
@@ -164,13 +155,12 @@ function render(ms) {
       `stanc ${ms.stanc.toFixed(0)} ms, lower ${ms.lower.toFixed(0)} ms, ` +
       `sample ${ms.sample.toFixed(0)} ms, total ${ms.total.toFixed(0)} ms ` +
       `(click a row for its histogram)`;
-  for (const tr of $("out").querySelectorAll("tr[data-i]"))
-    tr.onclick = () => hist(parseInt(tr.dataset.i, 10));
+  for (const tr of $("out").querySelectorAll("tr[data-n]"))
+    tr.onclick = () => hist(tr.dataset.n);
 }
 
-function hist(i) {
-  const { samples, cols, names } = result;
-  const xs = cols.subarray(i * samples, (i + 1) * samples);
+function hist(name) {
+  const xs = result.columns[name];
   let lo = Infinity, hi = -Infinity;
   for (const x of xs) { if (x < lo) lo = x; if (x > hi) hi = x; }
   if (!(hi > lo)) { lo -= 1; hi += 1; }
@@ -190,7 +180,7 @@ function hist(i) {
   g.fillStyle = getComputedStyle(document.body).color;
   g.font = "12px system-ui";
   g.textAlign = "left";
-  g.fillText(names[i] + "  [" + lo.toPrecision(3) + ", " +
+  g.fillText(name + "  [" + lo.toPrecision(3) + ", " +
              hi.toPrecision(3) + "]", 6, 14);
 }
 </script>

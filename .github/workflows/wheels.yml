@@ -279,7 +279,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: web/stancjs.bc.js
-          key: stancjs-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-jsoo6.4.1
+          key: stancjs-release-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-jsoo6.4.1
 
       - name: opam ${{ env.OPAM_VERSION }}
         if: steps.stancjs-cache.outputs.cache-hit != 'true'
@@ -304,10 +304,22 @@ jobs:
              js_of_ocaml.6.4.1 js_of_ocaml-compiler.6.4.1 \
              js_of_ocaml-ppx.6.4.1 &&
            eval "$(opam env --switch=stancjs)" &&
-           dune build src/stancjs/stancjs.bc.js)
+           dune build --profile release src/stancjs/stancjs.bc.js)
           cp deps/stanc3-src/_build/default/src/stancjs/stancjs.bc.js web/
         env:
           OPAMYES: '1'
+
+      - name: Assemble the page and the npm package
+        run: |
+          cp web/stanli.js web/stanli.wasm web/stancjs.bc.js js/
+          cp js/index.mjs web/stanli.mjs
+          cp js/worker.js web/
+          (cd js && npm pack --pack-destination ..)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: stanli-*.tgz
 
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -14,3 +14,9 @@ build-wasm/
 web/stanli.js
 web/stanli.wasm
 web/stancjs.bc.js
+js/stanli.js
+js/stanli.wasm
+js/stancjs.bc.js
+web/worker.js
+web/stanli.mjs
+*.tgz

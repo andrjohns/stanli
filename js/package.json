@@ -1,0 +1,34 @@
+{
+  "name": "stanli",
+  "version": "0.1.0",
+  "description": "Full Stan in the browser: stanc3 compiles the model in JS, a WASM runtime lowers it to an op graph and runs NUTS. No server, no C++ toolchain.",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "worker.js",
+    "stanli.js",
+    "stanli.wasm",
+    "stancjs.bc.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seantalts/stanli.git"
+  },
+  "homepage": "https://seantalts.github.io/stanli/",
+  "license": "BSD-3-Clause",
+  "keywords": [
+    "stan",
+    "bayesian",
+    "mcmc",
+    "nuts",
+    "statistics",
+    "wasm",
+    "webassembly"
+  ]
+}
