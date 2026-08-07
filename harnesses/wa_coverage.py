@@ -46,9 +46,15 @@ def main():
             with zipfile.ZipFile(dz) as z:
                 dj.write_bytes(z.read(z.namelist()[0]))
         try:
-            p = subprocess.run([str(CHECK), str(stan), str(dj)],
-                               capture_output=True, text=True, timeout=300,
-                               cwd=REPO)
+            # Walk the shared probe points: a model can be out of support
+            # at one (dogs_log rejects point 0) and fine at the next.
+            for point in ("0", "1", "2"):
+                p = subprocess.run([str(CHECK), str(stan), str(dj),
+                                    "--point", point],
+                                   capture_output=True, text=True,
+                                   timeout=300, cwd=REPO)
+                if p.stdout.startswith("OK"):
+                    break
         except subprocess.TimeoutExpired:
             rows.append((model, "TIMEOUT", "", 0))
             continue
