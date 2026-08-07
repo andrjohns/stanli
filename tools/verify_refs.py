@@ -92,11 +92,18 @@ def gate_for(ref, default):
     documented and understood (kronecker_gp: two of 438 gradients flow
     through eigenvectors of a nearly degenerate covariance). Gating it at
     the clean threshold would fail every run; ignoring it would let a real
-    regression hide behind a known deviation. Gate it a little above what
-    it was recorded at, so it can never get worse unnoticed.
+    regression hide behind a known deviation. Gate it above what it was
+    recorded at, so it can never get much worse unnoticed.
+
+    4x, not 2x: an ill-conditioned eigendecomposition amplifies ISA-level
+    differences, and the deviation itself moves across platforms. Measured
+    for kronecker_gp: 7.1e-3 on arm64 (where the reference was recorded),
+    1.71e-2 on both x86_64 runners, identical to each other. The gate is a
+    tripwire for the regression class this corpus has actually caught,
+    which measured 1.7e+5 relative, seven orders of magnitude above it.
     """
     if ref.get("status") == "MISMATCH":
-        return max(ref.get("max_rel", 0.0) * 2.0, default)
+        return max(ref.get("max_rel", 0.0) * 4.0, default)
     return default
 
 
