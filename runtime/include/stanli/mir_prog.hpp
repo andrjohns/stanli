@@ -261,51 +261,24 @@ struct ProgramCompiler {
       }
       bail("internal function " + e.name);
     }
-    if (e.args.size() == 2) {
-      const Range a = expr(e.args[0]), b = expr(e.args[1]);
-      const int n = std::max(a.len, b.len);
-      if ((a.len != 1 && a.len != n) || (b.len != 1 && b.len != n))
-        bail("binary " + e.name + " on mismatched widths");
-      Program::Code c;
-      if (e.name == "Plus__") c = Program::ADD;
-      else if (e.name == "Minus__") c = Program::SUB;
-      else if (e.name == "Times__" || e.name == "EltTimes__") c = Program::MUL;
-      else if (e.name == "Divide__" || e.name == "EltDivide__") c = Program::DIV;
-      else if (e.name == "Pow__" || e.name == "pow") c = Program::POW;
-      else if (e.name == "fmax") c = Program::FMAX;
-      else if (e.name == "fmin") c = Program::FMIN;
-      else if (e.name == "Greater__") c = Program::GT;
-      else if (e.name == "Geq__") c = Program::GE;
-      else if (e.name == "Less__") c = Program::LT;
-      else if (e.name == "Leq__") c = Program::LE;
-      else if (e.name == "Equals__") c = Program::EQ;
-      else if (e.name == "NEquals__") c = Program::NE;
-      else bail("function " + e.name);
-      const int r = alloc(n);
-      for (int i = 0; i < n; ++i)
-        emit(c, r + i, a.reg + (a.len == 1 ? 0 : i),
-             b.reg + (b.len == 1 ? 0 : i));
-      return {r, n};
-    }
+    // Ahead of the arity-keyed blocks below: those end in a bail on an
+    // unknown name, so while this table sat after them a two-argument
+    // density (exponential_lpdf) was unreachable -- listed as supported
+    // and refused in practice.
     // Explicit density calls. `target += normal_lpdf(y | mu, s)` keeps
     // every constant, which is the propto-OFF instantiation the machine
     // has; a `~` statement's dropped-constant form depends on which
     // arguments are autodiff and is not expressible here.
     {
-      Program::Code dc;
+      Program::Code dc = Program::CONST;
       int arity = 0;
-      if (e.name == "std_normal_lpdf") { dc = Program::STD_NORMAL; arity = 1; }
-      else if (e.name == "exponential_lpdf") { dc = Program::EXPONENTIAL; arity = 2; }
-      else if (e.name == "normal_lpdf") { dc = Program::NORMAL; arity = 3; }
-      else if (e.name == "lognormal_lpdf") { dc = Program::LOGNORMAL; arity = 3; }
-      else if (e.name == "cauchy_lpdf") { dc = Program::CAUCHY; arity = 3; }
-      else if (e.name == "gamma_lpdf") { dc = Program::GAMMA; arity = 3; }
-      else if (e.name == "inv_gamma_lpdf") { dc = Program::INV_GAMMA; arity = 3; }
-      else if (e.name == "beta_lpdf") { dc = Program::BETA; arity = 3; }
-      else if (e.name == "weibull_lpdf") { dc = Program::WEIBULL; arity = 3; }
-      else if (e.name == "logistic_lpdf") { dc = Program::LOGISTIC; arity = 3; }
-      else if (e.name == "double_exponential_lpdf") { dc = Program::DOUBLE_EXP; arity = 3; }
-      else if (e.name == "uniform_lpdf") { dc = Program::UNIFORM; arity = 3; }
+#define STANLI_PROG_DENSITY_NAME(code, fn, n) \
+  if (e.name == #fn) {                        \
+    dc = Program::code;                       \
+    arity = n;                                \
+  }
+      STANLI_PROGRAM_DENSITY_LIST(STANLI_PROG_DENSITY_NAME)
+#undef STANLI_PROG_DENSITY_NAME
       if (arity) {
         // A `~` statement lowers to the same call with propto set, and
         // which constants it drops depends on which arguments are
@@ -333,6 +306,32 @@ struct ProgramCompiler {
                                         arity > 2 ? av[2].reg : 0, 0});
         return {r, 1};
       }
+    }
+    if (e.args.size() == 2) {
+      const Range a = expr(e.args[0]), b = expr(e.args[1]);
+      const int n = std::max(a.len, b.len);
+      if ((a.len != 1 && a.len != n) || (b.len != 1 && b.len != n))
+        bail("binary " + e.name + " on mismatched widths");
+      Program::Code c;
+      if (e.name == "Plus__") c = Program::ADD;
+      else if (e.name == "Minus__") c = Program::SUB;
+      else if (e.name == "Times__" || e.name == "EltTimes__") c = Program::MUL;
+      else if (e.name == "Divide__" || e.name == "EltDivide__") c = Program::DIV;
+      else if (e.name == "Pow__" || e.name == "pow") c = Program::POW;
+      else if (e.name == "fmax") c = Program::FMAX;
+      else if (e.name == "fmin") c = Program::FMIN;
+      else if (e.name == "Greater__") c = Program::GT;
+      else if (e.name == "Geq__") c = Program::GE;
+      else if (e.name == "Less__") c = Program::LT;
+      else if (e.name == "Leq__") c = Program::LE;
+      else if (e.name == "Equals__") c = Program::EQ;
+      else if (e.name == "NEquals__") c = Program::NE;
+      else bail("function " + e.name);
+      const int r = alloc(n);
+      for (int i = 0; i < n; ++i)
+        emit(c, r + i, a.reg + (a.len == 1 ? 0 : i),
+             b.reg + (b.len == 1 ? 0 : i));
+      return {r, n};
     }
     if (e.args.size() == 1) {
       const Range a = expr(e.args[0]);

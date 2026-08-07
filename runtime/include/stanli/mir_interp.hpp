@@ -23,6 +23,7 @@
 #include <stanli/compile.hpp>
 #include <stanli/data.hpp>
 #include <stanli/mir.hpp>
+#include <stanli/program.hpp>
 
 #include <stan/math.hpp>
 
@@ -1139,16 +1140,22 @@ class MirInterp {
     // the hmm Viterbi recursions, log-likelihood columns). Elementwise
     // with scalar broadcasting, summed, which is stan-math's vectorized
     // semantics.
-    if (e.name == "normal_lpdf" || e.name == "lognormal_lpdf" ||
-        e.name == "exponential_lpdf" || e.name == "bernoulli_lpmf" ||
+    // The continuous scalar ones come from the shared list, so this can
+    // never be narrower than what the register-machine compiler accepts
+    // -- the compiled path falls back here when compilation fails, and a
+    // narrower fallback turns a slow path into an error. The discrete
+    // ones are the interpreter's alone: the register file has nowhere to
+    // put an integer outcome.
+    bool shared_density = false;
+#define STANLI_INTERP_DENSITY_NAME(code, fn, n) \
+  if (e.name == #fn) shared_density = true;
+    STANLI_PROGRAM_DENSITY_LIST(STANLI_INTERP_DENSITY_NAME)
+#undef STANLI_INTERP_DENSITY_NAME
+    if (shared_density || e.name == "bernoulli_lpmf" ||
         e.name == "binomial_lpmf" || e.name == "poisson_lpmf" ||
-        e.name == "poisson_log_lpmf" || e.name == "beta_lpdf" ||
-        e.name == "gamma_lpdf" || e.name == "uniform_lpdf" ||
-        e.name == "student_t_lpdf" || e.name == "cauchy_lpdf" ||
-        e.name == "bernoulli_logit_lpmf" || e.name == "std_normal_lpdf" ||
-        e.name == "binomial_logit_lpmf" || e.name == "inv_gamma_lpdf" ||
-        e.name == "weibull_lpdf" || e.name == "logistic_lpdf" ||
-        e.name == "double_exponential_lpdf") {
+        e.name == "poisson_log_lpmf" || e.name == "student_t_lpdf" ||
+        e.name == "bernoulli_logit_lpmf" ||
+        e.name == "binomial_logit_lpmf") {
       std::vector<Value> av;
       for (const auto& a : e.args) av.push_back(eval(a));
       size_t n = 1;
@@ -1164,13 +1171,19 @@ class MirInterp {
       };
       T acc = T(0.0);
       for (size_t i = 0; i < n; ++i) {
-        if (e.name == "normal_lpdf")
-          acc += stan::math::normal_lpdf(sc(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "lognormal_lpdf")
-          acc += stan::math::lognormal_lpdf(sc(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "exponential_lpdf")
-          acc += stan::math::exponential_lpdf(sc(0, i), sc(1, i));
-        else if (e.name == "bernoulli_lpmf")
+#define STANLI_INTERP_DENSITY_EVAL(code, fn, n)                        \
+  if (e.name == #fn) {                                                   \
+    if constexpr (n == 1)                                                \
+      acc += stan::math::fn(sc(0, i));                                   \
+    else if constexpr (n == 2)                                           \
+      acc += stan::math::fn(sc(0, i), sc(1, i));                         \
+    else                                                                 \
+      acc += stan::math::fn(sc(0, i), sc(1, i), sc(2, i));               \
+    continue;                                                            \
+  }
+        STANLI_PROGRAM_DENSITY_LIST(STANLI_INTERP_DENSITY_EVAL)
+#undef STANLI_INTERP_DENSITY_EVAL
+        if (e.name == "bernoulli_lpmf")
           acc += stan::math::bernoulli_lpmf(ic(0, i), sc(1, i));
         else if (e.name == "bernoulli_logit_lpmf")
           acc += stan::math::bernoulli_logit_lpmf(ic(0, i), sc(1, i));
@@ -1183,28 +1196,11 @@ class MirInterp {
           acc += stan::math::poisson_lpmf(ic(0, i), sc(1, i));
         else if (e.name == "poisson_log_lpmf")
           acc += stan::math::poisson_log_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "beta_lpdf")
-          acc += stan::math::beta_lpdf(sc(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "gamma_lpdf")
-          acc += stan::math::gamma_lpdf(sc(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "uniform_lpdf")
-          acc += stan::math::uniform_lpdf(sc(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "cauchy_lpdf")
-          acc += stan::math::cauchy_lpdf(sc(0, i), sc(1, i), sc(2, i));
         else if (e.name == "student_t_lpdf")
           acc += stan::math::student_t_lpdf(sc(0, i), sc(1, i), sc(2, i),
                                             sc(3, i));
-        else if (e.name == "inv_gamma_lpdf")
-          acc += stan::math::inv_gamma_lpdf(sc(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "weibull_lpdf")
-          acc += stan::math::weibull_lpdf(sc(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "logistic_lpdf")
-          acc += stan::math::logistic_lpdf(sc(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "double_exponential_lpdf")
-          acc += stan::math::double_exponential_lpdf(sc(0, i), sc(1, i),
-                                                     sc(2, i));
         else
-          acc += stan::math::std_normal_lpdf(sc(0, i));
+          fail("unsupported density " + e.name, e.raw);
       }
       r.r = {acc};
       return r;

@@ -28,6 +28,32 @@
 namespace stanli {
 
 struct Program {
+  // The scalar continuous densities, in one place, because three sites
+  // key off this list and they had already drifted: the instruction enum
+  // below, the MIR compiler's name lookup (mir_prog.hpp), and the
+  // interpreter the compiled path falls back to (mir_interp.hpp). Adding
+  // a density here adds it to all three, and forgetting one stops being
+  // possible -- the same reason STANLI_OPCODE_LIST exists.
+  //
+  // propto-OFF only: with no term-dropping the value does not depend on
+  // which arguments are autodiff, so one templated call serves both the
+  // double and var passes. The discrete densities are deliberately not
+  // here; they need an integer outcome the register file has nowhere to
+  // put, and the interpreter carries them alone.
+#define STANLI_PROGRAM_DENSITY_LIST(X)                                     \
+  X(STD_NORMAL, std_normal_lpdf, 1)                                        \
+  X(EXPONENTIAL, exponential_lpdf, 2)                                      \
+  X(NORMAL, normal_lpdf, 3)                                                \
+  X(LOGNORMAL, lognormal_lpdf, 3)                                          \
+  X(CAUCHY, cauchy_lpdf, 3)                                                \
+  X(GAMMA, gamma_lpdf, 3)                                                  \
+  X(INV_GAMMA, inv_gamma_lpdf, 3)                                          \
+  X(BETA, beta_lpdf, 3)                                                    \
+  X(WEIBULL, weibull_lpdf, 3)                                              \
+  X(LOGISTIC, logistic_lpdf, 3)                                            \
+  X(DOUBLE_EXP, double_exponential_lpdf, 3)                                \
+  X(UNIFORM, uniform_lpdf, 3)
+
   enum Code : uint8_t {
     CONST,     // dst = pool[a]
     CONSTR,    // dst[0..len) = pool[a + i]
@@ -53,18 +79,9 @@ struct Program {
     // autodiff, so binding all of them as T reproduces the scalar op's
     // value exactly; the extra partials computed for data arguments are
     // discarded when the executor hands the island a null adjoint.
-    STD_NORMAL,   // 1 arg
-    EXPONENTIAL,  // 2 args
-    NORMAL,       // 3 args
-    LOGNORMAL,
-    CAUCHY,
-    GAMMA,
-    INV_GAMMA,
-    BETA,
-    WEIBULL,
-    LOGISTIC,
-    DOUBLE_EXP,
-    UNIFORM,
+#define STANLI_PROGRAM_DENSITY_ENUM(code, name, arity) code,
+    STANLI_PROGRAM_DENSITY_LIST(STANLI_PROGRAM_DENSITY_ENUM)
+#undef STANLI_PROGRAM_DENSITY_ENUM
   };
   struct Instr {
     Code code = CONST;
@@ -180,43 +197,21 @@ void run_program(const Program& p, std::vector<T>& reg) {
       case Program::LOG_MIX:
         d() = stan::math::log_mix(ra(), rb(), reg[(size_t)I.c]);
         break;
-      case Program::STD_NORMAL:
-        d() = stan::math::std_normal_lpdf<false>(ra());
-        break;
-      case Program::EXPONENTIAL:
-        d() = stan::math::exponential_lpdf<false>(ra(), rb());
-        break;
-      case Program::NORMAL:
-        d() = stan::math::normal_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
-      case Program::LOGNORMAL:
-        d() = stan::math::lognormal_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
-      case Program::CAUCHY:
-        d() = stan::math::cauchy_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
-      case Program::GAMMA:
-        d() = stan::math::gamma_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
-      case Program::INV_GAMMA:
-        d() = stan::math::inv_gamma_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
-      case Program::BETA:
-        d() = stan::math::beta_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
-      case Program::WEIBULL:
-        d() = stan::math::weibull_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
-      case Program::LOGISTIC:
-        d() = stan::math::logistic_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
-      case Program::DOUBLE_EXP:
-        d() = stan::math::double_exponential_lpdf<false>(ra(), rb(),
-                                                         reg[(size_t)I.c]);
-        break;
-      case Program::UNIFORM:
-        d() = stan::math::uniform_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
-        break;
+      // Generated from the same list as the enum and the two front ends,
+      // so a density cannot exist as an instruction with no case to run
+      // it. It used to be possible, and the failure was a silently
+      // unwritten register rather than an error.
+#define STANLI_PROGRAM_DENSITY_CASE(code, fn, n)                     \
+  case Program::code:                                                \
+    if constexpr (n == 1)                                            \
+      d() = stan::math::fn<false>(ra());                             \
+    else if constexpr (n == 2)                                       \
+      d() = stan::math::fn<false>(ra(), rb());                       \
+    else                                                             \
+      d() = stan::math::fn<false>(ra(), rb(), reg[(size_t)I.c]);     \
+    break;
+      STANLI_PROGRAM_DENSITY_LIST(STANLI_PROGRAM_DENSITY_CASE)
+#undef STANLI_PROGRAM_DENSITY_CASE
     }
   }
 }
