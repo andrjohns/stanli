@@ -7,8 +7,9 @@ A/B parity is transitive verification of the passes.
 
 Usage: python3 harnesses/ab_corpus.py deps/posteriordb [--filter SUBSTR]
                                    [--disable VAR[,VAR...]]
-Default disables every pass at once (re-roll and in-place), which is the
-end-to-end check; pass one variable to attribute a divergence.
+Default disables every pass at once (re-roll, in-place, constant
+folding, islands), which is the end-to-end check; pass one variable to
+attribute a divergence.
 Run from the worktree root with build-rel/ built.
 """
 import json

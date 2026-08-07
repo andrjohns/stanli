@@ -229,7 +229,7 @@ evaluate, and verify. Details in
 
 ## Status
 
-21/21 tests green, built and tested in CI on macOS (arm64, x86_64) and
+25/25 tests green, built and tested in CI on macOS (arm64, x86_64) and
 manylinux (x86_64, aarch64). 119/120 posteriordb models compile and
 evaluate, <!--gen:corpus_verified_n-->118<!--/gen--> of them
 CmdStan-verified. Of the two that are not: `sir`'s
@@ -241,16 +241,12 @@ the corpus status).
 
 ## Roadmap
 
-1. Widening the re-roll pass. It handles lanes whose density output
-   feeds the target directly, lanes that fill a vector one element at a
-   time (contiguous, strided, or interleaved runs), per-lane integer
-   lpmf outcomes, and the unary math ops. The remaining gap is density
-   outputs that feed an op instead of the target: `low_dim_gauss_mix`
-   (0.78x) writes `log_mix(theta, normal_lpdf(...), ...)` per
-   observation and needs an elementwise-lp density variant plus batched
-   `log_sum_exp`/`log_mix` kernels, and the lda/mixture family is the
-   same shape. Fusing adjacent elementwise chains into one pass over
-   the arena is the follow-on.
+1. Fusing adjacent elementwise chains into one pass over the arena --
+   the follow-on now that the re-roll pass covers the mixture shape
+   (density lanes feeding `log_mix`/`log_sum_exp` instead of the target
+   fuse into an elementwise-lp density variant plus batched mixture
+   kernels) and tape islands compile the leftover scalar residue into
+   single ops.
 2. Windows wheels, and a CRAN shim package. The macOS (arm64, x86_64) and
    Linux (x86_64, aarch64) wheels are built and published by
    `.github/workflows/wheels.yml` on a version tag; Windows needs opam's
