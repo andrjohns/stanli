@@ -118,7 +118,7 @@ void density_fwd_elt(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
   }
 }
 
-template <int NArgs, typename FProp, typename FFull>
+template <int NArgs, bool Masked, typename FProp, typename FFull>
 void density_fwd_v(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
   if (ctx.variant & 0x40u) {
     // Real-argument densities reuse the same lambdas: scalar bindings
@@ -140,8 +140,14 @@ void density_fwd_v(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
   active_sink() = &s;
   if (ctx.variant & 0x80u) {
     mask_dispatch<NArgs>(mask, ctx, fp);
-  } else {
+  } else if constexpr (Masked) {
     mask_dispatch<NArgs>(mask, ctx, ff);
+  } else {
+    // See the note on the list in optable.hpp: with propto off the value
+    // does not depend on the mask, so one binding covers all of them and
+    // 2^NArgs - 1 instantiations stop existing. The partials computed for
+    // data arguments are discarded (density_bwd skips a null adjoint).
+    bind_args_m<NArgs, (1u << NArgs) - 1>(ctx, ff);
   }
   active_sink() = nullptr;
   ctx.out.data[0] = s.value;
@@ -219,7 +225,7 @@ int64_t density_scratch(const Op& op, const Slot* slots) {
     }                                                                          \
     Eigen::Map<const Eigen::VectorXi> y(                                       \
         ctx.idata, static_cast<Eigen::Index>(ctx.n_idata));                    \
-    density_fwd_v<NARGS>(                                                      \
+    density_fwd_v<NARGS, true>(                                                      \
         ctx, [&](const auto&... a) { stan::math::dist<true>(y, a...); },       \
         [&](const auto&... a) { stan::math::dist<false>(y, a...); });          \
   }
@@ -267,7 +273,7 @@ const int* int_group_next(const int* p) {
     }                                                                          \
     with_int_group(ctx.idata, [&](const auto& n, const int* rest) {            \
       with_int_group(rest, [&](const auto& N, const int*) {                    \
-        density_fwd_v<1>(                                                      \
+        density_fwd_v<1, true>(                                                      \
             ctx,                                                               \
             [&](const auto& theta) { stan::math::dist<true>(n, N, theta); },   \
             [&](const auto& theta) { stan::math::dist<false>(n, N, theta); }); \
@@ -329,7 +335,7 @@ void uniform_fwd(KernelCtx& ctx) {
     std::fill(ctx.scratch, ctx.scratch + plen, 0.0);
     return;
   }
-  density_fwd_v<3>(
+  density_fwd_v<3, true>(
       ctx, [](const auto&... a) { stan::math::uniform_lpdf<true>(a...); },
       [](const auto&... a) { stan::math::uniform_lpdf<false>(a...); });
   if (any_out && elt) {
@@ -350,9 +356,9 @@ void uniform_fwd(KernelCtx& ctx) {
 // share -- propto and per-argument activity from the variant byte,
 // elementwise output, the partials stashed for density_bwd to contract --
 // lives in density_fwd_v.
-#define STANLI_DEFINE_DENSITY_FWD(code, fn, n)                             \
+#define STANLI_DEFINE_DENSITY_FWD(code, fn, n, masked)                             \
   void fn##_fwd_gen(KernelCtx& ctx) {                                      \
-    density_fwd_v<n>(                                                      \
+    density_fwd_v<n, masked>(                                                      \
         ctx, [](const auto&... a) { stan::math::fn<true>(a...); },         \
         [](const auto&... a) { stan::math::fn<false>(a...); });            \
   }
@@ -362,7 +368,7 @@ STANLI_SCALAR_DENSITY_LIST(STANLI_DEFINE_DENSITY_FWD)
 }  // namespace
 
 void register_density_kernels() {
-#define STANLI_REGISTER_DENSITY(code, fn, n) \
+#define STANLI_REGISTER_DENSITY(code, fn, n, masked) \
   register_kernel(code, Kernel{fn##_fwd_gen, density_bwd<n>, density_scratch<n>});
   STANLI_SCALAR_DENSITY_LIST(STANLI_REGISTER_DENSITY)
 #undef STANLI_REGISTER_DENSITY

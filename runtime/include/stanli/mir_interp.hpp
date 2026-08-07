@@ -23,6 +23,7 @@
 #include <stanli/compile.hpp>
 #include <stanli/data.hpp>
 #include <stanli/mir.hpp>
+#include <stanli/optable.hpp>  // STANLI_SCALAR_UNARY_LIST
 #include <stanli/program.hpp>
 
 #include <stan/math.hpp>
@@ -1146,6 +1147,22 @@ class MirInterp {
     // the hmm Viterbi recursions, log-likelihood columns). Elementwise
     // with scalar broadcasting, summed, which is stan-math's vectorized
     // semantics.
+    // Scalar unaries from the shared list, so transformed data and
+    // generated quantities accept exactly what the log-density path does.
+#define STANLI_INTERP_UNARY(code, ufn, VAL, DERIV)                        \
+  if (e.name == #ufn && e.args.size() == 1) {                             \
+    const Value a = eval(e.args[0]);                                       \
+    r.r.resize(a.r.size());                                                \
+    for (size_t i = 0; i < a.r.size(); ++i) {                              \
+      const double x = val(a.r[i]);                                        \
+      r.r[i] = T(VAL);                                                     \
+    }                                                                      \
+    r.dims = a.dims;                                                       \
+    return r;                                                              \
+  }
+    STANLI_SCALAR_UNARY_LIST(STANLI_INTERP_UNARY)
+#undef STANLI_INTERP_UNARY
+
     // The continuous scalar ones come from the shared list, so this can
     // never be narrower than what the register-machine compiler accepts
     // -- the compiled path falls back here when compilation fails, and a

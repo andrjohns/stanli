@@ -857,7 +857,7 @@ struct Lowering {
         {"bernoulli_logit_lpmf", {OP_BERNOULLI_LOGIT_LPMF, 2, 1}},
         // Generated from STANLI_SCALAR_DENSITY_LIST (optable.hpp): the same
         // one line that made the opcode and the kernel makes this entry.
-#define STANLI_DENSITY_TABLE(code, fn, n) {#fn, {code, n, 0}},
+#define STANLI_DENSITY_TABLE(code, fn, n, m) {#fn, {code, n, 0}},
         STANLI_SCALAR_DENSITY_LIST(STANLI_DENSITY_TABLE)
 #undef STANLI_DENSITY_TABLE
         {"bernoulli_lpmf", {OP_BERNOULLI_LPMF, 2, 1}},
@@ -1075,6 +1075,11 @@ struct Lowering {
 
     // Elementwise unaries + reductions.
     static const std::map<std::string, uint16_t> kUn = {
+// Generated from STANLI_SCALAR_UNARY_LIST (optable.hpp), which also made
+// the opcode and the kernel.
+#define STANLI_UNARY_TABLE(code, name, v, d) {#name, code},
+        STANLI_SCALAR_UNARY_LIST(STANLI_UNARY_TABLE)
+#undef STANLI_UNARY_TABLE
         {"PMinus__", OP_NEG}, {"exp", OP_EXPV},      {"log", OP_LOGV},
         {"inv_logit", OP_INV_LOGIT}, {"sqrt", OP_SQRT},
         {"square", OP_SQUARE}, {"log1m", OP_LOG1M},  {"softmax", OP_SOFTMAX},

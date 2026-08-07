@@ -43,9 +43,12 @@ const char* opcode_name(uint16_t opcode) {
 #define STANLI_OPCODE_NAME(name) #name,
       STANLI_OPCODE_LIST(STANLI_OPCODE_NAME)
 #undef STANLI_OPCODE_NAME
-#define STANLI_DENSITY_OPCODE_NAME(code, fn, n) #code,
+#define STANLI_DENSITY_OPCODE_NAME(code, fn, n, m) #code,
       STANLI_SCALAR_DENSITY_LIST(STANLI_DENSITY_OPCODE_NAME)
 #undef STANLI_DENSITY_OPCODE_NAME
+#define STANLI_UNARY_OPCODE_NAME(code, fn, v, d) #code,
+      STANLI_SCALAR_UNARY_LIST(STANLI_UNARY_OPCODE_NAME)
+#undef STANLI_UNARY_OPCODE_NAME
   };
   return opcode < OP_COUNT_ ? names[opcode] : "OP_?";
 }

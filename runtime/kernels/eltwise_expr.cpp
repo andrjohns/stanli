@@ -390,9 +390,36 @@ void repv_bwd(KernelCtx& ctx) {
     ctx.in_adj[0].data[0] += ctx.out_adj_vec.data[i];
 }
 
+
+// Generated from STANLI_SCALAR_UNARY_LIST (optable.hpp): the value in the
+// forward, the derivative contracted in the backward. Shape-preserving and
+// elementwise, so a re-rolled vector arrives here as one op.
+#define STANLI_DEFINE_UNARY(code, name, VAL, DERIV)                        \
+  void name##_ufwd(KernelCtx& ctx) {                                       \
+    for (int64_t i = 0; i < ctx.out.len; ++i) {                            \
+      const double x = ctx.in[0].data[i];                                  \
+      ctx.out.data[i] = (VAL);                                             \
+    }                                                                      \
+  }                                                                        \
+  void name##_ubwd(KernelCtx& ctx) {                                       \
+    if (!ctx.in_adj[0].data) return;                                       \
+    const double* dout =                                                   \
+        ctx.out.len == 1 ? &ctx.out_adj : ctx.out_adj_vec.data;            \
+    for (int64_t i = 0; i < ctx.out.len; ++i) {                            \
+      const double x = ctx.in[0].data[i];                                  \
+      ctx.in_adj[0].data[i] += dout[i] * (DERIV);                          \
+    }                                                                      \
+  }
+STANLI_SCALAR_UNARY_LIST(STANLI_DEFINE_UNARY)
+#undef STANLI_DEFINE_UNARY
+
 }  // namespace
 
 void register_eltwise_kernels() {
+#define STANLI_REGISTER_UNARY(code, name, v, d) \
+  register_kernel(code, Kernel{name##_ufwd, name##_ubwd, nullptr});
+  STANLI_SCALAR_UNARY_LIST(STANLI_REGISTER_UNARY)
+#undef STANLI_REGISTER_UNARY
   register_kernel(OP_ADD, Kernel{add_fwd, add_bwd, nullptr});
   register_kernel(OP_SUB, Kernel{sub_fwd, sub_bwd, nullptr});
   register_kernel(OP_MUL, Kernel{mul_fwd, mul_bwd, nullptr});
