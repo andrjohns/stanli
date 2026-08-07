@@ -29,7 +29,8 @@ struct Slot {
 struct Op {
   uint16_t opcode = 0;
   uint8_t variant = 0;  // density kernels: bits 0..5 per-arg activity
-                        // (1 = autodiff), bit 7 = propto
+                        // (1 = autodiff), bit 6 = elementwise lp (out is
+                        // len N, out[n] = element n's lp), bit 7 = propto
   int out = -1;
   int out2 = -1;  // optional second output (e.g. constrain jacobian term)
   int in[6] = {-1, -1, -1, -1, -1, -1};

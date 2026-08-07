@@ -6,6 +6,8 @@
 #include <stan/math.hpp>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -78,6 +80,131 @@ static RunResult run_graph(uint16_t opcode,
   r.grad.assign(n_par, 0.0);
   r.value = ex.gradient(r.grad.data());
   return r;
+}
+
+// ---- elementwise variant (bit 6) -------------------------------------------
+// The fused elementwise op against the N scalar lane ops it replaces: INDEX
+// each vector argument per lane, run the scalar density with the same
+// mask/propto bits, SET_INDEX the lp into a threaded vector, SUM_VEC. That is
+// the exact graph shape lowering emits for a per-observation loop, so values,
+// per-element lps, and every gradient must match bitwise.
+struct EltRun {
+  double value;
+  std::vector<double> out;
+  std::vector<double> grad;
+};
+
+static EltRun run_elt_fused(uint16_t opcode, uint8_t variant, int64_t n,
+                            const std::vector<std::vector<double>>& vals,
+                            const std::vector<bool>& params,
+                            std::vector<int> idata) {
+  using namespace stanli;
+  Graph g;
+  std::vector<int> slots;
+  int64_t n_par = 0;
+  for (size_t i = 0; i < vals.size(); ++i) {
+    slots.push_back(g.add_slot((int64_t)vals[i].size(), params[i]));
+    if (params[i]) n_par += (int64_t)vals[i].size();
+  }
+  const int out = g.add_slot(n, false);
+  const int lp = g.add_slot(1, false);
+  stanli::Op op;
+  op.opcode = opcode;
+  op.variant = (uint8_t)(variant | 0x40u);
+  op.out = out;
+  for (int s : slots) op.in[op.n_in++] = s;
+  if (!idata.empty()) {
+    g.idata_pool.push_back(std::move(idata));
+    op.idata = g.idata_pool.back().data();
+    op.n_idata = (int64_t)g.idata_pool.back().size();
+  }
+  g.ops.push_back(op);
+  g.add_op(OP_SUM_VEC, {out}, lp);
+  g.result_slot = lp;
+
+  Executor ex(std::move(g));
+  for (size_t i = 0; i < vals.size(); ++i)
+    for (size_t j = 0; j < vals[i].size(); ++j)
+      ex.value_ptr(slots[i])[j] = vals[i][j];
+  EltRun r;
+  r.grad.assign(n_par, 0.0);
+  r.value = ex.gradient(r.grad.data());
+  r.out.assign(ex.value_ptr(out), ex.value_ptr(out) + n);
+  return r;
+}
+
+static EltRun run_elt_lanes(
+    uint16_t opcode, uint8_t variant, int64_t n,
+    const std::vector<std::vector<double>>& vals,
+    const std::vector<bool>& params,
+    const std::function<std::vector<int>(int64_t)>& lane_idata) {
+  using namespace stanli;
+  Graph g;
+  std::vector<int> slots;
+  int64_t n_par = 0;
+  for (size_t i = 0; i < vals.size(); ++i) {
+    slots.push_back(g.add_slot((int64_t)vals[i].size(), params[i]));
+    if (params[i]) n_par += (int64_t)vals[i].size();
+  }
+  int vec = g.add_slot(n, false);
+  for (int64_t i = 0; i < n; ++i) {
+    std::vector<int> args;
+    for (int s : slots) {
+      if (g.slots[s].len == 1) {
+        args.push_back(s);
+      } else {
+        const int e = g.add_slot(1, false);
+        g.add_op(OP_INDEX, {s}, e, {(int)i});
+        args.push_back(e);
+      }
+    }
+    const int fi = g.add_slot(1, false);
+    stanli::Op op;
+    op.opcode = opcode;
+    op.variant = variant;
+    op.out = fi;
+    for (int s : args) op.in[op.n_in++] = s;
+    if (lane_idata) {
+      auto id = lane_idata(i);
+      if (!id.empty()) {
+        g.idata_pool.push_back(std::move(id));
+        op.idata = g.idata_pool.back().data();
+        op.n_idata = (int64_t)g.idata_pool.back().size();
+      }
+    }
+    g.ops.push_back(op);
+    const int next = g.add_slot(n, false);
+    g.add_op(OP_SET_INDEX, {vec, fi}, next, {(int)i});
+    vec = next;
+  }
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_SUM_VEC, {vec}, lp);
+  g.result_slot = lp;
+
+  Executor ex(std::move(g));
+  for (size_t i = 0; i < vals.size(); ++i)
+    for (size_t j = 0; j < vals[i].size(); ++j)
+      ex.value_ptr(slots[i])[j] = vals[i][j];
+  EltRun r;
+  r.grad.assign(n_par, 0.0);
+  r.value = ex.gradient(r.grad.data());
+  r.out.assign(ex.value_ptr(vec), ex.value_ptr(vec) + n);
+  return r;
+}
+
+static void check_elt(
+    const std::string& tag, uint16_t opcode, uint8_t variant, int64_t n,
+    const std::vector<std::vector<double>>& vals,
+    const std::vector<bool>& params, std::vector<int> fused_idata = {},
+    const std::function<std::vector<int>(int64_t)>& lane_idata = nullptr) {
+  const EltRun f =
+      run_elt_fused(opcode, variant, n, vals, params, std::move(fused_idata));
+  const EltRun l = run_elt_lanes(opcode, variant, n, vals, params, lane_idata);
+  expect_eq(tag + " lp", f.value, l.value);
+  for (int64_t i = 0; i < n; ++i)
+    expect_eq(tag + " out" + std::to_string(i), f.out[i], l.out[i]);
+  for (size_t i = 0; i < f.grad.size(); ++i)
+    expect_eq(tag + " g" + std::to_string(i), f.grad[i], l.grad[i]);
 }
 
 int main() {
@@ -230,6 +357,44 @@ int main() {
       expect_eq("bernoulli_logit da" + std::to_string(i), r.grad[i],
                 va(i).adj());
     stan::math::recover_memory();
+  }
+
+  // ---- elementwise variant (bit 6) vs the scalar lanes it replaces --------
+  {
+    std::vector<double> mus{0.1, -0.2, 0.3, 0.05, -0.6};
+
+    // The gauss_mix shape: y data vector, mu/sigma broadcast scalar params.
+    check_elt("elt normal svv", OP_NORMAL_LPDF, 0x06, N, {ys, {0.25}, {1.4}},
+              {false, true, true});
+    check_elt("elt normal svv propto", OP_NORMAL_LPDF, 0x86, N,
+              {ys, {0.25}, {1.4}}, {false, true, true});
+
+    // Every activity mask, propto off and on, all-vector arguments.
+    for (unsigned m = 1; m < 8; ++m) {
+      check_elt("elt normal mask" + std::to_string(m), OP_NORMAL_LPDF,
+                (uint8_t)m, N, {ys, mus, pos}, {true, true, true});
+      check_elt("elt normal mask" + std::to_string(m) + " propto",
+                OP_NORMAL_LPDF, (uint8_t)(0x80u | m), N, {ys, mus, pos},
+                {true, true, true});
+    }
+
+    // idata-outcome lpmfs: fused idata is the concatenated outcomes, each
+    // lane carries its own element.
+    std::vector<int> yb{1, 0, 0, 1, 1};
+    std::vector<double> alpha{0.5, -1.2, 0.3, 2.0, -0.7};
+    check_elt("elt bern_logit", OP_BERNOULLI_LOGIT_LPMF, 0x81, N, {alpha},
+              {true}, yb, [&](int64_t i) { return std::vector<int>{yb[i]}; });
+    std::vector<int> counts{3, 0, 7, 1, 2};
+    check_elt("elt neg_binom2 vs", OP_NEG_BINOMIAL_2_LPMF, 0x03, N,
+              {pos, {3.5}}, {true, true}, counts,
+              [&](int64_t i) { return std::vector<int>{counts[i]}; });
+
+    // binomial: int groups; y vector, trials a language-level scalar (-1).
+    std::vector<int> fused_b{N, 3, 0, 7, 1, 2, -1, 20};
+    check_elt("elt binomial", OP_BINOMIAL_LPMF, 0x01, N, {unit}, {true},
+              fused_b, [&](int64_t i) {
+                return std::vector<int>{-1, counts[i], -1, 20};
+              });
   }
 
   if (failures == 0) std::printf("test_densities OK\n");
