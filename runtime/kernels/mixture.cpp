@@ -25,6 +25,8 @@
 
 #include <stan/math.hpp>
 
+#include <array>
+
 namespace stanli {
 namespace {
 
@@ -45,43 +47,75 @@ void lse_bwd(KernelCtx& ctx) {
     ctx.in_adj[0].data[i] += ctx.out_adj * ctx.scratch[i];
 }
 
-// ---- log_sum_exp(a, b) ----------------------------------------------------
-int64_t lse2_scratch(const Op&, const Slot*) { return 2; }
+// ---- log_sum_exp(a, b) / log_mix(theta, a, b) -----------------------------
+// Shape dispatch matches the elementwise binaries: each argument is len 1
+// (broadcast) or len N, out is len N, out[n] applies the scalar stan-math
+// function to element n. N == 1 is exactly the old scalar kernel; the len-N
+// form is the re-rolled body of a per-observation mixture loop. Each element
+// replays on its own nested tape, so element n's value and partials are
+// bit-identical to a lone scalar op over the same inputs.
+//
+// Scratch is NArgs partials per element, [n * NArgs + k].
+template <int NArgs>
+int64_t mix_scratch(const Op& op, const Slot* slots) {
+  return NArgs * slots[op.out].len;
+}
+
+template <int NArgs, typename F>
+void mix_fwd(KernelCtx& ctx, F&& f) {
+  const int64_t n = ctx.out.len;
+  for (int64_t i = 0; i < n; ++i) {
+    stan::math::nested_rev_autodiff nested;
+    std::array<stan::math::var, NArgs> a;
+    for (int k = 0; k < NArgs; ++k)
+      a[k] = ctx.in[k].data[ctx.in[k].len == 1 ? 0 : i];
+    stan::math::var j = f(a);
+    ctx.out.data[i] = j.val();
+    stan::math::grad(j.vi_);
+    for (int k = 0; k < NArgs; ++k) ctx.scratch[i * NArgs + k] = a[k].adj();
+  }
+}
+
+template <int NArgs>
+void mix_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.out.len;
+  for (int k = 0; k < NArgs; ++k) {
+    if (!ctx.in_adj[k].data) continue;
+    if (ctx.in_adj[k].len == 1 && n > 1) {
+      // Broadcast argument: every element contributes. Accumulate with i
+      // descending -- the order N scalar ops would add to this adjoint in
+      // the executor's reverse sweep -- so the fused op is bit-identical
+      // to the loop it replaces.
+      double acc = 0;
+      for (int64_t i = n; i-- > 0;)
+        acc += ctx.out_adj_vec.data[i] * ctx.scratch[i * NArgs + k];
+      ctx.in_adj[k].data[0] += acc;
+    } else {
+      for (int64_t i = 0; i < n; ++i)
+        ctx.in_adj[k].data[i] += ctx.out_adj_vec.data[i] * ctx.scratch[i * NArgs + k];
+    }
+  }
+}
 
 void lse2_fwd(KernelCtx& ctx) {
-  ctx.out.data[0] = legacy_fwd_partials_scalars<2>(ctx, [](const auto& a) {
+  mix_fwd<2>(ctx, [](const auto& a) {
     return stan::math::log_sum_exp(a[0], a[1]);
   });
 }
 
-void lse2_bwd(KernelCtx& ctx) {
-  for (int k = 0; k < 2; ++k)
-    if (ctx.in_adj[k].data)
-      ctx.in_adj[k].data[0] += ctx.out_adj * ctx.scratch[k];
-}
-
-// ---- log_mix(theta, a, b) -------------------------------------------------
-int64_t log_mix_scratch(const Op&, const Slot*) { return 3; }
-
 void log_mix_fwd(KernelCtx& ctx) {
-  ctx.out.data[0] = legacy_fwd_partials_scalars<3>(ctx, [](const auto& a) {
+  mix_fwd<3>(ctx, [](const auto& a) {
     return stan::math::log_mix(a[0], a[1], a[2]);
   });
-}
-
-void log_mix_bwd(KernelCtx& ctx) {
-  for (int k = 0; k < 3; ++k)
-    if (ctx.in_adj[k].data)
-      ctx.in_adj[k].data[0] += ctx.out_adj * ctx.scratch[k];
 }
 
 }  // namespace
 
 void register_mixture_kernels() {
   register_kernel(OP_LOG_SUM_EXP, Kernel{lse_fwd, lse_bwd, lse_scratch});
-  register_kernel(OP_LSE2, Kernel{lse2_fwd, lse2_bwd, lse2_scratch});
+  register_kernel(OP_LSE2, Kernel{lse2_fwd, mix_bwd<2>, mix_scratch<2>});
   register_kernel(OP_LOG_MIX,
-                  Kernel{log_mix_fwd, log_mix_bwd, log_mix_scratch});
+                  Kernel{log_mix_fwd, mix_bwd<3>, mix_scratch<3>});
 }
 
 }  // namespace stanli
