@@ -36,11 +36,27 @@ int main() {
 
   expect_eq("forward", ex.forward(), std::exp(0.3) + -1.1);
 
+  // The value-only forward is the same value for every kernel that has no
+  // partials to skip -- which is all of them but OP_ODE -- and it must not
+  // disturb a gradient taken afterwards. That second half is the whole
+  // safety argument for the mode: gradient() runs its own full forward, so
+  // nothing a value-only sweep skipped can survive into a reverse sweep.
+  expect_eq("forward_value_only", ex.forward_value_only(),
+            std::exp(0.3) + -1.1);
+
   double grad[2] = {0, 0};
   const double v = ex.gradient(grad);
   expect_eq("grad value", v, std::exp(0.3) + -1.1);
   expect_eq("d/da", grad[0], std::exp(0.3));
   expect_eq("d/db", grad[1], 1.0);
+
+  // ... and again with a value-only sweep in between.
+  ex.forward_value_only();
+  double grad2[2] = {0, 0};
+  expect_eq("grad after value-only", ex.gradient(grad2),
+            std::exp(0.3) + -1.1);
+  expect_eq("d/da after value-only", grad2[0], grad[0]);
+  expect_eq("d/db after value-only", grad2[1], grad[1]);
 
   // BCAST_FMA forward: out[i] = a + b * x[i].
   Graph g2;

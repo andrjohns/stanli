@@ -12,6 +12,20 @@
   produces different draws than 0.2.0 did; any seed is as valid as any
   other, but a run pinned to a seed will not reproduce byte for byte.
 
+- Initial points are accepted the way CmdStan accepts them, which fixes
+  `lotka_volterra`'s sampling timeout. CmdStan checks a candidate by
+  evaluating the log density on doubles and then its gradient; we only
+  ever ran the second. That matters for an ODE model, because the value
+  path solves the states alone while the gradient path solves the coupled
+  state-plus-sensitivity system, and at a solution grazing zero the two
+  disagree in sign (measured on the point in question: -1.81e-05 against
+  +5.33e-06, so log(z) is NaN for one and finite for the other). We were
+  accepting starting points CmdStan rejects, and at the corpus seed that
+  meant a chain that never left a bad region -- lp -1260 against a
+  typical set near -14, and 87x the leapfrogs, which is the whole
+  timeout. `Executor::forward_value_only()` is the double path, and
+  OP_ODE is the one kernel that does less work in it.
+
 - A draw whose generated quantities throw is written as nan and sampling
   continues, which is what CmdStan does. `stanli_run` used to abort and
   print nothing, so one bad `lognormal_rng` on a marginal ODE solution

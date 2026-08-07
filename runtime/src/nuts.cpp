@@ -56,11 +56,22 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
       // A density that rejects its argument outright (stan-math throws on a
       // NaN location, an out-of-support outcome) counts as a rejected draw,
       // exactly as CmdStan's initialize treats it -- not as a fatal error.
+      // CmdStan's two-stage check, in its order: the log density on
+      // doubles first (stan::services::util::initialize), then the
+      // gradient. The stages can disagree on an ODE model -- the value
+      // path solves the states alone and the gradient path solves the
+      // coupled system -- and running only the second accepted initial
+      // points CmdStan rejects, which on lotka_volterra meant starting
+      // in a region warmup could not climb out of.
       try {
-        const double lp = ex.gradient(grad.data());
+        const double lp = ex.forward_value_only();
         ok = std::isfinite(lp);
-        for (int64_t i = 0; ok && i < n; ++i)
-          ok = std::isfinite(grad[(size_t)i]);
+        if (ok) {
+          const double glp = ex.gradient(grad.data());
+          ok = std::isfinite(glp);
+          for (int64_t i = 0; ok && i < n; ++i)
+            ok = std::isfinite(grad[(size_t)i]);
+        }
       } catch (const std::exception&) {
         ok = false;
       }

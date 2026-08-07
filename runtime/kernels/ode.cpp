@@ -21,6 +21,7 @@
 // walks a few dozen varis, against several hundred right-hand-side
 // evaluations for a solve.
 #include <stanli/graph.hpp>
+#include <stanli/packet.hpp>
 #include <stanli/mir_interp.hpp>
 #include <stanli/ode.hpp>
 #include <stanli/optable.hpp>
@@ -81,6 +82,21 @@ std::vector<std::vector<T>> solve(const OdeSpec& s, const std::vector<T>& z0,
 void ode_fwd(KernelCtx& ctx) {
   const OdeSpec& s = *static_cast<const OdeSpec*>(ctx.udata);
   const int64_t S = ctx.in[0].len, P = ctx.in[1].len, W = S + P;
+  // The value alone: solve the states, skip the sensitivities and the
+  // jacobian nobody is going to read. This is what CmdStan's
+  // log_prob<double> does, and at a solution grazing zero it is a
+  // different answer from the coupled solve below -- the step controller
+  // sees different error estimates. Matching it is the point: it decides
+  // which initial points are valid.
+  if (values_only()) {
+    const std::vector<double> z0(ctx.in[0].data, ctx.in[0].data + S);
+    const std::vector<double> th(ctx.in[1].data, ctx.in[1].data + P);
+    const auto solv = solve(s, z0, th);
+    for (size_t n = 0; n < solv.size(); ++n)
+      for (int64_t k = 0; k < S; ++k)
+        ctx.out.data[(int64_t)n * S + k] = solv[n][k];
+    return;
+  }
   stan::math::nested_rev_autodiff nested;
   std::vector<var> z0(ctx.in[0].data, ctx.in[0].data + S);
   std::vector<var> th(ctx.in[1].data, ctx.in[1].data + P);

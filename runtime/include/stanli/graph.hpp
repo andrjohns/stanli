@@ -107,6 +107,17 @@ class Executor {
 
   // Forward through all ops; returns value of result_slot (must be scalar).
   double forward();
+  // The same value, computed the way CmdStan's log_prob<double> computes
+  // it: kernels that would build partials for a later reverse sweep may
+  // skip them. Only OP_ODE currently differs, and it differs a lot -- it
+  // solves the states alone instead of the coupled state-plus-sensitivity
+  // system, which is both cheaper and, at a solution grazing zero, a
+  // different answer. Use it where CmdStan uses the double path, chiefly
+  // deciding whether an initial point is valid.
+  //
+  // Safe to interleave with gradient(): that always runs a full forward
+  // first, so nothing stale survives into a reverse sweep.
+  double forward_value_only();
   // Forward for graphs whose result is not a scalar (tests only).
   void run_forward_only();
   // forward() + reverse sweep. grad_out receives d result / d params in

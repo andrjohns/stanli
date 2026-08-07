@@ -36,6 +36,10 @@ namespace stanli {
 // Read once from the environment on first call.
 bool packet_math();
 
+// True while Executor::forward_value_only() is running: a kernel may
+// skip work whose only consumer is its own backward. See graph.hpp.
+bool values_only();
+
 // Test-only override. The fixture tests that pin bitwise/low-ULP parity
 // with DEFAULT CmdStan are assertions about the AoS mirror specifically,
 // so they turn packet math off rather than widen their tolerance; the

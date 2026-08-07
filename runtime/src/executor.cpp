@@ -31,6 +31,12 @@ static bool g_packet_math = [] {
 bool packet_math() { return g_packet_math; }
 void set_packet_math(bool on) { g_packet_math = on; }
 
+// Set only for the duration of Executor::forward_value_only(). Kernels
+// that read it must still write ctx.out; all they may skip is work whose
+// only consumer is their own backward.
+static thread_local bool g_values_only = false;
+bool values_only() { return g_values_only; }
+
 const char* opcode_name(uint16_t opcode) {
   static const char* const names[] = {
       "OP_NONE_",
@@ -245,6 +251,20 @@ void Executor::run_forward_only() {
     fwd_fn_[i + 3](ctx_[i + 3]);
   }
   for (; i < n; ++i) fwd_fn_[i](ctx_[i]);
+}
+
+double Executor::forward_value_only() {
+  g_values_only = true;
+  try {
+    run_forward_only();
+  } catch (...) {
+    g_values_only = false;
+    throw;
+  }
+  g_values_only = false;
+  const Slot& r = graph_.slots[graph_.result_slot];
+  assert(r.len == 1);
+  return values_[r.offset];
 }
 
 double Executor::forward() {
