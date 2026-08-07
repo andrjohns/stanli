@@ -125,7 +125,7 @@ class Executor {
 
  private:
   void bind_();
-  KernelCtx make_ctx_(const Op& op, bool backward);
+  KernelCtx make_ctx_(const Op& op);
 
   struct ProfEntry {
     int64_t calls = 0;       // forward invocations

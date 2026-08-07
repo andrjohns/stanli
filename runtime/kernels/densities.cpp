@@ -145,21 +145,6 @@ void density_fwd_v(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
   ctx.out.data[0] = s.value;
 }
 
-// Back-compat shim for kernels not yet variant-aware.
-template <int NArgs, typename F>
-void density_fwd(KernelCtx& ctx, F&& f) {
-  sink s;
-  int64_t off = 0;
-  for (int k = 0; k < NArgs; ++k) {
-    s.buf[k] = ctx.scratch + off;
-    off += ctx.in[k].len;
-  }
-  active_sink() = &s;
-  bind_args_m<NArgs, (1u << NArgs) - 1>(ctx, f);
-  active_sink() = nullptr;
-  ctx.out.data[0] = s.value;
-}
-
 // Partials for argument k live at scratch[sum of lens of args < k]. A scalar
 // argument paired with vector ones holds the already-summed partial.
 // Elementwise variant: column k is scratch[k * N .. k * N + N), each element

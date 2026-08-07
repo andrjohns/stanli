@@ -191,7 +191,7 @@ struct Compiler {
   }
 
   void emit(IslandProg::Code c, int dst, int a, int b = 0, int cc = 0,
-            int len = 0, double imm = 0) {
+            int len = 0) {
     IslandProg::Instr I;
     I.code = c;
     I.dst = dst;
@@ -199,7 +199,6 @@ struct Compiler {
     I.b = b;
     I.c = cc;
     I.len = len;
-    I.imm = imm;
     prog.code.push_back(I);
   }
 
@@ -212,13 +211,15 @@ struct Compiler {
       case OP_DIV: {
         static_assert(IslandProg::SUB == IslandProg::ADD + 1 &&
                           IslandProg::MUL == IslandProg::ADD + 2 &&
-                          IslandProg::DIV == IslandProg::ADD + 3,
+                          IslandProg::DIV == IslandProg::ADD + 3 &&
+                          OP_SUB == OP_ADD + 1 && OP_MUL == OP_ADD + 2 &&
+                          OP_DIV == OP_ADD + 3,
                       "binary code order");
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
         const auto c = (IslandProg::Code)(IslandProg::ADD +
                                           (op.opcode - OP_ADD));
         emit(c, write_reg(op.out), a, b);
-        return ok && op.opcode - OP_ADD >= 0 && op.opcode - OP_ADD < 4;
+        return ok;
       }
       case OP_ADD_N: {
         const int a0 = read_reg(op.in[0]);

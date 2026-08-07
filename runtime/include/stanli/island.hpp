@@ -29,7 +29,6 @@ namespace stanli {
 
 struct IslandProg {
   enum Code : uint8_t {
-    CONST,     // dst = imm
     CONSTR,    // dst[0..len) = pool[a + i]  (fill-backed slot absorbed)
     MOV,       // dst = r[a]
     MOVR,      // dst[0..len) = r[a + i]
@@ -61,10 +60,9 @@ struct IslandProg {
     UNIFORM,
   };
   struct Instr {
-    Code code = CONST;
+    Code code = CONSTR;
     int32_t dst = 0, a = 0, b = 0, c = 0;
     int32_t len = 0;
-    double imm = 0;
   };
 
   std::vector<Instr> code;
@@ -101,7 +99,6 @@ void run_island(const IslandProg& p, const T* const* in, T* out) {
     auto ra = [&]() -> const T& { return reg[(size_t)I.a]; };
     auto rb = [&]() -> const T& { return reg[(size_t)I.b]; };
     switch (I.code) {
-      case IslandProg::CONST: d() = T(I.imm); break;
       case IslandProg::CONSTR:
         for (int32_t i = 0; i < I.len; ++i)
           reg[(size_t)(I.dst + i)] = T(p.pool[(size_t)(I.a + i)]);

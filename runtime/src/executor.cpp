@@ -61,12 +61,12 @@ static void ensure_registered() {
     register_elementwise_kernels();
     register_density_kernels();
     register_legacy_kernels();
-  register_matrix_kernels();
-  register_ode_kernels();
+    register_matrix_kernels();
+    register_ode_kernels();
     register_constrain_kernels();
     register_eltwise_kernels();
     register_mixture_kernels();
-  register_island_kernel();
+    register_island_kernel();
     return true;
   }();
   (void)once;
@@ -127,7 +127,7 @@ void Executor::bind_() {
   ctx_.resize(graph_.ops.size());
   out2_adj_ptr_.assign(graph_.ops.size(), nullptr);
   for (size_t i = 0; i < graph_.ops.size(); ++i) {
-    ctx_[i] = make_ctx_(graph_.ops[i], /*backward=*/true);
+    ctx_[i] = make_ctx_(graph_.ops[i]);
     const int o2 = graph_.ops[i].out2;
     if (o2 >= 0) out2_adj_ptr_[i] = adjoints_.data() + graph_.slots[o2].offset;
   }
@@ -144,7 +144,7 @@ void Executor::bind_() {
   }
 }
 
-KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
+KernelCtx Executor::make_ctx_(const Op& op) {
   KernelCtx ctx;
   ctx.n_in = op.n_in;
   for (int i = 0; i < op.n_in; ++i) {
@@ -162,18 +162,16 @@ KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
   ctx.idata = op.idata;
   ctx.udata = op.udata;
   ctx.n_idata = op.n_idata;
-  if (backward) {
-    for (int i = 0; i < op.n_in; ++i) {
-      const int si = op.in[i];
-      const Slot& s = graph_.slots[si];
-      const bool active = s.is_param || written_[si];
-      ctx.in_adj[i] =
-          Desc{active ? adjoints_.data() + s.offset : nullptr, s.len};
-    }
-    if (so.len == 1) ctx.out_adj = adjoints_[so.offset];
-    ctx.out_adj_vec = Desc{adjoints_.data() + so.offset, so.len};
-    if (op.out2 >= 0) ctx.out2_adj = adjoints_[graph_.slots[op.out2].offset];
+  for (int i = 0; i < op.n_in; ++i) {
+    const int si = op.in[i];
+    const Slot& s = graph_.slots[si];
+    const bool active = s.is_param || written_[si];
+    ctx.in_adj[i] =
+        Desc{active ? adjoints_.data() + s.offset : nullptr, s.len};
   }
+  if (so.len == 1) ctx.out_adj = adjoints_[so.offset];
+  ctx.out_adj_vec = Desc{adjoints_.data() + so.offset, so.len};
+  if (op.out2 >= 0) ctx.out2_adj = adjoints_[graph_.slots[op.out2].offset];
   return ctx;
 }
 
