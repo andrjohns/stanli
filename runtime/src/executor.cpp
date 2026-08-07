@@ -131,6 +131,17 @@ void Executor::bind_() {
     const int o2 = graph_.ops[i].out2;
     if (o2 >= 0) out2_adj_ptr_[i] = adjoints_.data() + graph_.slots[o2].offset;
   }
+  // Resolve dispatch now that ctx_ is final (it never reallocates after
+  // this, so BwdStep may hold pointers into it).
+  fwd_fn_.resize(graph_.ops.size());
+  bwd_.clear();
+  bwd_.reserve(graph_.ops.size());
+  for (size_t i = 0; i < graph_.ops.size(); ++i)
+    fwd_fn_[i] = kernel(graph_.ops[i].opcode).forward;
+  for (size_t i = graph_.ops.size(); i-- > 0;) {
+    void (*b)(KernelCtx&) = kernel(graph_.ops[i].opcode).backward;
+    if (b) bwd_.push_back(BwdStep{b, &ctx_[i], out2_adj_ptr_[i]});
+  }
 }
 
 KernelCtx Executor::make_ctx_(const Op& op, bool backward) {
@@ -205,9 +216,11 @@ std::string Executor::profile_report() const {
 }
 
 void Executor::run_forward_only() {
-  const size_t n = graph_.ops.size();
+  // The profiled path keeps the opcode-keyed loop (attribution needs the
+  // opcode anyway, and the timing calls dwarf dispatch cost).
   if (profile_) {
-    for (size_t i = 0; i < n; ++i) {
+    const size_t np = graph_.ops.size();
+    for (size_t i = 0; i < np; ++i) {
       const uint16_t op = graph_.ops[i].opcode;
       const auto t0 = std::chrono::steady_clock::now();
       kernel(op).forward(ctx_[i]);
@@ -220,8 +233,8 @@ void Executor::run_forward_only() {
     }
     return;
   }
-  for (size_t i = 0; i < n; ++i)
-    kernel(graph_.ops[i].opcode).forward(ctx_[i]);
+  const size_t n = fwd_fn_.size();
+  for (size_t i = 0; i < n; ++i) fwd_fn_[i](ctx_[i]);
 }
 
 double Executor::forward() {
@@ -236,23 +249,29 @@ double Executor::gradient(double* grad_out) {
   const double v = forward();
   std::memset(adjoints_.data(), 0, sizeof(double) * adjoints_.size());
   adjoints_[graph_.slots[graph_.result_slot].offset] = 1.0;
-  for (size_t i = graph_.ops.size(); i-- > 0;) {
-    const Kernel& k = kernel(graph_.ops[i].opcode);
-    if (!k.backward) continue;
-    KernelCtx& ctx = ctx_[i];
-    // The only fields that move between evaluations: the scalar adjoints,
-    // which kernels take by value.
-    if (ctx.out_adj_vec.len == 1) ctx.out_adj = ctx.out_adj_vec.data[0];
-    if (out2_adj_ptr_[i]) ctx.out2_adj = *out2_adj_ptr_[i];
-    if (profile_) {
+  if (profile_) {
+    for (size_t i = graph_.ops.size(); i-- > 0;) {
+      const Kernel& k = kernel(graph_.ops[i].opcode);
+      if (!k.backward) continue;
+      KernelCtx& ctx = ctx_[i];
+      if (ctx.out_adj_vec.len == 1) ctx.out_adj = ctx.out_adj_vec.data[0];
+      if (out2_adj_ptr_[i]) ctx.out2_adj = *out2_adj_ptr_[i];
       const auto t0 = std::chrono::steady_clock::now();
       k.backward(ctx);
       prof_[graph_.ops[i].opcode].bwd_ns +=
           std::chrono::duration_cast<std::chrono::nanoseconds>(
               std::chrono::steady_clock::now() - t0).count();
-      continue;
     }
-    k.backward(ctx);
+    std::memcpy(grad_out, adjoints_.data(), sizeof(double) * n_params_);
+    return v;
+  }
+  for (const BwdStep& s : bwd_) {
+    KernelCtx& ctx = *s.ctx;
+    // The only fields that move between evaluations: the scalar adjoints,
+    // which kernels take by value.
+    if (ctx.out_adj_vec.len == 1) ctx.out_adj = ctx.out_adj_vec.data[0];
+    if (s.out2_adj) ctx.out2_adj = *s.out2_adj;
+    s.fn(ctx);
   }
   std::memcpy(grad_out, adjoints_.data(), sizeof(double) * n_params_);
   return v;

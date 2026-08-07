@@ -143,6 +143,19 @@ class Executor {
   // copied from the op, so the only per-evaluation work is refreshing the
   // two scalar adjoints the reverse sweep passes by value.
   std::vector<KernelCtx> ctx_;
+  // The dispatch tables, resolved at bind. The sweeps walk these instead
+  // of reading each op's opcode and indexing the global kernel table:
+  // per op that saved an opcode load, a table index, a 3-pointer Kernel
+  // struct load, and (backward) a null test, which is a real fraction of
+  // the ~5 ns of executor overhead that sits on top of a small kernel.
+  std::vector<void (*)(KernelCtx&)> fwd_fn_;  // parallel to ctx_
+  // Reverse execution order, ops with no backward already dropped.
+  struct BwdStep {
+    void (*fn)(KernelCtx&);
+    KernelCtx* ctx;
+    const double* out2_adj;  // null when the op has no second output
+  };
+  std::vector<BwdStep> bwd_;
   std::vector<double*> out2_adj_ptr_;  // parallel to ops; null when no out2
   std::vector<char> written_;  // slot carries adjoint (param or op output)
   bool profile_ = false;
