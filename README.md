@@ -175,6 +175,24 @@ draws["mu"].mean()
 Builds without the embedded stanc3 object fall back to running a bundled
 stanc binary as a subprocess.
 
+## Browser (WASM)
+
+The same runtime compiles to WebAssembly and runs full Stan in a browser
+tab with no server: stanc3's js_of_ocaml build compiles the model to MIR
+in JS, and stanli.wasm lowers it and samples. Eight schools goes from
+Stan source to 1,000 posterior draws in about 120 ms in-tab. 118 of the
+119 compiling corpus models replay against the CmdStan references from
+inside WASM (`tools/wasm_check.sh` adapts `verify_refs.py`; the one
+exception is `nn_rbm1bJ100`, whose compile does not fit in wasm32's 4 GB).
+
+```
+./tools/build_web.sh              # emsdk + opam builds, assembled in web/
+python3 -m http.server -d web     # then open http://localhost:8000
+```
+
+Needs `deps/emsdk` (see tools/build_web.sh) and, for the stanc side, the
+same opam switch that builds the embedded compiler.
+
 ## Build
 
 One-shot setup (fetches pinned deps, builds, runs tests):

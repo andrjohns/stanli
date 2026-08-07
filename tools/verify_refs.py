@@ -62,7 +62,7 @@ def pair_dev(a, b):
     return (abs(a - b) / scale, ulp_distance(a, b))
 
 
-def check_model(model, ref, pdb, check_bin, tmp, timeout):
+def check_model(model, ref, pdb, check_bin, tmp, timeout, no_wa=False):
     """Returns (model, status, max_rel, max_ulp, n_values, detail)."""
     stan = pdb / "models" / "stan" / f"{model}.stan"
     dz = pdb / "data" / "data" / f"{ref['data']}.json.zip"
@@ -72,7 +72,7 @@ def check_model(model, ref, pdb, check_bin, tmp, timeout):
     with zipfile.ZipFile(dz) as z:
         dj.write_bytes(z.read(z.namelist()[0]))
     cmd = [str(check_bin), str(stan), str(dj), "--point", str(ref["point"])]
-    if "wa" in ref:
+    if "wa" in ref and not no_wa:
         cmd.append("--wa-values")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO,
@@ -104,7 +104,7 @@ def check_model(model, ref, pdb, check_bin, tmp, timeout):
         worst = max(worst, rel)
         worst_ulp = max(worst_ulp, ulp)
     n = len(rv)
-    if "wa" in ref:
+    if "wa" in ref and not no_wa:
         # The write_array reference: column names must match exactly, and
         # the values (transformed parameters + generated quantities at the
         # same point) share the model's gate.
@@ -163,6 +163,12 @@ def main():
                     default=REPO / "build" / "stanli_check")
     ap.add_argument("--max-rel", type=float, default=1e-9)
     ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--no-wa", action="store_true",
+                    help="replay lp and gradients only (the WASM check "
+                         "driver has no write_array entry point yet)")
+    ap.add_argument("--skip", default="",
+                    help="comma-separated models to exclude (the wasm32 "
+                         "build cannot fit nn_rbm1bJ100's compile in 4GB)")
     ap.add_argument("--timeout", type=float, default=300)
     args = ap.parse_args()
 
@@ -170,6 +176,8 @@ def main():
         (REPO / "docs" / "corpus-refs.json.gz").read_bytes()))
     pdb = args.pdb / "posterior_database"
     models = args.models or sorted(refs)
+    skip = set(filter(None, args.skip.split(",")))
+    models = [m for m in models if m not in skip]
     missing = [m for m in models if m not in refs]
     if missing:
         print(f"no reference recorded for: {' '.join(missing)}")
@@ -180,7 +188,7 @@ def main():
     worst_overall = ("", 0.0, 0)
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         futs = [pool.submit(check_model, m, refs[m], pdb, args.check, tmp,
-                            args.timeout) for m in models]
+                            args.timeout, args.no_wa) for m in models]
         for fut in concurrent.futures.as_completed(futs):
             model, status, rel, ulp, n, detail = fut.result()
             if status != "OK":

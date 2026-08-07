@@ -47,6 +47,16 @@ target_compile_definitions(stanmath INTERFACE _REENTRANT BOOST_DISABLE_ASSERTS)
 # between the kernels and the var-path references (measured: 2 ULP on
 # eight-schools d/dmu). Cost is well inside the performance budget.
 target_compile_options(stanmath INTERFACE -ffp-contract=off)
+if(EMSCRIPTEN)
+  target_compile_options(stanmath INTERFACE -fwasm-exceptions)
+  # stan-math's rev core includes TBB 2020 headers unconditionally, and
+  # that TBB predates wasm: its machine layer selects by OS macro and
+  # errors out on anything unknown. Steer it to the portable
+  # __atomic-builtins port (machine/gcc_generic.h), which sits behind the
+  # __linux__ branch. Emscripten's libc is musl, so the pretense is thin.
+  target_compile_definitions(stanmath INTERFACE
+    __linux__=1 TBB_USE_GCC_BUILTINS=1)
+endif()
 
 # The distributable shared library: C ABI + all kernels, TBB stubbed
 # (single-threaded until the payload ships real TBB).
@@ -74,6 +84,7 @@ target_compile_options(sundials PRIVATE -w
   -include ${_sundials}/include/stan_sundials_printf_override.hpp)
 set_target_properties(sundials PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+if(NOT EMSCRIPTEN)
 add_library(stanli_shared SHARED
   runtime/src/capi.cpp
   runtime/src/executor.cpp
@@ -137,6 +148,7 @@ if(STANLI_STANC_EMBED_OBJ)
   target_compile_definitions(stanli_shared PRIVATE STANLI_EMBED_STANC)
   target_link_libraries(stanli_shared PUBLIC dl pthread)
 endif()
+endif()  # NOT EMSCRIPTEN
 
 add_library(stanli STATIC
   runtime/src/executor.cpp
@@ -162,6 +174,26 @@ add_library(stanli STATIC
 target_include_directories(stanli PUBLIC runtime/include)
 target_link_libraries(stanli PUBLIC stanmath sundials)
 
+# The browser/WASM build: the same runtime and C ABI over the MIR-text
+# entry point (no embedded stanc; stanc.js supplies the MIR in JS). One
+# .js + .wasm pair, MODULARIZE'd so web pages and Node both load it.
+if(EMSCRIPTEN)
+  add_executable(stanli_wasm runtime/src/capi.cpp tests/tbb_stub.cpp)
+  target_link_libraries(stanli_wasm PRIVATE stanli)
+  set_target_properties(stanli_wasm PROPERTIES OUTPUT_NAME stanli)
+  target_link_options(stanli_wasm PRIVATE
+    -fwasm-exceptions
+    "SHELL:-s MODULARIZE=1"
+    "SHELL:-s EXPORT_NAME=createStanli"
+    "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+    "SHELL:-s MAXIMUM_MEMORY=4GB"
+    "SHELL:-s STACK_SIZE=8MB"
+    "SHELL:-s ENVIRONMENT=web,worker,node"
+    "SHELL:-s EXPORTED_FUNCTIONS=_stanli_model_new,_stanli_model_new_from_stan,_stanli_has_embedded_stanc,_stanli_model_free,_stanli_n_unconstrained,_stanli_grad,_stanli_sample,_stanli_n_constrained,_stanli_constrained_name,_stanli_constrain,_malloc,_free"
+    "SHELL:-s EXPORTED_RUNTIME_METHODS=cwrap,UTF8ToString,stringToNewUTF8,HEAPF64")
+endif()
+
+if(NOT EMSCRIPTEN)
 enable_testing()
 # Single-threaded tests stub the one TBB symbol stan-math's rev core needs.
 function(stanli_add_test NAME)
@@ -210,3 +242,4 @@ stanli_add_test(test_constfold)
 stanli_add_test(test_write_array)
 stanli_add_test(test_mixture)
 stanli_add_test(test_island)
+endif()  # NOT EMSCRIPTEN

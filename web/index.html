@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stanli: Stan in the browser</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font: 15px/1.45 system-ui, sans-serif;
+    max-width: 1100px; margin: 0 auto; padding: 1.2rem;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 .2rem; }
+  .sub { opacity: .7; margin: 0 0 1rem; }
+  .cols { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .cols > div { flex: 1 1 320px; display: flex; flex-direction: column; }
+  label { font-weight: 600; font-size: .85rem; margin-bottom: .25rem; }
+  textarea {
+    font: 12.5px/1.4 ui-monospace, monospace; width: 100%;
+    border: 1px solid #8884; border-radius: 6px; padding: .5rem;
+    background: transparent; color: inherit; resize: vertical;
+  }
+  #code { height: 320px; } #data { height: 320px; }
+  .bar { display: flex; gap: .8rem; align-items: center; margin: .8rem 0;
+         flex-wrap: wrap; }
+  .bar label { margin: 0; font-weight: 400; }
+  .bar input { width: 5.5rem; font: inherit; background: transparent;
+               color: inherit; border: 1px solid #8884; border-radius: 4px;
+               padding: .2rem .35rem; }
+  button {
+    font: 600 .95rem system-ui; padding: .45rem 1.1rem; border-radius: 6px;
+    border: 1px solid #4a7; background: #4a7; color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { font-size: .85rem; opacity: .75; min-height: 1.2em; }
+  #err { color: #c33; white-space: pre-wrap; font-family: ui-monospace,
+         monospace; font-size: .8rem; }
+  table { border-collapse: collapse; margin-top: .8rem; font-size: .85rem;
+          font-variant-numeric: tabular-nums; }
+  th, td { padding: .25rem .7rem; border-bottom: 1px solid #8883;
+           text-align: right; }
+  th:first-child, td:first-child { text-align: left;
+           font-family: ui-monospace, monospace; }
+  tr { cursor: pointer; }
+  tr:hover td { background: #8881; }
+  #hist { margin-top: .8rem; border: 1px solid #8883; border-radius: 6px;
+          width: 100%; max-width: 640px; height: 180px; }
+  .times { font-size: .8rem; opacity: .7; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>stanli: full Stan in the browser</h1>
+<p class="sub">stanc3 (OCaml&rarr;JS) compiles the model, stanli.wasm
+lowers it to an op graph and runs NUTS. No server, no C++ toolchain;
+everything below happens in this tab.</p>
+
+<div class="cols">
+  <div><label for="code">model.stan</label>
+    <textarea id="code" spellcheck="false"></textarea></div>
+  <div><label for="data">data.json</label>
+    <textarea id="data" spellcheck="false"></textarea></div>
+</div>
+
+<div class="bar">
+  <button id="run">Run NUTS</button>
+  <label>warmup <input id="warmup" value="1000"></label>
+  <label>samples <input id="samples" value="1000"></label>
+  <label>seed <input id="seed" value="1"></label>
+  <label>delta <input id="delta" value="0.8"></label>
+  <span id="status"></span>
+</div>
+<div id="err"></div>
+<div id="out"></div>
+<canvas id="hist" width="640" height="180" hidden></canvas>
+<div class="times" id="times"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+$("code").value = `data {
+  int<lower=0> J;
+  array[J] real y;
+  array[J] real<lower=0> sigma;
+}
+parameters {
+  real mu;
+  real<lower=0> tau;
+  vector[J] theta_tilde;
+}
+transformed parameters {
+  vector[J] theta = mu + tau * theta_tilde;
+}
+model {
+  mu ~ normal(0, 5);
+  tau ~ cauchy(0, 5);
+  theta_tilde ~ normal(0, 1);
+  y ~ normal(theta, sigma);
+}`;
+$("data").value = `{"J": 8,
+ "y": [28, 8, -3, 7, -1, 1, 18, 12],
+ "sigma": [15, 10, 16, 11, 9, 11, 10, 18]}`;
+
+const worker = new Worker("worker.js");
+let result = null;
+
+$("run").onclick = () => {
+  $("run").disabled = true;
+  $("err").textContent = "";
+  $("out").innerHTML = "";
+  $("times").textContent = "";
+  $("hist").hidden = true;
+  worker.postMessage({
+    cmd: "run",
+    code: $("code").value,
+    dataJson: $("data").value,
+    seed: parseInt($("seed").value, 10) || 1,
+    warmup: parseInt($("warmup").value, 10) || 1000,
+    samples: parseInt($("samples").value, 10) || 1000,
+    delta: parseFloat($("delta").value) || 0.8,
+  });
+};
+
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (m.status) { $("status").textContent = m.status; return; }
+  $("run").disabled = false;
+  $("status").textContent = "";
+  if (m.error) { $("err").textContent = m.error; return; }
+  result = { names: m.done.names, samples: m.done.samples,
+             cols: new Float64Array(m.done.columns) };
+  render(m.done.ms);
+};
+
+function colStats(i) {
+  const { samples, cols } = result;
+  const xs = cols.subarray(i * samples, (i + 1) * samples);
+  const sorted = Float64Array.from(xs).sort();
+  let s = 0; for (const x of xs) s += x;
+  const mean = s / samples;
+  let v = 0; for (const x of xs) v += (x - mean) * (x - mean);
+  const q = (p) => sorted[Math.min(samples - 1, Math.floor(p * samples))];
+  return { mean, sd: Math.sqrt(v / (samples - 1)),
+           q5: q(0.05), q50: q(0.5), q95: q(0.95) };
+}
+
+function render(ms) {
+  const f = (x) => (Math.abs(x) >= 1000 ? x.toFixed(0) : x.toPrecision(4));
+  let html = "<table><tr><th>parameter</th><th>mean</th><th>sd</th>" +
+             "<th>5%</th><th>50%</th><th>95%</th></tr>";
+  result.names.forEach((n, i) => {
+    const st = colStats(i);
+    html += `<tr data-i="${i}"><td>${n}</td><td>${f(st.mean)}</td>` +
+            `<td>${f(st.sd)}</td><td>${f(st.q5)}</td>` +
+            `<td>${f(st.q50)}</td><td>${f(st.q95)}</td></tr>`;
+  });
+  $("out").innerHTML = html + "</table>";
+  $("times").textContent =
+      `stanc ${ms.stanc.toFixed(0)} ms, lower ${ms.lower.toFixed(0)} ms, ` +
+      `sample ${ms.sample.toFixed(0)} ms, total ${ms.total.toFixed(0)} ms ` +
+      `(click a row for its histogram)`;
+  for (const tr of $("out").querySelectorAll("tr[data-i]"))
+    tr.onclick = () => hist(parseInt(tr.dataset.i, 10));
+}
+
+function hist(i) {
+  const { samples, cols, names } = result;
+  const xs = cols.subarray(i * samples, (i + 1) * samples);
+  let lo = Infinity, hi = -Infinity;
+  for (const x of xs) { if (x < lo) lo = x; if (x > hi) hi = x; }
+  if (!(hi > lo)) { lo -= 1; hi += 1; }
+  const nb = 40, counts = new Array(nb).fill(0);
+  for (const x of xs)
+    ++counts[Math.min(nb - 1, ((x - lo) / (hi - lo) * nb) | 0)];
+  const peak = Math.max(...counts);
+  const c = $("hist"), g = c.getContext("2d");
+  c.hidden = false;
+  g.clearRect(0, 0, c.width, c.height);
+  g.fillStyle = "#4a7";
+  const w = c.width / nb;
+  counts.forEach((k, b) => {
+    const h = (c.height - 22) * k / peak;
+    g.fillRect(b * w + 1, c.height - 20 - h, w - 2, h);
+  });
+  g.fillStyle = getComputedStyle(document.body).color;
+  g.font = "12px system-ui";
+  g.textAlign = "left";
+  g.fillText(names[i] + "  [" + lo.toPrecision(3) + ", " +
+             hi.toPrecision(3) + "]", 6, 14);
+}
+</script>
+</body>
+</html>

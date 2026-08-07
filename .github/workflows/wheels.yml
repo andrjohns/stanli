@@ -227,6 +227,29 @@ jobs:
           name: wheel-${{ matrix.plat }}
           path: dist/*.whl
 
+  wasm:
+    name: wasm (browser build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.6
+      - name: Fetch pinned dependencies
+        run: ./deps/fetch.sh
+      - name: Build stanli.wasm
+        run: |
+          emcmake cmake -B build-wasm -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-wasm -j4
+      - name: Sample eight schools under Node
+        run: node tests/test_wasm.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: |
+            build-wasm/stanli.js
+            build-wasm/stanli.wasm
+
   publish:
     # Tags only. PyPI versions can never be reused, so this must not fire
     # on a branch push.
