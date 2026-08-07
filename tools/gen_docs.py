@@ -27,6 +27,11 @@ TARGETS = [REPO / "README.md", REPO / "python" / "README.md"]
 MARK = re.compile(r"(<!--gen:([a-z_]+)-->)(.*?)(<!--/gen-->)", re.S)
 
 
+def num(cell):
+    """A table cell as a number. Thousands separators are for readers."""
+    return float(cell.replace(",", "").rstrip("x"))
+
+
 def bench_rows():
     """(model, params, stanli_ns, cmdstan_ns, speedup) from benchmarks.md."""
     text = (REPO / "docs" / "benchmarks.md").read_text()
@@ -43,11 +48,30 @@ def bench_rows():
         if not line.startswith("| `"):
             continue
         cells = [c.strip() for c in line.strip("|").split("|")]
-        rows.append((cells[0].strip("`"), int(cells[1]), float(cells[2]),
-                     float(cells[3]), float(cells[4].rstrip("x"))))
+        rows.append((cells[0].strip("`"), int(num(cells[1])), num(cells[2]),
+                     num(cells[3]), num(cells[4])))
     if not rows:
         raise SystemExit("no benchmark table found in docs/benchmarks.md")
     return rows
+
+
+def corpus_stats():
+    """(n, median speedup, models at or above parity) from the corpus TSV.
+
+    The benchmark table above is a shape slice, chosen to show the range;
+    summarizing the engine from it would be summarizing the choice. These
+    are every model the corpus run measured on both sides.
+    """
+    rows = (REPO / "docs" / "corpus-bench.tsv").read_text().splitlines()
+    idx = {name: k for k, name in enumerate(rows[0].split("\t"))}
+    ratios = []
+    for line in rows[1:]:
+        c = line.split("\t")
+        s, cm = c[idx["stanli_ns_grad"]], c[idx["cmdstan_ns_grad"]]
+        if s.strip() and cm.strip():
+            ratios.append(float(cm) / float(s))
+    ratios.sort()
+    return len(ratios), ratios[len(ratios) // 2], sum(r >= 1.0 for r in ratios)
 
 
 def us(ns):
@@ -62,6 +86,7 @@ def compute():
     worst = max(v["max_rel"] for v in verified.values())
     n_total = len(ver)
 
+    c_n, c_med, c_par = corpus_stats()
     rows = bench_rows()
     # A model counts as a win when its speedup rounds to at least 1.0x,
     # matching how the table has always been summarized.
@@ -89,6 +114,9 @@ def compute():
         "bench_wins": f"{len(wins)} of the {len(rows)}",
         "bench_losses": loss_text,
         "bench_table_us": "\n".join(table),
+        "corpus_median": f"{c_med:.2f}x",
+        "corpus_n_grad": str(c_n),
+        "corpus_at_par": str(c_par),
     }
 
 
