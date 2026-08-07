@@ -853,19 +853,13 @@ struct Lowering {
     // [len, vals..., len, vals...]; glm = [y..., rows, cols].
     struct Dens { uint16_t op; int nargs; int n_int; bool glm = false; };
     static const std::map<std::string, Dens> kDens = {
-        {"normal_lpdf", {OP_NORMAL_LPDF, 3, 0}},
-        {"cauchy_lpdf", {OP_CAUCHY_LPDF, 3, 0}},
-        {"student_t_lpdf", {OP_STUDENT_T_LPDF, 4, 0}},
-        {"gamma_lpdf", {OP_GAMMA_LPDF, 3, 0}},
-        {"beta_lpdf", {OP_BETA_LPDF, 3, 0}},
-        {"lognormal_lpdf", {OP_LOGNORMAL_LPDF, 3, 0}},
-        {"uniform_lpdf", {OP_UNIFORM_LPDF, 3, 0}},
-        {"double_exponential_lpdf", {OP_DOUBLE_EXP_LPDF, 3, 0}},
-        {"exponential_lpdf", {OP_EXPONENTIAL_LPDF, 2, 0}},
-        {"inv_gamma_lpdf", {OP_INV_GAMMA_LPDF, 3, 0}},
-        {"std_normal_lpdf", {OP_STD_NORMAL_LPDF, 1, 0}},
         {"poisson_log_lpmf", {OP_POISSON_LOG_LPMF, 2, 1}},
         {"bernoulli_logit_lpmf", {OP_BERNOULLI_LOGIT_LPMF, 2, 1}},
+        // Generated from STANLI_SCALAR_DENSITY_LIST (optable.hpp): the same
+        // one line that made the opcode and the kernel makes this entry.
+#define STANLI_DENSITY_TABLE(code, fn, n) {#fn, {code, n, 0}},
+        STANLI_SCALAR_DENSITY_LIST(STANLI_DENSITY_TABLE)
+#undef STANLI_DENSITY_TABLE
         {"bernoulli_lpmf", {OP_BERNOULLI_LPMF, 2, 1}},
         {"poisson_lpmf", {OP_POISSON_LPMF, 2, 1}},
         {"neg_binomial_2_lpmf", {OP_NEG_BINOMIAL_2_LPMF, 3, 1}},
@@ -874,8 +868,6 @@ struct Lowering {
         {"bernoulli_logit_glm_lpmf",
          {OP_BERNOULLI_LOGIT_GLM_LPMF, 4, 1, true}},
         {"dirichlet_lpdf", {OP_DIRICHLET_LPDF, 2, 0}},
-        {"weibull_lpdf", {OP_WEIBULL_LPDF, 3, 0}},
-        {"logistic_lpdf", {OP_LOGISTIC_LPDF, 3, 0}},
     };
     auto dit = kDens.find(e.name);
     if (dit != kDens.end()) {

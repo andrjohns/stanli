@@ -199,104 +199,7 @@ int64_t density_scratch(const Op& op, const Slot* slots) {
 }
 
 // ---- lpdfs: real args only -------------------------------------------------
-void normal_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::normal_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::normal_lpdf<false>(a...); });
-}
-void cauchy_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::cauchy_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::cauchy_lpdf<false>(a...); });
-}
-void student_t_fwd(KernelCtx& ctx) {
-  density_fwd_v<4>(
-      ctx, [](const auto&... a) { stan::math::student_t_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::student_t_lpdf<false>(a...); });
-}
-void gamma_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::gamma_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::gamma_lpdf<false>(a...); });
-}
-void beta_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::beta_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::beta_lpdf<false>(a...); });
-}
 
-void weibull_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::weibull_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::weibull_lpdf<false>(a...); });
-}
-void logistic_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::logistic_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::logistic_lpdf<false>(a...); });
-}
-void lognormal_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::lognormal_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::lognormal_lpdf<false>(a...); });
-}
-void uniform_fwd(KernelCtx& ctx) {
-  // stan-math reports out-of-support y with an early `return LOG_ZERO`
-  // that never reaches the partials sink, so the recorder would leave the
-  // value at 0 and the point would silently count as in support (caught
-  // by the dogs_log reference: CmdStan -inf, stanli finite). Handle
-  // support here; the density call then only ever runs on points where
-  // every stan-math path deposits through the sink.
-  const auto at = [&](int k, int64_t n) {
-    return ctx.in[k].data[ctx.in[k].len == 1 ? 0 : n];
-  };
-  const int64_t N =
-      std::max(ctx.in[0].len, std::max(ctx.in[1].len, ctx.in[2].len));
-  const bool elt = (ctx.variant & 0x40u) != 0;
-  bool any_out = false;
-  for (int64_t n = 0; n < N && !any_out; ++n)
-    any_out = at(0, n) < at(1, n) || at(0, n) > at(2, n);
-  if (any_out && !elt) {
-    ctx.out.data[0] = stan::math::LOG_ZERO;
-    const int64_t plen = ctx.in[0].len + ctx.in[1].len + ctx.in[2].len;
-    std::fill(ctx.scratch, ctx.scratch + plen, 0.0);
-    return;
-  }
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::uniform_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::uniform_lpdf<false>(a...); });
-  if (any_out && elt) {
-    // Elementwise variant: only the offending lanes are LOG_ZERO, and
-    // their partials contribute nothing.
-    const int64_t M = ctx.out.len;
-    for (int64_t n = 0; n < M; ++n)
-      if (at(0, n) < at(1, n) || at(0, n) > at(2, n)) {
-        ctx.out.data[n] = stan::math::LOG_ZERO;
-        for (int k = 0; k < 3; ++k)
-          ctx.scratch[static_cast<int64_t>(k) * M + n] = 0.0;
-      }
-  }
-}
-void double_exp_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::double_exponential_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::double_exponential_lpdf<false>(a...); });
-}
-void exponential_fwd(KernelCtx& ctx) {
-  density_fwd_v<2>(
-      ctx, [](const auto&... a) { stan::math::exponential_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::exponential_lpdf<false>(a...); });
-}
-void inv_gamma_fwd(KernelCtx& ctx) {
-  density_fwd_v<3>(
-      ctx, [](const auto&... a) { stan::math::inv_gamma_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::inv_gamma_lpdf<false>(a...); });
-}
-void std_normal_fwd(KernelCtx& ctx) {
-  density_fwd_v<1>(
-      ctx, [](const auto&... a) { stan::math::std_normal_lpdf<true>(a...); },
-      [](const auto&... a) { stan::math::std_normal_lpdf<false>(a...); });
-}
 
 // ---- lpmfs: integer outcome from idata, not a propagator edge --------------
 // The elementwise variant hands each recorder call outcome element n; the
@@ -404,45 +307,83 @@ void bernoulli_logit_glm_fwd(KernelCtx& ctx) {
 // alpha scalar, beta vector.
 void bernoulli_logit_glm_bwd(KernelCtx& ctx) { density_bwd<3>(ctx); }
 
+void uniform_fwd(KernelCtx& ctx) {
+  // stan-math reports out-of-support y with an early `return LOG_ZERO`
+  // that never reaches the partials sink, so the recorder would leave the
+  // value at 0 and the point would silently count as in support (caught
+  // by the dogs_log reference: CmdStan -inf, stanli finite). Handle
+  // support here; the density call then only ever runs on points where
+  // every stan-math path deposits through the sink.
+  const auto at = [&](int k, int64_t n) {
+    return ctx.in[k].data[ctx.in[k].len == 1 ? 0 : n];
+  };
+  const int64_t N =
+      std::max(ctx.in[0].len, std::max(ctx.in[1].len, ctx.in[2].len));
+  const bool elt = (ctx.variant & 0x40u) != 0;
+  bool any_out = false;
+  for (int64_t n = 0; n < N && !any_out; ++n)
+    any_out = at(0, n) < at(1, n) || at(0, n) > at(2, n);
+  if (any_out && !elt) {
+    ctx.out.data[0] = stan::math::LOG_ZERO;
+    const int64_t plen = ctx.in[0].len + ctx.in[1].len + ctx.in[2].len;
+    std::fill(ctx.scratch, ctx.scratch + plen, 0.0);
+    return;
+  }
+  density_fwd_v<3>(
+      ctx, [](const auto&... a) { stan::math::uniform_lpdf<true>(a...); },
+      [](const auto&... a) { stan::math::uniform_lpdf<false>(a...); });
+  if (any_out && elt) {
+    // Elementwise variant: only the offending lanes are LOG_ZERO, and
+    // their partials contribute nothing.
+    const int64_t M = ctx.out.len;
+    for (int64_t n = 0; n < M; ++n)
+      if (at(0, n) < at(1, n) || at(0, n) > at(2, n)) {
+        ctx.out.data[n] = stan::math::LOG_ZERO;
+        for (int k = 0; k < 3; ++k)
+          ctx.scratch[static_cast<int64_t>(k) * M + n] = 0.0;
+      }
+  }
+}
+
+// One line per density in STANLI_SCALAR_DENSITY_LIST (optable.hpp) makes
+// the forward, and the registration below makes the rest. Everything they
+// share -- propto and per-argument activity from the variant byte,
+// elementwise output, the partials stashed for density_bwd to contract --
+// lives in density_fwd_v.
+#define STANLI_DEFINE_DENSITY_FWD(code, fn, n)                             \
+  void fn##_fwd_gen(KernelCtx& ctx) {                                      \
+    density_fwd_v<n>(                                                      \
+        ctx, [](const auto&... a) { stan::math::fn<true>(a...); },         \
+        [](const auto&... a) { stan::math::fn<false>(a...); });            \
+  }
+STANLI_SCALAR_DENSITY_LIST(STANLI_DEFINE_DENSITY_FWD)
+#undef STANLI_DEFINE_DENSITY_FWD
+
 }  // namespace
 
 void register_density_kernels() {
-  register_kernel(OP_NORMAL_LPDF,
-                  Kernel{normal_fwd, density_bwd<3>, density_scratch<3>});
-  register_kernel(OP_CAUCHY_LPDF,
-                  Kernel{cauchy_fwd, density_bwd<3>, density_scratch<3>});
-  register_kernel(OP_STUDENT_T_LPDF,
-                  Kernel{student_t_fwd, density_bwd<4>, density_scratch<4>});
-  register_kernel(OP_GAMMA_LPDF,
-                  Kernel{gamma_fwd, density_bwd<3>, density_scratch<3>});
-  register_kernel(OP_BETA_LPDF,
-                  Kernel{beta_fwd, density_bwd<3>, density_scratch<3>});
+#define STANLI_REGISTER_DENSITY(code, fn, n) \
+  register_kernel(code, Kernel{fn##_fwd_gen, density_bwd<n>, density_scratch<n>});
+  STANLI_SCALAR_DENSITY_LIST(STANLI_REGISTER_DENSITY)
+#undef STANLI_REGISTER_DENSITY
+  // The list is the default. A density whose forward needs more than the
+  // shared one registers after it and wins: uniform_lpdf has to decide
+  // support itself, because stan-math returns LOG_ZERO out of support
+  // through an early return that never reaches the partials sink, and the
+  // recorder would leave the value at 0 (CmdStan -inf, stanli finite --
+  // caught by the dogs_log reference).
+  register_kernel(OP_UNIFORM_LPDF,
+                  Kernel{uniform_fwd, density_bwd<3>, density_scratch<3>});
   register_kernel(OP_POISSON_LOG_LPMF,
                   Kernel{poisson_log_fwd, density_bwd<1>, density_scratch<1>});
   register_kernel(OP_BERNOULLI_LOGIT_LPMF,
                   Kernel{bernoulli_logit_fwd, density_bwd<1>, density_scratch<1>});
-  register_kernel(OP_LOGNORMAL_LPDF,
-                  Kernel{lognormal_fwd, density_bwd<3>, density_scratch<3>});
-  register_kernel(OP_UNIFORM_LPDF,
-                  Kernel{uniform_fwd, density_bwd<3>, density_scratch<3>});
-  register_kernel(OP_DOUBLE_EXP_LPDF,
-                  Kernel{double_exp_fwd, density_bwd<3>, density_scratch<3>});
-  register_kernel(OP_EXPONENTIAL_LPDF,
-                  Kernel{exponential_fwd, density_bwd<2>, density_scratch<2>});
-  register_kernel(OP_INV_GAMMA_LPDF,
-                  Kernel{inv_gamma_fwd, density_bwd<3>, density_scratch<3>});
-  register_kernel(OP_STD_NORMAL_LPDF,
-                  Kernel{std_normal_fwd, density_bwd<1>, density_scratch<1>});
   register_kernel(OP_BERNOULLI_LPMF,
                   Kernel{bernoulli_fwd, density_bwd<1>, density_scratch<1>});
   register_kernel(OP_POISSON_LPMF,
                   Kernel{poisson_fwd, density_bwd<1>, density_scratch<1>});
   register_kernel(OP_NEG_BINOMIAL_2_LPMF,
                   Kernel{neg_binomial_2_fwd, density_bwd<2>, density_scratch<2>});
-  register_kernel(OP_LOGISTIC_LPDF,
-                  Kernel{logistic_fwd, density_bwd<3>, density_scratch<3>});
-  register_kernel(OP_WEIBULL_LPDF,
-                  Kernel{weibull_fwd, density_bwd<3>, density_scratch<3>});
   register_kernel(OP_BINOMIAL_LPMF,
                   Kernel{binomial_fwd, density_bwd<1>, density_scratch<1>});
   register_kernel(OP_BINOMIAL_LOGIT_LPMF,

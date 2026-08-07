@@ -77,8 +77,18 @@ DENSITIES = [
 
 # Which of the above stanli claims. Anything here that fails is a bug;
 # anything absent that passes is free coverage nobody wired up.
-def claimed(names_src):
-    have = set(re.findall(r'"([a-z_0-9]+_(?:lpdf|lpmf))"', names_src))
+def claimed():
+    """Names stanli wires into the log-density path.
+
+    Two sources since the densities were generated: the hand-written
+    entries still spelled out in lower.cpp, and STANLI_SCALAR_DENSITY_LIST
+    in optable.hpp, which generates the opcode, the kernel and the table
+    entry from one line each.
+    """
+    have = set(re.findall(r'"([a-z_0-9]+_(?:lpdf|lpmf))"',
+                          (REPO / "runtime/src/lower.cpp").read_text()))
+    have |= set(re.findall(r"X\(OP_[A-Z_0-9]+, ([a-z_0-9]+), \d\)",
+                           (REPO / "runtime/include/stanli/optable.hpp").read_text()))
     return have
 
 
@@ -200,7 +210,7 @@ def main():
     ap.add_argument("--missing", action="store_true")
     args = ap.parse_args()
 
-    have = claimed((REPO / "runtime/src/lower.cpp").read_text())
+    have = claimed()
     specs = [s for s in DENSITIES if args.filter in s[0]]
     if not args.missing:
         specs = [s for s in specs if s[0] in have]
