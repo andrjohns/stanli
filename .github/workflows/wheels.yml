@@ -32,6 +32,8 @@ env:
   STANC3_SRC_SHA: ac69570adecc41925b4ad72b6b2681c98c09c57d
   OCAML_VERSION: 5.5.0
   OPAM_VERSION: 2.5.2
+  # Must match tools/dev_setup.sh; pins the corpus the reference check reads.
+  PDB_SHA: 28f8d3d6e975315f42aa274a8399f21e07a43b30
 
 jobs:
   build:
@@ -146,6 +148,35 @@ jobs:
 
       - name: Tests
         run: ctest --test-dir build-rel --output-on-failure
+
+      # The models and data the corpus check reads: ~24 MB out of
+      # posteriordb's 2 GB, via sparse checkout, cached on the pinned SHA.
+      - name: Restore posteriordb (models and data only)
+        id: pdb-cache
+        uses: actions/cache@v4
+        with:
+          path: deps/posteriordb
+          key: pdb-lite-${{ env.PDB_SHA }}
+      - name: Fetch posteriordb
+        if: steps.pdb-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --filter=blob:none --sparse \
+            https://github.com/stan-dev/posteriordb.git deps/posteriordb
+          git -C deps/posteriordb sparse-checkout set \
+            posterior_database/models/stan posterior_database/data/data
+          git -C deps/posteriordb fetch -q origin "$PDB_SHA"
+          git -C deps/posteriordb checkout -q "$PDB_SHA"
+
+      # The strongest oracle in the project: every referenced posteriordb
+      # model evaluated and compared against CmdStan's recorded lp and full
+      # gradient (docs/corpus-refs.json.gz, written by the local rig).
+      # This class of check has caught what unit tests missed: eight
+      # models silently wrong by up to 1.7e5 relative reached main with
+      # every test green, and only the corpus diff flagged them.
+      - name: Corpus verification against CmdStan references
+        run: |
+          python3 tools/verify_refs.py deps/posteriordb \
+            --check build-rel/stanli_check --jobs 4
 
       - name: Wheel
         run: ./tools/build_wheel.sh

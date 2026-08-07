@@ -63,10 +63,12 @@ math is unmodified stan-math, the same code CmdStan runs.
 
 Nothing here ships on "looks close".
 
-**118 of 120 posteriordb models** are differentially verified against
-CmdStan: same model, same data, same evaluation point, comparing the log
-density and every single gradient component. **45 agree bitwise.** The worst
-deviation across the entire corpus is **2.6e-12 relative**.
+**<!--gen:corpus_verified_of-->118 of 120<!--/gen--> posteriordb models**
+are differentially verified against CmdStan: same model, same data, same
+evaluation point, comparing the log density and every single gradient
+component. **<!--gen:corpus_bitwise-->44<!--/gen--> agree bitwise.** The
+worst deviation across the entire corpus is
+**<!--gen:corpus_worst-->2.6e-12<!--/gen--> relative**.
 
 The two exceptions are documented rather than hidden. `sir`'s ODE solution
 dips about 1e-9 below a declared lower bound at the shared evaluation point,
@@ -82,18 +84,21 @@ Full per-model accuracy table:
 Per-gradient latency against CmdStan, same models, same evaluation point,
 both sides `-O3` with FP contraction pinned off:
 
-| model | params | stanli | CmdStan | speedup |
+<!--gen:bench_table_us-->| model | params | stanli | CmdStan | speedup |
 | --- | ---: | ---: | ---: | ---: |
-| `radon_pooled` | 3 | 53.1 us | 328.1 us | **6.2x** |
-| `radon_hierarchical_intercept_centered` | 391 | 112.1 us | 574.2 us | **5.1x** |
-| `arK` | 7 | 2.5 us | 11.9 us | **4.8x** |
-| `radon_county_intercept` | 388 | 90.4 us | 431.5 us | **4.8x** |
-| `bym2_offset_only` | 3845 | 40.0 us | 125.4 us | **3.1x** |
-| `eight_schools_noncentered` | 10 | 0.28 us | 0.64 us | **2.3x** |
-| `kidscore_momiq` | 3 | 1.9 us | 3.9 us | **2.0x** |
-| `lsat_model` | 1006 | 46.6 us | 91.2 us | **2.0x** |
-| `wells_dist100ars_model` | 3 | 17.3 us | 18.4 us | **1.1x** |
-| `low_dim_gauss_mix` | 5 | 186.4 us | 98.9 us | 0.53x |
+| `radon_pooled` | 3 | 53.1 us | 335.1 us | **6.3x** |
+| `arK` | 7 | 2.3 us | 12.1 us | **5.2x** |
+| `radon_hierarchical_intercept_centered` | 391 | 113.0 us | 577.0 us | **5.1x** |
+| `radon_county_intercept` | 388 | 89.8 us | 431.0 us | **4.8x** |
+| `eight_schools_noncentered` | 10 | 0.23 us | 0.73 us | **3.2x** |
+| `election88_full` | 90 | 297.0 us | 913.3 us | **3.1x** |
+| `bym2_offset_only` | 3845 | 41.2 us | 110.0 us | **2.7x** |
+| `kidscore_momiq` | 3 | 1.9 us | 3.8 us | **2.0x** |
+| `lsat_model` | 1006 | 46.9 us | 90.5 us | **1.9x** |
+| `wells_dist100ars_model` | 3 | 17.6 us | 18.4 us | **1.0x** |
+| `radon_county` | 389 | 84.3 us | 82.3 us | **1.0x** |
+| `low_dim_gauss_mix` | 5 | 127.5 us | 99.9 us | 0.78x |
+| `dogs` | 3 | 97.7 us | 63.2 us | 0.65x |<!--/gen-->
 
 The wins come from op granularity. CmdStan's var tape allocates, walks, and
 frees one node per scalar operation per leapfrog step; stanli pays a fixed

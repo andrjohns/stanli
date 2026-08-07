@@ -11,6 +11,7 @@ jacobian, so no propto constant is expected either.
 
 Usage: tools/verify_sample.py CMDSTAN_DIR PDB_DIR model1 model2 ...
 """
+import gzip
 import json
 import pathlib
 import struct
@@ -20,6 +21,7 @@ import tempfile
 import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+REFS_PATH = REPO / "docs" / "corpus-refs.json.gz"
 
 
 def write_results(results):
@@ -28,6 +30,22 @@ def write_results(results):
     prev = json.loads(out.read_text()) if out.exists() else {}
     prev.update(results)
     out.write_text(json.dumps(prev, indent=1, sort_keys=True) + "\n")
+
+
+def write_refs(refs):
+    """Merge the raw CmdStan values into the committed reference file.
+
+    tools/verify_refs.py replays these without CmdStan installed, which is
+    what lets CI run the differential corpus check on every push. Values are
+    stored as the exact %.17g strings ref_driver printed, so they round-trip
+    bitwise and diffs stay readable.
+    """
+    prev = {}
+    if REFS_PATH.exists():
+        prev = json.loads(gzip.decompress(REFS_PATH.read_bytes()))
+    prev.update(refs)
+    blob = json.dumps(prev, indent=0, sort_keys=True).encode()
+    REFS_PATH.write_bytes(gzip.compress(blob, mtime=0))
 
 
 def ulp_distance(a, b):
@@ -60,6 +78,7 @@ def main():
 
     n_pass = 0
     results = {}
+    refs = {}
     for model in models:
         stan = pdb / "models" / "stan" / f"{model}.stan"
         dz = pdb / "data" / "data" / f"{datas[model]}.json.zip"
@@ -133,6 +152,7 @@ def main():
         if len(rv) != len(gv):
             print(f"SHAPE_FAIL {model}: {len(rv)} vs {len(gv)}")
             continue
+
         worst = 0.0
         worst_ulp = 0
         for a, b in zip(rv, gv):
@@ -146,6 +166,14 @@ def main():
                           "max_ulp": worst_ulp, "n_values": len(rv),
                           "point": point}
         write_results(results)  # incremental: a later hang keeps the rest
+        # The raw CmdStan values, for tools/verify_refs.py to replay in CI
+        # without CmdStan. `status` and `max_rel` ride along so a model
+        # that is documented as not matching (kronecker_gp) is gated
+        # against its recorded deviation rather than the clean threshold.
+        refs[model] = {"point": point, "data": datas[model],
+                       "values": ref[1:], "status": status,
+                       "max_rel": worst}
+        write_refs(refs)
         print(f"{status} {model}: max rel diff {worst:.2e} "
               f"({worst_ulp} ulp) over lp + {len(rv) - 1} grads")
 

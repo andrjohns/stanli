@@ -13,14 +13,16 @@ pip install stanli
 ```
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
-  (gradient 1.0x-6.3x on eleven of the thirteen benchmark models, 0.78x
-  and 0.65x on the two that still defeat the re-roll pass;
-  time-to-first-draw ~20x faster)
+  (gradient <!--gen:bench_span-->1.0x-6.3x<!--/gen--> on
+  <!--gen:bench_wins-->11 of the 13<!--/gen--> benchmark models,
+  <!--gen:bench_losses-->0.78x and 0.65x<!--/gen--> on those that still
+  defeat the graph passes; time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
-  (118/120 posteriordb models differentially verified against CmdStan's
-  log_prob and full gradient, 45 of them bitwise identical, worst
-  relative deviation 2.6e-12; per-model accuracy in relative terms and
-  ULPs is listed there)
+  (<!--gen:corpus_verified-->118/120<!--/gen--> posteriordb models
+  differentially verified against CmdStan's log_prob and full gradient,
+  <!--gen:corpus_bitwise-->44<!--/gen--> of them bitwise identical, worst
+  relative deviation <!--gen:corpus_worst-->2.6e-12<!--/gen-->; per-model
+  accuracy in relative terms and ULPs is listed there)
 - Install size: one 13.8 MB shared library, a 4.9 MB wheel. Breakdown
   in [Binary size](#binary-size) below.
 - How this is possible, for statisticians:
@@ -229,7 +231,8 @@ evaluate, and verify. Details in
 
 21/21 tests green, built and tested in CI on macOS (arm64, x86_64) and
 manylinux (x86_64, aarch64). 119/120 posteriordb models compile and
-evaluate, 118 of them CmdStan-verified. Of the two that are not: `sir`'s
+evaluate, <!--gen:corpus_verified_n-->118<!--/gen--> of them
+CmdStan-verified. Of the two that are not: `sir`'s
 ODE solution dips ~1e-9 below a declared lower bound at every shared
 evaluation point and CmdStan rejects it there too, and `kronecker_gp`
 matches on lp and 436 of 438 gradients but differs on the two that flow
