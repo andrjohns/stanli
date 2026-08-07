@@ -57,6 +57,21 @@ def ulp_distance(a, b):
     return abs(key(ia) - key(ib))
 
 
+def parse_wa(out):
+    """(names_csv, value_strings) from WANAMES/WAVALS lines, or None."""
+    names, vals = None, None
+    for line in out.splitlines():
+        if line.startswith("WANAMES "):
+            names = line[8:]
+        elif line.startswith("WAVALS"):
+            vals = line[6:].split()
+    if names is None or vals is None or names.startswith("FAIL"):
+        return None
+    if vals and vals[0] == "FAIL":
+        return None
+    return (names, vals)
+
+
 def main():
     cs = pathlib.Path(sys.argv[1])
     pdb = pathlib.Path(sys.argv[2]) / "posterior_database"
@@ -115,14 +130,18 @@ def main():
         # solution dipping below a declared bound, say). Walk the shared
         # point list until one works on both sides.
         ref, got, point = [], [], 0
+        ref_out, got_out = "", ""
         for point in range(3):
-            ref = subprocess.run([str(exe), str(dj), str(point)],
-                                 capture_output=True, text=True).stdout.split()
+            ref_out = subprocess.run([str(exe), str(dj), str(point)],
+                                     capture_output=True, text=True).stdout
+            ref = (ref_out.splitlines() or [""])[0].split()
             try:
-                got = subprocess.run(
+                got_out = subprocess.run(
                     [str(REPO / "build/stanli_check"), str(stan), str(dj),
-                     "--point", str(point)], capture_output=True, text=True,
-                    cwd=REPO, timeout=300).stdout.split()
+                     "--point", str(point), "--wa-values"],
+                    capture_output=True, text=True,
+                    cwd=REPO, timeout=300).stdout
+                got = (got_out.splitlines() or [""])[0].split()
             except subprocess.TimeoutExpired:
                 print(f"TIMEOUT {model}")
                 got = []
@@ -173,9 +192,36 @@ def main():
         refs[model] = {"point": point, "data": datas[model],
                        "values": ref[1:], "status": status,
                        "max_rel": worst}
+
+        # write_array reference: recorded only when the generated
+        # quantities are deterministic (no _rng), so the values are a
+        # property of the draw and not of anyone's RNG stream.
+        wa_note = ""
+        src = stan.read_text()
+        gq = src[src.find("generated quantities"):]
+        wa = parse_wa(ref_out)
+        got_wa = parse_wa(got_out)
+        if "generated quantities" in src and "_rng" not in gq and wa:
+            if not got_wa:
+                wa_note = "; WA not recorded (stanli produced none)"
+            elif wa[0] != got_wa[0]:
+                wa_note = "; WA not recorded (column names differ)"
+            elif len(wa[1]) != len(got_wa[1]):
+                wa_note = "; WA not recorded (widths differ)"
+            else:
+                wworst = 0.0
+                for a, b in zip(map(float, wa[1]), map(float, got_wa[1])):
+                    scale = max(abs(a), abs(b), 1.0)
+                    wworst = max(wworst, abs(a - b) / scale)
+                if wworst < 1e-9:
+                    refs[model]["wa"] = {"names": wa[0], "values": wa[1]}
+                    wa_note = (f"; WA {len(wa[1])} values recorded "
+                               f"(max rel {wworst:.2e})")
+                else:
+                    wa_note = f"; WA not recorded (rel {wworst:.2e})"
         write_refs(refs)
         print(f"{status} {model}: max rel diff {worst:.2e} "
-              f"({worst_ulp} ulp) over lp + {len(rv) - 1} grads")
+              f"({worst_ulp} ulp) over lp + {len(rv) - 1} grads{wa_note}")
 
     write_results(results)
     print(f"\n{n_pass}/{len(models)} models verified against CmdStan")

@@ -53,6 +53,22 @@ bool WaInterp::read_param(
     if (s.read_transform->kind == mir::Transform::CholeskyCorr &&
         dims.size() == 1)
       dims = {dims[0], dims[0]};
+    if (s.decl_type.base == "SArray" && dims.size() == 2) {
+      // Batched containers (array[K] simplex[K]) sit batch-major in the
+      // constrained view; the interpreter indexes col-major (first index
+      // fastest). Transpose the storage so A[i, j] means what it says.
+      // Caught by the write_array reference for hmm_gaussian: every A
+      // off-diagonal came back transposed.
+      const int64_t B = dims[0], L = dims[1];
+      std::vector<double> t((size_t)(B * L));
+      for (int64_t b = 0; b < B; ++b)
+        for (int64_t l = 0; l < L; ++l)
+          t[(size_t)(b + B * l)] = e.r.at((size_t)(b * L + l));
+      e.r = std::move(t);
+    } else if (s.decl_type.base == "SArray" && dims.size() > 2) {
+      throw CompileError("stanli write_array: parameter " + s.decl_id +
+                         " has more than two read dims (unsupported)");
+    }
     e.dims = std::move(dims);
   }
   in.env()[s.decl_id] = std::move(e);
@@ -65,8 +81,25 @@ bool WaInterp::write_param(MirInterp<double>& in, const mir::Stmt& s,
   DataMap::Entry e = in.eval(v);
   const int64_t len = (int64_t)std::max(e.r.size(), e.i.size());
   if (!have_cols_) {
+    // Arrays of containers arrive one element at a time (`theta[k]`), and
+    // CmdStan names those columns outer-index-first: the index path joins
+    // the column name. Same rule as the graph lowering's FnWriteParam.
+    std::vector<long> ixs;
+    const mir::Expr* base = &v;
+    while (base->kind == mir::Expr::Indexed) {
+      for (size_t k = base->args.size(); k-- > 1;) {
+        if (base->args[k].name != "IndexSingle")
+          throw CompileError(
+              "stanli write_array: FnWriteParam under a non-scalar index");
+        ixs.push_back(in.as_int(base->args[k].args[0]));
+      }
+      base = &base->args[0];
+    }
+    std::string name = base->name;
+    for (auto it = ixs.rbegin(); it != ixs.rend(); ++it)
+      name += "." + std::to_string(*it);
     using Naming = CompiledModel::ParamView::Naming;
-    CompiledModel::ParamView pv{v.name, (int)row.size(), len};
+    CompiledModel::ParamView pv{name, (int)row.size(), len};
     if (v.type_ == "UReal" || v.type_ == "UInt" || v.type_ == "UComplex") {
       pv.naming = Naming::Scalar;
     } else if (v.type_ == "UMatrix") {

@@ -52,14 +52,16 @@ def check_model(model, ref, pdb, check_bin, tmp, timeout):
     dj = tmp / f"{model}_data.json"
     with zipfile.ZipFile(dz) as z:
         dj.write_bytes(z.read(z.namelist()[0]))
+    cmd = [str(check_bin), str(stan), str(dj), "--point", str(ref["point"])]
+    if "wa" in ref:
+        cmd.append("--wa-values")
     try:
-        proc = subprocess.run(
-            [str(check_bin), str(stan), str(dj),
-             "--point", str(ref["point"])],
-            capture_output=True, text=True, cwd=REPO, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO,
+                              timeout=timeout)
     except subprocess.TimeoutExpired:
         return (model, "TIMEOUT", 0.0, 0, 0, "")
-    got = proc.stdout.split()
+    lines = proc.stdout.splitlines()
+    got = lines[0].split() if lines else []
     if not got or got[0] != "OK":
         # Say HOW it died, not just that it did: a negative returncode is
         # a signal (ldaK5's 49 GB compile came back as a bare RUN_FAIL
@@ -82,7 +84,34 @@ def check_model(model, ref, pdb, check_bin, tmp, timeout):
         scale = max(abs(a), abs(b), 1.0)
         worst = max(worst, abs(a - b) / scale)
         worst_ulp = max(worst_ulp, ulp_distance(a, b))
-    return (model, "OK", worst, worst_ulp, len(rv), "")
+    n = len(rv)
+    if "wa" in ref:
+        # The write_array reference: column names must match exactly, and
+        # the values (transformed parameters + generated quantities at the
+        # same point) share the model's gate.
+        names, vals = None, None
+        for line in lines[1:]:
+            if line.startswith("WANAMES "):
+                names = line[8:]
+            elif line.startswith("WAVALS"):
+                vals = line[6:].split()
+        if names is None or vals is None or names.startswith("FAIL"):
+            return (model, "WA_FAIL", worst, worst_ulp, n,
+                    (names or "no write_array output")[:120])
+        if names != ref["wa"]["names"]:
+            return (model, "WA_NAMES_FAIL", worst, worst_ulp, n,
+                    f"got {names[:60]} want {ref['wa']['names'][:60]}")
+        wref = [float(x) for x in ref["wa"]["values"]]
+        wgot = [float(x) for x in vals]
+        if len(wref) != len(wgot):
+            return (model, "WA_SHAPE_FAIL", worst, worst_ulp, n,
+                    f"{len(wref)} vs {len(wgot)}")
+        for a, b in zip(wref, wgot):
+            scale = max(abs(a), abs(b), 1.0)
+            worst = max(worst, abs(a - b) / scale)
+            worst_ulp = max(worst_ulp, ulp_distance(a, b))
+        n += len(wref)
+    return (model, "OK", worst, worst_ulp, n, "")
 
 
 def gate_for(ref, default):

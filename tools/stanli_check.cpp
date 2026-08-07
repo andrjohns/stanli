@@ -58,9 +58,11 @@ int main(int argc, char** argv) {
   std::string stanc = "deps/stanc3/stanc";
   int variant = 0;
   bool columns_only = false;
+  bool wa_values = false;
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--columns") columns_only = true;
+    else if (a == "--wa-values") wa_values = true;
     else if (a == "--stanc" && i + 1 < argc) stanc = argv[++i];
     else if (a == "--point" && i + 1 < argc) variant = std::atoi(argv[++i]);
   }
@@ -172,8 +174,21 @@ int main(int argc, char** argv) {
                      "(interpreted: %s)\n",
                      wi.columns().size(), (long long)row.size(),
                      (long long)bad, cm.write_array->truncated.c_str());
+        if (wa_values) {
+          std::string joined;
+          for (const auto& nm :
+               stanli::CompiledModel::csv_names(wi.columns())) {
+            if (!joined.empty()) joined += ',';
+            joined += nm;
+          }
+          std::printf("WANAMES %s\nWAVALS", joined.c_str());
+          for (double x : row) std::printf(" %.17g", x);
+          std::printf("\n");
+        }
       } catch (const std::exception& we) {
         std::fprintf(stderr, "WA empty interp: %s\n", we.what());
+        if (wa_values)
+          std::printf("WANAMES FAIL %s\nWAVALS FAIL\n", we.what());
       }
     } else if (cm.write_array->columns.empty()) {
       std::fprintf(stderr, "WA empty %s\n", cm.write_array->truncated.c_str());
@@ -195,7 +210,25 @@ int main(int argc, char** argv) {
                    cm.write_array->truncated.empty()
                        ? "complete"
                        : ("truncated: " + cm.write_array->truncated).c_str());
+      if (wa_values) {
+        std::string joined;
+        for (const auto& nm :
+             stanli::CompiledModel::csv_names(cm.write_array->columns)) {
+          if (!joined.empty()) joined += ',';
+          joined += nm;
+        }
+        std::printf("WANAMES %s\nWAVALS", joined.c_str());
+        for (const auto& c : cm.write_array->columns) {
+          const double* p = wex.value_ptr(c.slot);
+          for (int64_t i = 0; i < c.len; ++i) std::printf(" %.17g", p[i]);
+        }
+        std::printf("\n");
+      }
     }
+    if (wa_values &&
+        (!cm.write_array ||
+         (!cm.write_array->interp && cm.write_array->columns.empty())))
+      std::printf("WANAMES FAIL no write_array\nWAVALS FAIL\n");
   } catch (const std::exception& e) {
     std::printf("EVAL_FAIL %s\n", e.what());
     return 1;

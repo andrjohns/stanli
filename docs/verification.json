@@ -119,8 +119,8 @@
   "status": "VERIFIED"
  },
  "accel_gp": {
-  "max_rel": 2.447297575943384e-15,
-  "max_ulp": 17,
+  "max_rel": 1.5835454903163073e-15,
+  "max_ulp": 11,
   "n_values": 67,
   "point": 0,
   "status": "VERIFIED"
@@ -714,8 +714,8 @@
   "status": "VERIFIED"
  },
  "rats_model": {
-  "max_rel": 2.417982456027364e-16,
-  "max_ulp": 2,
+  "max_rel": 4.0535818009760125e-16,
+  "max_ulp": 3,
   "n_values": 66,
   "point": 0,
   "status": "VERIFIED"

@@ -217,11 +217,17 @@ class MirInterp {
           e = from_entry(*dp);
         } else if (st.decl_type.base == "SInt" ||
                    st.decl_type.base == "SReal") {
-          // Bare scalar decl: zero, so reads before assignment behave.
+          // Bare scalar decl. Reals fill with NaN, matching CmdStan's
+          // uninitialized value: hmm_drive writes best_logp[1, K] where it
+          // means best_logp[1, k], and its Viterbi only matches CmdStan's
+          // because the never-written element loses every comparison.
           if (e.is_int) e.i = {0};
-          e.r = {T(0.0)};
+          e.r = {e.is_int
+                     ? T(0.0)
+                     : T(std::numeric_limits<double>::quiet_NaN())};
         } else if (!st.decl_type.base.empty()) {
-          // Bare sized decl: allocate zeros so element writes work.
+          // Bare sized decl: allocate so element writes work; real elements
+          // are NaN until written (see the scalar case above).
           int64_t n = 1;
           std::vector<int64_t> dims;
           for (const auto& d : st.decl_type.dims) {
@@ -229,7 +235,9 @@ class MirInterp {
             dims.push_back(v);
             n *= v;
           }
-          e.r.assign(n, T(0.0));
+          e.r.assign(n, e.is_int
+                            ? T(0.0)
+                            : T(std::numeric_limits<double>::quiet_NaN()));
           if (e.is_int) e.i.assign(n, 0);
           e.dims = std::move(dims);
         }
@@ -271,7 +279,11 @@ class MirInterp {
               en->r.at(j * R + (ix - 1)) = v.r[j];
             return;
           }
-          if ((size_t)ix > en->r.size()) en->r.resize(ix, T(0.0));
+          if ((size_t)ix > en->r.size())
+            en->r.resize(
+                ix, en->is_int
+                        ? T(0.0)
+                        : T(std::numeric_limits<double>::quiet_NaN()));
           en->r[ix - 1] = v.r.at(0);
           if (en->is_int) {
             if ((size_t)ix > en->i.size()) en->i.resize(ix, 0);
