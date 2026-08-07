@@ -26,7 +26,7 @@ namespace stanli {
 // separate varis reached through N pointers. This is stan-math's own SoA
 // representation, the one `stanc --O1` exists to reach, and its rev
 // overloads are the vectorized implementations. Measured on log_sum_exp:
-// 3.39 ns/element against 6.68 for the AoS form (tools/bench_varmat.cpp).
+// 3.39 ns/element against 6.68 for the AoS form (Apple M-series).
 //
 // F: var_value<VectorXd> -> var (scalar out) or a var vector (vector out).
 template <typename F>

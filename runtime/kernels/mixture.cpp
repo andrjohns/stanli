@@ -10,7 +10,7 @@
 //
 //   * the operand is `var_value<VectorXd>` (varmat, SoA) rather than
 //     `Matrix<var>`, which is what `stanc --O1` reaches for and roughly
-//     twice as fast: 3.39 vs 6.68 ns/element (tools/bench_varmat.cpp), and
+//     twice as fast: 3.39 vs 6.68 ns/element on Apple M-series, and
 //   * the replay runs in the FORWARD sweep and stashes the partials, so
 //     the backward is a scale of what stan-math already returned.
 //

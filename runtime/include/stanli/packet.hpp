@@ -12,7 +12,7 @@
 // Enabling packet math here is the same trade in stanli's terms: the
 // reference becomes `stanc --O1` CmdStan rather than default CmdStan, and
 // affected gradients move from bitwise to a low-ULP match. Measured gains
-// per element (tools/bench_packet.cpp, Apple M-series): exp 2.05x,
+// per element (Apple M-series): exp 2.05x,
 // inv_logit 1.93x, sum 4.3x, log 1.25x.
 //
 // OFF by default, and that default is a measurement, not caution. Per
