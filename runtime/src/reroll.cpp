@@ -192,6 +192,22 @@ RerollStats reroll(Graph& g,
 
   std::unordered_set<int> term_set(target_terms.begin(), target_terms.end());
 
+  // Write-fusion renaming, done lazily. When a store region is fused, every
+  // later reference to its vector means the fused value instead. Rewriting
+  // the tail eagerly is quadratic when one vector chains through many
+  // regions (ldaK5 refills a single 5-slot gamma 32,877 times: the eager
+  // scan cost 52 s and 49 GB of `uses` bookkeeping, OOM-killing every CI
+  // runner). Instead the original ops are left untouched -- classification
+  // only ever compares slot ids ACROSS lanes, and stale names are stale
+  // uniformly -- and the current name is applied at emission time. Values
+  // are never chained: remapping the ORIGINAL name to the newest
+  // replacement each time keeps lookups single-step.
+  std::unordered_map<int, int> renamed;
+  const auto resolve = [&renamed](int s) {
+    const auto it = renamed.find(s);
+    return it == renamed.end() ? s : it->second;
+  };
+
   // Slots read from outside the op graph (jacobian terms, constrained
   // parameter views). They have no consuming op, so `uses` cannot see
   // them; folding a lane that writes one would leave it unwritten.
@@ -545,12 +561,14 @@ RerollStats reroll(Graph& g,
         const Op& t = op_at(p, 0);
         Pos& ap = pos[(size_t)p];
         if (ap.index_elision) {
-          pos_out[(size_t)p] = t.in[0];
+          pos_out[(size_t)p] = resolve(t.in[0]);
           continue;
         }
         if (ap.hoist) {
-          result.push_back(t);
-          pos_out[(size_t)p] = t.out;
+          Op h = t;
+          for (int j = 0; j < h.n_in; ++j) h.in[j] = resolve(h.in[j]);
+          result.push_back(h);
+          pos_out[(size_t)p] = h.out;
           continue;
         }
         if (ap.store_vec >= 0) {
@@ -585,7 +603,7 @@ RerollStats reroll(Graph& g,
             sv.opcode =
                 ap.store_stride == 1 ? OP_SET_SLICE : OP_SET_SLICE_STRIDED;
             sv.n_in = 2;
-            sv.in[0] = vec;
+            sv.in[0] = resolve(vec);
             sv.in[1] = W;
             sv.out = g.add_slot(g.slots[vec].len, false);
             std::vector<int> sidata{ap.store_start};
@@ -597,22 +615,14 @@ RerollStats reroll(Graph& g,
             replacement = sv.out;
           }
           // Every later reference to the vector -- read or write -- now
-          // means the fused value. Renaming the writes too is what lets
-          // interleaved runs chain: the next block's element writes land on
-          // this block's store output, and when that block fuses in its turn
-          // it repeats the process on a fresh slot. Ops before the region
-          // are untouched; they saw the pre-write contents and still do.
-          for (size_t u = i + (size_t)P * (size_t)Luse; u < g.ops.size(); ++u) {
-            for (int j = 0; j < g.ops[u].n_in; ++j)
-              if (g.ops[u].in[j] == vec) {
-                g.ops[u].in[j] = replacement;
-                uses[replacement].push_back(u);
-              }
-            if (g.ops[u].out == vec) {
-              g.ops[u].out = replacement;
-              writers[replacement].push_back(u);
-            }
-          }
+          // means the fused value: recorded here, applied when those ops
+          // are emitted. Renaming the writes too is what lets interleaved
+          // runs chain: the next block's element writes still NAME the
+          // original vector, resolve to this block's store output when
+          // that block fuses in its turn, and repeat the process on a
+          // fresh slot. Ops before the region were emitted already; they
+          // saw the pre-write contents and still do.
+          renamed[vec] = replacement;
           pos_out[(size_t)p] = replacement;
           continue;
         }
@@ -623,7 +633,7 @@ RerollStats reroll(Graph& g,
           Op rd;
           rd.opcode = ap.slice_start >= 0 ? OP_SLICE : OP_GATHER;
           rd.n_in = 1;
-          rd.in[0] = t.in[0];
+          rd.in[0] = resolve(t.in[0]);
           rd.out = g.add_slot(Luse, false);
           std::vector<int> idata;
           if (ap.slice_start >= 0)
@@ -642,6 +652,7 @@ RerollStats reroll(Graph& g,
         for (int j = 0; j < t.n_in; ++j) {
           switch (ap.ins[j].kind) {
             case InKind::kInvariant:
+              op.in[j] = resolve(t.in[j]);
               if (g.slots[t.in[j]].len != 1) all_scalar = false;
               break;
             case InKind::kLaneLocal:
@@ -728,7 +739,12 @@ RerollStats reroll(Graph& g,
       break;
     }
     if (!rewrote) {
-      result.push_back(g.ops[i]);
+      Op op = g.ops[i];
+      if (!renamed.empty()) {
+        for (int j = 0; j < op.n_in; ++j) op.in[j] = resolve(op.in[j]);
+        op.out = resolve(op.out);
+      }
+      result.push_back(op);
       ++i;
     }
   }

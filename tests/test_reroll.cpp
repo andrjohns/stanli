@@ -6,6 +6,7 @@
 #include <stanli/reroll.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -506,6 +507,93 @@ int count(const Graph& g, uint16_t oc) {
 
 }  // namespace writefuse
 
+// (n) ldaK5 shape: one shared gamma vector, refilled by every unrolled
+// iteration's inner loop and read once by LOG_SUM_EXP before the next
+// refill. N iterations chain N store regions through that single slot, so
+// eager tail renaming made the pass quadratic in both time and memory
+// (the real model: 32,877 iterations, 52 s and 49 GB to compile, which
+// OOM-killed every CI runner). The pass must stay near-linear in N.
+namespace ldashape {
+
+struct Built {
+  Graph g;
+  Fills fills;
+  std::vector<int> terms;
+};
+
+Built build(int N) {
+  const int K = 5, V = 7;
+  Built b;
+  Graph& g = b.g;
+  const int t0 = g.add_slot(1, true);
+  const int p0 = g.add_slot(1, true);
+  const int thetav = g.add_slot(K, false);
+  g.add_op(OP_REP_VEC, {t0}, thetav);
+  const int phiv = g.add_slot(V, false);
+  g.add_op(OP_REP_VEC, {p0}, phiv);
+  const int gamma = g.add_slot(K, false);
+  b.fills.emplace_back(gamma, std::vector<double>(K, 0.0));
+  for (int n = 0; n < N; ++n) {
+    for (int k = 0; k < K; ++k) {
+      const int i1 = g.add_slot(1, false);
+      g.add_op(OP_INDEX, {thetav}, i1, {k});
+      const int l1 = g.add_slot(1, false);
+      g.add_op(OP_LOGV, {i1}, l1);
+      const int i2 = g.add_slot(1, false);
+      g.add_op(OP_INDEX, {phiv}, i2, {(n + 2 * k) % V});
+      const int l2 = g.add_slot(1, false);
+      g.add_op(OP_LOGV, {i2}, l2);
+      const int s = g.add_slot(1, false);
+      g.add_op(OP_ADD, {l1, l2}, s);
+      g.add_op(OP_SET_INDEX_INPLACE, {gamma, s}, gamma, {k});
+    }
+    const int lse = g.add_slot(1, false);
+    g.add_op(OP_LOG_SUM_EXP, {gamma}, lse);
+    b.terms.push_back(lse);
+  }
+  return b;
+}
+
+}  // namespace ldashape
+
+static void test_lda_shape_gradients() {
+  const int N = 40;
+  ldashape::Built b = ldashape::build(N);
+  Graph ref = b.g;
+  reduce_terms_into_result(ref, b.terms);
+  const std::vector<double> want = run_grad(std::move(ref), b.fills);
+
+  std::vector<int> tt = b.terms;
+  Fills f2 = b.fills;
+  RerollStats st = reroll(b.g, f2, tt, {});
+  expect("lda one region per iteration", st.regions == N);
+  // Per iteration: LOGV(theta) + GATHER + LOGV + ADD + LOG_SUM_EXP, plus a
+  // SET_SLICE chaining gamma everywhere but the last iteration (nothing
+  // writes gamma after it, so its lanes' values ARE the vector).
+  expect("lda stores chain", writefuse::count(b.g, OP_SET_SLICE) == N - 1);
+  expect("lda no element writes left",
+         writefuse::count(b.g, OP_SET_INDEX_INPLACE) == 0);
+  reduce_terms_into_result(b.g, tt);
+  const std::vector<double> got = run_grad(std::move(b.g), f2);
+  expect("lda sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("lda v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+static void test_lda_shape_linear_cost() {
+  const int N = 8000;  // quadratic renaming: seconds and GBs; linear: ~0.1 s
+  ldashape::Built b = ldashape::build(N);
+  std::vector<int> tt = b.terms;
+  const auto t0 = std::chrono::steady_clock::now();
+  RerollStats st = reroll(b.g, b.fills, tt, {});
+  const double sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+          .count();
+  expect("lda big all regions found", st.regions == N);
+  std::printf("  lda shape N=%d rerolled in %.2f s\n", N, sec);
+  expect("lda reroll near-linear (<2 s)", sec < 2.0);
+}
+
 static void test_write_fusion() {
   using namespace writefuse;
   for (int start : {0, 1}) {
@@ -814,6 +902,8 @@ int main() {
   test_first_lane_anomalous();
   test_block_structured();
   test_bail_extra_root();
+  test_lda_shape_gradients();
+  test_lda_shape_linear_cost();
   test_write_fusion();
   test_write_fusion_bails();
   test_write_fusion_scalar_chain();
