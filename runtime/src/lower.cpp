@@ -423,7 +423,16 @@ struct Lowering {
   struct IslandRegion {
     std::vector<int> in_slots;
     std::vector<std::string> out_names;
+    bool has_target = false;  // the region contributed to the target
   };
+
+  // Does `s` increment the target anywhere?
+  static bool has_target_pe(const mir::Stmt& s) {
+    if (s.kind == mir::Stmt::TargetPE) return true;
+    for (const auto& k : s.body)
+      if (has_target_pe(k)) return true;
+    return false;
+  }
 
   // Every name an Assignment targets anywhere in `s`, in first-seen order.
   void assigned_names(const mir::Stmt& s, std::vector<std::string>* out) {
@@ -456,6 +465,19 @@ struct Lowering {
       reg->in_slots.push_back(slot);
       return true;
     };
+    // `target +=` inside the region accumulates into a register of its
+    // own, seeded to zero, and the total leaves as one more live-out that
+    // lowering registers as a target term. A `~` statement cannot go here
+    // (its dropped constants depend on argument types the program binds
+    // uniformly), and stanc lowers `~` to TargetPE with the propto form
+    // already chosen, so the compiler refuses what it cannot reproduce.
+    int target_reg = -1;
+    if (s) {
+      target_reg = c.alloc(1);
+      const double zero = 0.0;
+      c.emit_const(target_reg, &zero, 1);
+      c.target_reg = target_reg;
+    }
     try {
       if (s) {
         // A local declared before the region but never assigned has no
@@ -481,6 +503,10 @@ struct Lowering {
           reg->out_names.push_back(name);
           for (int k = 0; k < it->second.len; ++k)
             prog->out_regs.push_back(it->second.reg + k);
+        }
+        if (has_target_pe(*s)) {
+          reg->has_target = true;
+          prog->out_regs.push_back(target_reg);
         }
       } else {
         *expr_out = c.expr(*e);
@@ -538,11 +564,13 @@ struct Lowering {
              ", which has no declared shape", s.raw);
       out_lens.push_back((int)dl->second.len);
     }
+    if (reg.has_target) out_lens.push_back(1);
     std::vector<int> out_slots;
     emit_island(prog, reg, out_lens, &out_slots);
     // Later statements read the island's results, not the old values.
     for (size_t k = 0; k < reg.out_names.size(); ++k)
       scope[reg.out_names[k]] = out_slots[k];
+    if (reg.has_target) target_terms.push_back(out_slots.back());
   }
 
   // `<depends on a parameter> ? a : b`

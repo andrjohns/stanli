@@ -56,6 +56,9 @@ struct ProgramCompiler {
   // backing the name and records it as a live-in. Returning false means
   // "no such value", and the compile bails.
   std::function<bool(const std::string&, Range*)> bind_extern;
+  // Where `target +=` accumulates, or -1 when the region may not have
+  // one. Set by the caller, which also seeds it to zero.
+  int target_reg = -1;
 
   // Registers are never recycled. Right-hand sides are a few lines over a
   // handful of states, so the count stays in the dozens; the cap is a
@@ -284,6 +287,53 @@ struct ProgramCompiler {
              b.reg + (b.len == 1 ? 0 : i));
       return {r, n};
     }
+    // Explicit density calls. `target += normal_lpdf(y | mu, s)` keeps
+    // every constant, which is the propto-OFF instantiation the machine
+    // has; a `~` statement's dropped-constant form depends on which
+    // arguments are autodiff and is not expressible here.
+    {
+      Program::Code dc;
+      int arity = 0;
+      if (e.name == "std_normal_lpdf") { dc = Program::STD_NORMAL; arity = 1; }
+      else if (e.name == "exponential_lpdf") { dc = Program::EXPONENTIAL; arity = 2; }
+      else if (e.name == "normal_lpdf") { dc = Program::NORMAL; arity = 3; }
+      else if (e.name == "lognormal_lpdf") { dc = Program::LOGNORMAL; arity = 3; }
+      else if (e.name == "cauchy_lpdf") { dc = Program::CAUCHY; arity = 3; }
+      else if (e.name == "gamma_lpdf") { dc = Program::GAMMA; arity = 3; }
+      else if (e.name == "inv_gamma_lpdf") { dc = Program::INV_GAMMA; arity = 3; }
+      else if (e.name == "beta_lpdf") { dc = Program::BETA; arity = 3; }
+      else if (e.name == "weibull_lpdf") { dc = Program::WEIBULL; arity = 3; }
+      else if (e.name == "logistic_lpdf") { dc = Program::LOGISTIC; arity = 3; }
+      else if (e.name == "double_exponential_lpdf") { dc = Program::DOUBLE_EXP; arity = 3; }
+      else if (e.name == "uniform_lpdf") { dc = Program::UNIFORM; arity = 3; }
+      if (arity) {
+        // A `~` statement lowers to the same call with propto set, and
+        // which constants it drops depends on which arguments are
+        // autodiff -- a distinction the program cannot make, since it
+        // binds every argument the same way. Getting this wrong is
+        // invisible in the gradient and shows up only in lp, so refuse
+        // rather than approximate. (Measured, before this check: lp off
+        // by exactly log(2*pi)/2 on a normal.)
+        if (e.fn_propto)
+          bail("`~` inside a parameter-dependent region (write it as "
+               "`target += " + e.name + "(...)`, which keeps every "
+               "constant and is what the region can reproduce)");
+        if ((int)e.args.size() != arity)
+          bail(e.name + " takes " + std::to_string(arity) + " arguments here");
+        Range av[3];
+        for (int k = 0; k < arity; ++k) {
+          av[k] = expr(e.args[(size_t)k]);
+          // One lp per call: a vectorized density inside a branch would
+          // have to sum over its arguments, which this does not do.
+          if (av[k].len != 1) bail(e.name + " on a container");
+        }
+        const int r = alloc(1);
+        p.code.push_back(Program::Instr{dc, r, av[0].reg,
+                                        arity > 1 ? av[1].reg : 0,
+                                        arity > 2 ? av[2].reg : 0, 0});
+        return {r, 1};
+      }
+    }
     if (e.args.size() == 1) {
       const Range a = expr(e.args[0]);
       if (e.name == "sum") {
@@ -430,6 +480,17 @@ struct ProgramCompiler {
       case mir::Stmt::SList:
         for (const auto& k : s.body) stmt(k);
         return;
+      case mir::Stmt::TargetPE: {
+        // The region's own running total. The caller decides what it is
+        // (the ODE side never sees one; lowering makes it a target term),
+        // so all this does is accumulate.
+        if (target_reg < 0)
+          bail("target += is not available in this region");
+        const Range v = expr(s.target);
+        if (v.len != 1) bail("target += of a container");
+        emit(Program::ADD, target_reg, target_reg, v.reg);
+        return;
+      }
       case mir::Stmt::NRFunApp:
       case mir::Stmt::Skip:
         return;

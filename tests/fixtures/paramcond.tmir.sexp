@@ -168,6 +168,54 @@
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+        (meta <opaque>))
+       ((pattern
+         (IfElse
+          ((pattern
+            (FunApp (StanLib Greater__ FnPlain AoS)
+             (((pattern (Var mu))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+              ((pattern (Var sigma))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+           (meta ((type_ UInt) (loc <opaque>) (adlevel AutoDiffable))))
+          ((pattern
+            (Block
+             (((pattern
+                (TargetPE
+                 ((pattern
+                   (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+                    (((pattern (Var y))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                     ((pattern (Var mu))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                     ((pattern
+                       (Promotion
+                        ((pattern (Lit Int 1))
+                         (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                        UReal DataOnly))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+               (meta <opaque>)))))
+           (meta <opaque>))
+          (((pattern
+             (Block
+              (((pattern
+                 (TargetPE
+                  ((pattern
+                    (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+                     (((pattern (Var y))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                      ((pattern (Var sigma))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                      ((pattern
+                        (Promotion
+                         ((pattern (Lit Int 1))
+                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                         UReal DataOnly))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                (meta <opaque>)))))
+            (meta <opaque>)))))
         (meta <opaque>)))))
     (meta <opaque>))))
  (reverse_mode_log_prob
@@ -320,6 +368,54 @@
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+        (meta <opaque>))
+       ((pattern
+         (IfElse
+          ((pattern
+            (FunApp (StanLib Greater__ FnPlain AoS)
+             (((pattern (Var mu))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+              ((pattern (Var sigma))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+           (meta ((type_ UInt) (loc <opaque>) (adlevel AutoDiffable))))
+          ((pattern
+            (Block
+             (((pattern
+                (TargetPE
+                 ((pattern
+                   (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+                    (((pattern (Var y))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                     ((pattern (Var mu))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                     ((pattern
+                       (Promotion
+                        ((pattern (Lit Int 1))
+                         (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                        UReal DataOnly))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+               (meta <opaque>)))))
+           (meta <opaque>))
+          (((pattern
+             (Block
+              (((pattern
+                 (TargetPE
+                  ((pattern
+                    (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+                     (((pattern (Var y))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                      ((pattern (Var sigma))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                      ((pattern
+                        (Promotion
+                         ((pattern (Lit Int 1))
+                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                         UReal DataOnly))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                (meta <opaque>)))))
+            (meta <opaque>)))))
         (meta <opaque>)))))
     (meta <opaque>))))
  (generate_quantities

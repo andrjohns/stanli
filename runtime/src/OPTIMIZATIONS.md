@@ -197,6 +197,36 @@ to 8, `radon_county` from 25,152 to 10, `election88_full` from 289,165
 to 65, `dogs` from 12,751 to 261, `low_dim_gauss_mix` (a mixture model,
 using the elementwise density form) to 16.
 
+## Control flow that depends on a parameter (`lower.cpp`, `mir_prog.cpp`)
+
+`if (theta > 0) ...` cannot become operations. The list of operations is
+built when the model is loaded and does not change afterwards, and this
+statement picks its branch every time the model is evaluated, from a
+value that is different every time.
+
+Until recently that was a compile error. Now the region -- just the
+conditional, not the model around it -- is translated into the same
+instruction list the ODE right-hand sides use, and one operation runs
+it: on plain numbers to get the value, and again under stan-math's own
+autodiff to get the derivatives, which are the derivatives of whichever
+branch actually ran. That is what the generated C++ does for the same
+statement, because it is the same autodiff over the same arithmetic.
+
+Values the region reads from outside come in as inputs, values it
+assigns come out and replace the old ones for the statements that
+follow. This is not an optimization and `STANLI_NO_ISLAND` does not turn
+it off: without it the model does not run at all.
+
+One thing it refuses. Writing `y ~ normal(mu, 1)` inside such a region
+is rejected with a message saying to write
+`target += normal_lpdf(y | mu, 1)` instead. The `~` form drops the terms
+that do not depend on the parameters, and *which* terms those are
+depends on which arguments are parameters -- a distinction the
+instruction list cannot make, because it treats every value the same
+way. Getting it wrong would leave the gradient perfect and the log
+density off by a constant, which is the kind of error that survives a
+long time, so it is refused instead of approximated.
+
 ## Tape islands (`island.cpp`, disable: `STANLI_NO_ISLAND=1`)
 
 Some code cannot be vectorized by anyone. A hidden Markov model's

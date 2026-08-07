@@ -590,7 +590,7 @@ int main() {
     int islands = 0;
     for (const Op& op : lm.graph.ops)
       if (op.opcode == OP_ISLAND) ++islands;
-    check(islands == 2, "paramcond: one island per parameter condition");
+    check(islands == 3, "paramcond: one island per parameter condition");
 
     Executor lex(std::move(lm.graph));
     lm.bind(lex);
@@ -610,14 +610,39 @@ int main() {
       var s = stan::math::value_of(sigma) < 1 ? 1.0 / sigma : sigma;
       // `~` lowers propto, so the reference drops the same constant.
       acc += stan::math::normal_lpdf<true>(1.75, m, s * w);
+      // The target-increment branch: propto OFF, as written.
+      acc += stan::math::value_of(u_mu) > stan::math::value_of(sigma)
+                 ? stan::math::normal_lpdf<false>(1.75, u_mu, 1.0)
+                 : stan::math::normal_lpdf<false>(1.75, sigma, 1.0);
       acc.grad();
       const std::string tag = "paramcond" + std::to_string(c);
-      expect_eq(tag + " lp", lp, acc.val());
+      // lp sums three target terms; the reference accumulates them in one
+      // var chain, so the last bit is an ordering artifact. Gradients are
+      // exact.
+      expect_ulp(tag + " lp", lp, acc.val());
       expect_eq(tag + " dmu", grad[0], u_mu.adj());
       expect_eq(tag + " dsigma", grad[1], u_sig.adj());
       stan::math::recover_memory();
     }
     unsetenv("STANLI_NO_ISLAND");
+  }
+
+  // The same region written with `~`: refused, by name, with the fix in
+  // the message. Before the check existed this compiled and was wrong in
+  // lp by exactly the dropped constant, with a correct gradient.
+  {
+    DataMap d;
+    d.set_real("y", 1.75);
+    bool threw = false;
+    try {
+      compile_model(slurp("tests/fixtures/paramcond_tilde.tmir.sexp"), d);
+    } catch (const CompileError& e) {
+      const std::string msg = e.what();
+      threw = msg.find("`~` inside a parameter-dependent region") !=
+                  std::string::npos &&
+              msg.find("target +=") != std::string::npos;
+    }
+    check(threw, "propto ~ in a parameter region refused with the fix");
   }
 
   {

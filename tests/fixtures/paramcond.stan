@@ -24,4 +24,13 @@ model {
   }
   real s = sigma < 1 ? 1 / sigma : sigma;
   y ~ normal(m, s * w);
+  // A target increment inside a parameter-dependent branch: the region's
+  // running total leaves the island as one more live-out and becomes a
+  // target term. `target +=` and not `~`, because the propto form's
+  // dropped constants depend on argument types the program cannot see.
+  if (mu > sigma) {
+    target += normal_lpdf(y | mu, 1);
+  } else {
+    target += normal_lpdf(y | sigma, 1);
+  }
 }
