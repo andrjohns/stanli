@@ -1,6 +1,6 @@
 // ODE integrator ops. stan-math does the solving and the sensitivities; the
 // right-hand side is the model's own user-defined function, evaluated at
-// runtime by the MIR interpreter (see mir_eval.hpp) because the integrator
+// runtime by the MIR interpreter (see mir_interp.hpp) because the integrator
 // picks the times, so the body cannot be inlined at compile time.
 //
 // One solve per gradient, in the forward sweep, with the solution's jacobian
@@ -21,7 +21,7 @@
 // walks a few dozen varis, against several hundred right-hand-side
 // evaluations for a solve.
 #include <stanli/graph.hpp>
-#include <stanli/mir_eval.hpp>
+#include <stanli/mir_interp.hpp>
 #include <stanli/ode.hpp>
 #include <stanli/optable.hpp>
 
@@ -57,7 +57,7 @@ struct MirRhs {
     }
     std::vector<T> tv{T(t)}, yv(y.begin(), y.end()),
         thv(theta.begin(), theta.end()), xrv(x_r.begin(), x_r.end());
-    MirEval<T> ev(*spec->funs());
+    MirInterp<T> ev(*spec->funs(), "ODE function");
     return ev.call(*spec->rhs(), {tv, yv, thv, xrv}, {x_i});
   }
 };

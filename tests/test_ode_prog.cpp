@@ -11,7 +11,7 @@
 // of that contract: it must refuse, with a reason, and the interpreter must
 // still produce the right answer.
 #include <stanli/mir.hpp>
-#include <stanli/mir_eval.hpp>
+#include <stanli/mir_interp.hpp>
 #include <stanli/ode_prog.hpp>
 #include <stanli/sexp.hpp>
 
@@ -67,7 +67,7 @@ void check(const std::string& name, const stanli::mir::FunDef& f,
     std::vector<double> got;
     run_rhs<double>(p, t, y.data(), th.data(), x_r.data(), got);
 
-    MirEval<double> ev(funs);
+    MirInterp<double> ev(funs, "ODE function");
     std::vector<double> tv{t}, xrv(x_r.begin(), x_r.end());
     const std::vector<double> want = ev.call(f, {tv, y, th, xrv}, {x_i});
 

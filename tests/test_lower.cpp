@@ -316,6 +316,30 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // Transformed-data use of fmax/fmin/inv/inv_logit: the function
+  // vocabulary must be the same one the ODE-side interpreter accepts.
+  {
+    DataMap d;
+    d.set_real("a", 1.25);
+    d.set_real("b", -0.5);
+    CompiledModel lm = compile_model(slurp("tests/fixtures/tdvocab.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.3;
+    double g = 0;
+    const double lp = lex.gradient(&g);
+
+    const double m = std::fmax(1.25, -0.5) + std::fmin(1.25, -0.5) +
+                     stan::math::inv(-0.5) + stan::math::inv_logit(1.25);
+    using stan::math::var;
+    var mu = 0.3;
+    var acc = stan::math::normal_lpdf<false>(mu, m, 1.0);
+    acc.grad();
+    expect_eq("tdvocab lp", lp, acc.val());
+    expect_eq("tdvocab dmu", g, mu.adj());
+    stan::math::recover_memory();
+  }
+
   // Model-block UDFs on parameters, inlined: scalar chain, vector return,
   // statement body with local accumulator + loop.
   {

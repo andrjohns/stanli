@@ -4,7 +4,7 @@
 // right-hand side cannot be: the integrator picks the times, so the body has
 // to stay callable at runtime, on double for the state solve and on var for
 // the jacobian stan-math takes at every step. It was therefore evaluated by a
-// tree-walking interpreter over the MIR (mir_eval.hpp), which costs a
+// tree-walking interpreter over the MIR (mir_interp.hpp), which costs a
 // std::map lookup per variable reference and a std::vector allocation per
 // intermediate -- 5.8 us per call on lotka_volterra's two-line right-hand
 // side, against roughly 500 calls per gradient. That interpreter was 97% of

@@ -2,14 +2,13 @@
 #include <stanli/constfold.hpp>
 #include <stanli/inplace.hpp>
 #include <stanli/mir.hpp>
+#include <stanli/mir_interp.hpp>
 #include <stanli/ode.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/island.hpp>
 #include <stanli/reroll.hpp>
 #include <stanli/sexp.hpp>
 
-#include <stan/math/prim/fun/constants.hpp>
-#include <stan/math/prim/prob/student_t_lccdf.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -29,20 +28,23 @@ struct SlotInfo {
   bool data_like = false;      // no adjoint (data or constant)
 };
 
-// Compile-time interpreter for prepare_data: everything there is DataOnly,
-// so transformed data evaluates to plain doubles/ints before lowering.
-struct TEnv {
-  std::map<std::string, DataMap::Entry> vars;
-
-  DataMap::Entry* find(const std::string& n) {
-    auto it = vars.find(n);
-    return it == vars.end() ? nullptr : &it->second;
-  }
-};
-
 struct Lowering {
   const DataMap& data;
-  TEnv env;
+  // The MIR interpreter instance for everything DataOnly: prepare_data,
+  // data-only conditions, size expressions. Its environment doubles as the
+  // lowering's view of transformed data. Hooks route FnReadData to the
+  // DataMap and unknown variables to the unrolled-loop int environment.
+  MirInterp<double> td{fun_defs, "prepare_data",
+      MirHooks{
+          [this](const std::string& n) -> const DataMap::Entry* {
+            return data.has(n) ? &data.at(n) : nullptr;
+          },
+          [this](const std::string& n, long* out) {
+            auto it = int_env.find(n);
+            if (it == int_env.end()) return false;
+            *out = it->second;
+            return true;
+          }}};
   Graph g;
   CompiledModel out;
   std::map<std::string, int> scope;            // var -> slot
@@ -97,13 +99,13 @@ struct Lowering {
       case mir::Expr::Var: {
         auto it = int_env.find(e.name);
         if (it != int_env.end()) return it->second;
-        DataMap::Entry* en = env.find(e.name);
+        DataMap::Entry* en = td.find(e.name);
         if (en && en->is_int && en->i.size() == 1) return en->i[0];
         fail("size expression needs unknown int " + e.name);
       }
       case mir::Expr::Indexed: {
         DataMap::Entry* en = e.args[0].kind == mir::Expr::Var
-                                 ? env.find(e.args[0].name)
+                                 ? td.find(e.args[0].name)
                                  : nullptr;
         if (en && en->is_int && e.args.size() == 2 &&
             e.args[1].name == "IndexSingle")
@@ -142,7 +144,7 @@ struct Lowering {
         // int array in a size expression, etc.).
         if (e.data_only) {
           try {
-            return eval_int_td(e);
+            return td.as_int(e);
           } catch (const CompileError&) {
           }
         }
@@ -158,7 +160,7 @@ struct Lowering {
             if (e.name == "cols") return si.rows > 0 ? si.cols : 1;
             return si.len;
           }
-          DataMap::Entry* en = env.find(e.args[0].name);
+          DataMap::Entry* en = td.find(e.args[0].name);
           if (en) {
             if (e.name == "rows")
               return en->dims.size() == 2 ? en->dims[0]
@@ -192,665 +194,13 @@ struct Lowering {
     fail("unsupported sized type " + t.base, t.raw);
   }
 
-  // ---- data block: interpret prepare_data over doubles ----------------------
-  // Thrown by a Return statement inside an interpreted UDF body.
-  struct TdReturn {
-    DataMap::Entry v;
-  };
-
-  DataMap::Entry td_call_udf(const mir::Expr& e) {
-    auto it = fun_defs.find(e.name);
-    if (it == fun_defs.end())
-      fail("prepare_data: unknown function " + e.name, e.raw);
-    const mir::FunDef& f = *it->second;
-    if (e.args.size() != f.arg_names.size())
-      fail("prepare_data: " + e.name + " arity mismatch");
-    if (++udf_depth > 64) fail("prepare_data: UDF recursion too deep");
-    std::vector<DataMap::Entry> argv;
-    for (const auto& a : e.args) argv.push_back(td_eval(a));
-    // Function bodies get their own scope: snapshot and restore the whole
-    // environment (UDF calls are rare and happen at compile time).
-    std::map<std::string, DataMap::Entry> saved = env.vars;
-    for (size_t i = 0; i < argv.size(); ++i)
-      env.vars[f.arg_names[i]] = std::move(argv[i]);
-    DataMap::Entry ret;
-    try {
-      for (const auto& st : f.body) td_exec(st);
-    } catch (TdReturn& r) {
-      ret = std::move(r.v);
-    }
-    env.vars = std::move(saved);
-    --udf_depth;
-    return ret;
-  }
-
-  DataMap::Entry td_eval(const mir::Expr& e) {
-    DataMap::Entry r;
-    switch (e.kind) {
-      case mir::Expr::LitInt:
-        r.is_int = true;
-        r.i = {(int)e.lit_i};
-        r.r = {(double)e.lit_i};
-        return r;
-      case mir::Expr::LitReal:
-        r.r = {e.lit};
-        return r;
-      case mir::Expr::Var: {
-        DataMap::Entry* en = env.find(e.name);
-        if (en) return *en;
-        // Loop variables of unrolled log_prob loops live in int_env, and
-        // data-only conditions there are evaluated through td_eval.
-        auto it = int_env.find(e.name);
-        if (it != int_env.end()) {
-          r.is_int = true;
-          r.i = {(int)it->second};
-          r.r = {(double)it->second};
-          return r;
-        }
-        fail("prepare_data: unknown variable " + e.name +
-             " (type " + e.type_ + ")", e.raw);
-      }
-      case mir::Expr::TernaryIf: {
-        const bool c = td_eval(e.args[0]).r.at(0) != 0.0;
-        return td_eval(e.args[c ? 1 : 2]);
-      }
-      case mir::Expr::EOr:
-      case mir::Expr::EAnd: {
-        // Short-circuit like the language does.
-        const bool a = td_eval(e.args[0]).r.at(0) != 0.0;
-        bool v = a;
-        if (e.kind == mir::Expr::EOr ? !a : a)
-          v = td_eval(e.args[1]).r.at(0) != 0.0;
-        r.is_int = true;
-        r.i = {v ? 1 : 0};
-        r.r = {v ? 1.0 : 0.0};
-        return r;
-      }
-      case mir::Expr::Indexed: {
-        // Index a named value in place. Evaluating the base by value copies
-        // the whole array per read, which is quadratic when a loop indexes
-        // a large data array (60k-row models spent minutes here).
-        const DataMap::Entry* base_ptr = nullptr;
-        DataMap::Entry base_storage;
-        if (e.args[0].kind == mir::Expr::Var)
-          base_ptr = env.find(e.args[0].name);
-        if (base_ptr == nullptr) {
-          base_storage = td_eval(e.args[0]);
-          base_ptr = &base_storage;
-        }
-        const DataMap::Entry& base = *base_ptr;
-        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
-            base.dims.size() <= 1) {
-          const long ix = eval_int_td(e.args[1].args[0]);
-          r.is_int = base.is_int;
-          if (base.is_int) r.i = {base.i.at(ix - 1)};
-          r.r = {base.r.at(ix - 1)};
-          return r;
-        }
-        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
-            base.dims.size() == 2) {
-          // Row of a 2-D array (col-major storage).
-          const long i = eval_int_td(e.args[1].args[0]);
-          const int64_t R = base.dims[0], C = base.dims[1];
-          r.is_int = base.is_int;
-          r.dims = {C};
-          for (int64_t j = 0; j < C; ++j) {
-            r.r.push_back(base.r.at(j * R + (i - 1)));
-            if (base.is_int) r.i.push_back(base.i.at(j * R + (i - 1)));
-          }
-          return r;
-        }
-        if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
-        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
-            base.dims.size() == 2) {
-          // Row of a 2-D array (col-major storage).
-          const long i = eval_int_td(e.args[1].args[0]);
-          const int64_t R = base.dims[0], C = base.dims[1];
-          r.is_int = base.is_int;
-          r.dims = {C};
-          for (int64_t j = 0; j < C; ++j) {
-            r.r.push_back(base.r.at(j * R + (i - 1)));
-            if (base.is_int) r.i.push_back(base.i.at(j * R + (i - 1)));
-          }
-          return r;
-        }
-        // General all-Single N-D element access (col-major strides).
-        if (e.args.size() == base.dims.size() + 1) {
-          bool all_single = true;
-          for (size_t k = 1; k < e.args.size(); ++k)
-            if (e.args[k].name != "IndexSingle") all_single = false;
-          if (all_single) {
-            int64_t flatpos = 0, stride = 1;
-            for (size_t d = 0; d < base.dims.size(); ++d) {
-              flatpos += (eval_int_td(e.args[1 + d].args[0]) - 1) * stride;
-              stride *= base.dims[d];
-            }
-            r.is_int = base.is_int;
-            if (base.is_int) r.i = {base.i.at(flatpos)};
-            r.r = {base.r.at(flatpos)};
-            return r;
-          }
-        }
-        // Column slice X[:, j] on a matrix: contiguous in col-major.
-        if (e.args.size() == 3 && e.args[1].name == "IndexAll" &&
-            e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
-          const long j = eval_int_td(e.args[2].args[0]);
-          const int64_t R = base.dims[0];
-          r.is_int = base.is_int;
-          r.dims = {R};
-          r.r.assign(base.r.begin() + (j - 1) * R,
-                     base.r.begin() + j * R);
-          if (base.is_int)
-            r.i.assign(base.i.begin() + (j - 1) * R, base.i.begin() + j * R);
-          return r;
-        }
-        // Row slice X[i, :] on a matrix / 2-D array.
-        if (e.args.size() == 3 && e.args[1].name == "IndexSingle" &&
-            e.args[2].name == "IndexAll" && base.dims.size() == 2) {
-          const long i = eval_int_td(e.args[1].args[0]);
-          const int64_t R = base.dims[0], C = base.dims[1];
-          r.is_int = base.is_int;
-          r.dims = {C};
-          for (int64_t j = 0; j < C; ++j) {
-            r.r.push_back(base.r.at(j * R + (i - 1)));
-            if (base.is_int) r.i.push_back(base.i.at(j * R + (i - 1)));
-          }
-          return r;
-        }
-        // Leading-Single slice of an N-D entry (k > 2): first index fixed.
-        // Flat storage is Fortran (first index fastest), so the sub-tensor
-        // elements sit at (i-1) + d0 * t.
-        if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
-            base.dims.size() > 2) {
-          const long i = eval_int_td(e.args[1].args[0]);
-          const int64_t d0 = base.dims[0];
-          int64_t rest = 1;
-          for (size_t d = 1; d < base.dims.size(); ++d) rest *= base.dims[d];
-          r.is_int = base.is_int;
-          r.dims.assign(base.dims.begin() + 1, base.dims.end());
-          for (int64_t k = 0; k < rest; ++k) {
-            r.r.push_back(base.r.at((i - 1) + d0 * k));
-            if (base.is_int) r.i.push_back(base.i.at((i - 1) + d0 * k));
-          }
-          return r;
-        }
-        // Between subrange of a 1-D value: v[a:b].
-        if (e.args.size() == 2 && e.args[1].name == "IndexBetween" &&
-            base.dims.size() <= 1) {
-          const long a = eval_int_td(e.args[1].args[0]);
-          const long b = eval_int_td(e.args[1].args[1]);
-          r.is_int = base.is_int;
-          r.dims = {b - a + 1};
-          for (long k = a; k <= b; ++k) {
-            r.r.push_back(base.r.at(k - 1));
-            if (base.is_int) r.i.push_back(base.i.at(k - 1));
-          }
-          return r;
-        }
-        // X[a:b, j] on a matrix / 2-D array: rows a..b of column j.
-        if (e.args.size() == 3 && e.args[1].name == "IndexBetween" &&
-            e.args[2].name == "IndexSingle" && base.dims.size() == 2) {
-          const long a = eval_int_td(e.args[1].args[0]);
-          const long b = eval_int_td(e.args[1].args[1]);
-          const long j = eval_int_td(e.args[2].args[0]);
-          const int64_t R = base.dims[0];
-          r.is_int = base.is_int;
-          r.dims = {b - a + 1};
-          for (long k = a; k <= b; ++k) {
-            r.r.push_back(base.r.at((j - 1) * R + (k - 1)));
-            if (base.is_int) r.i.push_back(base.i.at((j - 1) * R + (k - 1)));
-          }
-          return r;
-        }
-        fail("prepare_data: unsupported index", e.raw);
-      }
-      case mir::Expr::FunApp: {
-        if (e.fn_lib == mir::Expr::Lib::UserDefined) return td_call_udf(e);
-        auto bin = [&](auto f) {
-          DataMap::Entry a = td_eval(e.args[0]), b = td_eval(e.args[1]);
-          DataMap::Entry o;
-          const size_t n = std::max(a.r.size(), b.r.size());
-          o.r.resize(n);
-          for (size_t i = 0; i < n; ++i)
-            o.r[i] = f(a.r[a.r.size() == 1 ? 0 : i],
-                       b.r[b.r.size() == 1 ? 0 : i]);
-          o.dims = a.r.size() >= b.r.size() ? a.dims : b.dims;
-          if (a.is_int && b.is_int && a.i.size() == 1 && b.i.size() == 1) {
-            o.is_int = true;
-            o.i = {(int)f(a.i[0], b.i[0])};
-          }
-          return o;
-        };
-        auto un = [&](auto f) {
-          DataMap::Entry a = td_eval(e.args[0]);
-          DataMap::Entry o;
-          o.dims = a.dims;
-          o.r.resize(a.r.size());
-          for (size_t i = 0; i < a.r.size(); ++i) o.r[i] = f(a.r[i]);
-          return o;
-        };
-        if (e.name == "Plus__") return bin([](double x, double y) { return x + y; });
-        if (e.name == "Minus__") return bin([](double x, double y) { return x - y; });
-        if (e.name == "Times__" || e.name == "EltTimes__")
-          return bin([](double x, double y) { return x * y; });
-        if (e.name == "Divide__" || e.name == "EltDivide__")
-          return bin([](double x, double y) { return x / y; });
-        if (e.name == "Pow__" || e.name == "pow")
-          return bin([](double x, double y) { return std::pow(x, y); });
-        if (e.name == "PMinus__") return un([](double x) { return -x; });
-        if (e.name == "PPlus__") return un([](double x) { return x; });
-        if (e.name == "exp") return un([](double x) { return std::exp(x); });
-        if (e.name == "log") return un([](double x) { return std::log(x); });
-        if (e.name == "log10") return un([](double x) { return std::log10(x); });
-        if (e.name == "sqrt") return un([](double x) { return std::sqrt(x); });
-        if (e.name == "square") return un([](double x) { return x * x; });
-        if (e.name == "fabs" || e.name == "abs")
-          return un([](double x) { return std::fabs(x); });
-        if (e.name == "mean") {
-          DataMap::Entry a = td_eval(e.args[0]);
-          double m = 0;
-          for (double v : a.r) m += v;
-          r.r = {m / (double)a.r.size()};
-          return r;
-        }
-        if (e.name == "sd") {
-          DataMap::Entry a = td_eval(e.args[0]);
-          double m = 0;
-          for (double v : a.r) m += v;
-          m /= (double)a.r.size();
-          double s2 = 0;
-          for (double v : a.r) s2 += (v - m) * (v - m);
-          r.r = {std::sqrt(s2 / (double)(a.r.size() - 1))};
-          return r;
-        }
-        if (e.name == "sum") {
-          DataMap::Entry a = td_eval(e.args[0]);
-          double m = 0;
-          for (double v : a.r) m += v;
-          r.r = {m};
-          return r;
-        }
-        if (e.name == "rep_vector" || e.name == "rep_row_vector") {
-          DataMap::Entry a = td_eval(e.args[0]);
-          const long n = eval_int_td(e.args[1]);
-          r.r.assign(n, a.r.at(0));
-          r.dims = {n};
-          return r;
-        }
-        if (e.name == "Equals__") return bin([](double x, double y) { return x == y ? 1.0 : 0.0; });
-        if (e.name == "NEquals__") return bin([](double x, double y) { return x != y ? 1.0 : 0.0; });
-        if (e.name == "Greater__") return bin([](double x, double y) { return x > y ? 1.0 : 0.0; });
-        if (e.name == "Geq__") return bin([](double x, double y) { return x >= y ? 1.0 : 0.0; });
-        if (e.name == "Less__") return bin([](double x, double y) { return x < y ? 1.0 : 0.0; });
-        if (e.name == "Leq__") return bin([](double x, double y) { return x <= y ? 1.0 : 0.0; });
-        if (e.name == "PNot__") return un([](double x) { return x == 0.0 ? 1.0 : 0.0; });
-        if (e.name == "max" || e.name == "min") {
-          DataMap::Entry a = td_eval(e.args[0]);
-          if (e.args.size() == 2) {
-            DataMap::Entry b = td_eval(e.args[1]);
-            const double m = e.name == "max"
-                                 ? std::max(a.r.at(0), b.r.at(0))
-                                 : std::min(a.r.at(0), b.r.at(0));
-            r.is_int = a.is_int && b.is_int;
-            if (r.is_int) r.i = {(int)m};
-            r.r = {m};
-            return r;
-          }
-          double m = a.r.at(0);
-          for (double x : a.r) m = e.name == "max" ? std::max(m, x) : std::min(m, x);
-          r.is_int = a.is_int;
-          if (r.is_int) r.i = {(int)m};
-          r.r = {m};
-          return r;
-        }
-        if (e.name == "FnMakeArray" || e.name == "FnMakeRowVec") {
-          DataMap::Entry o;
-          o.is_int = true;
-          bool rows_mode = false;
-          int64_t row_len = 0;
-          for (const auto& a : e.args) {
-            DataMap::Entry v2 = td_eval(a);
-            if (v2.r.size() > 1 || rows_mode) {
-              // Row-vector elements: build a matrix, row-major.
-              rows_mode = true;
-              row_len = (int64_t)v2.r.size();
-              o.is_int = false;
-              o.r.insert(o.r.end(), v2.r.begin(), v2.r.end());
-              continue;
-            }
-            o.r.push_back(v2.r.at(0));
-            if (v2.is_int && !v2.i.empty()) o.i.push_back(v2.i[0]);
-            else o.is_int = false;
-          }
-          if (!o.is_int) o.i.clear();
-          if (rows_mode) {
-            // Rows arrived row-by-row; store column-major.
-            const int64_t R = (int64_t)e.args.size(), C = row_len;
-            std::vector<double> cm(R * C);
-            for (int64_t i = 0; i < R; ++i)
-              for (int64_t j = 0; j < C; ++j)
-                cm[j * R + i] = o.r[i * C + j];
-            o.r = std::move(cm);
-          }
-          if (rows_mode)
-            o.dims = {(int64_t)e.args.size(), row_len};
-          else
-            o.dims = {(int64_t)o.r.size()};
-          return o;
-        }
-        if (e.name == "Transpose__") {
-          DataMap::Entry a = td_eval(e.args[0]);
-          if (a.dims.size() < 2) return a;  // vector transpose: same storage
-          DataMap::Entry o;
-          o.dims = {a.dims[1], a.dims[0]};
-          o.r.resize(a.r.size());
-          // col-major: o(j,i) = a(i,j)
-          for (int64_t i = 0; i < a.dims[0]; ++i)
-            for (int64_t j = 0; j < a.dims[1]; ++j)
-              o.r[i * a.dims[1] + j] = a.r[j * a.dims[0] + i];
-          return o;
-        }
-        if (e.name == "to_vector") {
-          DataMap::Entry a = td_eval(e.args[0]);
-          a.dims = {(int64_t)a.r.size()};
-          a.is_int = false;
-          return a;
-        }
-        if (e.name == "rows" || e.name == "cols" || e.name == "size" ||
-            e.name == "num_elements") {
-          DataMap::Entry a = td_eval(e.args[0]);
-          long v = 0;
-          if (e.name == "rows")
-            v = a.dims.size() == 2 ? a.dims[0] : (long)a.r.size();
-          else if (e.name == "cols")
-            v = a.dims.size() == 2 ? a.dims[1] : 1;
-          else
-            v = a.dims.empty() ? (long)std::max(a.r.size(), a.i.size())
-                               : (long)a.dims[0];
-          if (e.name == "num_elements")
-            v = (long)std::max(a.r.size(), a.i.size());
-          r.is_int = true;
-          r.i = {(int)v};
-          r.r = {(double)v};
-          return r;
-        }
-        if (e.name == "dims" && e.args.size() == 1) {
-          DataMap::Entry a = td_eval(e.args[0]);
-          r.is_int = true;
-          std::vector<int64_t> ds = a.dims;
-          if (ds.empty())
-            ds = {(int64_t)std::max(a.r.size(), a.i.size())};
-          r.dims = {(int64_t)ds.size()};
-          for (int64_t d : ds) {
-            r.i.push_back((int)d);
-            r.r.push_back((double)d);
-          }
-          return r;
-        }
-        if (e.name == "pi" && e.args.empty()) {
-          r.r = {stan::math::pi()};
-          return r;
-        }
-        if (e.name == "e" && e.args.empty()) {
-          r.r = {stan::math::e()};
-          return r;
-        }
-        if (e.name == "machine_precision" && e.args.empty()) {
-          r.r = {std::numeric_limits<double>::epsilon()};
-          return r;
-        }
-        if (e.name == "negative_infinity") {
-          r.r = {-std::numeric_limits<double>::infinity()};
-          return r;
-        }
-        if (e.name == "positive_infinity") {
-          r.r = {std::numeric_limits<double>::infinity()};
-          return r;
-        }
-        if (e.name == "student_t_lccdf" && e.args.size() == 4) {
-          r.r = {stan::math::student_t_lccdf(
-              td_eval(e.args[0]).r.at(0), td_eval(e.args[1]).r.at(0),
-              td_eval(e.args[2]).r.at(0), td_eval(e.args[3]).r.at(0))};
-          return r;
-        }
-        if (e.name == "rep_array" && e.args.size() == 2) {
-          DataMap::Entry v = td_eval(e.args[0]);
-          const long n = eval_int_td(e.args[1]);
-          r.is_int = v.is_int;
-          r.dims = {n};
-          r.r.assign(n, v.r.at(0));
-          if (v.is_int) r.i.assign(n, v.i.at(0));
-          return r;
-        }
-        if (e.name == "rep_matrix" && e.args.size() == 3) {
-          DataMap::Entry v = td_eval(e.args[0]);
-          const long R = eval_int_td(e.args[1]), C = eval_int_td(e.args[2]);
-          r.dims = {R, C};
-          r.r.assign(R * C, v.r.at(0));
-          return r;
-        }
-        if (e.name == "append_row" && e.args.size() == 2) {
-          DataMap::Entry a = td_eval(e.args[0]), b = td_eval(e.args[1]);
-          if (a.dims.size() <= 1 && b.dims.size() <= 1) {
-            // Vectors/scalars: vertical concatenation.
-            r.dims = {(int64_t)(a.r.size() + b.r.size())};
-            r.r = a.r;
-            r.r.insert(r.r.end(), b.r.begin(), b.r.end());
-            return r;
-          }
-          if (a.dims.size() == 2 && b.dims.size() == 2 &&
-              a.dims[1] == b.dims[1]) {
-            // Matrices: stack rows, col-major storage interleaves columns.
-            const int64_t Ra = a.dims[0], Rb = b.dims[0], C = a.dims[1];
-            r.dims = {Ra + Rb, C};
-            r.r.reserve((Ra + Rb) * C);
-            for (int64_t j = 0; j < C; ++j) {
-              r.r.insert(r.r.end(), a.r.begin() + j * Ra,
-                         a.r.begin() + (j + 1) * Ra);
-              r.r.insert(r.r.end(), b.r.begin() + j * Rb,
-                         b.r.begin() + (j + 1) * Rb);
-            }
-            return r;
-          }
-          fail("prepare_data: append_row shape mismatch", e.raw);
-        }
-        if (e.name == "append_col" && e.args.size() == 2) {
-          DataMap::Entry a = td_eval(e.args[0]), b = td_eval(e.args[1]);
-          // Column-major storage makes column appends a concatenation.
-          // A vector argument is a one-column block.
-          const int64_t Ra = a.dims.size() == 2 ? a.dims[0]
-                                                : (int64_t)a.r.size();
-          const int64_t Rb = b.dims.size() == 2 ? b.dims[0]
-                                                : (int64_t)b.r.size();
-          const int64_t Ca = a.dims.size() == 2 ? a.dims[1] : 1;
-          const int64_t Cb = b.dims.size() == 2 ? b.dims[1] : 1;
-          if (Ra != Rb) fail("prepare_data: append_col row mismatch", e.raw);
-          r.dims = {Ra, Ca + Cb};
-          r.r = a.r;
-          r.r.insert(r.r.end(), b.r.begin(), b.r.end());
-          r.is_int = false;
-          return r;
-        }
-        fail("prepare_data: unsupported function " + e.name, e.raw);
-      }
-      default:
-        fail("prepare_data: unsupported expression", e.raw);
-    }
-  }
-
-  long eval_int_td(const mir::Expr& e) {
-    DataMap::Entry v = td_eval(e);
-    if (v.is_int && v.i.size() == 1) return v.i[0];
-    if (v.r.size() == 1) return (long)v.r[0];
-    fail("prepare_data: expected int scalar", e.raw);
-  }
-
-  void td_exec(const mir::Stmt& st) {
-    switch (st.kind) {
-      case mir::Stmt::Decl: {
-        DataMap::Entry e;
-        if (st.decl_type.base == "SInt" ||
-            (st.decl_type.base == "SArray" && st.decl_type.raw == "SInt"))
-          e.is_int = true;
-        if (st.has_init && st.init.kind == mir::Expr::FunApp &&
-            st.init.fn_lib == mir::Expr::Lib::Internal &&
-            st.init.name == "FnReadData") {
-          // Reads name the source data variable in their argument.
-          e = data.at(st.init.args.at(0).lit_s);
-        } else if (st.has_init &&
-                   !(st.init.kind == mir::Expr::FunApp &&
-                     st.init.fn_lib == mir::Expr::Lib::Internal)) {
-          const bool want_int = e.is_int;
-          e = td_eval(st.init);
-          if (want_int && !e.is_int) {
-            // Declared int, computed through real arithmetic: coerce back.
-            e.is_int = true;
-            e.i.clear();
-            for (double v : e.r) e.i.push_back((int)v);
-          }
-        } else if (data.has(st.decl_id)) {
-          e = data.at(st.decl_id);
-        } else if (!st.decl_type.base.empty() &&
-                   st.decl_type.base != "SInt" &&
-                   st.decl_type.base != "SReal") {
-          // Bare sized decl: allocate zeros so element writes work.
-          int64_t n = 1;
-          std::vector<int64_t> dims;
-          for (const auto& d : st.decl_type.dims) {
-            const long v = eval_int_td(d);
-            dims.push_back(v);
-            n *= v;
-          }
-          e.r.assign(n, 0.0);
-          if (e.is_int) e.i.assign(n, 0);
-          e.dims = std::move(dims);
-        }
-        env.vars[st.decl_id] = std::move(e);
-        return;
-      }
-      case mir::Stmt::Assignment: {
-        // Data reads: the FnReadData argument names the source variable.
-        std::string read_name;
-        std::function<void(const mir::Expr&)> scan = [&](const mir::Expr& x) {
-          if (x.kind == mir::Expr::FunApp && x.name == "FnReadData" &&
-              !x.args.empty())
-            read_name = x.args[0].lit_s;
-          for (const auto& a : x.args) scan(a);
-        };
-        scan(st.rhs);
-        if (!read_name.empty()) {
-          // The flat read buffer is consumed with sequential 1-D indexing
-          // regardless of the source variable's shape.
-          DataMap::Entry flat = data.at(read_name);
-          flat.dims = {(int64_t)std::max(flat.r.size(), flat.i.size())};
-          env.vars[st.lhs] = std::move(flat);
-          return;
-        }
-        if (st.lhs_idx.empty()) {
-          env.vars[st.lhs] = td_eval(st.rhs);
-          return;
-        }
-        DataMap::Entry* en = env.find(st.lhs);
-        if (!en) fail("prepare_data: assignment to unknown " + st.lhs);
-        DataMap::Entry v = td_eval(st.rhs);
-        if (st.lhs_idx.size() == 1 && st.lhs_idx[0].name == "IndexSingle") {
-          const long ix = eval_int_td(st.lhs_idx[0].args[0]);
-          if (en->dims.size() == 2) {
-            // Row write into a matrix (A[i] = row_vector), col-major strided.
-            const int64_t R = en->dims[0], C = en->dims[1];
-            if ((int64_t)v.r.size() != C)
-              fail("prepare_data: row write size mismatch");
-            for (int64_t j = 0; j < C; ++j)
-              en->r.at(j * R + (ix - 1)) = v.r[j];
-            return;
-          }
-          if ((size_t)ix > en->r.size()) en->r.resize(ix, 0.0);
-          en->r[ix - 1] = v.r.at(0);
-          if (en->is_int) {
-            if ((size_t)ix > en->i.size()) en->i.resize(ix, 0);
-            en->i[ix - 1] = v.is_int && !v.i.empty() ? v.i[0]
-                                                     : (int)v.r.at(0);
-          }
-          return;
-        }
-        // General all-Single N-D element write.
-        if (st.lhs_idx.size() == en->dims.size()) {
-          bool all_single = true;
-          for (const auto& ix : st.lhs_idx)
-            if (ix.name != "IndexSingle") all_single = false;
-          if (all_single) {
-            int64_t flatpos = 0, stride = 1;
-            for (size_t d = 0; d < en->dims.size(); ++d) {
-              flatpos += (eval_int_td(st.lhs_idx[d].args[0]) - 1) * stride;
-              stride *= en->dims[d];
-            }
-            en->r.at(flatpos) = v.r.at(0);
-            if (en->is_int)
-              en->i.at(flatpos) =
-                  v.is_int && !v.i.empty() ? v.i[0] : (int)v.r.at(0);
-            return;
-          }
-        }
-        // Column write Xc[:, j] = vector.
-        if (st.lhs_idx.size() == 2 && st.lhs_idx[0].name == "IndexAll" &&
-            st.lhs_idx[1].name == "IndexSingle" && en->dims.size() == 2) {
-          const long j = eval_int_td(st.lhs_idx[1].args[0]);
-          const int64_t R = en->dims[0];
-          for (int64_t i = 0; i < R; ++i)
-            en->r.at((j - 1) * R + i) = v.r.at(i);
-          return;
-        }
-        fail("prepare_data: unsupported indexed assignment");
-      }
-      case mir::Stmt::For: {
-        const long lo = eval_int_td(st.lower), hi = eval_int_td(st.upper);
-        for (long v = lo; v <= hi; ++v) {
-          DataMap::Entry lv;
-          lv.is_int = true;
-          lv.i = {(int)v};
-          lv.r = {(double)v};
-          env.vars[st.loopvar] = lv;
-          for (const auto& k : st.body) td_exec(k);
-        }
-        env.vars.erase(st.loopvar);
-        return;
-      }
-      case mir::Stmt::IfElse: {
-        const bool c = td_eval(st.cond).r.at(0) != 0.0;
-        if (c && !st.body.empty()) td_exec(st.body[0]);
-        if (!c && st.body.size() > 1) td_exec(st.body[1]);
-        return;
-      }
-      case mir::Stmt::Block:
-      case mir::Stmt::SList:
-        for (const auto& k : st.body) td_exec(k);
-        return;
-      case mir::Stmt::While: {
-        int64_t guard = 0;
-        while (td_eval(st.cond).r.at(0) != 0.0) {
-          if (++guard > 100000000)
-            fail("prepare_data: while loop did not terminate");
-          for (const auto& k : st.body) td_exec(k);
-        }
-        return;
-      }
-      case mir::Stmt::Return:
-        throw TdReturn{st.has_init ? td_eval(st.rhs) : DataMap::Entry{}};
-      case mir::Stmt::NRFunApp:
-      case mir::Stmt::Skip:
-        return;  // checks skipped in M2
-      default:
-        fail("prepare_data: unsupported statement", st.raw);
-    }
-  }
-
   void bind_data(const mir::Program& p) {
     for (const auto& [name, type] : p.input_vars) {
       (void)type;
-      if (data.has(name)) env.vars[name] = data.at(name);
+      if (data.has(name)) td.env()[name] = data.at(name);
     }
-    for (const auto& st : p.prepare_data) td_exec(st);
-    for (auto& [name, e] : env.vars) {
+    for (const auto& st : p.prepare_data) td.exec(st);
+    for (auto& [name, e] : td.env()) {
       if (e.is_int && e.i.size() == 1 && e.dims.empty())
         int_env[name] = e.i[0];
     }
@@ -859,7 +209,7 @@ struct Lowering {
 
   // Lazily materialize an env value as a data slot when log_prob uses it.
   int env_slot(const std::string& name) {
-    DataMap::Entry* en = env.find(name);
+    DataMap::Entry* en = td.find(name);
     // Empty entries are real: `array[0] real x_r` is how ODE models spell
     // "no data for the system", and it still has to become a (zero-length)
     // slot when passed around.
@@ -925,7 +275,7 @@ struct Lowering {
         }
         // Gather by a data int array: v[idx].
         if (e.args.size() == 2 && e.args[1].name == "IndexMulti") {
-          DataMap::Entry iv = td_eval(e.args[1].args[0]);
+          DataMap::Entry iv = td.eval(e.args[1].args[0]);
           if (!iv.is_int || iv.i.empty())
             fail("gather index must be int data", e.raw);
           std::vector<int> idata;
@@ -1030,7 +380,7 @@ struct Lowering {
         // reference parameters.
         if (!e.args[0].data_only)
           fail("TernaryIf on a parameter condition unsupported in M2", e.raw);
-        const bool c = td_eval(e.args[0]).r.at(0) != 0.0;
+        const bool c = td.eval(e.args[0]).r.at(0) != 0.0;
         return lower_expr(e.args[c ? 1 : 2]);
       }
       case mir::Expr::EOr:
@@ -1074,7 +424,7 @@ struct Lowering {
     if (!e.data_only || e.fn_propto) return false;
     DataMap::Entry en;
     try {
-      en = td_eval(e);
+      en = td.eval(e);
     } catch (const CompileError&) {
       return false;
     }
@@ -1100,7 +450,7 @@ struct Lowering {
   // time (int data, loop variables, or compile-time expressions).
   std::vector<int> int_arg_values(const mir::Expr& oc) {
     if (oc.kind == mir::Expr::Var) {
-      DataMap::Entry* en = env.find(oc.name);
+      DataMap::Entry* en = td.find(oc.name);
       if (en && en->is_int && !en->i.empty()) return en->i;
       if (int_env.count(oc.name))
         return {static_cast<int>(int_env[oc.name])};
@@ -1109,7 +459,7 @@ struct Lowering {
     if (oc.kind == mir::Expr::Indexed) {
       // May be a slice (y[i] on a 2-D array yields a whole row), so
       // evaluate through the data interpreter, not scalar eval_int.
-      DataMap::Entry v = td_eval(oc);
+      DataMap::Entry v = td.eval(oc);
       if (v.is_int && !v.i.empty()) return v.i;
     }
     if (oc.kind == mir::Expr::FunApp) {
@@ -1142,7 +492,7 @@ struct Lowering {
   // back to that slot's recorded fill.
   std::vector<double> const_values(const mir::Expr& e) {
     try {
-      DataMap::Entry en = td_eval(e);
+      DataMap::Entry en = td.eval(e);
       return en.r;
     } catch (const CompileError&) {
     }
@@ -1158,7 +508,7 @@ struct Lowering {
   }
   std::vector<int> const_ints(const mir::Expr& e) {
     try {
-      DataMap::Entry en = td_eval(e);
+      DataMap::Entry en = td.eval(e);
       if (en.is_int) return en.i;
       std::vector<int> out;
       for (double d : en.r) out.push_back((int)d);
@@ -1205,7 +555,7 @@ struct Lowering {
     auto ie_saved = int_env;
     auto dd_saved = decl_dims;
     auto dl_saved = decl_lens;
-    auto env_saved = env.vars;
+    auto env_saved = td.env();
     for (size_t i = 0; i < binds.size(); ++i) {
       const std::string& name = f.arg_names[i];
       decl_dims.erase(name);
@@ -1213,7 +563,7 @@ struct Lowering {
       // Data-only arguments also enter the interpreter's environment, so
       // shape and size queries inside the body (dims, size, rows) resolve
       // at compile time just as they do in transformed data.
-      env.vars.erase(name);
+      td.env().erase(name);
       // Bind whenever the argument's value is computable at compile time,
       // not just when the MIR flags it DataOnly: a function may take a data
       // array without the `data` qualifier, and its body still asks for
@@ -1222,9 +572,9 @@ struct Lowering {
       // something that varies.
       {
         try {
-          DataMap::Entry en = td_eval(e.args[i]);
+          DataMap::Entry en = td.eval(e.args[i]);
           if (en.dims.size() > 1) decl_dims[name] = en.dims;
-          env.vars[name] = std::move(en);
+          td.env()[name] = std::move(en);
         } catch (const CompileError&) {
           // Not interpretable, but a data-only value still has a constant
           // slot; bind that so shape and size queries inside the body work.
@@ -1236,7 +586,7 @@ struct Lowering {
               en.dims = {(int64_t)en.r.size()};
               if (binds[i].v.si.rows > 0)
                 en.dims = {binds[i].v.si.rows, binds[i].v.si.cols};
-              env.vars[name] = std::move(en);
+              td.env()[name] = std::move(en);
             }
           }
         }
@@ -1261,7 +611,7 @@ struct Lowering {
     int_env = std::move(ie_saved);
     decl_dims = std::move(dd_saved);
     decl_lens = std::move(dl_saved);
-    env.vars = std::move(env_saved);
+    td.env() = std::move(env_saved);
     --udf_depth;
     if (!returned)
       fail(e.name + ": no return value on the executed path");
@@ -1644,7 +994,7 @@ struct Lowering {
         auto dd = decl_dims.find(e.args[0].name);
         if (dd != decl_dims.end() && dd->second.size() == 2)
           D = dd->second[1];
-        else if (DataMap::Entry* en = env.find(e.args[0].name))
+        else if (DataMap::Entry* en = td.find(e.args[0].name))
           if (en->dims.size() == 2) D = en->dims[1];
       }
       const int64_t N = info[x.slot].len / D;
@@ -2204,7 +1554,7 @@ struct Lowering {
       case mir::Stmt::IfElse: {
         if (!s.cond.data_only)
           fail("IfElse on parameters unsupported in M2", s.raw);
-        const bool c = td_eval(s.cond).r.at(0) != 0.0;
+        const bool c = td.eval(s.cond).r.at(0) != 0.0;
         if (c && !s.body.empty()) lower_stmt(s.body[0]);
         if (!c && s.body.size() > 1) lower_stmt(s.body[1]);
         return;
@@ -2323,7 +1673,7 @@ CompiledModel compile_model(const std::string& tmir_text, const DataMap& data) {
     // interpreted: re-running prepare_data would double preparation time on
     // the models where preparation is the cost (nn_rbm1bJ100, 20.7 s).
     Lowering wa(data);
-    wa.env = lo.env;
+    wa.td.env() = lo.td.env();
     wa.int_env = lo.int_env_data;
     CompiledModel::WriteArray w = wa.run_write_array(prog);
     if (w.n_unconstrained != cm.n_unconstrained) {
