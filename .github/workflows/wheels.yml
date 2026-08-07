@@ -61,12 +61,12 @@ jobs:
             plat: manylinux_2_28_x86_64
             container: quay.io/pypa/manylinux_2_28_x86_64
             opam_arch: x86_64-linux
-            build_jobs: 2
+            build_jobs: 1
           - os: ubuntu-24.04-arm
             plat: manylinux_2_28_aarch64
             container: quay.io/pypa/manylinux_2_28_aarch64
             opam_arch: arm64-linux
-            build_jobs: 2
+            build_jobs: 1
     steps:
       - uses: actions/checkout@v4
 
