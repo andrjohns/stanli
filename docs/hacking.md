@@ -1,8 +1,13 @@
 # Hacking on stanli
 
-A map for contributors: which file owns what, and the recipes for the two
-most common changes. `docs/how-it-works.md` explains why the design is
-what it is; `runtime/src/OPTIMIZATIONS.md` explains the graph passes.
+A map for contributors: which file owns what, how a gradient actually
+gets computed, and the recipes for the two most common changes.
+`docs/how-it-works.md` explains why the design is what it is;
+`runtime/src/OPTIMIZATIONS.md` explains the graph passes in plain
+language; `docs/benchmarks.md` has the measurements.
+
+If you are reading only one section, read "Where the silent wrongness
+lives" -- it is the shape of every bug this project has shipped.
 
 ## Layout
 
@@ -16,12 +21,213 @@ what it is; `runtime/src/OPTIMIZATIONS.md` explains the graph passes.
 | `runtime/kernels/` | Op implementations. `densities.cpp` instantiates unmodified stan-math prim templates; `elementwise.cpp`/`eltwise_expr.cpp` the vector math; `constrain.cpp` the transforms; `matrix_fns.cpp` and `legacy_fns.cpp` wrap stan-math functions that have no native port (see `legacy.hpp` for the mechanism). |
 | `runtime/include/stanli/mir_interp.hpp` | The one MIR interpreter, templated on the scalar. Three users: the lowering (transformed data and every data-only expression, on `double`), the ODE kernels (right-hand sides the compiled path cannot handle, on `double` and `var`), and the interpreted write_array. |
 | `runtime/src/wa_interp.cpp` | `WaInterp`: per-draw interpreted generated quantities for models whose write_array graph cannot be built (RNG calls, draw-dependent branches). Owns the RNG stream and the FnReadParam/FnWriteParam statement hooks. |
-| `runtime/src/nuts.cpp` | The sampler: stan's own `adapt_diag_e_nuts` driven through `model_adapter.hpp`. |
+| `runtime/src/island.cpp` | The tape-island carver and its cost estimate, plus the graph-op front end to the register machine. Runs last in the pipeline. |
+| `runtime/include/stanli/program.hpp`, `mir_prog.hpp` | The register machine: one instruction set with one runner templated on the scalar (`program.hpp`), and the MIR front end both callers compile through (`mir_prog.hpp`). `ode_prog.cpp` is the ODE entry, `island.cpp` the graph-op entry, `lower.cpp` the parameter-conditional entry. |
+| `runtime/src/nuts.cpp` | The sampler: stan's own `adapt_diag_e_nuts` driven through `model_adapter.hpp`. Also owns CmdStan parity of the RNG stream and of which initial points are accepted. |
 | `runtime/src/capi.cpp`, `capi.h` | The C ABI the shared library exports. `python/stanli/__init__.py` is a thin ctypes wrapper over it. |
 | `runtime/src/stanc_embed_c.cpp`, `tools/stanc_embed/` | The in-process stanc3: the OCaml compiler built with `-output-complete-obj` and linked into the shared library. |
 | `tools/` | `stanli_check` (one deterministic gradient evaluation, machine-readable), `stanli_run` (full CSV sampling run), `dump_ops` (print a model's lowered op list), `verify_refs.py` (corpus replay against recorded CmdStan values, runs in CI), `verify_sample.py` (records those references, needs CmdStan), `sampler_trace.py` (sampler-column diff vs CmdStan), `gen_docs.py` (stamps measured numbers into the READMEs). |
 | `harnesses/` | Corpus sweeps that need a local posteriordb: `wa_coverage.py` (how much of each model's generated quantities we produce), `wa_header_check.py` (CSV headers vs CmdStan), benchmarks. |
 | `tests/` | One `test_*.cpp` per subsystem, plus `fixtures/` with `.stan` sources and their pinned `.tmir.sexp` MIR (regenerate with `tools/gen_fixtures.sh`). |
+
+## The shape of the thing
+
+About 11,500 lines of runtime against 5,800 lines of tests. Where the
+weight sits:
+
+| | lines | |
+|---|---:|---|
+| `lower.cpp` | 1,935 | The compiler. Biggest file, and the one most likely to be what you are looking for. |
+| `mir_interp.hpp` | 1,284 | The MIR interpreter, templated on the scalar. |
+| `reroll.cpp` | 860 | The vectorizing pass. Dense, but self-contained. |
+| `mir_prog.hpp` | 536 | MIR to register program. |
+| `island.cpp` | 528 | The island carver. |
+| `matrix_fns.cpp`, `densities.cpp` | 488, 455 | Kernels. Repetitive by design; read one, you can read them all. |
+| `mir_reader.cpp` | 374 | S-expressions to MIR structs. |
+| `executor.cpp` | 320 | Runs the op list. Small on purpose. |
+| `inplace.cpp`, `constfold.cpp` | 204, 186 | The other two passes. |
+| `nuts.cpp` | 133 | The sampler is thin: Stan's classes do the work. |
+
+There are 82 opcodes (`optable.hpp`). Adding one is a small, well-worn
+change; the recipe is below. The difficulty in this codebase is almost
+never in writing new code -- it is in not breaking the numerical
+agreement with CmdStan that everything else rests on, which is what the
+"silent wrongness" section is about.
+
+## Life of a gradient
+
+```
+model.stan + data.json
+  |  stanc3, linked in-process (stanc_embed)
+  v  transformed MIR, as s-expressions
+mir_reader.cpp
+  |  parsed into mir::Stmt / mir::Expr
+  v
+lower.cpp                       <- the compiler; ~everything hard lives here
+  |  transformed data evaluated eagerly (mir_interp.hpp, on double)
+  |  data-bound loops unrolled, `~` lowered with CmdStan's propto and
+  |  per-argument activity, parameter-conditional regions compiled to
+  |  islands (mir_prog.hpp)
+  v  Graph: Slot[] + Op[]
+graph passes, in this order (lower.cpp's run()):
+  |  make_inplace_updates      copy-then-modify -> in-place write
+  |  forward_stores_to_loads   write x[n], read x[n] -> use the value
+  |  const_fold                ops no parameter can reach -> constants
+  |  reroll                    N copies of a template -> vector ops
+  |  carve_islands             scalar residue -> one register program
+  |  reduce_terms              target terms -> one result slot
+  v
+Executor::bind_()
+  |  slot offsets assigned, three arenas sized (values, adjoints,
+  |  scratch), one KernelCtx built per op, dispatch tables resolved
+  v
+forward sweep   = log density, each kernel stashing its partials
+reverse sweep   = gradient, each kernel contracting them
+```
+
+Two things follow from that picture and are worth internalizing.
+
+**The graph is the autodiff tape.** There is no tape being built at
+evaluation time; the op list *is* the tape, fixed when the model loads.
+That is why control flow that depends on a parameter cannot be ops (it
+becomes an island instead), and why a steady-state gradient allocates
+nothing.
+
+**Lowering happens once, evaluation happens millions of times.** A
+compile-time cost of 200 ms to save 10 ns per gradient is a trade this
+project takes every time.
+
+## The IR
+
+Four types in `graph.hpp`, and they are deliberately dull:
+
+- `Slot` -- a value: an offset into the arenas, a length, and whether it
+  is a parameter. Parameters come first, in declaration order, so the
+  gradient vector is contiguous.
+- `Op` -- an opcode, up to six input slots, one output (rarely two),
+  integer immediates (`idata`), an opaque payload (`udata`, for ODE
+  specs and island programs), and a scratch window.
+- `Graph` -- the slots, the ops, and the pools that own `idata`/`udata`.
+- `KernelCtx` -- what a kernel actually sees: raw `double*` + length for
+  each input, output, and adjoint, plus its scratch. Assembled once at
+  bind, never rebuilt.
+
+The `variant` byte on `Op` is worth reading twice, because it encodes
+the CmdStan semantics a density has to reproduce: bits 0-5 are
+per-argument activity (which arguments are autodiff), bit 6 means the
+output is elementwise (one lp per element rather than the sum), and bit
+7 is propto. Get it wrong and the gradient stays perfect while the log
+density is off by a constant.
+
+## The kernel contract
+
+A kernel is three function pointers (`optable.hpp`):
+
+```cpp
+struct Kernel {
+  void (*forward)(KernelCtx&);            // writes ctx.out, stashes partials
+  void (*backward)(KernelCtx&);           // accumulates into ctx.in_adj[k]
+  int64_t (*scratch_size)(const Op&, const Slot*);   // doubles needed
+};
+```
+
+The rules, all of which have been learned the hard way:
+
+- **The forward computes partials; the backward only contracts them.**
+  Not the other way around. A backward that recomputes the forward pays
+  twice per gradient -- that was 90% of `diamonds`, and fixing it was
+  worth 1.8x on the model.
+- **`in_adj[k].data` may be null.** That means the input is data and its
+  adjoint must not be touched.
+- **Accumulate in the order the reference does.** Several kernels sum in
+  a deliberate direction (descending, or per-element rather than
+  blocked) to stay bitwise identical to the stan-math var path they are
+  checked against. If you reorder a reduction you will usually still
+  pass the corpus oracle at 1e-9 and still break `test_matvec` at 1 ULP,
+  and the ULP is the thing worth keeping.
+- **Scratch is yours alone**, sized at bind and never touched by another
+  op -- which is what makes an in-place write safe in front of you.
+
+## The register machine
+
+Some code cannot be ops. An ODE right-hand side has to stay callable
+because the integrator picks the times; a region whose control flow
+depends on a parameter has to pick its arm at evaluation time. Both
+compile to the same flat instruction list over a register file
+(`program.hpp`), run by one `run_program<T>` templated on the scalar --
+`double` for values, `var` where stan-math's autodiff needs to see the
+arithmetic.
+
+Three front ends produce one:
+
+| Entry | Source | Who runs it |
+|---|---|---|
+| `compile_rhs` (`ode_prog.cpp`) | a MIR function body | the ODE kernel, per integrator step |
+| `carve_islands` (`island.cpp`) | a run of graph ops | `OP_ISLAND`, once per evaluation |
+| `lower_param_ifelse` / `lower_param_ternary` (`lower.cpp`) | a MIR statement or expression | `OP_ISLAND`, once per evaluation |
+
+The first two are optimizations and can be declined -- the carver keeps
+an island only when it estimates the ops cost more (see OPTIMIZATIONS.md;
+`STANLI_NO_ISLAND=1` turns the pass off, `STANLI_ISLAND_ALWAYS=1` skips
+the estimate when you want to know why a region was left alone). The
+third is not: without it the model does not compile, so no switch
+reaches it.
+
+## The sampler
+
+`nuts.cpp` is 133 lines because Stan's own `adapt_diag_e_nuts` does the
+sampling; the file's real job is matching CmdStan's *configuration*,
+which is invisible to any pointwise gradient test. Three things it has
+to keep in step, each of which was wrong at some point:
+
+- The max tree depth, which defaults to 5 in the base class and 10 in
+  CmdStan.
+- The RNG stream: `stan::services::util::create_rng(seed, chain)`, the
+  same engine seeded the same way, drawing the initial point in the same
+  order. Different engines mean the same seed names different starting
+  points, and every sampler comparison silently compares two draws.
+- Which initial points are accepted: CmdStan evaluates the log density
+  on doubles *and then* its gradient, rejecting on either. Those two can
+  disagree for an ODE model, so `Executor::forward_value_only()` exists
+  to be the double path.
+
+`tools/sampler_trace.py` is the oracle for all of this: same model, same
+seed, compare the sampler columns distributionally.
+
+## Where the silent wrongness lives
+
+Every bug this project has shipped has been of one kind: the graph
+changed shape, every test passed, and the numbers were wrong. The
+classes, with the case that taught each:
+
+- **A destructive write in front of a backward that re-reads its
+  inputs.** The in-place pass may only write over a value when every
+  earlier op's backward is pure adjoint routing
+  (`backward_ignores_input_values`, pinned by `test_pass_safety.cpp`).
+  Getting this wrong made eight models wrong by up to 1.7e+05 relative
+  with their op counts unchanged.
+- **Propto and argument types.** Which constants a density drops depends
+  on which arguments are autodiff. Anything that binds arguments
+  uniformly (the register machine) cannot reproduce it, which is why
+  `~` inside a parameter-conditional region is refused rather than
+  approximated -- it had a perfect gradient and an lp off by exactly
+  log(2*pi)/2.
+- **Aliasing a slot that is both read and written by the same region.**
+  An island's live-in that is also a live-out needs a fresh slot, or the
+  producer's adjoint is counted twice (measured: off by exactly 1.0).
+- **Reassociation.** See the kernel contract. Cheap to do by accident,
+  invisible in the corpus oracle, visible in the ULP tests.
+- **Modes that skip work.** `forward_value_only()` lets a kernel skip
+  partials; it is safe only because `gradient()` always runs a full
+  forward first. If you add a mode like that, say out loud why the
+  skipped work cannot survive into a reverse sweep.
+
+The practice that catches these is mutation testing, and it is expected
+of a change that claims a safety property: break the thing on purpose,
+watch the test fail, put it back. If the test passes with the guard
+removed, the test is not testing the guard. (Delete the object file and
+`touch` the source first -- make's mtime granularity will happily hand
+you a stale binary and a green run.)
 
 ## Adding a stan-math function
 
