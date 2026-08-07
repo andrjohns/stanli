@@ -84,7 +84,9 @@ target_compile_options(sundials PRIVATE -w
   -include ${_sundials}/include/stan_sundials_printf_override.hpp)
 set_target_properties(sundials PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-if(NOT EMSCRIPTEN)
+# The shared library ships in wheels; Windows needs a .def-based export
+# story before a dll is worth building, so the test milestone skips it.
+if(NOT EMSCRIPTEN AND NOT WIN32)
 add_library(stanli_shared SHARED
   runtime/src/capi.cpp
   runtime/src/executor.cpp
@@ -148,7 +150,7 @@ if(STANLI_STANC_EMBED_OBJ)
   target_compile_definitions(stanli_shared PRIVATE STANLI_EMBED_STANC)
   target_link_libraries(stanli_shared PUBLIC dl pthread)
 endif()
-endif()  # NOT EMSCRIPTEN
+endif()  # NOT EMSCRIPTEN AND NOT WIN32
 
 add_library(stanli STATIC
   runtime/src/executor.cpp

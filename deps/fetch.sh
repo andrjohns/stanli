@@ -28,6 +28,7 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-x86_64) STANC_ASSET=mac-stanc ;;
   Linux-aarch64) STANC_ASSET=linux-arm64-stanc ;;
   Linux-x86_64) STANC_ASSET=linux-stanc ;;
+  MINGW*|MSYS*|CYGWIN*) STANC_ASSET=windows-stanc ;;
 esac
 mkdir -p stanc3
 if [ ! -x stanc3/stanc ]; then
