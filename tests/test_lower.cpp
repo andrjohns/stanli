@@ -606,9 +606,10 @@ int main() {
       var sigma = stan::math::exp(u_sig);
       var acc = u_sig;  // lower=0 jacobian
       var m = stan::math::value_of(u_mu) > 0 ? u_mu * 2.0 : -u_mu;
+      var w = stan::math::value_of(u_mu) > 0 ? 1.0 + sigma : 3.0 * sigma;
       var s = stan::math::value_of(sigma) < 1 ? 1.0 / sigma : sigma;
       // `~` lowers propto, so the reference drops the same constant.
-      acc += stan::math::normal_lpdf<true>(1.75, m, s);
+      acc += stan::math::normal_lpdf<true>(1.75, m, s * w);
       acc.grad();
       const std::string tag = "paramcond" + std::to_string(c);
       expect_eq(tag + " lp", lp, acc.val());
