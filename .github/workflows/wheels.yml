@@ -178,6 +178,10 @@ jobs:
           python3 tools/verify_refs.py deps/posteriordb \
             --check build-rel/stanli_check --jobs 4
 
+      # The headline numbers in both READMEs are derived, not typed.
+      - name: Docs match the measured artifacts
+        run: python3 tools/gen_docs.py --check
+
       - name: Wheel
         run: ./tools/build_wheel.sh
 
