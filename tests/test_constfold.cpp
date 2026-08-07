@@ -10,6 +10,7 @@
 //     op overwrites it -- is refused, since folding keeps only the final
 //     contents (the destructive update chains make this reachable),
 //   * STANLI_NO_CONSTFOLD=1 disables the pass.
+#include "env_helpers.hpp"
 #include <stanli/constfold.hpp>
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
@@ -121,7 +122,7 @@ static void test_refuses_midchain_reader() {
 }
 
 static void test_env_disable() {
-  setenv("STANLI_NO_CONSTFOLD", "1", 1);
+  test_setenv("STANLI_NO_CONSTFOLD", "1", 1);
   Graph g;
   Fills fills;
   const int a = g.add_slot(1, false), b = g.add_slot(1, false);
@@ -132,7 +133,7 @@ static void test_env_disable() {
   g.result_slot = ab;
   ConstFoldStats st = const_fold(g, fills, {ab});
   expect("disabled: nothing folded", st.ops_removed == 0);
-  unsetenv("STANLI_NO_CONSTFOLD");
+  test_unsetenv("STANLI_NO_CONSTFOLD");
 }
 
 int main() {

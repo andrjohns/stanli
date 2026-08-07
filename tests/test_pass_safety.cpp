@@ -13,6 +13,7 @@
 //    built from the shapes real models produce (write chains, read-backs,
 //    whole-vector reads, elementwise arithmetic, densities), including
 //    the interleavings no hand-written test would think to write.
+#include "env_helpers.hpp"
 #include <stanli/graph.hpp>
 #include <stanli/inplace.hpp>
 #include <stanli/island.hpp>
@@ -335,7 +336,7 @@ static void test_random_graphs_preserve_gradients() {
 }
 
 int main() {
-  setenv("STANLI_ISLAND_ALWAYS", "1", 1);  // see the fuzz loop
+  test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);  // see the fuzz loop
   test_whitelist_backwards_ignore_values();
   test_random_graphs_preserve_gradients();
   if (failures) { std::printf("%d failures\n", failures); return 1; }

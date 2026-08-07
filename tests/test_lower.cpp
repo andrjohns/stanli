@@ -1,6 +1,7 @@
 // The graph compiler on eight schools: MIR text + data -> graph whose
 // log_prob gradient matches a var reference that mirrors the lowering's
 // evaluation order. Plus the unsupported-construct error path.
+#include "env_helpers.hpp"
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
@@ -582,7 +583,7 @@ int main() {
     // An optimization pass may be switched off; this is not one. Without
     // the island the model does not compile at all, so the disable flag
     // must not reach it.
-    setenv("STANLI_NO_ISLAND", "1", 1);
+    test_setenv("STANLI_NO_ISLAND", "1", 1);
     DataMap d;
     d.set_real("y", 1.75);
     CompiledModel lm =
@@ -624,7 +625,7 @@ int main() {
       expect_eq(tag + " dsigma", grad[1], u_sig.adj());
       stan::math::recover_memory();
     }
-    unsetenv("STANLI_NO_ISLAND");
+    test_unsetenv("STANLI_NO_ISLAND");
   }
 
   // The same region written with `~`: refused, by name, with the fix in

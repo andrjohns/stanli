@@ -1,6 +1,7 @@
 // Tape islands: a compiled region must match the op-by-op graph it
 // replaces (values and gradients), and everything the carver cannot prove
 // safe must stay untouched.
+#include "env_helpers.hpp"
 #include <stanli/graph.hpp>
 #include <stanli/island.hpp>
 #include <stanli/optable.hpp>
@@ -351,7 +352,7 @@ int main() {
   // What the compiler does with a region, on graphs small enough to
   // reason about. The cost estimate would refuse most of them -- it is
   // policy, tested separately below, and these are about correctness.
-  setenv("STANLI_ISLAND_ALWAYS", "1", 1);
+  test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);
   test_hmm_parity();
   test_live_in_and_out_slot();
   test_short_run_untouched();
@@ -360,7 +361,7 @@ int main() {
   test_too_many_live_ins();
   test_six_live_ins_ok();
 
-  unsetenv("STANLI_ISLAND_ALWAYS");
+  test_unsetenv("STANLI_ISLAND_ALWAYS");
   test_wide_state_refused();
   test_vector_copies_carved();
   test_scalar_chain_refused();

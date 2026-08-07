@@ -1,5 +1,6 @@
 // Re-roll pass: unrolled scalar-loop regions collapse to vector ops with
 // gradients preserved (up to summation order, 1e-12 rel).
+#include "env_helpers.hpp"
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
@@ -494,7 +495,7 @@ static void test_data_index_gathers() {
 
 // (d) STANLI_NO_REROLL disables the pass.
 static void test_env_disable() {
-  setenv("STANLI_NO_REROLL", "1", 1);
+  test_setenv("STANLI_NO_REROLL", "1", 1);
   const int L = 6;
   Graph g;
   Fills fills;
@@ -514,7 +515,7 @@ static void test_env_disable() {
   RerollStats st = reroll(g, fills, tt, {});
   expect("env disables", st.regions == 0);
   expect("env ops unchanged", g.ops.size() == before);
-  unsetenv("STANLI_NO_REROLL");
+  test_unsetenv("STANLI_NO_REROLL");
 }
 
 // (e) first lane anomalous (its y is an op output, not a const): the pass
@@ -1005,9 +1006,9 @@ static void test_e2e_fixtures() {
   };
   for (const Case& c : cases) {
     size_t ops_unrolled = 0, ops_rerolled = 0;
-    setenv("STANLI_NO_REROLL", "1", 1);
+    test_setenv("STANLI_NO_REROLL", "1", 1);
     const std::vector<double> want = e2e_grad(c.sexp, c.json, &ops_unrolled);
-    unsetenv("STANLI_NO_REROLL");
+    test_unsetenv("STANLI_NO_REROLL");
     const std::vector<double> got = e2e_grad(c.sexp, c.json, &ops_rerolled);
     expect((std::string(c.name) + " sizes").c_str(),
            got.size() == want.size());
