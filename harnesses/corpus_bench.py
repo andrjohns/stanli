@@ -112,7 +112,9 @@ def main():
         else:
             sexp.write_text(r.stdout)
             probe = run([str(BENCH), str(sexp), str(dj), "1"], timeout)
-            if probe is None:
+            # A rejected model (sir: domain error at the probe point) can
+            # exit 0 with nothing on stdout; treat that as eval_fail too.
+            if probe is None or not probe.stdout.split():
                 notes.append("stanli_eval_fail")
             else:
                 n_params = int(probe.stdout.split()[-1])
