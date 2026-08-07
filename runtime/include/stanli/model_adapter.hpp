@@ -4,8 +4,9 @@
 // precomputed_gradients node wrapping the executor's double gradient, so the
 // sampler-side var tape holds exactly one vari per gradient evaluation.
 //
-// propto and jacobian template flags are ignored in M1: the graph already
-// includes its Jacobian terms and all densities are propto=false.
+// propto and jacobian template flags are ignored: the graph is fixed at
+// compile time, Jacobian terms included and each density's propto choice
+// baked into its variant bits.
 #ifndef STANLI_MODEL_ADAPTER_HPP
 #define STANLI_MODEL_ADAPTER_HPP
 

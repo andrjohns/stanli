@@ -1,5 +1,5 @@
-// Proof-of-mechanism legacy ops. The M3 generator emits kernels of exactly
-// this shape for every signature without a native port.
+// Legacy ops: kernels of exactly this shape wrap any stan-math signature
+// that has no native port yet.
 #include <stanli/graph.hpp>
 #include <stanli/legacy.hpp>
 #include <stanli/optable.hpp>

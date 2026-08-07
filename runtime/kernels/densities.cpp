@@ -361,7 +361,7 @@ void bernoulli_logit_glm_fwd(KernelCtx& ctx) {
         y, X, rvar(ctx.in[1].data[0]), as_rvar(ctx.in[2]));
   } else {
     active_sink() = nullptr;
-    throw std::runtime_error("glm: vector alpha unsupported in M2");
+    throw std::runtime_error("glm: vector alpha unsupported");
   }
   active_sink() = nullptr;
   ctx.out.data[0] = s.value;

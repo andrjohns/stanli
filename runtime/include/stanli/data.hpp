@@ -1,5 +1,5 @@
-// Runtime data container. Task 5 uses programmatic construction; Task 6 adds
-// JSON parsing (CmdStan conventions).
+// Runtime data container: built programmatically by tests, or parsed from
+// JSON with CmdStan's conventions.
 #ifndef STANLI_DATA_HPP
 #define STANLI_DATA_HPP
 

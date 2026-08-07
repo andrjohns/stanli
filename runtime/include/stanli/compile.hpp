@@ -1,13 +1,9 @@
 // The graph compiler: transformed-MIR sexp text -> executable graph, sized
-// against a concrete dataset. M2 scope: straight-line log_prob (tier-1);
-// unsupported constructs raise CompileError naming the construct.
+// against a concrete dataset. Scope: straight-line log_prob; unsupported
+// constructs raise CompileError naming the construct.
 //
-// Known M2 simplifications, lifted by the corpus loop:
-// - FnCheck data validations are skipped (sizes are still enforced when
-//   binding data slots); posteriordb data is assumed valid.
-// - transformed data expressions are unsupported.
-// - propto: all densities lower to propto=false kernels; lp differs from
-//   CmdStan's by a per-model constant, gradients are unaffected.
+// Deliberate simplification: FnCheck data validations are skipped (sizes
+// are still enforced when binding data slots); the data is assumed valid.
 #ifndef STANLI_COMPILE_HPP
 #define STANLI_COMPILE_HPP
 

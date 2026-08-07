@@ -1,6 +1,6 @@
 // End to end through the compiler: es.stan MIR + posteriordb JSON data ->
-// NUTS -> posterior checks. Mirrors M1's statistical test but with the graph
-// produced by the compiler instead of by hand.
+// NUTS -> posterior checks. Mirrors the hand-built models' statistical test
+// but with the graph produced by the compiler instead of by hand.
 #include <stanli/compile.hpp>
 #include <stanli/nuts.hpp>
 

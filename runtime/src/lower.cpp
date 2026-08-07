@@ -380,7 +380,7 @@ struct Lowering {
         // Data-only conditions resolve at compile time; either branch may
         // reference parameters.
         if (!e.args[0].data_only)
-          fail("TernaryIf on a parameter condition unsupported in M2", e.raw);
+          fail("TernaryIf on a parameter condition unsupported", e.raw);
         const bool c = td.eval(e.args[0]).r.at(0) != 0.0;
         return lower_expr(e.args[c ? 1 : 2]);
       }
@@ -388,7 +388,7 @@ struct Lowering {
       case mir::Expr::EAnd: {
         Val v;
         if (try_fold_const(e, &v)) return v;
-        fail("boolean operator on parameters unsupported in M2", e.raw);
+        fail("boolean operator on parameters unsupported", e.raw);
       }
       default: {
         Val v;
@@ -467,7 +467,7 @@ struct Lowering {
       // Compile-time int expression (e.g. sum(y[n]) under an unrolled loop).
       return {static_cast<int>(eval_int(oc))};
     }
-    fail("int argument must be int data in M2 (kind=" +
+    fail("int argument must be int data (kind=" +
              std::to_string((int)oc.kind) + " type=" + oc.type_ + ")",
          oc.raw);
   }
@@ -724,7 +724,7 @@ struct Lowering {
         // X must be a data matrix; append its dims to idata.
         const SlotInfo& xsi = info[ins[0]];
         if (xsi.rows == 0 || !xsi.data_like)
-          fail(e.name + ": X must be a data matrix in M2");
+          fail(e.name + ": X must be a data matrix");
         idata.push_back((int)xsi.rows);
         idata.push_back((int)xsi.cols);
       }
@@ -804,7 +804,7 @@ struct Lowering {
       Val y = lower_expr(e.args[0]);
       Val X = lower_expr(e.args[1]);
       if (X.si.rows == 0 || !info[X.slot].data_like)
-        fail("normal_id_glm: X must be a data matrix in M2", e.raw);
+        fail("normal_id_glm: X must be a data matrix", e.raw);
       Val alpha = lower_expr(e.args[2]);
       Val beta = lower_expr(e.args[3]);
       Val sigma = lower_expr(e.args[4]);
@@ -1072,7 +1072,7 @@ struct Lowering {
       Val alpha = lower_expr(e.args[1]);
       Val rho = lower_expr(e.args[2]);
       if (!info[x.slot].data_like)
-        fail("gp_exp_quad_cov: parameter inputs unsupported in M2", e.raw);
+        fail("gp_exp_quad_cov: parameter inputs unsupported", e.raw);
       // x is array[N] real (D == 1) or array[N] vector[D], stored
       // array-major, so D falls out of the declared dims.
       int64_t D = 1;
@@ -1529,7 +1529,7 @@ struct Lowering {
         return;
       case mir::Stmt::NRFunApp:
         // Compiler-internal checks (FnCheck / FnValidateSize): sizes are
-        // enforced at data binding; value checks are skipped in M2.
+        // enforced at data binding; value checks are skipped.
         if (s.fn_name == "FnCheck" || s.fn_name == "FnValidateSize") return;
         if (s.fn_name == "FnWriteParam") {
           // One CSV column, at the point the emission happens: this is what
@@ -1587,7 +1587,7 @@ struct Lowering {
       }
       case mir::Stmt::IfElse: {
         if (!s.cond.data_only)
-          fail("IfElse on parameters unsupported in M2", s.raw);
+          fail("IfElse on parameters unsupported", s.raw);
         const bool c = td.eval(s.cond).r.at(0) != 0.0;
         if (c && !s.body.empty()) lower_stmt(s.body[0]);
         if (!c && s.body.size() > 1) lower_stmt(s.body[1]);
