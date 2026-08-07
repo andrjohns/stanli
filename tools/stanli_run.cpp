@@ -124,12 +124,38 @@ int main(int argc, char** argv) {
     if (wi) {
       wi->seed(cfg.seed);
       irows.reserve(draws.size());
-      for (const auto& q : draws) irows.push_back(wi->eval(constrained_by_name(q)));
+      // A draw whose generated quantities cannot be evaluated is written
+      // as NaNs and the run continues, which is what CmdStan does
+      // (mcmc_writer.hpp catches domain_error, logs it, and pads the row).
+      // Aborting instead threw away every draw of an otherwise good run:
+      // one lognormal_rng on a marginal ODE solution took out the whole
+      // CSV.
+      size_t n_bad = 0;
+      std::string first_bad;
+      for (const auto& q : draws) {
+        try {
+          irows.push_back(wi->eval(constrained_by_name(q)));
+        } catch (const std::domain_error& e) {
+          if (n_bad++ == 0) first_bad = e.what();
+          irows.emplace_back();  // widened to nan below, once cols is known
+        }
+      }
+      if (n_bad)
+        std::fprintf(stderr,
+                     "stanli_run: %zu of %zu draws could not produce "
+                     "generated quantities, written as nan: %s\n",
+                     n_bad, draws.size(), first_bad.c_str());
     }
 
     const auto& cols =
         wi ? wi->columns() : (have_wa ? cm.write_array->columns : cm.views);
     stanli::Executor& out = have_wa ? *wex : ex;
+    if (wi) {
+      const size_t w = stanli::CompiledModel::csv_names(cols).size();
+      for (auto& r : irows)
+        if (r.size() != w)
+          r.assign(w, std::numeric_limits<double>::quiet_NaN());
+    }
 
     std::string hdr;
     if (want_stats)

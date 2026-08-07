@@ -4,11 +4,13 @@
 
 #include <stan/callbacks/logger.hpp>
 #include <stan/mcmc/hmc/nuts/adapt_diag_e_nuts.hpp>
+#include <stan/services/util/create_rng.hpp>
 
-#include <boost/random/additive_combine.hpp>
 #include <boost/random/uniform_real_distribution.hpp>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -17,9 +19,17 @@ namespace stanli {
 std::vector<std::vector<double>> run_nuts(Executor& ex,
                                           const NutsConfig& cfg,
                                           SamplerStats* stats) {
-  using rng_t = boost::ecuyer1988;
+  // CmdStan's generator, seeded CmdStan's way: same engine (mixmax in this
+  // Stan version, ecuyer1988 in older ones -- create_rng is what tracks
+  // that), same (0, 1, seed, chain) construction, chain 1 as the default
+  // `id`. Before this the seeds named unrelated streams, so "seed 1" meant
+  // a different starting point in each engine and any comparison of a
+  // sampling run was comparing two different draws as much as two
+  // samplers. With the stream matched and the same draw order below, the
+  // initial point is the same one CmdStan starts from.
+  using rng_t = stan::rng_t;
   ExecutorModel model(ex);
-  rng_t rng(cfg.seed);
+  rng_t rng = stan::services::util::create_rng(cfg.seed, 1);
   stan::mcmc::adapt_diag_e_nuts<ExecutorModel, rng_t> sampler(model, rng);
   stan::callbacks::logger logger;
 
@@ -39,6 +49,8 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
     std::vector<double> grad((size_t)n);
     bool ok = false;
     for (int attempt = 0; attempt < kMaxInitAttempts && !ok; ++attempt) {
+      // stan::io::random_var_context draws one per unconstrained
+      // parameter, in declaration order, from this distribution.
       for (int64_t i = 0; i < n; ++i) q(i) = init_dist(rng);
       for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = q(i);
       // A density that rejects its argument outright (stan-math throws on a
@@ -58,6 +70,11 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
           "initialization failed: no draw in " +
           std::to_string(kMaxInitAttempts) +
           " attempts had finite log density and gradient");
+  }
+  if (std::getenv("STANLI_DEBUG_INIT")) {
+    std::fprintf(stderr, "init");
+    for (int64_t i = 0; i < n; ++i) std::fprintf(stderr, " %.17g", q(i));
+    std::fprintf(stderr, "\n");
   }
   sampler.seed(q);
 
