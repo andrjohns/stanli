@@ -424,10 +424,19 @@ what the table is read for, and stanli's own time is the ratio applied to
 the column beside it. Sampling is 1000 warmup + 1000 draws at matched
 seeds, indicative rather than controlled -- the two samplers take
 different trajectories, so it measures the whole run, not the gradient.
-Where the two columns disagree sharply (`hmm_gaussian` 0.69x per
-gradient and 0.03x sampling, `ldaK2` 0.71x and 0.25x) the trajectory is
-what differs, and none of those are explained yet. Regenerate with
-`python3 tools/corpus_table.py docs/corpus-bench.tsv`.
+Where the two columns disagree sharply, the two engines sampled
+different modes. `ldaK2` has two (mean lp about -596 and about -696) and
+the second is five times more expensive to explore -- adapted stepsize
+0.09 against 0.48. Over five seeds through `tools/sampler_trace.py` the
+engines picked the same mode in four and the corpus seed is the fifth,
+where stanli drew the expensive mode and CmdStan the cheap one. That is
+the whole of its 0.25x sampling column against a 0.71x gradient, and it
+is a property of the posterior, not of either sampler. `hmm_gaussian`
+(0.69x per gradient, 0.03x sampling) is the same shape with a sharper
+edge: at that seed CmdStan's run has *every* post-warmup draw divergent,
+so its 18.75 s is a chain that is not sampling at all. Read the sampling
+column as indicative and the gradient column as the measurement.
+Regenerate with `python3 tools/corpus_table.py docs/corpus-bench.tsv`.
 
 | model | params | CmdStan ns/grad | grad speedup | CmdStan sample | sample speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -568,13 +577,10 @@ rather than inside it.
   cap. Their per-gradient numbers are measured and stand.
 - `kronecker_gp` is 0.70x per gradient and CmdStan takes 451 s, so the
   same run does not fit in 900 s.
-- `lotka_volterra` is the honest puzzle: CmdStan samples it in 6.2 s and
-  stanli is 0.61x per gradient, so the cap should be nowhere near.
-  Something in the run itself diverges, and that is unexplained. It is
-  the same thing the sampling column shows on `hmm_gaussian` (0.03x
-  against a 0.69x gradient) and `ldaK2` (0.25x against 0.71x): a
-  sampler-level question, not a gradient-level one. `tools/sampler_trace.py`
-  is the tool for it and nobody has run it on these yet.
+- `lotka_volterra` is the honest puzzle left: CmdStan samples it in
+  6.2 s and stanli is 0.61x per gradient, so the cap should be nowhere
+  near. The mode explanation above covers `ldaK2` and `hmm_gaussian`;
+  this one has not been traced yet. `tools/sampler_trace.py` is the tool.
 - `sir` throws at the benchmark's fixed evaluation point: the ODE
   solution dips to -4.4e-10 and `poisson_lpmf` rejects a negative rate.
   CmdStan has no gradient number here either. The model samples fine

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.1
+
+- Two kernels stopped doing twice the work. `normal_id_glm_lpdf` built a
+  var tape in the forward, threw it away, and built it again in the
+  backward to differentiate it; it now differentiates once and stashes
+  the partials, as every other native kernel does. `OP_MATVEC`
+  accumulated each output element in a single dependency chain, running
+  at one multiply-add per cycle; four independent accumulators per sweep
+  fill the pipeline. Both are bitwise unchanged.
+
+      diamonds  65,799 -> 35,358 ns/grad   0.48x of CmdStan -> 0.89x
+      prophet  103,452 -> 56,912 ns/grad   0.67x -> 1.23x
+      blr          877 -> 709 ns/grad      1.97x -> 2.44x
+
+  Their sampling runs followed: diamonds 108 s -> 58 s, prophet 175 s ->
+  98 s. Corpus median per-gradient 2.00x -> 2.07x, 93 of 119 models at
+  parity or better.
+
+- Both changes came from profiling every sub-parity model with
+  `STANLI_PROFILE=1` rather than from guessing, and the same survey says
+  where the rest of the tail is: in seven of those models a single
+  precompiled kernel is half to nine-tenths of the gradient. Measured
+  and rejected along the way: Eigen's gemv (fastest, but reassociates
+  and costs 1-2 ULP against stan-math on every model with a matrix),
+  cache-blocking the accumulator, swapping the loop nesting (both
+  slower than what they replaced), and the same partial-stashing on
+  `multi_normal_cholesky_lpdf` (a wash, and it would have cost n^2
+  doubles of scratch per op).
+
 ## 0.2.0
 
 - Generated quantities and transformed parameters now come out of all
