@@ -15,6 +15,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -644,7 +645,23 @@ struct Lowering {
       if (try_fold_const(e, &v)) return v;
       fail("unsupported function kind for " + e.name, e.raw);
     }
+    // The stan-library names split into disjoint groups; each helper owns
+    // one and declines the rest.
+    if (auto v = lower_density_fn(e)) return *v;
+    if (auto v = lower_eltwise_fn(e)) return *v;
+    if (auto v = lower_matrix_fn(e)) return *v;
+    if (auto v = lower_ode_fn(e)) return *v;
+    {
+      Val v;
+      if (try_fold_const(e, &v)) return v;
+    }
+    fail("unsupported function " + e.name);
+  }
 
+  // Density calls: the table-driven kernels plus the ones that decompose
+  // onto existing ops (categorical) or carry matrix arguments
+  // (multi_normal, lkj, glm).
+  std::optional<Val> lower_density_fn(const mir::Expr& e) {
     // Densities. n_int leading args come from int data (idata); the rest are
     // real slots. Layouts: one int group = raw values; two groups =
     // [len, vals..., len, vals...]; glm = [y..., rows, cols].
@@ -716,6 +733,96 @@ struct Lowering {
       return dv;
     }
 
+    if (e.name == "categorical_logit_lpmf" && e.args.size() == 2) {
+      // stan-math evaluates log_softmax(beta) then picks the outcomes,
+      // which is exactly this composition.
+      if (e.fn_propto && e.args[1].data_only) return Val{const_slot(0.0), {}};
+      Val b = lower_expr(e.args[1]);
+      Val ls = emit(OP_LOG_SOFTMAX, {b.slot}, info[b.slot].len);
+      auto ns = int_arg_values(e.args[0]);
+      if (e.args[0].type_ == "UInt" && ns.size() == 1)
+        return emit(OP_INDEX, {ls.slot}, 1, {}, {ns[0] - 1});
+      std::vector<int> idata;
+      for (int n : ns) idata.push_back(n - 1);
+      Val ga = emit(OP_GATHER, {ls.slot}, (int64_t)idata.size(), {}, idata);
+      return emit(OP_SUM_VEC, {ga.slot}, 1);
+    }
+    if (e.name == "categorical_lpmf" && e.args.size() == 2) {
+      // stan-math computes log(theta[n-1]) on the scalar type directly (no
+      // ops_partials), so this decomposes exactly onto existing ops. For an
+      // array outcome the reference logs the whole simplex once and gathers,
+      // which also fixes the adjoint association for repeated categories.
+      if (e.fn_propto && e.args[1].data_only) return Val{const_slot(0.0), {}};
+      Val th = lower_expr(e.args[1]);
+      auto ns = int_arg_values(e.args[0]);
+      if (e.args[0].type_ == "UInt" && ns.size() == 1) {
+        Val el = emit(OP_INDEX, {th.slot}, 1, {}, {ns[0] - 1});
+        return emit(OP_LOGV, {el.slot}, 1);
+      }
+      Val lg = emit(OP_LOGV, {th.slot}, info[th.slot].len);
+      std::vector<int> idata;
+      for (int n : ns) idata.push_back(n - 1);
+      Val ga = emit(OP_GATHER, {lg.slot}, (int64_t)idata.size(), {}, idata);
+      return emit(OP_SUM_VEC, {ga.slot}, 1);
+    }
+
+    if ((e.name == "multi_normal_cholesky_lpdf" ||
+         e.name == "multi_normal_lpdf") && e.args.size() == 3) {
+      Val y = lower_expr(e.args[0]);
+      Val mu = lower_expr(e.args[1]);
+      Val m = lower_expr(e.args[2]);
+      uint8_t variant = 0;
+      for (int i = 0; i < 3; ++i)
+        if (!e.args[i].data_only) variant |= (uint8_t)(1u << i);
+      if (e.fn_propto) variant |= 0x80u;
+      // K comes from the matrix argument; y may be one K-vector or an
+      // array of m of them (stan-math's vectorized signature).
+      if (m.si.rows == 0)
+        fail(e.name + ": needs a matrix argument (got length " +
+                 std::to_string(info[m.slot].len) + ")",
+             e.raw);
+      const int64_t K = m.si.rows;
+      const int64_t reps = info[y.slot].len / K;
+      Val v = emit(e.name.find("cholesky") != std::string::npos
+                       ? OP_MULTI_NORMAL_CHOL_LPDF
+                       : OP_MULTI_NORMAL_LPDF,
+                   {y.slot, mu.slot, m.slot}, 1, {},
+                   {(int)K, (int)reps});
+      g.ops.back().variant = variant;
+      return v;
+    }
+    if (e.name == "lkj_corr_cholesky_lpdf" && e.args.size() == 2) {
+      Val L = lower_expr(e.args[0]);
+      Val eta = lower_expr(e.args[1]);
+      if (L.si.rows == 0) fail("lkj_corr_cholesky needs a matrix", e.raw);
+      Val v = emit(OP_LKJ_CORR_CHOL_LPDF, {L.slot, eta.slot}, 1, {},
+                   {(int)L.si.rows});
+      g.ops.back().variant = (uint8_t)((e.fn_propto ? 0x80u : 0u) | 0x1u);
+      return v;
+    }
+    if (e.name == "normal_id_glm_lpdf" && e.args.size() == 5) {
+      Val y = lower_expr(e.args[0]);
+      Val X = lower_expr(e.args[1]);
+      if (X.si.rows == 0 || !info[X.slot].data_like)
+        fail("normal_id_glm: X must be a data matrix in M2", e.raw);
+      Val alpha = lower_expr(e.args[2]);
+      Val beta = lower_expr(e.args[3]);
+      Val sigma = lower_expr(e.args[4]);
+      uint8_t variant = 0;
+      for (int i = 0; i < 5; ++i)
+        if (!e.args[i].data_only) variant |= (uint8_t)(1u << i);
+      if (e.fn_propto) variant |= 0x80u;
+      Val v = emit(OP_NORMAL_ID_GLM_LPDF,
+                   {y.slot, X.slot, alpha.slot, beta.slot, sigma.slot}, 1, {},
+                   {(int)X.si.rows, (int)X.si.cols});
+      g.ops.back().variant = variant;
+      return v;
+    }
+    return std::nullopt;
+  }
+
+  // Elementwise math, reductions, and dot products.
+  std::optional<Val> lower_eltwise_fn(const mir::Expr& e) {
     // Elementwise binaries.
     static const std::map<std::string, uint16_t> kBin = {
         {"Plus__", OP_ADD},      {"Minus__", OP_SUB},
@@ -845,38 +952,17 @@ struct Lowering {
       Val b = lower_expr(e.args[1]);
       return emit(OP_DOT, {a.slot, b.slot}, 1);
     }
-    if (e.name == "categorical_logit_lpmf" && e.args.size() == 2) {
-      // stan-math evaluates log_softmax(beta) then picks the outcomes,
-      // which is exactly this composition.
-      if (e.fn_propto && e.args[1].data_only) return {const_slot(0.0), {}};
-      Val b = lower_expr(e.args[1]);
-      Val ls = emit(OP_LOG_SOFTMAX, {b.slot}, info[b.slot].len);
-      auto ns = int_arg_values(e.args[0]);
-      if (e.args[0].type_ == "UInt" && ns.size() == 1)
-        return emit(OP_INDEX, {ls.slot}, 1, {}, {ns[0] - 1});
-      std::vector<int> idata;
-      for (int n : ns) idata.push_back(n - 1);
-      Val ga = emit(OP_GATHER, {ls.slot}, (int64_t)idata.size(), {}, idata);
-      return emit(OP_SUM_VEC, {ga.slot}, 1);
+
+    if (e.name == "dot_self") {
+      Val a = lower_expr(e.args[0]);
+      return emit(OP_DOT, {a.slot, a.slot}, 1);
     }
-    if (e.name == "categorical_lpmf" && e.args.size() == 2) {
-      // stan-math computes log(theta[n-1]) on the scalar type directly (no
-      // ops_partials), so this decomposes exactly onto existing ops. For an
-      // array outcome the reference logs the whole simplex once and gathers,
-      // which also fixes the adjoint association for repeated categories.
-      if (e.fn_propto && e.args[1].data_only) return {const_slot(0.0), {}};
-      Val th = lower_expr(e.args[1]);
-      auto ns = int_arg_values(e.args[0]);
-      if (e.args[0].type_ == "UInt" && ns.size() == 1) {
-        Val el = emit(OP_INDEX, {th.slot}, 1, {}, {ns[0] - 1});
-        return emit(OP_LOGV, {el.slot}, 1);
-      }
-      Val lg = emit(OP_LOGV, {th.slot}, info[th.slot].len);
-      std::vector<int> idata;
-      for (int n : ns) idata.push_back(n - 1);
-      Val ga = emit(OP_GATHER, {lg.slot}, (int64_t)idata.size(), {}, idata);
-      return emit(OP_SUM_VEC, {ga.slot}, 1);
-    }
+    return std::nullopt;
+  }
+
+  // Matrix shape and algebra: transposes, reshapes, factorizations,
+  // slices, and concatenations.
+  std::optional<Val> lower_matrix_fn(const mir::Expr& e) {
     if ((e.name == "Transpose__" || e.name == "transpose") &&
         e.args.size() == 1) {
       Val a = lower_expr(e.args[0]);
@@ -933,9 +1019,9 @@ struct Lowering {
       if (e.args.size() == 3) {
         si.rows = eval_int(e.args[1]);
         si.cols = eval_int(e.args[2]);
-        return {a.slot, si};
+        return Val{a.slot, si};
       }
-      if (a.si.rows > 0) return {a.slot, a.si};
+      if (a.si.rows > 0) return Val{a.slot, a.si};
       std::vector<int64_t> dims;
       if (e.args[0].kind == mir::Expr::Var) {
         auto dd = decl_dims.find(e.args[0].name);
@@ -957,7 +1043,7 @@ struct Lowering {
       SlotInfo si = a.si;
       si.rows = 0;
       si.cols = 0;
-      return {a.slot, si};
+      return Val{a.slot, si};
     }
     if (e.name == "rep_matrix") {
       SlotInfo si;
@@ -1020,108 +1106,7 @@ struct Lowering {
       return emit(OP_CHOLESKY, {a.slot}, info[a.slot].len, si,
                   {(int)a.si.rows});
     }
-    if ((e.name == "multi_normal_cholesky_lpdf" ||
-         e.name == "multi_normal_lpdf") && e.args.size() == 3) {
-      Val y = lower_expr(e.args[0]);
-      Val mu = lower_expr(e.args[1]);
-      Val m = lower_expr(e.args[2]);
-      uint8_t variant = 0;
-      for (int i = 0; i < 3; ++i)
-        if (!e.args[i].data_only) variant |= (uint8_t)(1u << i);
-      if (e.fn_propto) variant |= 0x80u;
-      // K comes from the matrix argument; y may be one K-vector or an
-      // array of m of them (stan-math's vectorized signature).
-      if (m.si.rows == 0)
-        fail(e.name + ": needs a matrix argument (got length " +
-                 std::to_string(info[m.slot].len) + ")",
-             e.raw);
-      const int64_t K = m.si.rows;
-      const int64_t reps = info[y.slot].len / K;
-      Val v = emit(e.name.find("cholesky") != std::string::npos
-                       ? OP_MULTI_NORMAL_CHOL_LPDF
-                       : OP_MULTI_NORMAL_LPDF,
-                   {y.slot, mu.slot, m.slot}, 1, {},
-                   {(int)K, (int)reps});
-      g.ops.back().variant = variant;
-      return v;
-    }
-    if (e.name == "lkj_corr_cholesky_lpdf" && e.args.size() == 2) {
-      Val L = lower_expr(e.args[0]);
-      Val eta = lower_expr(e.args[1]);
-      if (L.si.rows == 0) fail("lkj_corr_cholesky needs a matrix", e.raw);
-      Val v = emit(OP_LKJ_CORR_CHOL_LPDF, {L.slot, eta.slot}, 1, {},
-                   {(int)L.si.rows});
-      g.ops.back().variant = (uint8_t)((e.fn_propto ? 0x80u : 0u) | 0x1u);
-      return v;
-    }
-    if (e.name == "normal_id_glm_lpdf" && e.args.size() == 5) {
-      Val y = lower_expr(e.args[0]);
-      Val X = lower_expr(e.args[1]);
-      if (X.si.rows == 0 || !info[X.slot].data_like)
-        fail("normal_id_glm: X must be a data matrix in M2", e.raw);
-      Val alpha = lower_expr(e.args[2]);
-      Val beta = lower_expr(e.args[3]);
-      Val sigma = lower_expr(e.args[4]);
-      uint8_t variant = 0;
-      for (int i = 0; i < 5; ++i)
-        if (!e.args[i].data_only) variant |= (uint8_t)(1u << i);
-      if (e.fn_propto) variant |= 0x80u;
-      Val v = emit(OP_NORMAL_ID_GLM_LPDF,
-                   {y.slot, X.slot, alpha.slot, beta.slot, sigma.slot}, 1, {},
-                   {(int)X.si.rows, (int)X.si.cols});
-      g.ops.back().variant = variant;
-      return v;
-    }
-    if (e.name.rfind("integrate_ode_", 0) == 0) {
-      // integrate_ode_*(f, z_init, t0, ts, theta, x_r, x_i[, rtol, atol,
-      // max_steps]). Everything but z_init and theta is data, and is
-      // captured in the spec the kernel reads through the op payload.
-      if (e.args.size() < 7) fail(e.name + ": unexpected arity", e.raw);
-      auto spec = std::make_shared<OdeSpec>();
-      auto fit = fun_defs.find(e.args[0].name);
-      if (fit == fun_defs.end())
-        fail(e.name + ": unknown right-hand side " + e.args[0].name, e.raw);
-      spec->adopt(fun_defs);
-      spec->rhs_name = e.args[0].name;
-      spec->stiff = e.name.find("bdf") != std::string::npos;
-      // stan-math's own defaults differ per solver: rk45 1e-6/1e-6/1e6,
-      // bdf 1e-10/1e-10/1e8. Using one set for both left one_comp_mm's
-      // gradients 2.9e-6 off CmdStan.
-      if (spec->stiff) {
-        spec->rtol = 1e-10;
-        spec->atol = 1e-10;
-        spec->max_steps = 100000000;
-      }
-      spec->t0 = const_values(e.args[2]).at(0);
-      spec->ts = const_values(e.args[3]);
-      spec->x_r = const_values(e.args[5]);
-      spec->x_i = const_ints(e.args[6]);
-      if (e.args.size() >= 10) {
-        spec->rtol = const_values(e.args[7]).at(0);
-        spec->atol = const_values(e.args[8]).at(0);
-        spec->max_steps = (long)const_values(e.args[9]).at(0);
-      }
-      Val z0 = lower_expr(e.args[1]);
-      Val theta = lower_expr(e.args[4]);
-      const int64_t S = info[z0.slot].len;
-      const int64_t N = (int64_t)spec->ts.size();
-      // Compile the right-hand side now that its argument sizes are known.
-      // A failure here is not a compile error: the interpreter still runs it.
-      spec->prog = compile_rhs(*spec->rhs(), *spec->funs(), (int)S,
-                               (int)info[theta.slot].len,
-                               (int)spec->x_r.size(), spec->x_i);
-      // Falling back is correct but ~30x slower, so make it findable.
-      if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ODE"))
-        std::fprintf(stderr,
-                     "stanli: ODE right-hand side %s falls back to the "
-                     "interpreter: %s\n",
-                     spec->rhs_name.c_str(), spec->prog.why.c_str());
-      Val v = emit(OP_ODE, {z0.slot, theta.slot}, N * S, {}, {(int)N, (int)S});
-      g.ops.back().udata = spec.get();
-      g.udata_pool.push_back(std::move(spec));
-      decl_dims_pending = {N, S};
-      return v;
-    }
+
     if ((e.name == "eigenvalues_sym" || e.name == "eigenvectors_sym") &&
         e.args.size() == 1) {
       Val a = lower_expr(e.args[0]);
@@ -1153,10 +1138,7 @@ struct Lowering {
       return emit(OP_GEMM, {left.slot, d.slot}, n * n, si,
                   {(int)n, (int)n, (int)n});
     }
-    if (e.name == "dot_self") {
-      Val a = lower_expr(e.args[0]);
-      return emit(OP_DOT, {a.slot, a.slot}, 1);
-    }
+
     if ((e.name == "append_row" || e.name == "append_col") &&
         e.args.size() == 2) {
       Val a = lower_expr(e.args[0]);
@@ -1230,12 +1212,64 @@ struct Lowering {
       const long off = e.name == "head" ? 0 : info[a.slot].len - n;
       return emit(OP_SLICE, {a.slot}, n, {}, {(int)off});
     }
-    {
-      Val v;
-      if (try_fold_const(e, &v)) return v;
-    }
-    fail("unsupported function " + e.name);
+    return std::nullopt;
   }
+
+  // The integrate_ode_* family.
+  std::optional<Val> lower_ode_fn(const mir::Expr& e) {
+    if (e.name.rfind("integrate_ode_", 0) == 0) {
+      // integrate_ode_*(f, z_init, t0, ts, theta, x_r, x_i[, rtol, atol,
+      // max_steps]). Everything but z_init and theta is data, and is
+      // captured in the spec the kernel reads through the op payload.
+      if (e.args.size() < 7) fail(e.name + ": unexpected arity", e.raw);
+      auto spec = std::make_shared<OdeSpec>();
+      auto fit = fun_defs.find(e.args[0].name);
+      if (fit == fun_defs.end())
+        fail(e.name + ": unknown right-hand side " + e.args[0].name, e.raw);
+      spec->adopt(fun_defs);
+      spec->rhs_name = e.args[0].name;
+      spec->stiff = e.name.find("bdf") != std::string::npos;
+      // stan-math's own defaults differ per solver: rk45 1e-6/1e-6/1e6,
+      // bdf 1e-10/1e-10/1e8. Using one set for both left one_comp_mm's
+      // gradients 2.9e-6 off CmdStan.
+      if (spec->stiff) {
+        spec->rtol = 1e-10;
+        spec->atol = 1e-10;
+        spec->max_steps = 100000000;
+      }
+      spec->t0 = const_values(e.args[2]).at(0);
+      spec->ts = const_values(e.args[3]);
+      spec->x_r = const_values(e.args[5]);
+      spec->x_i = const_ints(e.args[6]);
+      if (e.args.size() >= 10) {
+        spec->rtol = const_values(e.args[7]).at(0);
+        spec->atol = const_values(e.args[8]).at(0);
+        spec->max_steps = (long)const_values(e.args[9]).at(0);
+      }
+      Val z0 = lower_expr(e.args[1]);
+      Val theta = lower_expr(e.args[4]);
+      const int64_t S = info[z0.slot].len;
+      const int64_t N = (int64_t)spec->ts.size();
+      // Compile the right-hand side now that its argument sizes are known.
+      // A failure here is not a compile error: the interpreter still runs it.
+      spec->prog = compile_rhs(*spec->rhs(), *spec->funs(), (int)S,
+                               (int)info[theta.slot].len,
+                               (int)spec->x_r.size(), spec->x_i);
+      // Falling back is correct but ~30x slower, so make it findable.
+      if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ODE"))
+        std::fprintf(stderr,
+                     "stanli: ODE right-hand side %s falls back to the "
+                     "interpreter: %s\n",
+                     spec->rhs_name.c_str(), spec->prog.why.c_str());
+      Val v = emit(OP_ODE, {z0.slot, theta.slot}, N * S, {}, {(int)N, (int)S});
+      g.ops.back().udata = spec.get();
+      g.udata_pool.push_back(std::move(spec));
+      decl_dims_pending = {N, S};
+      return v;
+    }
+    return std::nullopt;
+  }
+
 
   // ---- statements -----------------------------------------------------------
   void lower_read_param(const mir::Stmt& s) {
