@@ -16,7 +16,7 @@ lives" -- it is the shape of every bug this project has shipped.
 | [`runtime/include/stanli/`](../runtime/include/stanli/) | All public headers. [`graph.hpp`](../runtime/include/stanli/graph.hpp) is the IR: `Slot` + `Op` over flat arenas. |
 | [`runtime/src/lower.cpp`](../runtime/src/lower.cpp) | The compiler: transformed MIR in, op graph out. `lower_expr`/`lower_stmt` walk statements; function calls dispatch through `lower_density_fn`, `lower_eltwise_fn`, `lower_matrix_fn`, `lower_ode_fn`. `lower_read_param` builds the constrain ops and the parameter views. |
 | [`runtime/src/mir_reader.cpp`](../runtime/src/mir_reader.cpp), [`sexp.hpp`](../runtime/include/stanli/sexp.hpp), [`mir.hpp`](../runtime/include/stanli/mir.hpp) | Parse stanc3's `--debug-transformed-mir` s-expressions into the C++ MIR structs. Anything unrecognized is preserved as raw text and fails loudly if reached. |
-| [`runtime/src/inplace.cpp`](../runtime/src/inplace.cpp), [`constfold.cpp`](../runtime/src/constfold.cpp), [`reroll.cpp`](../runtime/src/reroll.cpp) | The graph passes, in pipeline order. Each has an env switch to turn it off (see OPTIMIZATIONS.md). |
+| [`runtime/src/inplace.cpp`](../runtime/src/inplace.cpp), [`constfold.cpp`](../runtime/src/constfold.cpp), [`reroll.cpp`](../runtime/src/reroll.cpp) | The graph passes, in pipeline order (with [`island.cpp`](../runtime/src/island.cpp), below, closing it). Each has an env switch to turn it off (see [OPTIMIZATIONS.md](../runtime/src/OPTIMIZATIONS.md)). |
 | [`runtime/src/executor.cpp`](../runtime/src/executor.cpp) | Runs the op list: forward for the log density, reverse for the gradient. `STANLI_PROFILE=1` prints per-opcode accounting. |
 | [`runtime/kernels/`](../runtime/kernels/) | Op implementations. [`densities.cpp`](../runtime/kernels/densities.cpp) instantiates unmodified stan-math prim templates; [`elementwise.cpp`](../runtime/kernels/elementwise.cpp)/[`eltwise_expr.cpp`](../runtime/kernels/eltwise_expr.cpp) the vector math; [`constrain.cpp`](../runtime/kernels/constrain.cpp) the transforms; [`matrix_fns.cpp`](../runtime/kernels/matrix_fns.cpp) and [`legacy_fns.cpp`](../runtime/kernels/legacy_fns.cpp) wrap stan-math functions that have no native port (see [`legacy.hpp`](../runtime/include/stanli/legacy.hpp) for the mechanism). |
 | [`runtime/include/stanli/mir_interp.hpp`](../runtime/include/stanli/mir_interp.hpp) | The one MIR interpreter, templated on the scalar. Three users: the lowering (transformed data and every data-only expression, on `double`), the ODE kernels (right-hand sides the compiled path cannot handle, on `double` and `var`), and the interpreted write_array. |
@@ -169,7 +169,8 @@ Three front ends produce one:
 | `lower_param_ifelse` / `lower_param_ternary` ([`lower.cpp`](../runtime/src/lower.cpp)) | a MIR statement or expression | `OP_ISLAND`, once per evaluation |
 
 The first two are optimizations and can be declined -- the carver keeps
-an island only when it estimates the ops cost more (see OPTIMIZATIONS.md;
+an island only when it estimates the ops cost more (see
+[OPTIMIZATIONS.md](../runtime/src/OPTIMIZATIONS.md);
 `STANLI_NO_ISLAND=1` turns the pass off, `STANLI_ISLAND_ALWAYS=1` skips
 the estimate when you want to know why a region was left alone). The
 third is not: without it the model does not compile, so no switch
@@ -264,10 +265,12 @@ python3 tools/verify_refs.py deps/posteriordb --check build-rel/stanli_check --j
 
 The second line replays all 119 corpus models against recorded CmdStan
 values and is the strongest oracle in the project; it also runs in CI on
-every push, on all four platforms. Compiler changes that claim to be pure
+every push, on all five wheel platforms, and
+[`tools/wasm_check.sh`](../tools/wasm_check.sh) drives the same replay
+through the WASM build under Node. Compiler changes that claim to be pure
 refactors should leave its worst-deviation line untouched. For sampler
 changes use [`tools/sampler_trace.py`](../tools/sampler_trace.py); for generated-quantities coverage,
-`harnesses/wa_coverage.py`; for performance claims, measure with
+[`harnesses/wa_coverage.py`](../harnesses/wa_coverage.py); for performance claims, measure with
 `STANLI_PROFILE=1` before and after ([`docs/benchmarks.md`](benchmarks.md) has the
 harnesses and the current numbers).
 
