@@ -48,7 +48,9 @@ static std::string run_stanc(const std::string& stanc,
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: stanli_check model.stan data.json [--stanc PATH] [--point N]\n");
+    std::fprintf(stderr,
+                 "usage: stanli_check model.stan data.json "
+                 "[--stanc PATH] [--point N] [--columns]\n");
     return 2;
   }
   std::string stanc = "deps/stanc3/stanc";
@@ -87,7 +89,7 @@ int main(int argc, char** argv) {
   }
 
   // --columns: the CSV header the write_array graph would write, for
-  // comparison against CmdStan's (spikes/wa_header_check.py).
+  // comparison against CmdStan's (harnesses/wa_header_check.py).
   if (columns_only) {
     if (!cm.write_array || cm.write_array->columns.empty()) {
       std::printf("NO_COLUMNS %s\n",

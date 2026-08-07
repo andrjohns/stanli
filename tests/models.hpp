@@ -1,5 +1,6 @@
-// Hand-built model graphs shared by the parity and sampling tests. These are
-// what the stanc3 backend will emit mechanically in M2.
+// Hand-built model graphs shared by the parity and sampling tests: the
+// structure lower.cpp emits from the MIR, fixed here so executor and
+// sampler tests do not depend on the lowering.
 #ifndef STANLI_TESTS_MODELS_HPP
 #define STANLI_TESTS_MODELS_HPP
 

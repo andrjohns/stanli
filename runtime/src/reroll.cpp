@@ -18,7 +18,13 @@
 // exactly lane-count elements: the vectorized consumer reads the base).
 // A density whose every lane output is a target term becomes one vector
 // density: the vector kernels already return the summed lp, which also
-// deletes the region's share of the ADD_N reduction tree.
+// deletes the region's share of the ADD_N reduction tree. A density whose
+// lanes feed ops instead (the log_mix mixture idiom) becomes one
+// elementwise op (variant bit 6: out[n] is lane n's lp); a widenable op
+// whose every lane output is a target term widens and swaps the lanes'
+// terms for its OP_SUM_VEC; element stores marching through one vector at
+// a constant stride collapse into a single vector store -- or into the
+// fused value vector itself -- with every later reference renamed.
 //
 // Failed classifications report the longest still-classifiable lane
 // prefix and retry with it. This is what handles block-structured data

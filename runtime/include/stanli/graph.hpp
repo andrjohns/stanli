@@ -1,6 +1,6 @@
 // Structured op graph: the runtime's IR and, during reverse mode, its tape.
-// M1 builds graphs programmatically; the stanc3 backend (M2) will emit the
-// same structure from MIR.
+// Lowering (lower.cpp) emits it from stanc3's transformed MIR; tests build
+// the same structure programmatically.
 #ifndef STANLI_GRAPH_HPP
 #define STANLI_GRAPH_HPP
 
