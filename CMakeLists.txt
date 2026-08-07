@@ -84,9 +84,7 @@ target_compile_options(sundials PRIVATE -w
   -include ${_sundials}/include/stan_sundials_printf_override.hpp)
 set_target_properties(sundials PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# The shared library ships in wheels; Windows needs a .def-based export
-# story before a dll is worth building, so the test milestone skips it.
-if(NOT EMSCRIPTEN AND NOT WIN32)
+if(NOT EMSCRIPTEN)
 add_library(stanli_shared SHARED
   runtime/src/capi.cpp
   runtime/src/executor.cpp
@@ -123,6 +121,13 @@ if(APPLE)
     "-Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.txt")
   set_property(TARGET stanli_shared APPEND PROPERTY LINK_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.txt)
+elseif(WIN32)
+  # PE exports come from the .def; -static folds libstdc++, libgcc, and
+  # winpthread into the dll so the wheel drops one self-contained file
+  # onto machines with no mingw runtime.
+  target_sources(stanli_shared PRIVATE tools/exported_symbols.def)
+  set_target_properties(stanli_shared PROPERTIES PREFIX "")
+  target_link_options(stanli_shared PRIVATE -static)
 elseif(UNIX)
   target_link_options(stanli_shared PRIVATE
     "-Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/tools/exported_symbols.map")
@@ -150,7 +155,7 @@ if(STANLI_STANC_EMBED_OBJ)
   target_compile_definitions(stanli_shared PRIVATE STANLI_EMBED_STANC)
   target_link_libraries(stanli_shared PUBLIC dl pthread)
 endif()
-endif()  # NOT EMSCRIPTEN AND NOT WIN32
+endif()  # NOT EMSCRIPTEN
 
 add_library(stanli STATIC
   runtime/src/executor.cpp

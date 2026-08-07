@@ -1,0 +1,17 @@
+; PE export list for stanli.dll: the C ABI and nothing else, matching
+; exported_symbols.txt (Mach-O) and exported_symbols.map (ELF).
+EXPORTS
+  stanli_model_new
+  stanli_model_new_from_stan
+  stanli_has_embedded_stanc
+  stanli_model_free
+  stanli_n_unconstrained
+  stanli_grad
+  stanli_sample
+  stanli_n_constrained
+  stanli_constrained_name
+  stanli_constrain
+  stanli_wa_n_columns
+  stanli_wa_column_name
+  stanli_wa_seed
+  stanli_wa_row

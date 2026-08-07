@@ -227,6 +227,63 @@ jobs:
           name: wheel-${{ matrix.plat }}
           path: dist/*.whl
 
+  windows:
+    name: win_amd64
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-ucrt-x86_64-python-setuptools
+            git
+            unzip
+            curl
+
+      - name: Fetch pinned dependencies
+        run: ./deps/fetch.sh
+
+      - name: Configure, build, test
+        run: |
+          cmake -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-rel -j4
+          (cd build-rel && ctest --output-on-failure)
+
+      - name: Build the wheel
+        run: |
+          python3 -m pip install --upgrade wheel
+          ./tools/build_wheel.sh
+
+      # The wheel must work from python.org's CPython, not just msys2's:
+      # that is the interpreter Windows users actually have.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the wheel and run the Python tests
+        shell: pwsh
+        run: |
+          python -m venv wheeltest
+          $whl = Get-Item dist\*.whl
+          wheeltest\Scripts\pip install $whl.FullName
+          wheeltest\Scripts\python tests\test_python.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-win_amd64
+          path: dist/*.whl
+
   wasm:
     name: wasm (browser build)
     runs-on: ubuntu-latest
@@ -332,7 +389,7 @@ jobs:
     # Tags only. PyPI versions can never be reused, so this must not fire
     # on a branch push.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, windows]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

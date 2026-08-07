@@ -12,7 +12,8 @@ cmake --build build-rel -j8 --target stanli_shared
 mkdir -p python/stanli/_bin
 rm -f python/stanli/_bin/*
 LIB=""
-for cand in build-rel/libstanli.dylib build-rel/libstanli.so; do
+for cand in build-rel/libstanli.dylib build-rel/libstanli.so \
+            build-rel/stanli.dll; do
   [ -f "$cand" ] && LIB=$cand && break
 done
 [ -n "$LIB" ] || { echo "no shared library in build-rel/"; exit 1; }
@@ -22,8 +23,11 @@ cp THIRD_PARTY_LICENSES.md LICENSE python/stanli/
 
 # Without the embedded compiler the package needs the stanc binary instead.
 if [ ! -f deps/stanc3/stanc_embed.o ]; then
-  cp deps/stanc3/stanc python/stanli/_bin/stanc
-  chmod +x python/stanli/_bin/stanc
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) cp deps/stanc3/stanc python/stanli/_bin/stanc.exe ;;
+    *) cp deps/stanc3/stanc python/stanli/_bin/stanc
+       chmod +x python/stanli/_bin/stanc ;;
+  esac
 fi
 
 case "$(uname -s)-$(uname -m)" in
@@ -31,6 +35,7 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-x86_64) PLAT=macosx_10_15_x86_64 ;;
   Linux-aarch64) PLAT=manylinux_2_28_aarch64 ;;
   Linux-x86_64) PLAT=manylinux_2_28_x86_64 ;;
+  MINGW*|MSYS*|CYGWIN*) PLAT=win_amd64 ;;
   *) echo "unknown platform: $(uname -s)-$(uname -m)"; exit 1 ;;
 esac
 
