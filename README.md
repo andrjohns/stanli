@@ -23,6 +23,8 @@ pip install stanli
   ULPs is listed there)
 - Install size: one 13.8 MB shared library, a 4.9 MB wheel. Breakdown
   in [Binary size](#binary-size) below.
+- How this is possible, for statisticians:
+  [docs/how-it-works.md](docs/how-it-works.md)
 - Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
 
 ## Architecture
