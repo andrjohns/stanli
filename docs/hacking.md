@@ -2,9 +2,9 @@
 
 A map for contributors: which file owns what, how a gradient actually
 gets computed, and the recipes for the two most common changes.
-`docs/how-it-works.md` explains why the design is what it is;
-`runtime/src/OPTIMIZATIONS.md` explains the graph passes in plain
-language; `docs/benchmarks.md` has the measurements.
+[`docs/how-it-works.md`](how-it-works.md) explains why the design is what it is;
+[`runtime/src/OPTIMIZATIONS.md`](../runtime/src/OPTIMIZATIONS.md) explains the graph passes in plain
+language; [`docs/benchmarks.md`](benchmarks.md) has the measurements.
 
 If you are reading only one section, read "Where the silent wrongness
 lives" -- it is the shape of every bug this project has shipped.
@@ -13,22 +13,24 @@ lives" -- it is the shape of every bug this project has shipped.
 
 | Path | Owns |
 |---|---|
-| `runtime/include/stanli/` | All public headers. `graph.hpp` is the IR: `Slot` + `Op` over flat arenas. |
-| `runtime/src/lower.cpp` | The compiler: transformed MIR in, op graph out. `lower_expr`/`lower_stmt` walk statements; function calls dispatch through `lower_density_fn`, `lower_eltwise_fn`, `lower_matrix_fn`, `lower_ode_fn`. `lower_read_param` builds the constrain ops and the parameter views. |
-| `runtime/src/mir_reader.cpp`, `sexp.hpp`, `mir.hpp` | Parse stanc3's `--debug-transformed-mir` s-expressions into the C++ MIR structs. Anything unrecognized is preserved as raw text and fails loudly if reached. |
-| `runtime/src/inplace.cpp`, `constfold.cpp`, `reroll.cpp` | The graph passes, in pipeline order. Each has an env switch to turn it off (see OPTIMIZATIONS.md). |
-| `runtime/src/executor.cpp` | Runs the op list: forward for the log density, reverse for the gradient. `STANLI_PROFILE=1` prints per-opcode accounting. |
-| `runtime/kernels/` | Op implementations. `densities.cpp` instantiates unmodified stan-math prim templates; `elementwise.cpp`/`eltwise_expr.cpp` the vector math; `constrain.cpp` the transforms; `matrix_fns.cpp` and `legacy_fns.cpp` wrap stan-math functions that have no native port (see `legacy.hpp` for the mechanism). |
-| `runtime/include/stanli/mir_interp.hpp` | The one MIR interpreter, templated on the scalar. Three users: the lowering (transformed data and every data-only expression, on `double`), the ODE kernels (right-hand sides the compiled path cannot handle, on `double` and `var`), and the interpreted write_array. |
-| `runtime/src/wa_interp.cpp` | `WaInterp`: per-draw interpreted generated quantities for models whose write_array graph cannot be built (RNG calls, draw-dependent branches). Owns the RNG stream and the FnReadParam/FnWriteParam statement hooks. |
-| `runtime/src/island.cpp` | The tape-island carver and its cost estimate, plus the graph-op front end to the register machine. Runs last in the pipeline. |
-| `runtime/include/stanli/program.hpp`, `mir_prog.hpp` | The register machine: one instruction set with one runner templated on the scalar (`program.hpp`), and the MIR front end both callers compile through (`mir_prog.hpp`). `ode_prog.cpp` is the ODE entry, `island.cpp` the graph-op entry, `lower.cpp` the parameter-conditional entry. |
-| `runtime/src/nuts.cpp` | The sampler: stan's own `adapt_diag_e_nuts` driven through `model_adapter.hpp`. Also owns CmdStan parity of the RNG stream and of which initial points are accepted. |
-| `runtime/src/capi.cpp`, `capi.h` | The C ABI the shared library exports. `python/stanli/__init__.py` is a thin ctypes wrapper over it. |
-| `runtime/src/stanc_embed_c.cpp`, `tools/stanc_embed/` | The in-process stanc3: the OCaml compiler built with `-output-complete-obj` and linked into the shared library. |
-| `tools/` | `stanli_check` (one deterministic gradient evaluation, machine-readable), `stanli_run` (full CSV sampling run), `dump_ops` (print a model's lowered op list), `verify_refs.py` (corpus replay against recorded CmdStan values, runs in CI), `verify_sample.py` (records those references, needs CmdStan), `sampler_trace.py` (sampler-column diff vs CmdStan), `gen_docs.py` (stamps measured numbers into the READMEs). |
-| `harnesses/` | Corpus sweeps that need a local posteriordb: `wa_coverage.py` (how much of each model's generated quantities we produce), `wa_header_check.py` (CSV headers vs CmdStan), benchmarks. |
-| `tests/` | One `test_*.cpp` per subsystem, plus `fixtures/` with `.stan` sources and their pinned `.tmir.sexp` MIR (regenerate with `tools/gen_fixtures.sh`). |
+| [`runtime/include/stanli/`](../runtime/include/stanli/) | All public headers. [`graph.hpp`](../runtime/include/stanli/graph.hpp) is the IR: `Slot` + `Op` over flat arenas. |
+| [`runtime/src/lower.cpp`](../runtime/src/lower.cpp) | The compiler: transformed MIR in, op graph out. `lower_expr`/`lower_stmt` walk statements; function calls dispatch through `lower_density_fn`, `lower_eltwise_fn`, `lower_matrix_fn`, `lower_ode_fn`. `lower_read_param` builds the constrain ops and the parameter views. |
+| [`runtime/src/mir_reader.cpp`](../runtime/src/mir_reader.cpp), [`sexp.hpp`](../runtime/include/stanli/sexp.hpp), [`mir.hpp`](../runtime/include/stanli/mir.hpp) | Parse stanc3's `--debug-transformed-mir` s-expressions into the C++ MIR structs. Anything unrecognized is preserved as raw text and fails loudly if reached. |
+| [`runtime/src/inplace.cpp`](../runtime/src/inplace.cpp), [`constfold.cpp`](../runtime/src/constfold.cpp), [`reroll.cpp`](../runtime/src/reroll.cpp) | The graph passes, in pipeline order. Each has an env switch to turn it off (see OPTIMIZATIONS.md). |
+| [`runtime/src/executor.cpp`](../runtime/src/executor.cpp) | Runs the op list: forward for the log density, reverse for the gradient. `STANLI_PROFILE=1` prints per-opcode accounting. |
+| [`runtime/kernels/`](../runtime/kernels/) | Op implementations. [`densities.cpp`](../runtime/kernels/densities.cpp) instantiates unmodified stan-math prim templates; [`elementwise.cpp`](../runtime/kernels/elementwise.cpp)/[`eltwise_expr.cpp`](../runtime/kernels/eltwise_expr.cpp) the vector math; [`constrain.cpp`](../runtime/kernels/constrain.cpp) the transforms; [`matrix_fns.cpp`](../runtime/kernels/matrix_fns.cpp) and [`legacy_fns.cpp`](../runtime/kernels/legacy_fns.cpp) wrap stan-math functions that have no native port (see [`legacy.hpp`](../runtime/include/stanli/legacy.hpp) for the mechanism). |
+| [`runtime/include/stanli/mir_interp.hpp`](../runtime/include/stanli/mir_interp.hpp) | The one MIR interpreter, templated on the scalar. Three users: the lowering (transformed data and every data-only expression, on `double`), the ODE kernels (right-hand sides the compiled path cannot handle, on `double` and `var`), and the interpreted write_array. |
+| [`runtime/src/wa_interp.cpp`](../runtime/src/wa_interp.cpp) | `WaInterp`: per-draw interpreted generated quantities for models whose write_array graph cannot be built (RNG calls, draw-dependent branches). Owns the RNG stream and the FnReadParam/FnWriteParam statement hooks. |
+| [`runtime/src/island.cpp`](../runtime/src/island.cpp) | The tape-island carver and its cost estimate, plus the graph-op front end to the register machine. Runs last in the pipeline. |
+| [`runtime/include/stanli/program.hpp`](../runtime/include/stanli/program.hpp), [`mir_prog.hpp`](../runtime/include/stanli/mir_prog.hpp) | The register machine: one instruction set with one runner templated on the scalar ([`program.hpp`](../runtime/include/stanli/program.hpp)), and the MIR front end both callers compile through ([`mir_prog.hpp`](../runtime/include/stanli/mir_prog.hpp)). [`ode_prog.cpp`](../runtime/src/ode_prog.cpp) is the ODE entry, [`island.cpp`](../runtime/src/island.cpp) the graph-op entry, [`lower.cpp`](../runtime/src/lower.cpp) the parameter-conditional entry. |
+| [`runtime/src/nuts.cpp`](../runtime/src/nuts.cpp) | The sampler: stan's own `adapt_diag_e_nuts` driven through [`model_adapter.hpp`](../runtime/include/stanli/model_adapter.hpp). Also owns CmdStan parity of the RNG stream and of which initial points are accepted. |
+| [`runtime/src/capi.cpp`](../runtime/src/capi.cpp), [`capi.h`](../runtime/include/stanli/capi.h) | The C ABI the shared library exports, write_array included. [`python/stanli/__init__.py`](../python/stanli/__init__.py) is a thin ctypes wrapper over it. |
+| [`runtime/src/stanc_embed_c.cpp`](../runtime/src/stanc_embed_c.cpp), [`tools/stanc_embed/`](../tools/stanc_embed/) | The in-process stanc3: the OCaml compiler built with `-output-complete-obj` and linked into the shared library. |
+| [`js/`](../js/) | The npm package: [`index.mjs`](../js/index.mjs) is the one-call `sample()` API over [`worker.js`](../js/worker.js), which runs stancjs (stanc3 as JavaScript) and the WASM build of this runtime off the main thread. |
+| [`web/`](../web/) | The demo page at [seantalts.github.io/stanli](https://seantalts.github.io/stanli/), assembled from [`js/`](../js/) by [`tools/build_web.sh`](../tools/build_web.sh) so the package and the page cannot drift. |
+| [`tools/`](../tools/) | [`stanli_check`](../tools/stanli_check.cpp) (one deterministic gradient evaluation, machine-readable), [`stanli_run`](../tools/stanli_run.cpp) (full CSV sampling run), [`dump_ops`](../tools/dump_ops.cpp) (print a model's lowered op list), [`verify_refs.py`](../tools/verify_refs.py) (corpus replay against recorded CmdStan values, runs in CI), [`verify_sample.py`](../tools/verify_sample.py) (records those references, needs CmdStan), [`sampler_trace.py`](../tools/sampler_trace.py) (sampler-column diff vs CmdStan), [`gen_docs.py`](../tools/gen_docs.py) (stamps measured numbers into the READMEs), [`wasm_check.sh`](../tools/wasm_check.sh) (the corpus replay through the WASM build, under Node). |
+| [`harnesses/`](../harnesses/) | Corpus sweeps that need a local posteriordb: [`wa_coverage.py`](../harnesses/wa_coverage.py) (how much of each model's generated quantities we produce), [`wa_header_check.py`](../harnesses/wa_header_check.py) (CSV headers vs CmdStan), benchmarks. |
+| [`tests/`](../tests/) | One `test_*.cpp` per subsystem, plus [`fixtures/`](../tests/fixtures/) with `.stan` sources and their pinned `.tmir.sexp` MIR (regenerate with [`tools/gen_fixtures.sh`](../tools/gen_fixtures.sh)). |
 
 ## The shape of the thing
 
@@ -37,18 +39,18 @@ weight sits:
 
 | | lines | |
 |---|---:|---|
-| `lower.cpp` | 1,935 | The compiler. Biggest file, and the one most likely to be what you are looking for. |
-| `mir_interp.hpp` | 1,284 | The MIR interpreter, templated on the scalar. |
-| `reroll.cpp` | 860 | The vectorizing pass. Dense, but self-contained. |
-| `mir_prog.hpp` | 536 | MIR to register program. |
-| `island.cpp` | 528 | The island carver. |
-| `matrix_fns.cpp`, `densities.cpp` | 488, 455 | Kernels. Repetitive by design; read one, you can read them all. |
-| `mir_reader.cpp` | 374 | S-expressions to MIR structs. |
-| `executor.cpp` | 320 | Runs the op list. Small on purpose. |
-| `inplace.cpp`, `constfold.cpp` | 204, 186 | The other two passes. |
-| `nuts.cpp` | 133 | The sampler is thin: Stan's classes do the work. |
+| [`lower.cpp`](../runtime/src/lower.cpp) | 1,935 | The compiler. Biggest file, and the one most likely to be what you are looking for. |
+| [`mir_interp.hpp`](../runtime/include/stanli/mir_interp.hpp) | 1,284 | The MIR interpreter, templated on the scalar. |
+| [`reroll.cpp`](../runtime/src/reroll.cpp) | 860 | The vectorizing pass. Dense, but self-contained. |
+| [`mir_prog.hpp`](../runtime/include/stanli/mir_prog.hpp) | 536 | MIR to register program. |
+| [`island.cpp`](../runtime/src/island.cpp) | 528 | The island carver. |
+| [`matrix_fns.cpp`](../runtime/kernels/matrix_fns.cpp), [`densities.cpp`](../runtime/kernels/densities.cpp) | 488, 455 | Kernels. Repetitive by design; read one, you can read them all. |
+| [`mir_reader.cpp`](../runtime/src/mir_reader.cpp) | 374 | S-expressions to MIR structs. |
+| [`executor.cpp`](../runtime/src/executor.cpp) | 320 | Runs the op list. Small on purpose. |
+| [`inplace.cpp`](../runtime/src/inplace.cpp), [`constfold.cpp`](../runtime/src/constfold.cpp) | 204, 186 | The other two passes. |
+| [`nuts.cpp`](../runtime/src/nuts.cpp) | 133 | The sampler is thin: Stan's classes do the work. |
 
-There are 82 opcodes (`optable.hpp`). Adding one is a small, well-worn
+There are 82 opcodes ([`optable.hpp`](../runtime/include/stanli/optable.hpp)). Adding one is a small, well-worn
 change; the recipe is below. The difficulty in this codebase is almost
 never in writing new code -- it is in not breaking the numerical
 agreement with CmdStan that everything else rests on, which is what the
@@ -99,7 +101,7 @@ project takes every time.
 
 ## The IR
 
-Four types in `graph.hpp`, and they are deliberately dull:
+Four types in [`graph.hpp`](../runtime/include/stanli/graph.hpp), and they are deliberately dull:
 
 - `Slot` -- a value: an offset into the arenas, a length, and whether it
   is a parameter. Parameters come first, in declaration order, so the
@@ -121,7 +123,7 @@ density is off by a constant.
 
 ## The kernel contract
 
-A kernel is three function pointers (`optable.hpp`):
+A kernel is three function pointers ([`optable.hpp`](../runtime/include/stanli/optable.hpp)):
 
 ```cpp
 struct Kernel {
@@ -143,7 +145,7 @@ The rules, all of which have been learned the hard way:
   a deliberate direction (descending, or per-element rather than
   blocked) to stay bitwise identical to the stan-math var path they are
   checked against. If you reorder a reduction you will usually still
-  pass the corpus oracle at 1e-9 and still break `test_matvec` at 1 ULP,
+  pass the corpus oracle at 1e-9 and still break [`test_matvec`](../tests/test_matvec.cpp) at 1 ULP,
   and the ULP is the thing worth keeping.
 - **Scratch is yours alone**, sized at bind and never touched by another
   op -- which is what makes an in-place write safe in front of you.
@@ -154,7 +156,7 @@ Some code cannot be ops. An ODE right-hand side has to stay callable
 because the integrator picks the times; a region whose control flow
 depends on a parameter has to pick its arm at evaluation time. Both
 compile to the same flat instruction list over a register file
-(`program.hpp`), run by one `run_program<T>` templated on the scalar --
+([`program.hpp`](../runtime/include/stanli/program.hpp)), run by one `run_program<T>` templated on the scalar --
 `double` for values, `var` where stan-math's autodiff needs to see the
 arithmetic.
 
@@ -162,9 +164,9 @@ Three front ends produce one:
 
 | Entry | Source | Who runs it |
 |---|---|---|
-| `compile_rhs` (`ode_prog.cpp`) | a MIR function body | the ODE kernel, per integrator step |
-| `carve_islands` (`island.cpp`) | a run of graph ops | `OP_ISLAND`, once per evaluation |
-| `lower_param_ifelse` / `lower_param_ternary` (`lower.cpp`) | a MIR statement or expression | `OP_ISLAND`, once per evaluation |
+| `compile_rhs` ([`ode_prog.cpp`](../runtime/src/ode_prog.cpp)) | a MIR function body | the ODE kernel, per integrator step |
+| `carve_islands` ([`island.cpp`](../runtime/src/island.cpp)) | a run of graph ops | `OP_ISLAND`, once per evaluation |
+| `lower_param_ifelse` / `lower_param_ternary` ([`lower.cpp`](../runtime/src/lower.cpp)) | a MIR statement or expression | `OP_ISLAND`, once per evaluation |
 
 The first two are optimizations and can be declined -- the carver keeps
 an island only when it estimates the ops cost more (see OPTIMIZATIONS.md;
@@ -175,7 +177,7 @@ reaches it.
 
 ## The sampler
 
-`nuts.cpp` is 133 lines because Stan's own `adapt_diag_e_nuts` does the
+[`nuts.cpp`](../runtime/src/nuts.cpp) is 133 lines because Stan's own `adapt_diag_e_nuts` does the
 sampling; the file's real job is matching CmdStan's *configuration*,
 which is invisible to any pointwise gradient test. Three things it has
 to keep in step, each of which was wrong at some point:
@@ -191,7 +193,7 @@ to keep in step, each of which was wrong at some point:
   disagree for an ODE model, so `Executor::forward_value_only()` exists
   to be the double path.
 
-`tools/sampler_trace.py` is the oracle for all of this: same model, same
+[`tools/sampler_trace.py`](../tools/sampler_trace.py) is the oracle for all of this: same model, same
 seed, compare the sampler columns distributionally.
 
 ## Where the silent wrongness lives
@@ -203,7 +205,7 @@ classes, with the case that taught each:
 - **A destructive write in front of a backward that re-reads its
   inputs.** The in-place pass may only write over a value when every
   earlier op's backward is pure adjoint routing
-  (`backward_ignores_input_values`, pinned by `test_pass_safety.cpp`).
+  (`backward_ignores_input_values`, pinned by [`test_pass_safety.cpp`](../tests/test_pass_safety.cpp)).
   Getting this wrong made eight models wrong by up to 1.7e+05 relative
   with their op counts unchanged.
 - **Propto and argument types.** Which constants a density drops depends
@@ -235,22 +237,22 @@ Decide where it runs. Anything the log density touches needs to be an op;
 functions that only appear in transformed data, ODE right-hand sides, or
 generated quantities only need the interpreter.
 
-Interpreter vocabulary: add a branch in `mir_interp.hpp`'s `eval_fun`
+Interpreter vocabulary: add a branch in [`mir_interp.hpp`](../runtime/include/stanli/mir_interp.hpp)'s `eval_fun`
 (deterministic math, templated on the scalar) or, for RNG draws, in
-`wa_interp.cpp`'s `rng_fun`. Both fail loudly on anything unhandled, so
+[`wa_interp.cpp`](../runtime/src/wa_interp.cpp)'s `rng_fun`. Both fail loudly on anything unhandled, so
 the corpus tells you what is missing:
 `python3 harnesses/wa_coverage.py deps/posteriordb`.
 
 An op takes four steps:
 
-1. Opcode in `optable.hpp`, kernel in `runtime/kernels/`. For a stan-math
+1. Opcode in [`optable.hpp`](../runtime/include/stanli/optable.hpp), kernel in [`runtime/kernels/`](../runtime/kernels/). For a stan-math
    function without a native port, wrap it with the mechanism in
-   `legacy.hpp` (examples all over `matrix_fns.cpp`); it is correct by
+   [`legacy.hpp`](../runtime/include/stanli/legacy.hpp) (examples all over [`matrix_fns.cpp`](../runtime/kernels/matrix_fns.cpp)); it is correct by
    construction and can be replaced by a native kernel when it shows up
    in profiles.
-2. Lowering branch in the matching `lower_*_fn` group in `lower.cpp`.
+2. Lowering branch in the matching `lower_*_fn` group in [`lower.cpp`](../runtime/src/lower.cpp).
 3. A test in the matching `tests/test_*.cpp`, asserting parity against
-   the same stan-math call on `var` (house pattern in `test_lower.cpp`).
+   the same stan-math call on `var` (house pattern in [`test_lower.cpp`](../tests/test_lower.cpp)).
 4. `build-rel/dump_ops model.stan data.json` shows what actually lowered.
 
 ## Verifying a change
@@ -264,9 +266,9 @@ The second line replays all 119 corpus models against recorded CmdStan
 values and is the strongest oracle in the project; it also runs in CI on
 every push, on all four platforms. Compiler changes that claim to be pure
 refactors should leave its worst-deviation line untouched. For sampler
-changes use `tools/sampler_trace.py`; for generated-quantities coverage,
+changes use [`tools/sampler_trace.py`](../tools/sampler_trace.py); for generated-quantities coverage,
 `harnesses/wa_coverage.py`; for performance claims, measure with
-`STANLI_PROFILE=1` before and after (`docs/benchmarks.md` has the
+`STANLI_PROFILE=1` before and after ([`docs/benchmarks.md`](benchmarks.md) has the
 harnesses and the current numbers).
 
-Release process and CI layout live in `README.md` under "Releasing".
+Release process and CI layout live in [`README.md`](../README.md) under "Releasing".
