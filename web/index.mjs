@@ -1,32 +1,89 @@
 // stanli: full Stan in the browser. stanc3 (compiled to JS) turns Stan
 // source into MIR, and a WASM build of the stanli runtime lowers it to an
 // op graph and runs NUTS. Everything happens client side, off the main
-// thread, in a worker this module owns.
+// thread, in workers this module owns.
 //
-//   import { sample } from "stanli";
-//   const fit = await sample({ code, data: { N: 8, ... }, seed: 1 });
-//   fit.columns["mu"]   // Float64Array of draws
+//   import { compile, sample } from "stanli";
+//   const { mir } = await compile({ code });
+//   const fits = await Promise.all([1, 2, 3, 4].map((c) =>
+//       sample({ mir, data, seed: c })));
 //
-// One worker is created on first use and reused; requests queue and run
-// one at a time (the runtime is single threaded by design).
+// Workers pool up to the hardware's concurrency, so independent calls --
+// one chain each -- run simultaneously. Compiling once and passing `mir`
+// keeps the 2.8 MB compiler in a single worker (or out of the page
+// entirely, if the model was precompiled at build time with
+// stanc --debug-transformed-mir).
 
-let worker = null;
-let queue = Promise.resolve();
+const pool = [];
+const waiters = [];
+const MAX_WORKERS = Math.max(
+    2, Math.min(8, ((typeof navigator !== "undefined" &&
+                     navigator.hardwareConcurrency) || 4)));
 
-function getWorker() {
-  if (!worker)
-    worker = new Worker(new URL("./worker.js", import.meta.url));
-  return worker;
+function acquire() {
+  let slot = pool.find((s) => !s.busy);
+  if (!slot && pool.length < MAX_WORKERS) {
+    slot = { worker: new Worker(new URL("./worker.js", import.meta.url)),
+             busy: false };
+    pool.push(slot);
+  }
+  if (slot) {
+    slot.busy = true;
+    return Promise.resolve(slot);
+  }
+  return new Promise((res) => waiters.push(res));
 }
 
-/** Compile a Stan model and draw from its posterior.
+function release(slot) {
+  const next = waiters.shift();
+  if (next) next(slot);  // handed over still busy
+  else slot.busy = false;
+}
+
+function request(msg, opts) {
+  return acquire().then((slot) => {
+    const w = slot.worker;
+    return new Promise((resolve, reject) => {
+      w.onmessage = (e) => {
+        const m = e.data;
+        if (m.status) {
+          if (opts.onProgress) opts.onProgress(m.status);
+          return;
+        }
+        if (m.liveMeta || m.live) {
+          if (opts.onLive) opts.onLive(m);
+          return;
+        }
+        if (m.error) reject(new Error(m.error));
+        else resolve(m.done);
+      };
+      w.onerror = (e) => {
+        reject(new Error("stanli worker: " + (e.message ||
+                                              "failed to load")));
+      };
+      w.postMessage(msg);
+    }).finally(() => {
+      w.onmessage = null;
+      w.onerror = null;
+      release(slot);
+    });
+  });
+}
+
+/** Compile Stan source to transformed MIR (one worker loads stanc3).
+ * @returns {Promise<{mir: string, ms: {stanc: number}}>} */
+export function compile(opts) {
+  return request({ cmd: "compile", code: opts.code }, opts);
+}
+
+/** Compile (unless `mir` is given) and draw from the posterior.
  *
  * @param {Object} opts
- * @param {string} [opts.code]     Stan source (compiled in the browser by
+ * @param {string} [opts.code]     Stan source (compiled in the worker by
  *   stanc3, which loads lazily on first use).
  * @param {string} [opts.mir]      Precompiled transformed MIR (from
- *   `stanc --debug-transformed-mir model.stan` at build time). When
- *   given, the 2.8 MB compiler never loads: the runtime alone is
+ *   `compile()` here, or `stanc --debug-transformed-mir` at build time).
+ *   When given, the 2.8 MB compiler never loads: the runtime alone is
  *   ~1.3 MB gzipped.
  * @param {Object|string} [opts.data]  Data as an object or JSON text.
  * @param {number} [opts.seed=1]       Chain seed (sampler and GQ RNG).
@@ -46,51 +103,25 @@ function getWorker() {
  *   parameters, transformed parameters, and generated quantities.
  */
 export function sample(opts) {
-  const run = () => new Promise((resolve, reject) => {
-    const w = getWorker();
-    w.onmessage = (e) => {
-      const m = e.data;
-      if (m.status) {
-        if (opts.onProgress) opts.onProgress(m.status);
-        return;
-      }
-      if (m.liveMeta || m.live) {
-        if (opts.onLive) opts.onLive(m);
-        return;
-      }
-      w.onmessage = null;
-      w.onerror = null;
-      if (m.error) {
-        reject(new Error(m.error));
-        return;
-      }
-      const { names, samples, ms } = m.done;
-      const flat = new Float64Array(m.done.columns);
-      const columns = {};
-      names.forEach((name, i) => {
-        columns[name] = flat.subarray(i * samples, (i + 1) * samples);
-      });
-      resolve({ names, samples, columns, ms });
-    };
-    w.onerror = (e) => {
-      w.onmessage = null;
-      w.onerror = null;
-      reject(new Error("stanli worker: " + (e.message || "failed to load")));
-    };
-    w.postMessage({
-      cmd: "run",
-      code: opts.code,
-      mir: opts.mir,
-      dataJson: typeof opts.data === "string"
-          ? opts.data
-          : JSON.stringify(opts.data || {}),
-      seed: opts.seed == null ? 1 : opts.seed,
-      warmup: opts.warmup == null ? 1000 : opts.warmup,
-      samples: opts.samples == null ? 1000 : opts.samples,
-      delta: opts.delta == null ? 0.8 : opts.delta,
+  return request({
+    cmd: "run",
+    code: opts.code,
+    mir: opts.mir,
+    live: !!opts.onLive,
+    dataJson: typeof opts.data === "string"
+        ? opts.data
+        : JSON.stringify(opts.data || {}),
+    seed: opts.seed == null ? 1 : opts.seed,
+    warmup: opts.warmup == null ? 1000 : opts.warmup,
+    samples: opts.samples == null ? 1000 : opts.samples,
+    delta: opts.delta == null ? 0.8 : opts.delta,
+  }, opts).then((done) => {
+    const { names, samples, ms } = done;
+    const flat = new Float64Array(done.columns);
+    const columns = {};
+    names.forEach((name, i) => {
+      columns[name] = flat.subarray(i * samples, (i + 1) * samples);
     });
+    return { names, samples, columns, ms };
   });
-  const p = queue.then(run);
-  queue = p.catch(() => {});
-  return p;
 }

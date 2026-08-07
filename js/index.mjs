@@ -107,6 +107,7 @@ export function sample(opts) {
     cmd: "run",
     code: opts.code,
     mir: opts.mir,
+    live: !!opts.onLive,
     dataJson: typeof opts.data === "string"
         ? opts.data
         : JSON.stringify(opts.data || {}),

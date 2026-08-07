@@ -63,15 +63,19 @@ onmessage = async (e) => {
     // Stream: every draw lands in the buffer before its callback, so the
     // page can plot the chain as it grows. Constrained rows batch in
     // chunks of 20 to keep message traffic sane.
+    // Streaming is opt-in: without a live consumer the sampler runs the
+    // plain path and pays nothing for callbacks or message traffic.
+    let cbPtr = 0, liveRowPtr = 0;
+    if (req.live) {
     const nLive = Number(M._stanli_n_constrained(model));
     const liveNames = [];
     for (let i = 0; i < nLive; ++i)
       liveNames.push(
           M.UTF8ToString(M._stanli_constrained_name(model, BigInt(i))));
     postMessage({ liveMeta: { names: liveNames, warmup, samples } });
-    const liveRowPtr = M._malloc(8 * nLive);
+    liveRowPtr = M._malloc(8 * nLive);
     let pend = [];
-    const cbPtr = M.addFunction((i, wu) => {
+    cbPtr = M.addFunction((i, wu) => {
       if (wu) {
         if (i % 25 === 0 || i + 1 === warmup)
           postMessage({ live: { phase: "warmup", i: i + 1 } });
@@ -89,11 +93,12 @@ onmessage = async (e) => {
                               rows: chunk.buffer } }, [chunk.buffer]);
       }
     }, "viii");
+    }
     const rc = M._stanli_sample_stream(model, req.seed >>> 0, warmup,
                                        samples, +req.delta, drawsPtr,
                                        cbPtr, 0, errPtr, errLen);
-    M.removeFunction(cbPtr);
-    M._free(liveRowPtr);
+    if (cbPtr) M.removeFunction(cbPtr);
+    if (liveRowPtr) M._free(liveRowPtr);
     if (rc !== 0) throw new Error(M.UTF8ToString(errPtr));
     const tSample = performance.now();
 

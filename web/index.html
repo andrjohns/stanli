@@ -359,11 +359,13 @@ function render(ms, nChains) {
             `<td>${st.ess.toFixed(0)}</td></tr>`;
   });
   $("out").innerHTML = html + "</table>";
+  const perChain = ms.sample / nChains;
   $("times").textContent =
       `${nChains} chain${nChains > 1 ? "s" : ""} in parallel: ` +
-      `${(ms.wall / 1000).toFixed(1)} s wall ` +
-      `(stanc ${ms.stanc.toFixed(0)} ms once, then ` +
-      `${ms.sample.toFixed(0)} ms of sampling across workers); ` +
+      `${(ms.wall / 1000).toFixed(1)} s wall, ` +
+      `${perChain < 1000 ? perChain.toFixed(0) + " ms"
+                         : (perChain / 1000).toFixed(1) + " s"} ` +
+      `sampling per chain (stanc ${ms.stanc.toFixed(0)} ms, once); ` +
       `click a row for trace + histogram`;
   for (const tr of $("out").querySelectorAll("tr[data-n]"))
     tr.onclick = () => { tracePlot(tr.dataset.n); histPlot(tr.dataset.n); };
