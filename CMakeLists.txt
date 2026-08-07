@@ -86,6 +86,8 @@ add_library(stanli_shared SHARED
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/kernels/mixture.cpp
+  runtime/kernels/island.cpp
+  runtime/src/island.cpp
   runtime/src/nuts.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp
@@ -146,6 +148,8 @@ add_library(stanli STATIC
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/kernels/mixture.cpp
+  runtime/kernels/island.cpp
+  runtime/src/island.cpp
   runtime/src/nuts.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp
@@ -208,3 +212,4 @@ stanli_add_test(test_ode_prog)
 stanli_add_test(test_constfold)
 stanli_add_test(test_write_array)
 stanli_add_test(test_mixture)
+stanli_add_test(test_island)

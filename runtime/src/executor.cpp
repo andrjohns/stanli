@@ -54,6 +54,7 @@ void register_ode_kernels();
 void register_constrain_kernels();
 void register_eltwise_kernels();
 void register_mixture_kernels();
+void register_island_kernel();
 
 static void ensure_registered() {
   static const bool once = [] {
@@ -65,6 +66,7 @@ static void ensure_registered() {
     register_constrain_kernels();
     register_eltwise_kernels();
     register_mixture_kernels();
+  register_island_kernel();
     return true;
   }();
   (void)once;

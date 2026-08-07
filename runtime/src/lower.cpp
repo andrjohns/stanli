@@ -4,6 +4,7 @@
 #include <stanli/mir.hpp>
 #include <stanli/ode.hpp>
 #include <stanli/optable.hpp>
+#include <stanli/island.hpp>
 #include <stanli/reroll.hpp>
 #include <stanli/sexp.hpp>
 
@@ -2297,6 +2298,10 @@ struct Lowering {
     const_fold(g, out.fills, update_roots, &folded);
     for (int s : folded) info[s].data_like = true;
     reroll(g, out.fills, target_terms, roots);  // off under STANLI_NO_REROLL
+    // LAST, after every other pass has had first crack: compile whatever
+    // scalar residue survives (recurrences the re-roll can never widen)
+    // into island ops. Off under STANLI_NO_ISLAND.
+    carve_islands(g, out.fills, target_terms, roots);
     info.resize(g.slots.size());  // keep SlotInfo parallel: emit() in
                                   // reduce_terms reads info[o] by slot id
     std::vector<int> all = target_terms;
