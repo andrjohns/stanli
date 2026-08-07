@@ -1,5 +1,7 @@
 // One-op graphs per density: value and every parameter gradient must match
 // an in-process var-path evaluation of the same call, bitwise.
+#include "graph_helpers.hpp"
+
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
 
@@ -36,51 +38,6 @@ static std::vector<double> ys{1.3, -0.4, 2.2, 0.1, -1.7};
 static std::vector<double> pos{0.9, 1.7, 0.35, 2.4, 1.1};
 static std::vector<double> unit{0.2, 0.5, 0.75, 0.9, 0.33};
 static const int N = 5;
-
-// Build a one-op graph. shapes[i]: len of arg i; params[i]: is arg i a
-// parameter. vals[i]: contents. Returns gradient concatenated in param order
-// plus the value.
-struct RunResult {
-  double value;
-  std::vector<double> grad;
-};
-static RunResult run_graph(uint16_t opcode,
-                           const std::vector<std::vector<double>>& vals,
-                           const std::vector<bool>& params,
-                           std::vector<int> idata = {}) {
-  using namespace stanli;
-  Graph g;
-  std::vector<int> slots;
-  int64_t n_par = 0;
-  for (size_t i = 0; i < vals.size(); ++i) {
-    slots.push_back(g.add_slot((int64_t)vals[i].size(), params[i]));
-    if (params[i]) n_par += (int64_t)vals[i].size();
-  }
-  const int lp = g.add_slot(1, false);
-  Op op;  // build via add_op with variable input count
-  {
-    op.opcode = opcode;
-    op.out = lp;
-    op.n_in = 0;
-    for (int s : slots) op.in[op.n_in++] = s;
-    if (!idata.empty()) {
-      g.idata_pool.push_back(std::move(idata));
-      op.idata = g.idata_pool.back().data();
-      op.n_idata = (int64_t)g.idata_pool.back().size();
-    }
-    g.ops.push_back(op);
-  }
-  g.result_slot = lp;
-  Executor ex(std::move(g));
-  for (size_t i = 0; i < vals.size(); ++i) {
-    double* p = ex.value_ptr(slots[i]);
-    for (size_t j = 0; j < vals[i].size(); ++j) p[j] = vals[i][j];
-  }
-  RunResult r;
-  r.grad.assign(n_par, 0.0);
-  r.value = ex.gradient(r.grad.data());
-  return r;
-}
 
 // ---- elementwise variant (bit 6) -------------------------------------------
 // The fused elementwise op against the N scalar lane ops it replaces: INDEX
@@ -213,8 +170,8 @@ int main() {
 
   // ---- normal_lpdf(y_pv, mu_ps, sigma_ps): all three parameters ----------
   {
-    auto r = run_graph(OP_NORMAL_LPDF, {ys, {0.25}, {1.4}},
-                       {true, true, true});
+    auto r = testutil::run_one_op(OP_NORMAL_LPDF, {ys, {0.25}, {1.4}},
+                                  {true, true, true});
     Eigen::Matrix<var, -1, 1> vy(N);
     for (int i = 0; i < N; ++i) vy(i) = ys[i];
     var vmu = 0.25, vsig = 1.4;
@@ -230,8 +187,8 @@ int main() {
 
   // ---- normal_lpdf(y_data, mu_ps, sigma_ps) ------------------------------
   {
-    auto r = run_graph(OP_NORMAL_LPDF, {ys, {0.25}, {1.4}},
-                       {false, true, true});
+    auto r = testutil::run_one_op(OP_NORMAL_LPDF, {ys, {0.25}, {1.4}},
+                                  {false, true, true});
     Eigen::Map<Eigen::VectorXd> ymap(ys.data(), N);
     var vmu = 0.25, vsig = 1.4;
     var lp = stan::math::normal_lpdf<false>(ymap, vmu, vsig);
@@ -246,7 +203,8 @@ int main() {
   {
     std::vector<double> mus{0.1, -0.2, 0.3, 0.05, -0.6};
     std::vector<double> sigs{15, 10, 16, 11, 9};
-    auto r = run_graph(OP_NORMAL_LPDF, {ys, mus, sigs}, {false, true, false});
+    auto r = testutil::run_one_op(OP_NORMAL_LPDF, {ys, mus, sigs},
+                                  {false, true, false});
     Eigen::Map<Eigen::VectorXd> ymap(ys.data(), N);
     Eigen::Map<Eigen::VectorXd> smap(sigs.data(), N);
     Eigen::Matrix<var, -1, 1> vmu(N);
@@ -261,8 +219,8 @@ int main() {
 
   // ---- cauchy_lpdf(y_ps, 0_data, 5_data) ---------------------------------
   {
-    auto r = run_graph(OP_CAUCHY_LPDF, {{2.3}, {0.0}, {5.0}},
-                       {true, false, false});
+    auto r = testutil::run_one_op(OP_CAUCHY_LPDF, {{2.3}, {0.0}, {5.0}},
+                                  {true, false, false});
     var vt = 2.3;
     var lp = stan::math::cauchy_lpdf<false>(vt, 0.0, 5.0);
     lp.grad();
@@ -273,8 +231,9 @@ int main() {
 
   // ---- student_t_lpdf(y_data, nu_ps, mu_ps, sigma_ps) --------------------
   {
-    auto r = run_graph(OP_STUDENT_T_LPDF, {ys, {4.0}, {0.25}, {1.4}},
-                       {false, true, true, true});
+    auto r = testutil::run_one_op(OP_STUDENT_T_LPDF,
+                                  {ys, {4.0}, {0.25}, {1.4}},
+                                  {false, true, true, true});
     Eigen::Map<Eigen::VectorXd> ymap(ys.data(), N);
     var vnu = 4.0, vmu = 0.25, vsig = 1.4;
     var lp = stan::math::student_t_lpdf<false>(ymap, vnu, vmu, vsig);
@@ -301,8 +260,8 @@ int main() {
 
   // ---- gamma_lpdf(y_data, alpha_ps, beta_ps) -----------------------------
   {
-    auto r = run_graph(OP_GAMMA_LPDF, {pos, {2.5}, {1.3}},
-                       {false, true, true});
+    auto r = testutil::run_one_op(OP_GAMMA_LPDF, {pos, {2.5}, {1.3}},
+                                  {false, true, true});
     Eigen::Map<Eigen::VectorXd> ymap(pos.data(), N);
     var va = 2.5, vb = 1.3;
     var lp = stan::math::gamma_lpdf<false>(ymap, va, vb);
@@ -315,8 +274,8 @@ int main() {
 
   // ---- beta_lpdf(y_data, alpha_ps, beta_ps) ------------------------------
   {
-    auto r = run_graph(OP_BETA_LPDF, {unit, {2.0}, {3.0}},
-                       {false, true, true});
+    auto r = testutil::run_one_op(OP_BETA_LPDF, {unit, {2.0}, {3.0}},
+                                  {false, true, true});
     Eigen::Map<Eigen::VectorXd> ymap(unit.data(), N);
     var va = 2.0, vb = 3.0;
     var lp = stan::math::beta_lpdf<false>(ymap, va, vb);
@@ -330,7 +289,8 @@ int main() {
   // ---- poisson_log_lpmf(n_idata; alpha_pv) -------------------------------
   {
     std::vector<double> alpha{0.2, 0.4, 0.6, 0.8, 1.0};
-    auto r = run_graph(OP_POISSON_LOG_LPMF, {alpha}, {true}, {2, 0, 5, 1, 3});
+    auto r = testutil::run_one_op(OP_POISSON_LOG_LPMF, {alpha}, {true},
+                                  {2, 0, 5, 1, 3});
     std::vector<int> n{2, 0, 5, 1, 3};
     Eigen::Matrix<var, -1, 1> va(N);
     for (int i = 0; i < N; ++i) va(i) = alpha[i];
@@ -345,8 +305,8 @@ int main() {
   // ---- bernoulli_logit_lpmf(y_idata; alpha_pv) ---------------------------
   {
     std::vector<double> alpha{0.5, -1.2, 0.3, 2.0, -0.7};
-    auto r = run_graph(OP_BERNOULLI_LOGIT_LPMF, {alpha}, {true},
-                       {1, 0, 0, 1, 1});
+    auto r = testutil::run_one_op(OP_BERNOULLI_LOGIT_LPMF, {alpha}, {true},
+                                  {1, 0, 0, 1, 1});
     std::vector<int> y{1, 0, 0, 1, 1};
     Eigen::Matrix<var, -1, 1> va(N);
     for (int i = 0; i < N; ++i) va(i) = alpha[i];
