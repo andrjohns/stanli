@@ -159,6 +159,54 @@ int main() {
     }
   }
 
+  // ---- sampler stats: one CmdStan-shaped row per post-warmup draw --------
+  {
+    const int D = 4;
+    Graph g;
+    const int x = g.add_slot(D, true);
+    const int zero = g.add_slot(1, false);
+    const int one = g.add_slot(1, false);
+    const int lp = g.add_slot(1, false);
+    g.add_op(OP_NORMAL_LPDF, {x, zero, one}, lp);
+    g.result_slot = lp;
+    Executor ex(std::move(g));
+    ex.value_ptr(zero)[0] = 0.0;
+    ex.value_ptr(one)[0] = 1.0;
+
+    NutsConfig cfg;
+    cfg.seed = 7;
+    cfg.warmup = 200;
+    cfg.samples = 100;
+    SamplerStats stats;
+    auto draws = run_nuts(ex, cfg, &stats);
+    if (stats.rows.size() != draws.size()) {
+      ++failures;
+      std::printf("FAIL stats rows %zu draws %zu\n", stats.rows.size(),
+                  draws.size());
+    }
+    int64_t leapfrogs = 0;
+    for (const auto& r : stats.rows) {
+      const double lp_ = r[0], accept = r[1], step = r[2], depth = r[3],
+                   nleap = r[4], div = r[5], energy = r[6];
+      const bool ok = std::isfinite(lp_) && accept >= 0.0 && accept <= 1.0 &&
+                      step > 0.0 && depth >= 0 && depth <= cfg.max_depth &&
+                      nleap >= 1 && (div == 0.0 || div == 1.0) &&
+                      std::isfinite(energy) && energy >= -lp_;
+      if (!ok) {
+        ++failures;
+        std::printf("FAIL stats row: lp %g accept %g step %g depth %g "
+                    "nleap %g div %g energy %g\n",
+                    lp_, accept, step, depth, nleap, div, energy);
+        break;
+      }
+      leapfrogs += (int64_t)nleap;
+    }
+    if (leapfrogs < cfg.samples) {
+      ++failures;
+      std::printf("FAIL total leapfrogs %lld\n", (long long)leapfrogs);
+    }
+  }
+
   if (failures == 0) std::printf("test_nuts OK\n");
   return failures == 0 ? 0 : 1;
 }

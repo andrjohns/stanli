@@ -3,7 +3,12 @@
 // samples with NUTS, emits constrained parameter draws.
 //
 // Usage: stanli_run model.stan data.json [--seed N] [--warmup N]
-//        [--samples N] [--delta X] [--stanc PATH]
+//        [--samples N] [--delta X] [--stanc PATH] [--sampler-stats]
+//
+// --sampler-stats prepends CmdStan's seven sampler columns (lp__,
+// accept_stat__, stepsize__, treedepth__, n_leapfrog__, divergent__,
+// energy__) to each CSV row, which is what tools/sampler_trace.py diffs
+// against a real CmdStan run.
 #include <stanli/compile.hpp>
 #include <stanli/nuts.hpp>
 
@@ -34,7 +39,8 @@ int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr,
                  "usage: stanli_run model.stan data.json [--seed N] "
-                 "[--warmup N] [--samples N] [--delta X] [--stanc PATH]\n");
+                 "[--warmup N] [--samples N] [--delta X] [--stanc PATH] "
+                 "[--sampler-stats]\n");
     return 2;
   }
   std::string model = argv[1], datafile = argv[2];
@@ -43,12 +49,17 @@ int main(int argc, char** argv) {
   cfg.seed = 1;
   cfg.warmup = 1000;
   cfg.samples = 1000;
-  for (int i = 3; i + 1 < argc; i += 2) {
-    const std::string k = argv[i], v = argv[i + 1];
+  bool want_stats = false;
+  for (int i = 3; i < argc; ++i) {
+    const std::string k = argv[i];
+    if (k == "--sampler-stats") { want_stats = true; continue; }
+    if (i + 1 >= argc) break;
+    const std::string v = argv[++i];
     if (k == "--seed") cfg.seed = (uint32_t)std::stoul(v);
     else if (k == "--warmup") cfg.warmup = std::stoi(v);
     else if (k == "--samples") cfg.samples = std::stoi(v);
     else if (k == "--delta") cfg.delta = std::stod(v);
+    else if (k == "--max-depth") cfg.max_depth = std::stoi(v);
     else if (k == "--stanc") stanc = v;
   }
   if (const char* env = std::getenv("STANC")) stanc = env;
@@ -63,7 +74,8 @@ int main(int argc, char** argv) {
     // printed to stderr alongside the gradient-evaluation count.
     const char* prof_env = std::getenv("STANLI_PROFILE");
     if (prof_env && prof_env[0] != '0') ex.set_profile(true);
-    auto draws = stanli::run_nuts(ex, cfg);
+    stanli::SamplerStats stats;
+    auto draws = stanli::run_nuts(ex, cfg, want_stats ? &stats : nullptr);
 
     // Draws are written through the write_array graph when there is one --
     // that is what supplies transformed parameters and generated quantities,
@@ -83,15 +95,25 @@ int main(int argc, char** argv) {
     stanli::Executor& out = have_wa ? *wex : ex;
 
     std::string hdr;
+    if (want_stats)
+      hdr = "lp__,accept_stat__,stepsize__,treedepth__,n_leapfrog__,"
+            "divergent__,energy__";
     for (const auto& n : stanli::CompiledModel::csv_names(cols)) {
       if (!hdr.empty()) hdr += ',';
       hdr += n;
     }
     std::printf("%s\n", hdr.c_str());
-    for (const auto& q : draws) {
+    for (size_t d = 0; d < draws.size(); ++d) {
+      const auto& q = draws[d];
       for (size_t i = 0; i < q.size(); ++i) out.params_data()[i] = q[i];
       out.run_forward_only();
       bool first = true;
+      if (want_stats) {
+        for (double v : stats.rows[d]) {
+          std::printf(first ? "%.17g" : ",%.17g", v);
+          first = false;
+        }
+      }
       for (const auto& v : cols) {
         const double* p = out.value_ptr(v.slot);
         for (int64_t i = 0; i < v.len; ++i) {

@@ -15,7 +15,8 @@
 namespace stanli {
 
 std::vector<std::vector<double>> run_nuts(Executor& ex,
-                                          const NutsConfig& cfg) {
+                                          const NutsConfig& cfg,
+                                          SamplerStats* stats) {
   using rng_t = boost::ecuyer1988;
   ExecutorModel model(ex);
   rng_t rng(cfg.seed);
@@ -75,11 +76,28 @@ std::vector<std::vector<double>> run_nuts(Executor& ex,
 
   std::vector<std::vector<double>> draws;
   draws.reserve(cfg.samples);
+  if (stats) {
+    stats->rows.clear();
+    stats->rows.reserve((size_t)cfg.samples);
+  }
   Eigen::VectorXd qd(n);
+  std::vector<double> sp;
   for (int i = 0; i < cfg.samples; ++i) {
     s = sampler.transition(s, logger);
     s.cont_params(qd);
     draws.emplace_back(qd.data(), qd.data() + n);
+    if (stats) {
+      // get_sampler_params yields stepsize__, treedepth__, n_leapfrog__,
+      // divergent__, energy__ in that order (stan::mcmc::base_nuts).
+      sp.clear();
+      sampler.get_sampler_params(sp);
+      stats->rows.push_back({s.log_prob(), s.accept_stat(),
+                             sp.size() > 0 ? sp[0] : 0.0,
+                             sp.size() > 1 ? sp[1] : 0.0,
+                             sp.size() > 2 ? sp[2] : 0.0,
+                             sp.size() > 3 ? sp[3] : 0.0,
+                             sp.size() > 4 ? sp[4] : 0.0});
+    }
   }
   return draws;
 }

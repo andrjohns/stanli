@@ -3,6 +3,7 @@
 
 #include <stanli/graph.hpp>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -19,10 +20,22 @@ struct NutsConfig {
   int max_depth = 10;
 };
 
+// One row per post-warmup draw, in CmdStan's column order:
+//   lp__, accept_stat__, stepsize__, treedepth__, n_leapfrog__,
+//   divergent__, energy__
+// This is the sampler-level oracle the gradient rig cannot be: comparing
+// these against a CmdStan run catches configuration divergence (a wrong
+// max tree depth, a wrong adaptation target) that pointwise gradient
+// verification is structurally blind to.
+struct SamplerStats {
+  std::vector<std::array<double, 7>> rows;
+};
+
 // Adaptive diagonal-metric NUTS (stan::mcmc::adapt_diag_e_nuts) over the
 // executor's log_prob_grad. Returns one unconstrained parameter vector per
-// post-warmup draw.
-std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg);
+// post-warmup draw. `stats`, when non-null, receives one row per draw.
+std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg,
+                                          SamplerStats* stats = nullptr);
 
 }  // namespace stanli
 
