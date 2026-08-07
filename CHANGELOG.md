@@ -2,6 +2,21 @@
 
 ## 0.2.1
 
+- The sampler draws from CmdStan's generator now. It built
+  `boost::ecuyer1988` from the seed while CmdStan builds
+  `boost::random::mixmax` as `(0, 1, seed, chain)`, so the same seed
+  named unrelated streams and any sampling comparison was comparing two
+  different draws as much as two engines. `run_nuts` calls
+  `stan::services::util::create_rng` and draws the initial point the way
+  `stan::io::random_var_context` does. Note that a given seed now
+  produces different draws than 0.2.0 did; any seed is as valid as any
+  other, but a run pinned to a seed will not reproduce byte for byte.
+
+- A draw whose generated quantities throw is written as nan and sampling
+  continues, which is what CmdStan does. `stanli_run` used to abort and
+  print nothing, so one bad `lognormal_rng` on a marginal ODE solution
+  discarded every draw of an otherwise good chain.
+
 - Two kernels stopped doing twice the work. `normal_id_glm_lpdf` built a
   var tape in the forward, threw it away, and built it again in the
   backward to differentiate it; it now differentiates once and stashes
