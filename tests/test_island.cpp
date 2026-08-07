@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -55,14 +56,18 @@ struct HmmGraph {
   size_t body_ops = 0;
 };
 
-static HmmGraph build_hmm(int T) {
+// W widens the state vector without changing what is computed: only two
+// of its elements are ever read. What it does change is what the ops
+// COPY -- each SET_INDEX rewrites the whole vector -- which is the shape
+// the cost estimate is looking for (test_vector_copies_carved).
+static HmmGraph build_hmm(int T, int W = 2) {
   HmmGraph h;
   Graph& g = h.g;
-  const int gp0 = g.add_slot(2, true);   // initial log-state
+  const int gp0 = g.add_slot(W, true);   // initial log-state
   const int mu = g.add_slot(2, true);
   const int sigma = g.add_slot(1, true);
-  const int z2 = g.add_slot(2, false);   // fill-backed template (absorbed)
-  h.fills.emplace_back(z2, std::vector<double>{0.0, 0.0});
+  const int z2 = g.add_slot(W, false);   // fill-backed template (absorbed)
+  h.fills.emplace_back(z2, std::vector<double>((size_t)W, 0.0));
   auto cslot = [&](double v) {
     const int s = g.add_slot(1, false);
     h.fills.emplace_back(s, std::vector<double>{v});
@@ -87,8 +92,12 @@ static HmmGraph build_hmm(int T) {
       g.ops[id].variant = 0x06;  // y data, mu/sigma active; propto OFF
       const int nk = g.add_slot(1, false);
       g.add_op(OP_ADD, {s0, em}, nk);
-      const int dst = g.add_slot(2, false);
-      g.add_op(OP_SET_INDEX, {k == 0 ? z2 : next, nk}, dst, {k});
+      const int dst = g.add_slot(W, false);
+      // The first step fills the zero template (absorbed as a constant);
+      // later steps overwrite the previous step's state, which is what a
+      // forward algorithm does and what lets the registers alias.
+      g.add_op(OP_SET_INDEX, {k == 0 ? (t == 0 ? z2 : gp) : next, nk}, dst,
+               {k});
       next = dst;
     }
     gp = next;
@@ -161,6 +170,66 @@ static void test_unsupported_op_splits() {
   const int carved = carve_islands(g, h.fills, h.terms, {});
   expect("split none carved", carved == 0);
   expect("split ops unchanged", g.ops.size() == before);
+}
+
+// A region that carries far more state than it computes: each step drops
+// one scalar into its own wide template, so the register file grows by a
+// whole vector per three instructions. The file is rebuilt every call --
+// as vars on the backward, one nested-arena allocation each -- so the
+// replay costs more than the scalar ops it would replace. bones_model is
+// this shape (36 ops behind 4,024 registers) and the islands cost it 19x.
+static void test_wide_state_refused() {
+  Graph g;
+  Fills fills;
+  const int W = 64;
+  int prev = g.add_slot(1, true);
+  for (int t = 0; t < 12; ++t) {
+    const int sq = g.add_slot(1, false);
+    g.add_op(OP_MUL, {prev, prev}, sq);
+    const int tmpl = g.add_slot(W, false);
+    fills.emplace_back(tmpl, std::vector<double>((size_t)W, 0.0));
+    const int wide = g.add_slot(W, false);
+    g.add_op(OP_SET_INDEX, {tmpl, sq}, wide, {0});
+    const int back = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {wide}, back, {0});
+    prev = back;
+  }
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_ADD, {prev, prev}, lp);
+  g.result_slot = lp;
+  std::vector<int> terms{lp};
+  const size_t before = g.ops.size();  // 36 in vocab, above kMinIslandOps
+  const int carved = carve_islands(g, fills, terms, {});
+  expect("wide none carved", carved == 0);
+  expect("wide ops unchanged", g.ops.size() == before);
+}
+
+// The cost estimate, on the two shapes it has to tell apart. A wide
+// state vector copied per step is `iohmm_reg`: the ops move far more
+// than the register file does, and the island is the cheaper form.
+static void test_vector_copies_carved() {
+  HmmGraph ref = build_hmm(8, 128);
+  const std::vector<double> want = run_grad(std::move(ref.g), ref.fills);
+
+  HmmGraph isl = build_hmm(8, 128);
+  const int carved = carve_islands(isl.g, isl.fills, isl.terms, {});
+  expect("copies carved==1", carved == 1);
+  expect("copies ops==4", isl.g.ops.size() == 4);
+  const std::vector<double> got = run_grad(std::move(isl.g), isl.fills);
+  expect("copies sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("copies v" + std::to_string(i), got[i], want[i]);
+}
+
+// The same recurrence on a two-element state: nothing is copied, the ops
+// are already as cheap as the arithmetic they do, and a var replay of
+// them costs more. This is every HMM in the corpus but `iohmm_reg`.
+static void test_scalar_chain_refused() {
+  HmmGraph h = build_hmm(8);
+  const size_t before = h.g.ops.size();
+  const int carved = carve_islands(h.g, h.fills, h.terms, {});
+  expect("scalar chain none carved", carved == 0);
+  expect("scalar chain ops unchanged", h.g.ops.size() == before);
 }
 
 static void test_too_many_live_ins() {
@@ -279,6 +348,10 @@ static void test_live_in_and_out_slot() {
 }
 
 int main() {
+  // What the compiler does with a region, on graphs small enough to
+  // reason about. The cost estimate would refuse most of them -- it is
+  // policy, tested separately below, and these are about correctness.
+  setenv("STANLI_ISLAND_ALWAYS", "1", 1);
   test_hmm_parity();
   test_live_in_and_out_slot();
   test_short_run_untouched();
@@ -286,6 +359,11 @@ int main() {
   test_unsupported_op_splits();
   test_too_many_live_ins();
   test_six_live_ins_ok();
+
+  unsetenv("STANLI_ISLAND_ALWAYS");
+  test_wide_state_refused();
+  test_vector_copies_carved();
+  test_scalar_chain_refused();
   if (failures) {
     std::printf("%d failures\n", failures);
     return 1;

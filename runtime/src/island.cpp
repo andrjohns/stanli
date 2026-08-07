@@ -15,7 +15,10 @@
 // an op producing a target term (terms stay graph-visible), or idata in a
 // form the compiler does not model. Runs shorter than kMinIslandOps stay
 // as they are: below that, per-op dispatch with scratch partials is cheaper
-// than a var replay.
+// than a var replay. A compiled run is then kept only if it is cheaper
+// than the ops it replaces -- see the cost estimate at the end of
+// carve_islands, which is what decides the pass is a win rather than a
+// wash.
 #include <stanli/island.hpp>
 
 #include <stanli/graph.hpp>
@@ -33,6 +36,10 @@ namespace {
 
 constexpr int64_t kMinIslandOps = 32;
 constexpr int kMaxLiveIns = 6;
+// What one register costs against one element of graph traffic. The
+// register file is built per call and built again as vars on the
+// backward, an allocation each, and the reverse sweep walks all of them.
+constexpr int kVarWeight = 4;
 
 bool scalar_ins(const Graph& g, const Op& op) {
   for (int j = 0; j < op.n_in; ++j)
@@ -397,6 +404,35 @@ int carve_islands(Graph& g,
     for (size_t u = i; u < j && compiled; ++u) {
       cc.op_index = u;
       compiled = cc.compile(g.ops[u]) && cc.ok;
+    }
+    // Is the island cheaper than the ops it replaces? Both sides counted
+    // in elements touched per call: the graph's is what its ops write
+    // (an in-place element update writes one element, not a vector), the
+    // island's is its register file, weighted because the file is built
+    // twice per call and once as vars. See kVarWeight.
+    //
+    // This is the whole difference between the one model islands help
+    // and the eleven they do not. `iohmm_reg` copies a 1,500-element
+    // state vector per step -- 1.6M elements against the island's 435k,
+    // and it runs 2.6x faster islanded. Every other region the carver
+    // reaches is scalar arithmetic the in-place pass already made cheap,
+    // where the replay costs 4-20x what the ops did and measured 0.65x
+    // to 1.01x. Refusing them is what makes the pass a win rather than
+    // a wash. (`STANLI_ISLAND_ALWAYS=1` bypasses this, for tests that
+    // exercise the compiler on small graphs and for asking why a region
+    // was left alone.)
+    if (compiled && !std::getenv("STANLI_ISLAND_ALWAYS")) {
+      int64_t graph_elems = 0;
+      for (size_t u = i; u < j; ++u)
+        graph_elems += g.ops[u].opcode == OP_SET_INDEX_INPLACE
+                           ? 1
+                           : g.slots[g.ops[u].out].len;
+      const int64_t island_elems = kVarWeight * (int64_t)cc.prog.n_regs +
+                                   (int64_t)cc.prog.code.size();
+      if (std::getenv("STANLI_DEBUG_ISLAND"))
+        std::fprintf(stderr, "island? ops=%zu graph=%lld island=%lld\n", j - i,
+                     (long long)graph_elems, (long long)island_elems);
+      if (graph_elems < island_elems) compiled = false;
     }
     if (compiled) {
       // Live-outs: written in the region and visible after it, in
