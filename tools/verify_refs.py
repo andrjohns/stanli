@@ -43,6 +43,25 @@ def ulp_distance(a, b):
     return abs(key(ia) - key(ib))
 
 
+def pair_dev(a, b):
+    """(rel, ulp) for one reference/stanli pair, nonfinite-safe.
+
+    Both NaN, or the same infinity, is agreement (0, 0). A nonfinite
+    value on one side only is an infinite relative deviation: the old
+    arithmetic produced NaN here and Python's max() silently kept the
+    running value, which hid dogs_log disagreeing with CmdStan at -inf
+    for months.
+    """
+    if a != a and b != b:
+        return (0.0, 0)
+    if a == b:
+        return (0.0, 0)
+    if not (a - a == 0.0 and b - b == 0.0):
+        return (float("inf"), ulp_distance(a, b) if a == a and b == b else 0)
+    scale = max(abs(a), abs(b), 1.0)
+    return (abs(a - b) / scale, ulp_distance(a, b))
+
+
 def check_model(model, ref, pdb, check_bin, tmp, timeout):
     """Returns (model, status, max_rel, max_ulp, n_values, detail)."""
     stan = pdb / "models" / "stan" / f"{model}.stan"
@@ -81,9 +100,9 @@ def check_model(model, ref, pdb, check_bin, tmp, timeout):
         return (model, "SHAPE_FAIL", 0.0, 0, 0, f"{len(rv)} vs {len(gv)}")
     worst, worst_ulp = 0.0, 0
     for a, b in zip(rv, gv):
-        scale = max(abs(a), abs(b), 1.0)
-        worst = max(worst, abs(a - b) / scale)
-        worst_ulp = max(worst_ulp, ulp_distance(a, b))
+        rel, ulp = pair_dev(a, b)
+        worst = max(worst, rel)
+        worst_ulp = max(worst_ulp, ulp)
     n = len(rv)
     if "wa" in ref:
         # The write_array reference: column names must match exactly, and
@@ -107,9 +126,9 @@ def check_model(model, ref, pdb, check_bin, tmp, timeout):
             return (model, "WA_SHAPE_FAIL", worst, worst_ulp, n,
                     f"{len(wref)} vs {len(wgot)}")
         for a, b in zip(wref, wgot):
-            scale = max(abs(a), abs(b), 1.0)
-            worst = max(worst, abs(a - b) / scale)
-            worst_ulp = max(worst_ulp, ulp_distance(a, b))
+            rel, ulp = pair_dev(a, b)
+            worst = max(worst, rel)
+            worst_ulp = max(worst_ulp, ulp)
         n += len(wref)
     return (model, "OK", worst, worst_ulp, n, "")
 

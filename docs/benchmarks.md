@@ -347,9 +347,12 @@ They were also unequal work in a second way: stanli computed no
 transformed parameters and no generated quantities, so on the models with
 a generated quantities block (`diamonds`, `accel_splines`,
 `covid19imperial_v2` among the biggest apparent sampling wins) CmdStan
-was doing per-draw work stanli skipped. The write_array graph closes that
-for 93 of the 119 compiling models; the rest stop at an RNG call in
-generated quantities, which stanli cannot yet evaluate.
+was doing per-draw work stanli skipped. That gap is closed for all 119
+compiling models: the write_array graph covers 95, and the 24 the graph
+cannot express (RNG draws, branches on draw-computed values) run through
+a per-draw interpreter (`harnesses/wa_coverage.py` is the sweep). The
+sampling columns for those 24 predate the interpreted fallback, so they
+still understate CmdStan's side there.
 
 | engine | stage | time |
 | --- | --- | --- |
@@ -370,8 +373,14 @@ per-gradient table.
 
 Every model in the passing set is differentially verified against
 CmdStan's `log_prob_propto_jacobian` and full gradient at the shared
-point: 118/120 verified, 45 of them bitwise identical, worst relative
+point: 118/120 verified, 44 of them bitwise identical, worst relative
 deviation 2.6e-12 (`tools/verify_sample.py`, `docs/corpus-status.md`).
+For the 20 models whose generated quantities are deterministic
+(kronecker_gp sits out with its documented eigenvector deviation), the
+same oracle also replays CmdStan's write_array values (every CSV column at the
+same point); recording those caught two interpreter bugs on its first
+run, an uninitialized-value semantic and a transposed batched-simplex
+read, both invisible to structural coverage checks.
 Transformed models change summation order relative to CmdStan's scalar
 loop, so they verify at tolerance rather than bitwise: across the corpus
 the passes now change 66 models and the worst gradient deviation any of

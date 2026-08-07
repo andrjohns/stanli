@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <limits>
 #include <functional>
 #include <string>
 #include <vector>
@@ -167,6 +168,27 @@ static void check_elt(
 int main() {
   using namespace stanli;
   using stan::math::var;
+
+  // ---- uniform_lpdf out of support: -inf, no partials --------------------
+  // stan-math reports out-of-support y through an early return that never
+  // reaches the partials sink, so the kernel checks support itself. Found
+  // by the dogs_log reference: CmdStan said -inf, stanli said finite.
+  {
+    auto r = testutil::run_one_op(OP_UNIFORM_LPDF, {{0.1}, {-100.0}, {0.0}},
+                                  {true, false, false});
+    expect_eq("uniform oos value", r.value,
+              -std::numeric_limits<double>::infinity());
+    expect_eq("uniform oos dy", r.grad[0], 0.0);
+    auto r2 = testutil::run_one_op(OP_UNIFORM_LPDF,
+                                   {{-0.5}, {-100.0}, {0.0}},
+                                   {true, false, false});
+    var vy = -0.5;
+    var lp = stan::math::uniform_lpdf<false>(vy, -100.0, 0.0);
+    lp.grad();
+    expect_eq("uniform in value", r2.value, lp.val());
+    expect_eq("uniform in dy", r2.grad[0], vy.adj());
+    stan::math::recover_memory();
+  }
 
   // ---- normal_lpdf(y_pv, mu_ps, sigma_ps): all three parameters ----------
   {

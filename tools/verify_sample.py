@@ -57,6 +57,25 @@ def ulp_distance(a, b):
     return abs(key(ia) - key(ib))
 
 
+def pair_dev(a, b):
+    """(rel, ulp) for one reference/stanli pair, nonfinite-safe.
+
+    Both NaN, or the same infinity, is agreement (0, 0). A nonfinite
+    value on one side only is an infinite relative deviation: the old
+    arithmetic produced NaN here and Python's max() silently kept the
+    running value, which hid dogs_log disagreeing with CmdStan at -inf
+    for months.
+    """
+    if a != a and b != b:
+        return (0.0, 0)
+    if a == b:
+        return (0.0, 0)
+    if not (a - a == 0.0 and b - b == 0.0):
+        return (float("inf"), ulp_distance(a, b) if a == a and b == b else 0)
+    scale = max(abs(a), abs(b), 1.0)
+    return (abs(a - b) / scale, ulp_distance(a, b))
+
+
 def parse_wa(out):
     """(names_csv, value_strings) from WANAMES/WAVALS lines, or None."""
     names, vals = None, None
@@ -175,9 +194,9 @@ def main():
         worst = 0.0
         worst_ulp = 0
         for a, b in zip(rv, gv):
-            scale = max(abs(a), abs(b), 1.0)
-            worst = max(worst, abs(a - b) / scale)
-            worst_ulp = max(worst_ulp, ulp_distance(a, b))
+            rel, ulp = pair_dev(a, b)
+            worst = max(worst, rel)
+            worst_ulp = max(worst_ulp, ulp)
         status = "VERIFIED" if worst < 1e-10 else "MISMATCH"
         if status == "VERIFIED":
             n_pass += 1
@@ -211,8 +230,7 @@ def main():
             else:
                 wworst = 0.0
                 for a, b in zip(map(float, wa[1]), map(float, got_wa[1])):
-                    scale = max(abs(a), abs(b), 1.0)
-                    wworst = max(wworst, abs(a - b) / scale)
+                    wworst = max(wworst, pair_dev(a, b)[0])
                 if wworst < 1e-9:
                     refs[model]["wa"] = {"names": wa[0], "values": wa[1]}
                     wa_note = (f"; WA {len(wa[1])} values recorded "

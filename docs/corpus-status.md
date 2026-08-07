@@ -24,7 +24,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `Rate_4_model` | 3 | 1.3e-16 | 1 |
 | `Rate_5_model` | 2 | 0 (bitwise) | 0 |
 | `Survey_model` | 2 | 0 (bitwise) | 0 |
-| `accel_gp` | 67 | 2.4e-15 | 17 |
+| `accel_gp` | 67 | 1.6e-15 | 11 |
 | `accel_splines` | 83 | 6.6e-15 | 119 |
 | `arK` | 8 | 9.6e-16 | 5 |
 | `arma11` | 5 | 0 (bitwise) | 0 |
@@ -36,7 +36,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `diamonds` | 27 | 2.6e-12 | 16248 |
 | `dogs` | 4 | 1.4e-15 | 11 |
 | `dogs_hierarchical` | 3 | 1.4e-16 | 1 |
-| `dogs_log` | 3 | 0 (bitwise) | 4568827796563958854 |
+| `dogs_log` | 3 | 0 (bitwise) | 0 |
 | `dogs_nonhierarchical` | 66 | 7.4e-16 | 5 |
 | `dugongs_model` | 5 | 1.9e-16 | 1 |
 | `earn_height` | 4 | 0 (bitwise) | 0 |
@@ -108,7 +108,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `radon_variable_intercept_slope_noncentered` | 778 | 2.4e-15 | 14 |
 | `radon_variable_slope_centered` | 391 | 1.5e-14 | 92 |
 | `radon_variable_slope_noncentered` | 391 | 1.1e-14 | 74 |
-| `rats_model` | 66 | 2.4e-16 | 2 |
+| `rats_model` | 66 | 4.1e-16 | 3 |
 | `seeds_centered_model` | 27 | 0 (bitwise) | 0 |
 | `seeds_model` | 27 | 0 (bitwise) | 0 |
 | `seeds_stanified_model` | 27 | 0 (bitwise) | 0 |
@@ -126,6 +126,33 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `wells_interaction_c_model` | 5 | 6.6e-15 | 39 |
 | `wells_interaction_model` | 5 | 0 (bitwise) | 0 |
 
+## write_array references
+
+For models whose generated quantities are deterministic (no `_rng`), the oracle also records CmdStan's write_array at the same point: every CSV column (constrained parameters, transformed parameters, generated quantities). tools/verify_refs.py replays them in CI with the column names matched exactly and the values sharing the model's gate. Models with RNG draws are exercised structurally (all columns produced and finite) by harnesses/wa_coverage.py instead, since their values are a property of the RNG stream.
+
+| model | write_array values compared |
+| --- | ---: |
+| `2pl_latent_reg_irt` | 549 |
+| `GLMM_Poisson_model` | 125 |
+| `GLM_Binomial_model` | 83 |
+| `GLM_Poisson_model` | 84 |
+| `accel_gp` | 72 |
+| `accel_splines` | 160 |
+| `bym2_offset_only` | 9610 |
+| `diamonds` | 27 |
+| `gpcm_latent_reg_irt` | 550 |
+| `grsm_latent_reg_irt` | 418 |
+| `hier_2pl` | 804 |
+| `hmm_drive_0` | 429 |
+| `hmm_drive_1` | 429 |
+| `hmm_example` | 111 |
+| `hmm_gaussian` | 9519 |
+| `logistic_regression_rhs` | 4719 |
+| `losscurve_sislob` | 384 |
+| `lsat_model` | 1012 |
+| `rats_model` | 66 |
+| `surgical_model` | 28 |
+
 ## Rejected by both engines
 
 CmdStan and stanli both reject every shared evaluation point for these models: the model is invalid there (an ODE solution dipping below a declared lower bound, for instance), so there is nothing to compare. Agreement, not a gap, but not counted as verified either.
@@ -139,4 +166,4 @@ CmdStan and stanli both reject every shared evaluation point for these models: t
 
 ## Failures
 
-- `sir`: EVAL_FAIL poisson_lpmf: Rate parameter is -4.42014e-10, but must be nonnegative!
+- `sir`: EVAL_FAIL poisson_lpmf: Rate parameter is -2.06273e-09, but must be nonnegative!

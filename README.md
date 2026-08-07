@@ -21,7 +21,7 @@ pip install stanli
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
   (<!--gen:corpus_verified-->118/120<!--/gen--> posteriordb models
   differentially verified against CmdStan's log_prob and full gradient,
-  <!--gen:corpus_bitwise-->44<!--/gen--> of them bitwise identical, worst
+  <!--gen:corpus_bitwise-->45<!--/gen--> of them bitwise identical, worst
   relative deviation <!--gen:corpus_worst-->2.6e-12<!--/gen-->; per-model
   accuracy in relative terms and ULPs is listed there)
 - Install size: one 13.8 MB shared library, a 4.9 MB wheel. Breakdown

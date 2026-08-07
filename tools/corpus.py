@@ -7,6 +7,7 @@ PDB_DIR is a posteriordb checkout containing posterior_database/.
 Writes docs/corpus-status.md and prints the failure histogram.
 """
 import collections
+import gzip
 import json
 import pathlib
 import re
@@ -70,9 +71,16 @@ def main():
             with zipfile.ZipFile(dz) as z:
                 dj.write_bytes(z.read(z.namelist()[0]))
         try:
-            out = subprocess.run(
-                [str(CHECK), str(stan), str(dj)], capture_output=True,
-                text=True, timeout=120, cwd=REPO).stdout.strip()
+            # Same point walk as verify_sample/ref_driver: a model can be
+            # legitimately out of support at one probe point (dogs_log's
+            # uniform priors reject point 0) and fine at the next.
+            for point in ("0", "1", "2"):
+                out = subprocess.run(
+                    [str(CHECK), str(stan), str(dj), "--point", point],
+                    capture_output=True,
+                    text=True, timeout=120, cwd=REPO).stdout.strip()
+                if out.startswith("OK"):
+                    break
         except subprocess.TimeoutExpired:
             out = "EVAL_FAIL timeout"
         if out.startswith("OK"):
@@ -125,6 +133,28 @@ def main():
         v = ver[m]
         rel = "0 (bitwise)" if v["max_rel"] == 0 else f"{v['max_rel']:.1e}"
         md.append(f"| `{m}` | {v['n_values']} | {rel} | {v['max_ulp']} |")
+    refs_path = REPO / "docs" / "corpus-refs.json.gz"
+    wa_refs = {}
+    if refs_path.exists():
+        refs = json.loads(gzip.decompress(refs_path.read_bytes()))
+        wa_refs = {m: len(v["wa"]["values"])
+                   for m, v in refs.items() if "wa" in v}
+    if wa_refs:
+        md += ["", "## write_array references", "",
+               "For models whose generated quantities are deterministic "
+               "(no `_rng`), the oracle also records CmdStan's write_array "
+               "at the same point: every CSV column (constrained "
+               "parameters, transformed parameters, generated quantities). "
+               "tools/verify_refs.py replays them in CI with the column "
+               "names matched exactly and the values sharing the model's "
+               "gate. Models with RNG draws are exercised structurally "
+               "(all columns produced and finite) by "
+               "harnesses/wa_coverage.py instead, since their values are "
+               "a property of the RNG stream.", "",
+               "| model | write_array values compared |",
+               "| --- | ---: |"]
+        for m in sorted(wa_refs):
+            md.append(f"| `{m}` | {wa_refs[m]} |")
     rejected = [m for m, v in ver.items()
                 if v.get("status") == "REJECTED_BOTH"]
     if rejected:
