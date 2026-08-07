@@ -167,15 +167,15 @@ data structure.
 
 ## Where the compiled model still wins
 
-Honesty requires the other column. One benchmark model
-(`low_dim_gauss_mix`) still runs at about half CmdStan's speed: it
-computes `log_mix` per observation, a shape the rewriting pass does not
-yet know how to vectorize, so it stays as thousands of scalar operations.
-ODE models run at 0.6x: the right-hand side of an ODE is the one place
-Stan requires calling back into user code at times chosen by the solver,
-and stanli evaluates it through a compact bytecode program where CmdStan
-runs natively compiled code. Both gaps are engineering rather than
-anything fundamental, but today they are real.
+Honesty requires the other column. Two benchmark models still lose:
+`low_dim_gauss_mix` (0.78x) computes `log_mix` per observation, a shape
+the rewriting passes do not yet know how to vectorize, and `dogs` (0.65x)
+writes a matrix down its columns in strides the store-fusion pass cannot
+yet express. ODE models run at about 0.6x: the right-hand side of an ODE
+is the one place Stan requires calling back into user code at times
+chosen by the solver, and stanli evaluates it through a compact bytecode
+program where CmdStan runs natively compiled code. All three gaps are
+engineering rather than anything fundamental, but today they are real.
 
 The other cost is size, and it is the deliberate trade at the center of
 the design: the wheel is about 5 MB because it carries the entire Stan
