@@ -214,21 +214,13 @@ jobs:
           echo "minos $got, tag promises $MACOSX_DEPLOYMENT_TARGET"
           [ "$got" = "$MACOSX_DEPLOYMENT_TARGET" ]
 
-      # The library is the whole wheel, so proving it loads and samples is
-      # the only smoke test worth running here.
-      - name: Install the wheel and sample
+      # The library is the whole wheel; these tests prove it loads, samples,
+      # and fails the way the API promises.
+      - name: Install the wheel and run the Python tests
         run: |
           python3 -m venv /tmp/wheeltest
           /tmp/wheeltest/bin/pip install dist/*.whl
-          /tmp/wheeltest/bin/python -c "
-          import stanli
-          m = stanli.Model(stan_file='tests/fixtures/es.stan',
-                           data='tests/fixtures/eight_schools.json')
-          d = m.sample(seed=1, warmup=1000, samples=1000)
-          mu = d['mu'].mean()
-          assert 3.0 < mu < 6.0, mu
-          print('mu', mu)
-          "
+          /tmp/wheeltest/bin/python tests/test_python.py
 
       - uses: actions/upload-artifact@v4
         with:

@@ -133,13 +133,21 @@ class Model:
     def log_prob_grad(self, q):
         """log density (jacobian included) and gradient at unconstrained q."""
         q = np.ascontiguousarray(q, dtype=np.float64)
-        assert q.size == self.n_unconstrained
+        if q.size != self.n_unconstrained:
+            raise ValueError(f"q has {q.size} elements, model has "
+                             f"{self.n_unconstrained} unconstrained parameters")
         lp = ctypes.c_double()
         grad = np.empty(self.n_unconstrained)
-        _lib.stanli_grad(self._m,
-                         q.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
-                         ctypes.byref(lp),
-                         grad.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+        rc = _lib.stanli_grad(
+            self._m,
+            q.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            ctypes.byref(lp),
+            grad.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+        if rc != 0:
+            # The gradient buffer is uninitialized on failure; never let a
+            # caller see it.
+            raise RuntimeError("log density evaluation failed at this point "
+                               "(domain error in a distribution or function)")
         return lp.value, grad
 
     def sample(self, *, seed=1, warmup=1000, samples=1000, delta=0.8):
