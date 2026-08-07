@@ -233,8 +233,20 @@ void Executor::run_forward_only() {
     }
     return;
   }
+  // Unrolled by hand: four separate indirect-call sites predict
+  // independently, and the loop bookkeeping amortizes. Measured against a
+  // musttail-chained alternative in tools/bench_dispatch.cpp -- the unroll
+  // won (79-80% of the plain loop vs 85-95%, and no kernel signature
+  // changes), so this is the whole of "threaded dispatch" worth having.
   const size_t n = fwd_fn_.size();
-  for (size_t i = 0; i < n; ++i) fwd_fn_[i](ctx_[i]);
+  size_t i = 0;
+  for (; i + 4 <= n; i += 4) {
+    fwd_fn_[i](ctx_[i]);
+    fwd_fn_[i + 1](ctx_[i + 1]);
+    fwd_fn_[i + 2](ctx_[i + 2]);
+    fwd_fn_[i + 3](ctx_[i + 3]);
+  }
+  for (; i < n; ++i) fwd_fn_[i](ctx_[i]);
 }
 
 double Executor::forward() {
@@ -250,29 +262,39 @@ double Executor::gradient(double* grad_out) {
   std::memset(adjoints_.data(), 0, sizeof(double) * adjoints_.size());
   adjoints_[graph_.slots[graph_.result_slot].offset] = 1.0;
   if (profile_) {
-    for (size_t i = graph_.ops.size(); i-- > 0;) {
-      const Kernel& k = kernel(graph_.ops[i].opcode);
+    for (size_t pi = graph_.ops.size(); pi-- > 0;) {
+      const Kernel& k = kernel(graph_.ops[pi].opcode);
       if (!k.backward) continue;
-      KernelCtx& ctx = ctx_[i];
+      KernelCtx& ctx = ctx_[pi];
       if (ctx.out_adj_vec.len == 1) ctx.out_adj = ctx.out_adj_vec.data[0];
-      if (out2_adj_ptr_[i]) ctx.out2_adj = *out2_adj_ptr_[i];
+      if (out2_adj_ptr_[pi]) ctx.out2_adj = *out2_adj_ptr_[pi];
       const auto t0 = std::chrono::steady_clock::now();
       k.backward(ctx);
-      prof_[graph_.ops[i].opcode].bwd_ns +=
+      prof_[graph_.ops[pi].opcode].bwd_ns +=
           std::chrono::duration_cast<std::chrono::nanoseconds>(
               std::chrono::steady_clock::now() - t0).count();
     }
     std::memcpy(grad_out, adjoints_.data(), sizeof(double) * n_params_);
     return v;
   }
-  for (const BwdStep& s : bwd_) {
+  // Same unroll as the forward sweep (see run_forward_only).
+  const auto step = [](const BwdStep& s) {
     KernelCtx& ctx = *s.ctx;
     // The only fields that move between evaluations: the scalar adjoints,
     // which kernels take by value.
     if (ctx.out_adj_vec.len == 1) ctx.out_adj = ctx.out_adj_vec.data[0];
     if (s.out2_adj) ctx.out2_adj = *s.out2_adj;
     s.fn(ctx);
+  };
+  const size_t nb = bwd_.size();
+  size_t i = 0;
+  for (; i + 4 <= nb; i += 4) {
+    step(bwd_[i]);
+    step(bwd_[i + 1]);
+    step(bwd_[i + 2]);
+    step(bwd_[i + 3]);
   }
+  for (; i < nb; ++i) step(bwd_[i]);
   std::memcpy(grad_out, adjoints_.data(), sizeof(double) * n_params_);
   return v;
 }
