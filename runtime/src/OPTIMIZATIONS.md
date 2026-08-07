@@ -154,15 +154,30 @@ Reads and writes of vector elements get special handling:
   broadcast op copies it across the range. Widening it blindly was a
   bug: the kernels would have read only the first element.
 
-Densities get one more trick. If every lane's density result goes
-straight into the target (the running log-density total), the N scalar
-density ops become one vector density op. The vector kernels already
-return the sum of the element densities, so this also removes N
-additions from the target total. Discrete densities like
-`bernoulli_logit` carry their integer outcome (the observed 0 or 1) as
-a small attached integer rather than as a buffer; those fuse by
-concatenating the attached integers of all lanes into one array, which
-is exactly the form the vector kernel expects.
+Densities get two more tricks, depending on where their results go.
+
+If every lane's density result goes straight into the target (the
+running log-density total), the N scalar density ops become one vector
+density op. The vector kernels already return the sum of the element
+densities, so this also removes N additions from the target total.
+Discrete densities like `bernoulli_logit` carry their integer outcome
+(the observed 0 or 1) as a small attached integer rather than as a
+buffer; those fuse by concatenating the attached integers of all lanes
+into one array, which is exactly the form the vector kernel expects.
+
+If instead every lane's density result feeds another op in the same
+lane -- the mixture-model idiom, where two densities per observation
+feed a `log_mix` -- the N scalar density ops become one *elementwise*
+density op: its output is a vector holding each lane's own log density,
+not the sum. The kernel computes each element with the same
+per-element call the scalar ops used, so the results are identical bit
+for bit. The consumers (`log_mix`, `log_sum_exp` of two arguments, and
+the ordinary arithmetic ops) then vectorize as usual. When those
+consumers' results are what goes into the target, the pass adds one
+summing op over the vector and the N per-lane target entries become
+that single sum. A density whose inputs are all the same buffer in
+every lane is kept as one scalar op instead (each lane would compute
+the same number, and the consumers can reuse it).
 
 Anything the pass cannot prove safe, it leaves alone. The common
 reasons to leave a region alone:
@@ -170,9 +185,6 @@ reasons to leave a region alone:
 - One lane reads a result computed by the previous lane (a recurrence,
   like an AR model's state update, when it involves parameters).
 - A lane's intermediate result is used outside the loop.
-- The density results feed into another op (for example `log_mix`)
-  instead of the target. This is the main remaining gap; mixture
-  models still run as scalar loops because of it.
 - An op the pass does not have a rule for.
 
 When a repeated pattern only partly qualifies, the pass rewrites the
@@ -182,7 +194,8 @@ observations sorted by time period): each block vectorizes separately.
 
 Results, to give a sense of scale: `radon_pooled` drops from 27,670 ops
 to 8, `radon_county` from 25,152 to 10, `election88_full` from 289,165
-to 65, `dogs` from 12,751 to 261.
+to 65, `dogs` from 12,751 to 261, `low_dim_gauss_mix` (a mixture model,
+using the elementwise density form) to 16.
 
 ## Compiled ODE right-hand sides (`ode_prog.cpp`, report fallbacks: `STANLI_DEBUG_ODE=1`)
 
