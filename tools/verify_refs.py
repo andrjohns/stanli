@@ -53,15 +53,26 @@ def check_model(model, ref, pdb, check_bin, tmp, timeout):
     with zipfile.ZipFile(dz) as z:
         dj.write_bytes(z.read(z.namelist()[0]))
     try:
-        got = subprocess.run(
+        proc = subprocess.run(
             [str(check_bin), str(stan), str(dj),
              "--point", str(ref["point"])],
-            capture_output=True, text=True, cwd=REPO,
-            timeout=timeout).stdout.split()
+            capture_output=True, text=True, cwd=REPO, timeout=timeout)
     except subprocess.TimeoutExpired:
         return (model, "TIMEOUT", 0.0, 0, 0, "")
+    got = proc.stdout.split()
     if not got or got[0] != "OK":
-        return (model, "RUN_FAIL", 0.0, 0, 0, " ".join(got[:3]))
+        # Say HOW it died, not just that it did: a negative returncode is
+        # a signal (ldaK5's 49 GB compile came back as a bare RUN_FAIL
+        # because the OOM killer leaves no stdout).
+        detail = " ".join(got[:3])
+        if not detail:
+            detail = (f"killed by signal {-proc.returncode}"
+                      if proc.returncode < 0
+                      else f"exit {proc.returncode}, no output")
+        err = proc.stderr.strip().splitlines()
+        if err:
+            detail += " | " + err[-1][:120]
+        return (model, "RUN_FAIL", 0.0, 0, 0, detail)
     rv = [float(x) for x in ref["values"]]
     gv = [float(x) for x in got[1:]]
     if len(rv) != len(gv):

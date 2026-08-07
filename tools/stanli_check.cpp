@@ -111,6 +111,10 @@ int main(int argc, char** argv) {
   try {
     stanli::Executor ex(std::move(cm.graph));
     cm.bind(ex);
+    // STANLI_PROFILE=1: per-opcode accounting for the single gradient
+    // evaluation, printed to stderr. Same switch as stanli_run.
+    const char* prof_env = std::getenv("STANLI_PROFILE");
+    if (prof_env && prof_env[0] != '0') ex.set_profile(true);
     const int64_t n = ex.n_params();
     for (int64_t i = 0; i < n; ++i)
       ex.params_data()[i] = eval_point(i, variant);
@@ -128,6 +132,8 @@ int main(int argc, char** argv) {
     std::printf("OK %.17g", lp);
     for (double g : grad) std::printf(" %.17g", g);
     std::printf("\n");
+    if (prof_env && prof_env[0] != '0')
+      std::fprintf(stderr, "%s", ex.profile_report().c_str());
 
     // The write_array graph, exercised at the same point. Reported on stderr
     // so the machine-readable stdout contract is unchanged; this is what the
