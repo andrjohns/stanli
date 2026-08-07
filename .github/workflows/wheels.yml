@@ -8,12 +8,10 @@
 # stanli ships a ctypes-loaded shared library with no extension module, so
 # there is exactly one py3-none-<platform> wheel per platform.
 #
-# Windows is not here yet. It needs three things this workflow does not
-# have: opam 2.2+ native Windows support to build the stanc3 object, a
-# mingw-w64 toolchain (stan-math does not build under MSVC, which is why
-# RStan ships through RTools), and a version-script equivalent for the
-# export list. Track it separately rather than shipping a wheel nobody
-# has run.
+# Windows builds under mingw-w64 (stan-math does not build under MSVC,
+# which is why RStan ships through RTools), exports the C ABI through a
+# .def file, and bundles the release stanc.exe as a subprocess: the
+# embedded compiler waits on opam's native Windows support.
 name: wheels
 
 on:

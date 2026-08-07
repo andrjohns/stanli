@@ -269,11 +269,12 @@ the corpus status).
    fuse into an elementwise-lp density variant plus batched mixture
    kernels) and tape islands compile the leftover scalar residue into
    single ops where that is measurably cheaper than the ops.
-2. Windows wheels, and a CRAN shim package. The macOS (arm64, x86_64) and
-   Linux (x86_64, aarch64) wheels are built and published by
-   `.github/workflows/wheels.yml` on a version tag; Windows needs opam's
-   native Windows support for the stanc3 object and a mingw-w64 toolchain,
-   since stan-math does not build under MSVC.
+2. A CRAN shim package. All five wheels (macOS arm64/x86_64, Linux
+   x86_64/aarch64, Windows x86_64) are built and published by
+   `.github/workflows/wheels.yml` on a version tag. The Windows wheel is
+   built under mingw-w64 (stan-math does not build under MSVC) and
+   bundles the release `stanc.exe` as a subprocess instead of the
+   embedded compiler, which waits on opam's native Windows support.
 3. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
    kernels mirror CmdStan's default AoS arithmetic, which is scalar for
    transcendentals and reductions (strided var access defeats Eigen's
