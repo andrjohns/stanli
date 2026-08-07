@@ -32,6 +32,9 @@ pip install stanli
 
 ## Architecture
 
+For a contributor's file-by-file map and the how-to-add-a-function
+recipe, see [docs/hacking.md](docs/hacking.md).
+
 The premise: a Stan model does not need machine code generated for it.
 Every model is a composition of a fixed vocabulary of operations
 (densities, constraint transforms, linear algebra, elementwise math), so
