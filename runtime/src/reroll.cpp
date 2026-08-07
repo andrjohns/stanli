@@ -103,6 +103,10 @@ bool is_widenable(uint16_t oc) {
     case OP_TANHV:
     case OP_LOG_INV_LOGIT:
     case OP_LOG1M_INV_LOGIT:
+    // Batched since mixture.cpp grew shape dispatch: any argument len 1 or
+    // N, out len N, per-element math bit-identical to the scalar op.
+    case OP_LOG_MIX:
+    case OP_LSE2:
       return true;
     default:
       return false;
@@ -122,6 +126,11 @@ struct Pos {
   bool index_elision = false;  // OP_INDEX, idata==lane, base len==lanes
   bool hoist = false;          // all inputs + idata invariant: emit once
   bool term_density = false;   // density, every lane's out a target term
+  bool elt_density = false;    // density, every lane's out consumed only
+                               //   inside its own lane -> variant bit 6,
+                               //   out[n] = lane n's lp
+  bool term_widen = false;     // widenable, every lane's out a target term
+                               //   -> widen + OP_SUM_VEC, swap the terms
   int slice_start = -1;        // OP_INDEX over a contiguous window
   std::vector<int> gather_idx; // OP_INDEX with a data-driven index
   int store_vec = -1;          // element write filling a window of this
@@ -233,15 +242,17 @@ RerollStats reroll(Graph& g,
          ++P) {
       if (i < retry_at[(size_t)P]) continue;
       // Cheap pre-check before any lane counting: a profitable region must
-      // contain either an allowlisted density whose out is a target term, or
-      // a per-lane element write (which fuses into one vector store).
+      // contain an allowlisted density (term or elementwise), a per-lane
+      // element write (which fuses into one vector store), or a widenable
+      // op whose out is a target term (log_mix lanes over already-vector
+      // lps: the region is INDEX/INDEX/LOG_MIX with no density at all).
       bool candidate = false;
       for (int p = 0; p < P && !candidate; ++p) {
         const Op& t = g.ops[i + p];
-        candidate = ((is_density(t.opcode) ||
-                      is_idata_outcome_density(t.opcode)) &&
-                     term_set.count(t.out) != 0) ||
-                    is_element_store(t);
+        candidate = is_density(t.opcode) ||
+                    is_idata_outcome_density(t.opcode) ||
+                    is_element_store(t) ||
+                    (is_widenable(t.opcode) && term_set.count(t.out) != 0);
       }
       if (!candidate) continue;
 
@@ -272,6 +283,8 @@ RerollStats reroll(Graph& g,
         bool ok = true;
         bool any_term_density = false;
         bool any_store = false;
+        bool any_elt_density = false;
+        bool any_term_widen = false;
         const size_t region_end = i + (size_t)P * (size_t)Luse;
         for (int p = 0; p < P; ++p) {
           const Op& t = op_at(p, 0);
@@ -477,20 +490,25 @@ RerollStats reroll(Graph& g,
             }
           } else if (is_density(t.opcode) ||
                      is_idata_outcome_density(t.opcode)) {
-            if (br_term < Luse || br_internal < Luse) {
-              // br_internal here can only mean an extra root: a term
-              // density has no op consumers to escape to.
+            // Two fusable dispositions: every lane's out IS a target term
+            // (one summed vector density), or NO lane's out is a term and
+            // each is consumed only inside its own lane (one elementwise
+            // density, variant bit 6 -- the log_mix/log_sum_exp mixture
+            // idiom). Mixed lanes or escaping outputs bound the prefix.
+            const bool all_terms = br_term == Luse;
+            const bool no_terms = br_nonterm == Luse;
+            if (br_internal < Luse || (!all_terms && !no_terms)) {
               ok = false;
-              prefix = std::min(prefix, std::min(br_term, br_internal));
-            } else {
+              prefix = std::min(
+                  prefix, std::min(br_internal, std::max(br_term, br_nonterm)));
+            } else if (is_idata_outcome_density(t.opcode) && t.n_idata != 1) {
+              ok = false;
+              prefix = 0;  // already a vector op; nothing to fuse
+            } else if (all_terms) {
               auto uit = uses.find(t.out);
               if (uit != uses.end() && !uit->second.empty()) {
                 ok = false;
                 prefix = 0;  // a term that is also an op input
-              } else if (is_idata_outcome_density(t.opcode) &&
-                         t.n_idata != 1) {
-                ok = false;
-                prefix = 0;  // already a vector op; nothing to fuse
               } else if (all_inputs_invariant &&
                          !is_idata_outcome_density(t.opcode)) {
                 // L identical lanes (the const pool dedup'd even the data
@@ -507,6 +525,20 @@ RerollStats reroll(Graph& g,
                     ap.outcome_idata.push_back(op_at(p, l).idata[0]);
                 }
               }
+            } else if (all_inputs_invariant &&
+                       !is_idata_outcome_density(t.opcode)) {
+              // Every lane computes the same scalar lp: keep ONE scalar op
+              // and let the lanes' consumers broadcast it. Widening scalar
+              // inputs into a len-N out is the losscurve hazard.
+              ap.hoist = true;
+            } else {
+              ap.elt_density = true;
+              any_elt_density = true;
+              if (is_idata_outcome_density(t.opcode)) {
+                ap.outcome_idata.reserve((size_t)Luse);
+                for (int64_t l = 0; l < Luse; ++l)
+                  ap.outcome_idata.push_back(op_at(p, l).idata[0]);
+              }
             }
           } else if (all_inputs_invariant) {
             const int64_t io_ok = std::min(br_internal, br_nonterm);
@@ -517,10 +549,25 @@ RerollStats reroll(Graph& g,
               prefix = std::min(prefix, io_ok);
             }
           } else if (is_widenable(t.opcode)) {
-            const int64_t io_ok = std::min(br_internal, br_nonterm);
-            if (io_ok < Luse) {
-              ok = false;
-              prefix = std::min(prefix, io_ok);
+            if (br_term == Luse && br_internal == Luse) {
+              // Every lane's out is a target term (log_mix under
+              // `target +=`): widen the op, SUM_VEC the lanes, and swap
+              // the N terms for the sum.
+              auto uit = uses.find(t.out);
+              if (uit != uses.end() && !uit->second.empty()) {
+                ok = false;
+                prefix = 0;  // a term that is also an op input
+              } else {
+                ap.term_widen = true;
+                any_term_widen = true;
+              }
+            } else {
+              const int64_t io_ok =
+                  std::min(br_internal, std::max(br_term, br_nonterm));
+              if (io_ok < Luse || br_nonterm < Luse) {
+                ok = false;
+                prefix = std::min(prefix, io_ok);
+              }
             }
           } else {
             ok = false;
@@ -528,7 +575,8 @@ RerollStats reroll(Graph& g,
           }
           lane0_producer[t.out] = p;
         }
-        if (ok && (any_term_density || any_store)) {
+        if (ok && (any_term_density || any_store || any_elt_density ||
+                   any_term_widen)) {
           classified = true;
           break;
         }
@@ -670,6 +718,75 @@ RerollStats reroll(Graph& g,
               break;  // unreachable: classification succeeded
           }
         }
+        // Swap the Luse lane terms for one replacement, at the first
+        // lane's position (term_density and term_widen both end here).
+        const auto swap_terms = [&](int new_term) {
+          std::unordered_set<int> dead;
+          for (int64_t l = 0; l < Luse; ++l) dead.insert(op_at(p, l).out);
+          std::vector<int> next_terms;
+          next_terms.reserve(target_terms.size());
+          bool placed = false;
+          for (int s : target_terms) {
+            if (dead.count(s)) {
+              if (!placed) {
+                next_terms.push_back(new_term);
+                placed = true;
+              }
+            } else {
+              next_terms.push_back(s);
+            }
+          }
+          target_terms = std::move(next_terms);
+          for (int s : dead) term_set.erase(s);
+          term_set.insert(new_term);
+        };
+        if (ap.elt_density) {
+          // One density op with variant bit 6: out[n] is lane n's lp, read
+          // by the lanes' (widened) consumers. An all-scalar real-arg
+          // density classified as hoist instead, so a vector input or a
+          // per-lane outcome exists here and the out is genuinely len-N.
+          op.variant = (uint8_t)(op.variant | 0x40u);
+          op.out = g.add_slot(Luse, false);
+          if (!ap.outcome_idata.empty()) {
+            g.idata_pool.push_back(std::move(ap.outcome_idata));
+            op.idata = g.idata_pool.back().data();
+            op.n_idata = (int64_t)g.idata_pool.back().size();
+          }
+          pos_out[(size_t)p] = op.out;
+          result.push_back(op);
+          continue;
+        }
+        if (ap.term_widen) {
+          int term_slot;
+          if (all_scalar) {
+            // Every lane's term is the same scalar: one op, times L.
+            result.push_back(op);  // scalar op, out = t.out
+            Op mul;
+            mul.opcode = OP_MUL;
+            mul.n_in = 2;
+            mul.in[0] = op.out;
+            const int lc = g.add_slot(1, false);
+            fills.emplace_back(lc, std::vector<double>{(double)Luse});
+            mul.in[1] = lc;
+            mul.out = g.add_slot(1, false);
+            result.push_back(mul);
+            term_slot = mul.out;
+            pos_out[(size_t)p] = op.out;
+          } else {
+            op.out = g.add_slot(Luse, false);
+            result.push_back(op);
+            Op sum;
+            sum.opcode = OP_SUM_VEC;
+            sum.n_in = 1;
+            sum.in[0] = op.out;
+            sum.out = g.add_slot(1, false);
+            result.push_back(sum);
+            term_slot = sum.out;
+            pos_out[(size_t)p] = op.out;
+          }
+          swap_terms(term_slot);
+          continue;
+        }
         // A widened op whose mapped inputs are all len-1 computes the same
         // value in every lane -- its lane-varying inputs came from HOISTED
         // producers, which are scalars. Widening it anyway hands the kernels
@@ -707,26 +824,7 @@ RerollStats reroll(Graph& g,
             op.idata = g.idata_pool.back().data();
             op.n_idata = (int64_t)g.idata_pool.back().size();
           }
-          // Swap the Luse lane terms for the one summed term, at the
-          // first lane's position.
-          std::unordered_set<int> dead;
-          for (int64_t l = 0; l < Luse; ++l) dead.insert(op_at(p, l).out);
-          std::vector<int> next_terms;
-          next_terms.reserve(target_terms.size());
-          bool placed = false;
-          for (int s : target_terms) {
-            if (dead.count(s)) {
-              if (!placed) {
-                next_terms.push_back(op.out);
-                placed = true;
-              }
-            } else {
-              next_terms.push_back(s);
-            }
-          }
-          target_terms = std::move(next_terms);
-          for (int s : dead) term_set.erase(s);
-          term_set.insert(op.out);
+          swap_terms(op.out);
         } else {
           op.out = g.add_slot(Luse, false);
         }

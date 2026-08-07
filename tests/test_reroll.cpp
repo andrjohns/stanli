@@ -200,8 +200,150 @@ static void test_bail_recurrence() {
   expect("recurrence ops unchanged", g.ops.size() == before);
 }
 
-// (b) density out consumed by another op (gauss_mix shape): must bail.
-static void test_bail_nonterm_density() {
+// (b) density outs consumed inside their own lanes (gauss_mix shape): the
+// elementwise-lp rule fuses the densities (variant bit 6), widens the
+// consumer, and swaps the lane terms for one SUM_VEC.
+static void test_gauss_mix_shape() {
+  const int L = 6;
+  Graph g;
+  Fills fills;
+  const int theta = g.add_slot(1, true);
+  const int mu1 = g.add_slot(1, true);
+  const int sig1 = g.add_slot(1, true);
+  const int mu2 = g.add_slot(1, true);
+  const int sig2 = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int y = cslot(0.4 * l - 1.1);
+    const int lp1 = g.add_slot(1, false);
+    const int i1 = g.add_op(OP_NORMAL_LPDF, {y, mu1, sig1}, lp1);
+    g.ops[i1].variant = 0x06;
+    const int lp2 = g.add_slot(1, false);
+    const int i2 = g.add_op(OP_NORMAL_LPDF, {y, mu2, sig2}, lp2);
+    g.ops[i2].variant = 0x06;
+    const int t = g.add_slot(1, false);
+    g.add_op(OP_LOG_MIX, {theta, lp1, lp2}, t);
+    terms.push_back(t);
+  }
+  Graph ref = g;
+  {
+    int acc = terms[0];
+    for (int l = 1; l < L; ++l) {
+      const int s = ref.add_slot(1, false);
+      ref.add_op(OP_ADD_N, {acc, terms[l]}, s);
+      acc = s;
+    }
+    ref.result_slot = acc;
+  }
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  RerollStats st = reroll(g, f2, tt, {});
+  expect("gmix regions==1", st.regions == 1);
+  // 2 elementwise NORMAL + 1 widened LOG_MIX + 1 SUM_VEC.
+  expect("gmix ops==4", g.ops.size() == 4);
+  expect("gmix one term", tt.size() == 1);
+  expect("gmix elt variant", (g.ops[0].variant & 0x40) != 0);
+  g.result_slot = tt[0];
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("gmix sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("gmix v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// (b2) idata-outcome lpmf feeding an in-lane op: the elementwise lpmf
+// concatenates the lane outcomes into one idata array.
+static void test_elt_lpmf_shape() {
+  const int L = 6;
+  Graph g;
+  Fills fills;
+  const int alpha = g.add_slot(L, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int a = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {alpha}, a, {l});
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_BERNOULLI_LOGIT_LPMF, {a}, lp, {l % 2});
+    g.ops[id].variant = 0x81;
+    const int t = g.add_slot(1, false);
+    g.add_op(OP_ADD, {lp, cslot(0.2 * l)}, t);
+    terms.push_back(t);
+  }
+  Graph ref = g;
+  reduce_terms_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  RerollStats st = reroll(g, f2, tt, {});
+  expect("eltlpmf regions==1", st.regions == 1);
+  // INDEX elides; 1 elementwise BERNOULLI_LOGIT + 1 widened ADD + SUM_VEC.
+  expect("eltlpmf ops==3", g.ops.size() == 3);
+  expect("eltlpmf idata==L", g.ops[0].n_idata == L);
+  g.result_slot = tt[0];
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("eltlpmf sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("eltlpmf v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// (b3) density whose inputs are all lane-invariant, feeding an in-lane op:
+// the density HOISTS to one scalar op (widening scalar inputs into a len-N
+// out is the losscurve hazard); the consumer broadcasts it.
+static void test_elt_scalar_density_hoists() {
+  const int L = 6;
+  Graph g;
+  Fills fills;
+  const int mu = g.add_slot(1, true);
+  const int sigma = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  const int y = cslot(0.7);  // same slot every lane: invariant
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {y, mu, sigma}, lp);
+    g.ops[id].variant = 0x06;
+    const int t = g.add_slot(1, false);
+    g.add_op(OP_ADD, {lp, cslot(0.3 * l - 0.5)}, t);
+    terms.push_back(t);
+  }
+  Graph ref = g;
+  reduce_terms_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  RerollStats st = reroll(g, f2, tt, {});
+  expect("elthoist regions==1", st.regions == 1);
+  // 1 hoisted scalar NORMAL + 1 widened ADD (broadcast lp) + SUM_VEC.
+  expect("elthoist ops==3", g.ops.size() == 3);
+  expect("elthoist density scalar",
+         (g.ops[0].variant & 0x40) == 0);  // NOT elementwise
+  g.result_slot = tt[0];
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("elthoist sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("elthoist v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// (b4) density out consumed by ANOTHER lane's op (cross-lane mixture
+// recursion): must still bail.
+static void test_bail_cross_lane_density() {
   const int L = 6;
   Graph g;
   Fills fills;
@@ -213,19 +355,55 @@ static void test_bail_nonterm_density() {
     return s;
   };
   std::vector<int> terms;
+  int prev_lp = -1;
   for (int l = 0; l < L; ++l) {
     const int lp = g.add_slot(1, false);
     const int id = g.add_op(OP_NORMAL_LPDF, {cslot(0.1 * l), mu, sigma}, lp);
     g.ops[id].variant = 0x06;
-    const int doubled = g.add_slot(1, false);
-    g.add_op(OP_ADD, {lp, lp}, doubled);  // lp escapes into an op
-    terms.push_back(doubled);
+    const int t = g.add_slot(1, false);
+    // Lane 0 consumes its own lp; every later lane consumes the PREVIOUS
+    // lane's lp: the density out escapes its lane.
+    g.add_op(OP_ADD, {l == 0 ? lp : prev_lp, cslot(0.2)}, t);
+    prev_lp = lp;
+    terms.push_back(t);
   }
   std::vector<int> tt = terms;
   const size_t before = g.ops.size();
   RerollStats st = reroll(g, fills, tt, {});
-  expect("nonterm density not rerolled", st.regions == 0);
-  expect("nonterm ops unchanged", g.ops.size() == before);
+  expect("crosslane not rerolled", st.regions == 0);
+  expect("crosslane ops unchanged", g.ops.size() == before);
+}
+
+// (b5) density outs consumed only outside the region (one op sums them all
+// after the run): must still bail.
+static void test_bail_escaping_density() {
+  const int L = 6;
+  Graph g;
+  Fills fills;
+  const int mu = g.add_slot(1, true);
+  const int sigma = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> lps;
+  for (int l = 0; l < L; ++l) {
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {cslot(0.1 * l), mu, sigma}, lp);
+    g.ops[id].variant = 0x06;
+    const int sq = g.add_slot(1, false);
+    g.add_op(OP_SQUARE, {lp}, sq);  // in-lane consumer, keeps shape periodic
+    lps.push_back(sq);
+  }
+  // The escape: everything ALSO read by one op past the region.
+  const int total = g.add_slot(1, false);
+  g.add_op(OP_ADD_N, {lps[0], lps[1], lps[2], lps[3], lps[4], lps[5]}, total);
+  std::vector<int> tt{total};
+  const size_t before = g.ops.size();
+  RerollStats st = reroll(g, fills, tt, {});
+  expect("escape not rerolled", st.regions == 0);
+  expect("escape ops unchanged", g.ops.size() == before);
 }
 
 // (c) partial-range INDEX progression (a contiguous window of a longer
@@ -895,7 +1073,11 @@ int main() {
   test_radon_shape();
   test_ark_shape();
   test_bail_recurrence();
-  test_bail_nonterm_density();
+  test_gauss_mix_shape();
+  test_elt_lpmf_shape();
+  test_elt_scalar_density_hoists();
+  test_bail_cross_lane_density();
+  test_bail_escaping_density();
   test_partial_range_slices();
   test_data_index_gathers();
   test_env_disable();
