@@ -3,6 +3,7 @@
 // evaluation order. Plus the unsupported-construct error path.
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
 #include <stanli/packet.hpp>
 
 #include <stan/math.hpp>
@@ -569,6 +570,55 @@ int main() {
   // cholesky_factor_corr is supported now, so this fixture compiles; the
   // error path is covered by the unsupported-function check below.
   check(!threw, "cholesky_corr fixture compiles");
+  // Control flow on a parameter: an `if` and a ternary whose conditions
+  // depend on mu and sigma cannot pick an arm at load time, so lowering
+  // compiles each into a necessity island. The gradient must be the one
+  // the taken arm implies -- the reference below branches on the same
+  // values, which is exactly what CmdStan's generated C++ does.
+  //
+  // Both arms of both constructs are covered: case 0 takes the if's THEN
+  // and the ternary's THEN, case 1 takes both ELSEs.
+  {
+    // An optimization pass may be switched off; this is not one. Without
+    // the island the model does not compile at all, so the disable flag
+    // must not reach it.
+    setenv("STANLI_NO_ISLAND", "1", 1);
+    DataMap d;
+    d.set_real("y", 1.75);
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/paramcond.tmir.sexp"), d);
+    int islands = 0;
+    for (const Op& op : lm.graph.ops)
+      if (op.opcode == OP_ISLAND) ++islands;
+    check(islands == 2, "paramcond: one island per parameter condition");
+
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double pts[2][2] = {{0.3, -0.2}, {-0.4, 0.5}};
+    for (int c = 0; c < 2; ++c) {
+      lex.params_data()[0] = pts[c][0];
+      lex.params_data()[1] = pts[c][1];
+      double grad[2] = {0, 0};
+      const double lp = lex.gradient(grad);
+
+      using stan::math::var;
+      var u_mu = pts[c][0], u_sig = pts[c][1];
+      var sigma = stan::math::exp(u_sig);
+      var acc = u_sig;  // lower=0 jacobian
+      var m = stan::math::value_of(u_mu) > 0 ? u_mu * 2.0 : -u_mu;
+      var s = stan::math::value_of(sigma) < 1 ? 1.0 / sigma : sigma;
+      // `~` lowers propto, so the reference drops the same constant.
+      acc += stan::math::normal_lpdf<true>(1.75, m, s);
+      acc.grad();
+      const std::string tag = "paramcond" + std::to_string(c);
+      expect_eq(tag + " lp", lp, acc.val());
+      expect_eq(tag + " dmu", grad[0], u_mu.adj());
+      expect_eq(tag + " dsigma", grad[1], u_sig.adj());
+      stan::math::recover_memory();
+    }
+    unsetenv("STANLI_NO_ISLAND");
+  }
+
   {
     // Error path: an unsupported function is reported by name, never
     // silently miscompiled. Mutate a known-good fixture's density name.

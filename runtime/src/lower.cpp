@@ -1,6 +1,7 @@
 #include <stanli/compile.hpp>
 #include <stanli/constfold.hpp>
 #include <stanli/inplace.hpp>
+#include <stanli/mir_prog.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/mir_interp.hpp>
 #include <stanli/ode.hpp>
@@ -380,8 +381,9 @@ struct Lowering {
       case mir::Expr::TernaryIf: {
         // Data-only conditions resolve at compile time; either branch may
         // reference parameters.
-        if (!e.args[0].data_only)
-          fail("TernaryIf on a parameter condition unsupported", e.raw);
+        // A parameter-dependent condition cannot pick an arm at load
+        // time, so the whole expression becomes an island.
+        if (!e.args[0].data_only) return lower_param_ternary(e);
         const bool c = td.eval(e.args[0]).r.at(0) != 0.0;
         return lower_expr(e.args[c ? 1 : 2]);
       }
@@ -397,6 +399,161 @@ struct Lowering {
         fail("unsupported expression", e.raw.empty() ? e.name : e.raw);
       }
     }
+  }
+
+
+  // ---- necessity islands ---------------------------------------------------
+  // A region whose control flow depends on a parameter has no op-graph
+  // form: `if (theta > 0)` picks its arm at evaluation time, and an op
+  // graph is fixed when the model is loaded. Such a region compiles
+  // instead into a register program (mir_prog.hpp) that one OP_ISLAND
+  // runs -- forward on doubles, backward replayed under stan-math's
+  // nested autodiff, which differentiates the arm that actually ran.
+  // That is what CmdStan's generated C++ does for the same statement,
+  // because it is the same autodiff over the same arithmetic.
+  //
+  // Unlike the carver's islands (island.cpp) this is not an optimization
+  // and STANLI_NO_ISLAND does not disable it: without it the model does
+  // not compile at all.
+  //
+  // Names the region reads that live outside it bind as live-ins; names
+  // it assigns become live-outs, extracted into fresh slots that later
+  // statements refer to. An assigned name is usually both: the arm that
+  // does not run has to leave the old value in place.
+  struct IslandRegion {
+    std::vector<int> in_slots;
+    std::vector<std::string> out_names;
+  };
+
+  // Every name an Assignment targets anywhere in `s`, in first-seen order.
+  void assigned_names(const mir::Stmt& s, std::vector<std::string>* out) {
+    if (s.kind == mir::Stmt::Assignment &&
+        std::find(out->begin(), out->end(), s.lhs) == out->end())
+      out->push_back(s.lhs);
+    for (const auto& k : s.body) assigned_names(k, out);
+  }
+
+  // Compile `s` (a statement region) or `e` (a ternary) into a program.
+  void lower_island(const mir::Stmt* s, const mir::Expr* e, IslandRegion* reg,
+                    Range* expr_out, std::shared_ptr<IslandProg>* prog_out) {
+    auto prog = std::make_shared<IslandProg>();
+    ProgramCompiler c{*prog, fun_defs};
+    for (const auto& [name, v] : int_env) c.ints[name] = {v};
+    c.bind_extern = [&](const std::string& name, Range* r) {
+      auto sc = scope.find(name);
+      const int slot = sc != scope.end() ? sc->second : env_slot(name);
+      if (slot < 0) return false;
+      const int64_t len = g.slots[slot].len;
+      if (len <= 0) return false;
+      // An op takes at most six inputs (graph.hpp), and each outside
+      // value the region reads is one of them.
+      if ((int)reg->in_slots.size() >= 6)
+        c.bail("a parameter-dependent region may read at most 6 values "
+               "from outside it; " + name + " is one too many");
+      r->reg = c.alloc((int)len);
+      r->len = (int)len;
+      prog->ins.push_back(IslandProg::LiveIn{r->reg, (int)len});
+      reg->in_slots.push_back(slot);
+      return true;
+    };
+    try {
+      if (s) {
+        // A local declared before the region but never assigned has no
+        // slot yet (lowering makes one on first assignment), so there is
+        // no outside value to read: the region declares it itself. Stan
+        // initializes a local to NaN, and an arm that does not assign it
+        // has to leave it that way.
+        std::vector<std::string> pre;
+        assigned_names(*s, &pre);
+        for (const std::string& name : pre) {
+          if (scope.count(name) || int_locals.count(name)) continue;
+          auto dl = decl_lens.find(name);
+          if (dl == decl_lens.end()) continue;
+          c.declare(name, (int)dl->second.len,
+                    std::numeric_limits<double>::quiet_NaN());
+        }
+        c.stmt(*s);
+        std::vector<std::string> assigned;
+        assigned_names(*s, &assigned);
+        for (const std::string& name : assigned) {
+          auto it = c.reals.find(name);
+          if (it == c.reals.end()) continue;
+          reg->out_names.push_back(name);
+          for (int k = 0; k < it->second.len; ++k)
+            prog->out_regs.push_back(it->second.reg + k);
+        }
+      } else {
+        *expr_out = c.expr(*e);
+        for (int k = 0; k < expr_out->len; ++k)
+          prog->out_regs.push_back(expr_out->reg + k);
+      }
+    } catch (Bail& b) {
+      fail("parameter-dependent region: " + b.why, s ? s->raw : e->raw);
+    }
+    if (prog->out_regs.empty())
+      fail("parameter-dependent region produces nothing", s ? s->raw : e->raw);
+    *prog_out = std::move(prog);
+  }
+
+  // The OP_ISLAND for a compiled region, plus one extraction per live-out.
+  void emit_island(const std::shared_ptr<IslandProg>& prog,
+                   const IslandRegion& reg, const std::vector<int>& out_lens,
+                   std::vector<int>* out_slots) {
+    int64_t packed = 0;
+    for (int len : out_lens) packed += len;
+    Op is;
+    is.opcode = OP_ISLAND;
+    is.n_in = (int)reg.in_slots.size();
+    for (int k = 0; k < is.n_in; ++k) is.in[k] = reg.in_slots[k];
+    is.out = add_slot(packed, false);
+    is.udata = prog.get();
+    g.udata_pool.push_back(prog);
+    g.ops.push_back(is);
+    int64_t off = 0;
+    for (size_t k = 0; k < out_lens.size(); ++k) {
+      const int len = out_lens[k];
+      const Val v =
+          emit(len == 1 ? OP_INDEX : OP_SLICE, {is.out}, len, {}, {(int)off});
+      out_slots->push_back(v.slot);
+      off += len;
+    }
+  }
+
+  // `if (<depends on a parameter>) ... else ...`
+  void lower_param_ifelse(const mir::Stmt& s) {
+    IslandRegion reg;
+    std::shared_ptr<IslandProg> prog;
+    Range ignored;
+    lower_island(&s, nullptr, &reg, &ignored, &prog);
+    std::vector<int> out_lens;
+    for (const std::string& name : reg.out_names) {
+      auto it = scope.find(name);
+      if (it != scope.end()) {
+        out_lens.push_back((int)g.slots[it->second].len);
+        continue;
+      }
+      auto dl = decl_lens.find(name);
+      if (dl == decl_lens.end())
+        fail("parameter-dependent region assigns " + name +
+             ", which has no declared shape", s.raw);
+      out_lens.push_back((int)dl->second.len);
+    }
+    std::vector<int> out_slots;
+    emit_island(prog, reg, out_lens, &out_slots);
+    // Later statements read the island's results, not the old values.
+    for (size_t k = 0; k < reg.out_names.size(); ++k)
+      scope[reg.out_names[k]] = out_slots[k];
+  }
+
+  // `<depends on a parameter> ? a : b`
+  Val lower_param_ternary(const mir::Expr& e) {
+    IslandRegion reg;
+    std::shared_ptr<IslandProg> prog;
+    Range value;
+    lower_island(nullptr, &e, &reg, &value, &prog);
+    std::vector<int> out_slots;
+    emit_island(prog, reg, {value.len}, &out_slots);
+    return {out_slots[0], info[out_slots[0]]};
   }
 
   Val emit(uint16_t opcode, std::vector<int> ins, int64_t out_len,
@@ -1587,8 +1744,10 @@ struct Lowering {
         return;
       }
       case mir::Stmt::IfElse: {
-        if (!s.cond.data_only)
-          fail("IfElse on parameters unsupported", s.raw);
+        if (!s.cond.data_only) {  // an island, not a compile error
+          lower_param_ifelse(s);
+          return;
+        }
         const bool c = td.eval(s.cond).r.at(0) != 0.0;
         if (c && !s.body.empty()) lower_stmt(s.body[0]);
         if (!c && s.body.size() > 1) lower_stmt(s.body[1]);

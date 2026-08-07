@@ -22,8 +22,7 @@
 #define STANLI_ODE_PROG_HPP
 
 #include <stanli/mir.hpp>
-
-#include <stan/math.hpp>
+#include <stanli/program.hpp>
 
 #include <cstdint>
 #include <map>
@@ -32,27 +31,10 @@
 
 namespace stanli {
 
-struct RhsProgram {
-  enum Code : uint8_t {
-    CONST, MOV,
-    ADD, SUB, MUL, DIV, POW, FMAX, FMIN,
-    NEG, EXP, LOG, SQRT, SQUARE, INV, FABS, INV_LOGIT,
-    GT, GE, LT, LE, EQ, NE,
-    JZ,   // jump to `dst` when register `a` is zero
-    JMP,  // jump to `dst`
-  };
-  struct Instr {
-    Code code = CONST;
-    int32_t dst = 0, a = 0, b = 0;
-    double imm = 0;
-  };
-
-  std::vector<Instr> code;
-  int n_regs = 0;
+struct RhsProgram : Program {
   // Where run_rhs deposits the call arguments.
   int t_reg = -1, y0 = -1, th0 = -1, xr0 = -1;
   int n_y = 0, n_th = 0, n_xr = 0;
-  std::vector<int> out_regs;  // the returned array, in order
   bool ok = false;
   std::string why;  // why not, when !ok
 };
@@ -78,73 +60,7 @@ void run_rhs(const RhsProgram& p, const T& t, const T* y, const T* th,
   for (int i = 0; i < p.n_th; ++i) reg[(size_t)(p.th0 + i)] = th[i];
   for (int i = 0; i < p.n_xr; ++i) reg[(size_t)(p.xr0 + i)] = T(xr[i]);
 
-  const int64_t n = (int64_t)p.code.size();
-  for (int64_t pc = 0; pc < n; ++pc) {
-    const RhsProgram::Instr& I = p.code[(size_t)pc];
-    // `dst` is a register for everything but the jumps, where it is an
-    // instruction index -- so it is only ever dereferenced inside the cases
-    // that actually write a register.
-    auto d = [&]() -> T& { return reg[(size_t)I.dst]; };
-    switch (I.code) {
-      case RhsProgram::CONST: d() = T(I.imm); break;
-      case RhsProgram::MOV: d() = reg[(size_t)I.a]; break;
-      case RhsProgram::ADD: d() = reg[(size_t)I.a] + reg[(size_t)I.b]; break;
-      case RhsProgram::SUB: d() = reg[(size_t)I.a] - reg[(size_t)I.b]; break;
-      case RhsProgram::MUL: d() = reg[(size_t)I.a] * reg[(size_t)I.b]; break;
-      case RhsProgram::DIV: d() = reg[(size_t)I.a] / reg[(size_t)I.b]; break;
-      case RhsProgram::POW:
-        d() = stan::math::pow(reg[(size_t)I.a], reg[(size_t)I.b]);
-        break;
-      case RhsProgram::FMAX:
-        d() = stan::math::fmax(reg[(size_t)I.a], reg[(size_t)I.b]);
-        break;
-      case RhsProgram::FMIN:
-        d() = stan::math::fmin(reg[(size_t)I.a], reg[(size_t)I.b]);
-        break;
-      case RhsProgram::NEG: d() = -reg[(size_t)I.a]; break;
-      case RhsProgram::EXP: d() = stan::math::exp(reg[(size_t)I.a]); break;
-      case RhsProgram::LOG: d() = stan::math::log(reg[(size_t)I.a]); break;
-      case RhsProgram::SQRT: d() = stan::math::sqrt(reg[(size_t)I.a]); break;
-      case RhsProgram::SQUARE:
-        d() = stan::math::square(reg[(size_t)I.a]);
-        break;
-      case RhsProgram::INV: d() = stan::math::inv(reg[(size_t)I.a]); break;
-      case RhsProgram::FABS: d() = stan::math::fabs(reg[(size_t)I.a]); break;
-      case RhsProgram::INV_LOGIT:
-        d() = stan::math::inv_logit(reg[(size_t)I.a]);
-        break;
-      // Comparisons produce a plain 0/1 with no derivative, matching how the
-      // generated C++ evaluates them on values.
-      case RhsProgram::GT:
-        d() = T(stan::math::value_of(reg[(size_t)I.a]) >
-              stan::math::value_of(reg[(size_t)I.b]));
-        break;
-      case RhsProgram::GE:
-        d() = T(stan::math::value_of(reg[(size_t)I.a]) >=
-              stan::math::value_of(reg[(size_t)I.b]));
-        break;
-      case RhsProgram::LT:
-        d() = T(stan::math::value_of(reg[(size_t)I.a]) <
-              stan::math::value_of(reg[(size_t)I.b]));
-        break;
-      case RhsProgram::LE:
-        d() = T(stan::math::value_of(reg[(size_t)I.a]) <=
-              stan::math::value_of(reg[(size_t)I.b]));
-        break;
-      case RhsProgram::EQ:
-        d() = T(stan::math::value_of(reg[(size_t)I.a]) ==
-              stan::math::value_of(reg[(size_t)I.b]));
-        break;
-      case RhsProgram::NE:
-        d() = T(stan::math::value_of(reg[(size_t)I.a]) !=
-              stan::math::value_of(reg[(size_t)I.b]));
-        break;
-      case RhsProgram::JZ:
-        if (stan::math::value_of(reg[(size_t)I.a]) == 0.0) pc = I.dst - 1;
-        break;
-      case RhsProgram::JMP: pc = I.dst - 1; break;
-    }
-  }
+  run_program(p, reg);
 
   out.resize(p.out_regs.size());
   for (size_t i = 0; i < p.out_regs.size(); ++i)

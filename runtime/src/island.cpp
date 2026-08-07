@@ -105,18 +105,18 @@ bool in_vocab(const Graph& g, const Op& op) {
 // Density opcode -> island instruction, or -1. Arity is op.n_in.
 int density_code(uint16_t oc) {
   switch (oc) {
-    case OP_STD_NORMAL_LPDF: return IslandProg::STD_NORMAL;
-    case OP_EXPONENTIAL_LPDF: return IslandProg::EXPONENTIAL;
-    case OP_NORMAL_LPDF: return IslandProg::NORMAL;
-    case OP_LOGNORMAL_LPDF: return IslandProg::LOGNORMAL;
-    case OP_CAUCHY_LPDF: return IslandProg::CAUCHY;
-    case OP_GAMMA_LPDF: return IslandProg::GAMMA;
-    case OP_INV_GAMMA_LPDF: return IslandProg::INV_GAMMA;
-    case OP_BETA_LPDF: return IslandProg::BETA;
-    case OP_WEIBULL_LPDF: return IslandProg::WEIBULL;
-    case OP_LOGISTIC_LPDF: return IslandProg::LOGISTIC;
-    case OP_DOUBLE_EXP_LPDF: return IslandProg::DOUBLE_EXP;
-    case OP_UNIFORM_LPDF: return IslandProg::UNIFORM;
+    case OP_STD_NORMAL_LPDF: return Program::STD_NORMAL;
+    case OP_EXPONENTIAL_LPDF: return Program::EXPONENTIAL;
+    case OP_NORMAL_LPDF: return Program::NORMAL;
+    case OP_LOGNORMAL_LPDF: return Program::LOGNORMAL;
+    case OP_CAUCHY_LPDF: return Program::CAUCHY;
+    case OP_GAMMA_LPDF: return Program::GAMMA;
+    case OP_INV_GAMMA_LPDF: return Program::INV_GAMMA;
+    case OP_BETA_LPDF: return Program::BETA;
+    case OP_WEIBULL_LPDF: return Program::WEIBULL;
+    case OP_LOGISTIC_LPDF: return Program::LOGISTIC;
+    case OP_DOUBLE_EXP_LPDF: return Program::DOUBLE_EXP;
+    case OP_UNIFORM_LPDF: return Program::UNIFORM;
     default: return -1;
   }
 }
@@ -165,8 +165,8 @@ struct Compiler {
     auto cit = const_slots.find(slot);
     if (cit != const_slots.end()) {
       const int r = alloc(len);
-      IslandProg::Instr I;
-      I.code = IslandProg::CONSTR;
+      Program::Instr I;
+      I.code = len == 1 ? Program::CONST : Program::CONSTR;
       I.dst = r;
       I.a = (int)prog.pool.size();
       I.len = len;
@@ -197,9 +197,9 @@ struct Compiler {
     return r;
   }
 
-  void emit(IslandProg::Code c, int dst, int a, int b = 0, int cc = 0,
+  void emit(Program::Code c, int dst, int a, int b = 0, int cc = 0,
             int len = 0) {
-    IslandProg::Instr I;
+    Program::Instr I;
     I.code = c;
     I.dst = dst;
     I.a = a;
@@ -216,14 +216,14 @@ struct Compiler {
       case OP_SUB:
       case OP_MUL:
       case OP_DIV: {
-        static_assert(IslandProg::SUB == IslandProg::ADD + 1 &&
-                          IslandProg::MUL == IslandProg::ADD + 2 &&
-                          IslandProg::DIV == IslandProg::ADD + 3 &&
+        static_assert(Program::SUB == Program::ADD + 1 &&
+                          Program::MUL == Program::ADD + 2 &&
+                          Program::DIV == Program::ADD + 3 &&
                           OP_SUB == OP_ADD + 1 && OP_MUL == OP_ADD + 2 &&
                           OP_DIV == OP_ADD + 3,
                       "binary code order");
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        const auto c = (IslandProg::Code)(IslandProg::ADD +
+        const auto c = (Program::Code)(Program::ADD +
                                           (op.opcode - OP_ADD));
         emit(c, write_reg(op.out), a, b);
         return ok;
@@ -232,12 +232,12 @@ struct Compiler {
         const int a0 = read_reg(op.in[0]);
         const int d = write_reg(op.out);
         if (op.n_in == 1) {
-          emit(IslandProg::MOV, d, a0);
+          emit(Program::MOV, d, a0);
           return ok;
         }
-        emit(IslandProg::ADD, d, a0, read_reg(op.in[1]));
+        emit(Program::ADD, d, a0, read_reg(op.in[1]));
         for (int j = 2; j < op.n_in; ++j)
-          emit(IslandProg::ADD, d, d, read_reg(op.in[j]));
+          emit(Program::ADD, d, d, read_reg(op.in[j]));
         return ok;
       }
       case OP_NEG:
@@ -248,25 +248,25 @@ struct Compiler {
       case OP_INV_LOGIT:
       case OP_LOG1M:
       case OP_TANHV: {
-        IslandProg::Code c;
+        Program::Code c;
         switch (op.opcode) {
-          case OP_NEG: c = IslandProg::NEG; break;
-          case OP_EXPV: c = IslandProg::EXP; break;
-          case OP_LOGV: c = IslandProg::LOG; break;
-          case OP_SQRT: c = IslandProg::SQRT; break;
-          case OP_SQUARE: c = IslandProg::SQUARE; break;
-          case OP_INV_LOGIT: c = IslandProg::INV_LOGIT; break;
-          case OP_LOG1M: c = IslandProg::LOG1M; break;
-          default: c = IslandProg::TANH; break;
+          case OP_NEG: c = Program::NEG; break;
+          case OP_EXPV: c = Program::EXP; break;
+          case OP_LOGV: c = Program::LOG; break;
+          case OP_SQRT: c = Program::SQRT; break;
+          case OP_SQUARE: c = Program::SQUARE; break;
+          case OP_INV_LOGIT: c = Program::INV_LOGIT; break;
+          case OP_LOG1M: c = Program::LOG1M; break;
+          default: c = Program::TANH; break;
         }
         const int a = read_reg(op.in[0]);
         const int d = write_reg(op.out);
         if (out_len == 1) {
           emit(c, d, a);
-        } else if (c == IslandProg::LOG) {
-          emit(IslandProg::LOG_RANGE, d, a, 0, 0, (int)out_len);
-        } else if (c == IslandProg::EXP) {
-          emit(IslandProg::EXP_RANGE, d, a, 0, 0, (int)out_len);
+        } else if (c == Program::LOG) {
+          emit(Program::LOG_RANGE, d, a, 0, 0, (int)out_len);
+        } else if (c == Program::EXP) {
+          emit(Program::EXP_RANGE, d, a, 0, 0, (int)out_len);
         } else {
           return false;  // vector unary outside the range vocabulary
         }
@@ -276,7 +276,7 @@ struct Compiler {
         const int idx = op.idata[0];
         if (idx < 0 || idx >= g.slots[op.in[0]].len) return false;
         const int a = read_reg(op.in[0]);
-        emit(IslandProg::MOV, write_reg(op.out), a + idx);
+        emit(Program::MOV, write_reg(op.out), a + idx);
         return ok;
       }
       case OP_SLICE: {
@@ -284,7 +284,7 @@ struct Compiler {
         if (start < 0 || start + out_len > g.slots[op.in[0]].len)
           return false;
         const int a = read_reg(op.in[0]);
-        emit(IslandProg::MOVR, write_reg(op.out), a + start, 0, 0,
+        emit(Program::MOVR, write_reg(op.out), a + start, 0, 0,
              (int)out_len);
         return ok;
       }
@@ -297,8 +297,8 @@ struct Compiler {
         // In-place, or a base nothing reads again: same registers, no copy.
         if (base_dead_here(op.in[0])) reg_of[op.out] = base;
         const int d = write_reg(op.out);
-        if (d != base) emit(IslandProg::MOVR, d, base, 0, 0, (int)out_len);
-        emit(IslandProg::MOV, d + idx, val);
+        if (d != base) emit(Program::MOVR, d, base, 0, 0, (int)out_len);
+        emit(Program::MOV, d + idx, val);
         return ok;
       }
       case OP_SET_SLICE: {
@@ -310,37 +310,37 @@ struct Compiler {
         const int val = read_reg(op.in[1]);
         if (base_dead_here(op.in[0])) reg_of[op.out] = base;
         const int d = write_reg(op.out);
-        if (d != base) emit(IslandProg::MOVR, d, base, 0, 0, (int)out_len);
-        emit(IslandProg::MOVR, d + start, val, 0, 0, (int)vlen);
+        if (d != base) emit(Program::MOVR, d, base, 0, 0, (int)out_len);
+        emit(Program::MOVR, d + start, val, 0, 0, (int)vlen);
         return ok;
       }
       case OP_DOT: {
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(IslandProg::DOT, write_reg(op.out), a, b, 0,
+        emit(Program::DOT, write_reg(op.out), a, b, 0,
              (int)g.slots[op.in[0]].len);
         return ok;
       }
       case OP_LOG_SUM_EXP: {
         const int a = read_reg(op.in[0]);
-        emit(IslandProg::LSE_RANGE, write_reg(op.out), a, 0, 0,
+        emit(Program::LSE_RANGE, write_reg(op.out), a, 0, 0,
              (int)g.slots[op.in[0]].len);
         return ok;
       }
       case OP_SOFTMAX: {
         if (out_len != g.slots[op.in[0]].len) return false;
         const int a = read_reg(op.in[0]);
-        emit(IslandProg::SOFTMAX, write_reg(op.out), a, 0, 0, (int)out_len);
+        emit(Program::SOFTMAX, write_reg(op.out), a, 0, 0, (int)out_len);
         return ok;
       }
       case OP_LSE2: {
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(IslandProg::LSE2, write_reg(op.out), a, b);
+        emit(Program::LSE2, write_reg(op.out), a, b);
         return ok;
       }
       case OP_LOG_MIX: {
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
         const int c = read_reg(op.in[2]);
-        emit(IslandProg::LOG_MIX, write_reg(op.out), a, b, c);
+        emit(Program::LOG_MIX, write_reg(op.out), a, b, c);
         return ok;
       }
       default: {
@@ -349,7 +349,7 @@ struct Compiler {
         const int a = read_reg(op.in[0]);
         const int b = op.n_in > 1 ? read_reg(op.in[1]) : 0;
         const int c = op.n_in > 2 ? read_reg(op.in[2]) : 0;
-        emit((IslandProg::Code)dc, write_reg(op.out), a, b, c);
+        emit((Program::Code)dc, write_reg(op.out), a, b, c);
         return ok;
       }
     }
