@@ -96,7 +96,7 @@ everything below happens in this tab.
 <div class="times" id="times"></div>
 
 <script type="module">
-import { sample } from "./stanli.mjs";
+import { compile, sample } from "./stanli.mjs";
 const $ = (id) => document.getElementById(id);
 
 // ---- presets ---------------------------------------------------------------
@@ -220,35 +220,54 @@ $("run").onclick = async () => {
     delta: parseFloat($("delta").value) || 0.8,
   };
   try {
-    const chains = [];
-    const ms = { stanc: 0, lower: 0, sample: 0, total: 0 };
-    const live = { names: null, done: [], cur: [] };
-    for (let c = 0; c < nChains; ++c) {
-      const r = await sample({
-        ...opts, seed: seed + c,
-        onProgress: (s) =>
-            { $("status").textContent = `chain ${c + 1}/${nChains}: ${s}`; },
-        onLive: (m) => {
-          if (m.liveMeta) { live.names = m.liveMeta.names; return; }
-          const lv = m.live;
-          if (lv.phase === "warmup") {
-            $("status").textContent =
-                `chain ${c + 1}/${nChains}: warmup ${lv.i}`;
-            return;
-          }
-          const chunk = new Float64Array(lv.rows);
-          for (let k = 0; k < chunk.length / lv.nCon; ++k)
-            live.cur.push(chunk.subarray(k * lv.nCon, (k + 1) * lv.nCon));
-          $("status").textContent =
-              `chain ${c + 1}/${nChains}: sampling ${lv.i}`;
-          liveTrace(live, c, nChains);
-        },
-      });
-      live.done.push(live.cur);
-      live.cur = [];
-      chains.push(r);
-      for (const k of Object.keys(ms)) ms[k] += r.ms[k];
-    }
+    // Compile once; every chain then runs from the same MIR, in its own
+    // worker, all simultaneously.
+    $("status").textContent = "compiling (stanc3)";
+    const tWall = performance.now();
+    const compiled = await compile({ code: opts.code });
+    const live = { names: null,
+                   chains: Array.from({ length: nChains }, () => []),
+                   warm: new Array(nChains).fill(0),
+                   drawn: new Array(nChains).fill(0) };
+    let lastDraw = 0;
+    const progress = () => {
+      const w = live.warm.reduce((a, b) => a + b, 0);
+      const d = live.drawn.reduce((a, b) => a + b, 0);
+      $("status").textContent = d
+          ? `sampling: ${d}/${nChains * opts.samples} draws across ` +
+            `${nChains} chains`
+          : `warmup: ${w}/${nChains * opts.warmup} across ${nChains} chains`;
+    };
+    const results = await Promise.all(
+        Array.from({ length: nChains }, (_, c) => sample({
+          ...opts, code: undefined, mir: compiled.mir, seed: seed + c,
+          onLive: (m) => {
+            if (m.liveMeta) { live.names = m.liveMeta.names; return; }
+            const lv = m.live;
+            if (lv.phase === "warmup") {
+              live.warm[c] = lv.i;
+              progress();
+              return;
+            }
+            live.drawn[c] = lv.i;
+            const chunk = new Float64Array(lv.rows);
+            for (let k = 0; k < chunk.length / lv.nCon; ++k)
+              live.chains[c].push(
+                  chunk.subarray(k * lv.nCon, (k + 1) * lv.nCon));
+            progress();
+            const now = performance.now();
+            if (now - lastDraw > 60) {
+              lastDraw = now;
+              liveTrace(live, nChains);
+            }
+          },
+        })));
+    liveTrace(live, nChains, true);
+    const chains = results;
+    const ms = { stanc: compiled.ms.stanc, lower: 0, sample: 0,
+                 wall: performance.now() - tWall };
+    for (const r of results)
+      for (const k of ["lower", "sample"]) ms[k] += r.ms[k];
     fit = { names: chains[0].names, samples: chains[0].samples,
             chains: chains.map((r) => r.columns) };
     render(ms, nChains);
@@ -341,10 +360,11 @@ function render(ms, nChains) {
   });
   $("out").innerHTML = html + "</table>";
   $("times").textContent =
-      `${nChains} chain${nChains > 1 ? "s" : ""}: ` +
-      `stanc ${ms.stanc.toFixed(0)} ms, lower ${ms.lower.toFixed(0)} ms, ` +
-      `sample ${ms.sample.toFixed(0)} ms, total ${ms.total.toFixed(0)} ms ` +
-      `(click a row for trace + histogram)`;
+      `${nChains} chain${nChains > 1 ? "s" : ""} in parallel: ` +
+      `${(ms.wall / 1000).toFixed(1)} s wall ` +
+      `(stanc ${ms.stanc.toFixed(0)} ms once, then ` +
+      `${ms.sample.toFixed(0)} ms of sampling across workers); ` +
+      `click a row for trace + histogram`;
   for (const tr of $("out").querySelectorAll("tr[data-n]"))
     tr.onclick = () => { tracePlot(tr.dataset.n); histPlot(tr.dataset.n); };
 }
@@ -352,13 +372,13 @@ function render(ms, nChains) {
 // ---- plots -----------------------------------------------------------------
 const CHAIN_COLORS = ["#4a7", "#47a", "#a47", "#a74", "#7a4", "#74a"];
 
-// The live view while NUTS runs: the first parameter's trace, finished
-// chains solid and the growing chain drawn as it streams in.
-function liveTrace(live, chainIdx, nChains) {
+// The live view while NUTS runs: every chain's trace of the first
+// parameter, each growing as its worker streams draws in.
+function liveTrace(live, nChains, done) {
   if (!live.names || !live.names.length) return;
   const c = $("trace"), g = c.getContext("2d");
   c.hidden = false;
-  const seqs = [...live.done, live.cur].filter((s) => s.length > 1);
+  const seqs = live.chains.filter((s) => s.length > 1);
   if (!seqs.length) return;
   let lo = Infinity, hi = -Infinity;
   for (const s of seqs)
@@ -383,8 +403,9 @@ function liveTrace(live, chainIdx, nChains) {
   g.globalAlpha = 1;
   g.fillStyle = getComputedStyle(document.body).color;
   g.font = "12px system-ui";
-  g.fillText(`${live.names[0]}  live, chain ${chainIdx + 1}/${nChains}`,
-             6, 14);
+  g.fillText(done ? `${live.names[0]}  ${nChains} chains`
+                  : `${live.names[0]}  live, ${seqs.length} of ${nChains} ` +
+                    `chains running`, 6, 14);
 }
 function tracePlot(name) {
   const c = $("trace"), g = c.getContext("2d");

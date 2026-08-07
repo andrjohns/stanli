@@ -21,6 +21,17 @@ onmessage = async (e) => {
   const t0 = performance.now();
   const say = (status) => postMessage({ status });
   try {
+    if (req.cmd === "compile") {
+      // Compile once here, sample everywhere: chain workers take the MIR
+      // and never load the compiler.
+      say("compiling Stan -> MIR (stanc3)");
+      ensureStanc();
+      const sc = stanc("browser_model", req.code, ["debug-transformed-mir"]);
+      if (sc.errors) throw new Error(Array.from(sc.errors).join("\n"));
+      postMessage({ done: { mir: String(sc.result),
+                            ms: { stanc: performance.now() - t0 } } });
+      return;
+    }
     const M = await ready;
     let mir = req.mir;
     if (!mir) {
