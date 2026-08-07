@@ -27,6 +27,12 @@ Usage:
 
   --missing   also emit models for functions stan-math has and stanli
               does not, so the report doubles as the coverage gap.
+  --from-stanc  take the function list from stanc3 itself
+                (--dump-stan-math-signatures, 564 names / 24k signatures)
+                rather than the table below: every function with an
+                all-real-scalar signature returning real. That is the
+                authoritative list, so the report is a true coverage
+                number rather than a number about what someone typed here.
 """
 import argparse
 import concurrent.futures
@@ -106,16 +112,52 @@ model {{
 """
 
 
-def model_for(name, argv):
-    """A model whose target sums the density once per differentiable slot."""
+def model_for(name, argv, density=True):
+    """Target sums the call once per differentiable slot, so the gradient
+    exercises every partial the function has."""
     lines = []
     for k in range(len(argv)):
         args = [f"{v}" for v in argv]
         args[k] = f"({args[k]} + p * 0.0625)"
-        lhs, rest = args[0], args[1:]
-        call = f"{name}({lhs} | {', '.join(rest)})" if rest else f"{name}({lhs})"
+        if density:
+            lhs, rest = args[0], args[1:]
+            call = (f"{name}({lhs} | {', '.join(rest)})" if rest
+                    else f"{name}({lhs})")
+        else:
+            call = f"{name}({', '.join(args)})"
         lines.append(f"  target += {call};")
     return MODEL.format(body="\n".join(lines))
+
+
+# Arguments by position for the generated scalar models. Most of the
+# vocabulary is happy with these; a function whose domain excludes them
+# fails on BOTH engines, which the comparison reports as such rather than
+# as a difference.
+SCALAR_ARGS = [0.5, 1.25, 0.75, 1.5, 2.0]
+
+
+def from_stanc(stanc):
+    """Every function with an all-real-scalar signature returning real."""
+    dump = subprocess.run([str(stanc), "--dump-stan-math-signatures"],
+                          capture_output=True, text=True).stdout
+    out, seen = [], set()
+    for line in dump.splitlines():
+        m = re.match(r"([a-zA-Z_0-9]+)\((.*?)\) => (.*)", line)
+        if not m:
+            continue
+        name, args, ret = m.group(1), m.group(2), m.group(3)
+        if name in seen or ret != "real" or not args:
+            continue
+        parts = [a.strip() for a in args.split(",")]
+        if any(p != "real" for p in parts) or len(parts) > len(SCALAR_ARGS):
+            continue
+        # The density and rng families have their own shapes and oracles.
+        if name.endswith(("_lpdf", "_lpmf", "_rng", "_cdf", "_lcdf",
+                          "_lccdf")):
+            continue
+        seen.add(name)
+        out.append((name, len(parts), SCALAR_ARGS[:len(parts)]))
+    return out
 
 
 def run(cmd, **kw):
@@ -133,12 +175,12 @@ def ulps(a, b):
     return abs(ia - ib)
 
 
-def sweep_one(spec, cs, tmp, keep):
+def sweep_one(spec, cs, tmp, keep, density=True):
     name, n, argv = spec
     d = tmp / name
     d.mkdir(parents=True, exist_ok=True)
     stan = d / f"{name}.stan"
-    stan.write_text(model_for(name, argv[:n]))
+    stan.write_text(model_for(name, argv[:n], density))
     data = d / "data.json"
     data.write_text(json.dumps({"y_data": 1.0}))
 
@@ -208,17 +250,21 @@ def main():
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--missing", action="store_true")
+    ap.add_argument("--from-stanc", action="store_true")
     args = ap.parse_args()
 
     have = claimed()
-    specs = [s for s in DENSITIES if args.filter in s[0]]
-    if not args.missing:
+    density = not args.from_stanc
+    pool = from_stanc(REPO / "deps/stanc3/stanc") if args.from_stanc else DENSITIES
+    specs = [s for s in pool if args.filter in s[0]]
+    if not args.missing and not args.from_stanc:
         specs = [s for s in specs if s[0] in have]
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_fnsweep_"))
     rows = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        for r in ex.map(lambda s: sweep_one(s, args.cmdstan, tmp, args.keep),
+        for r in ex.map(lambda s: sweep_one(s, args.cmdstan, tmp, args.keep,
+                                           density),
                         specs):
             rows.append(r)
             print(".", end="", flush=True)
