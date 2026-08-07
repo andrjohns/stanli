@@ -103,19 +103,19 @@ both sides `-O3` with FP contraction pinned off:
 | `wells_dist100ars_model` | 3 | 17.4 us | 19.0 us | **1.1x** |
 | `radon_county` | 389 | 83.2 us | 82.1 us | **1.0x** |
 | `arma11` | 4 | 6.7 us | 6.2 us | 0.93x |
+| `diamonds` | 26 | 35.4 us | 31.5 us | 0.89x |
 | `garch11` | 4 | 11.2 us | 9.7 us | 0.86x |
 | `hmm_drive_0` | 6 | 173.0 us | 132.8 us | 0.77x |
 | `hmm_example` | 4 | 36.3 us | 27.1 us | 0.75x |
 | `ldaK2` | 7 | 145.9 us | 104.1 us | 0.71x |
-| `iohmm_reg` | 29 | 545.2 us | 320.3 us | 0.59x |
-| `diamonds` | 26 | 65.8 us | 31.5 us | 0.48x |<!--/gen-->
+| `iohmm_reg` | 29 | 545.2 us | 320.3 us | 0.59x |<!--/gen-->
 
 The wins come from op granularity. CmdStan's var tape allocates, walks, and
 frees one node per scalar operation per leapfrog step; stanli pays a fixed
 cost per *op*, and a vectorized statement over N elements amortizes that to
 nothing. Across the whole posteriordb corpus the median is
-<!--gen:corpus_median-->2.00x<!--/gen--> and
-<!--gen:corpus_at_par-->92<!--/gen--> of
+<!--gen:corpus_median-->2.07x<!--/gen--> and
+<!--gen:corpus_at_par-->93<!--/gen--> of
 <!--gen:corpus_n_grad-->119<!--/gen--> models are at or above CmdStan.
 
 The losses are honest and understood, and they are all one shape: a

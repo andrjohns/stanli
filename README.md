@@ -13,9 +13,9 @@ pip install stanli
 ```
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
-  (median gradient <!--gen:corpus_median-->2.00x<!--/gen--> across
+  (median gradient <!--gen:corpus_median-->2.07x<!--/gen--> across
   <!--gen:corpus_n_grad-->119<!--/gen--> posteriordb models,
-  <!--gen:corpus_at_par-->92<!--/gen--> of them at or above CmdStan;
+  <!--gen:corpus_at_par-->93<!--/gen--> of them at or above CmdStan;
   <!--gen:bench_span-->1.0x-6.1x<!--/gen--> on the vectorized shapes that
   suit it best; time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)

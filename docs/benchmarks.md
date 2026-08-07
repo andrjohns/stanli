@@ -33,12 +33,12 @@ this page.
 | `wells_dist100ars_model` | 3 | 17,431 | 18,997 | 1.09x | 0.025 s |
 | `radon_county` | 389 | 83,236 | 82,076 | 0.99x | 0.105 s |
 | `arma11` | 4 | 6,650 | 6,158 | 0.93x | 0.012 s |
+| `diamonds` | 26 | 35,358 | 31,497 | 0.89x | 0.110 s |
 | `garch11` | 4 | 11,184 | 9,664 | 0.86x | 0.016 s |
 | `hmm_drive_0` | 6 | 172,957 | 132,850 | 0.77x | 0.189 s |
 | `hmm_example` | 4 | 36,275 | 27,145 | 0.75x | 0.046 s |
 | `ldaK2` | 7 | 145,916 | 104,059 | 0.71x | 0.165 s |
 | `iohmm_reg` | 29 | 545,184 | 320,335 | 0.59x | 0.441 s |
-| `diamonds` | 26 | 65,799 | 31,497 | 0.48x | 0.141 s |
 
 (The table has changed shape twice: `radon_county`, `election88_full`
 and `dogs` moved up with the write-fusion and constant-folding work, the
@@ -48,7 +48,7 @@ climbed from 0.21x on the island pass. All three are described below.)
 ## Which models are faster, which are slower, and why
 
 Across the full corpus (`docs/corpus-bench.tsv`, 119 models with both
-gradients) the median per-gradient speedup is 2.00x and 92 of 119 models
+gradients) the median per-gradient speedup is 2.07x and 93 of 119 models
 are at or above parity. The ratio is almost entirely predicted by the
 model's *shape*, not its size:
 
@@ -96,16 +96,26 @@ model's *shape*, not its size:
   side was interpreted per call; with it compiled (below) they sit at
   ~0.6x, the residue being our per-call dispatch against CmdStan's
   fully inlined right-hand side inside the same CVODES solver.
-- **Two models that are neither** — the worst rows in the table — and
-  `STANLI_PROFILE=1` says plainly what each is. `diamonds` (0.48x)
-  spends **92.6%** of its gradient inside a single op,
-  `OP_NORMAL_ID_GLM_LPDF` (45 us forward, 35 us backward, one call):
-  there is no graph problem to fix, the gap is inside that one kernel.
-  `Mtbh_model` (0.45x) spends **36%** in `OP_SET_SLICE_STRIDED`, 146
-  calls moving 106,580 elements, most of it in the backward: the
-  in-place rule below rewrites element writes (`OP_SET_INDEX`) but not
-  slice writes, so a model that fills a matrix column by column still
-  copies the whole matrix per column. Both are open.
+- **`Mtbh_model` (0.45x)**, now the slowest model, spends **36%** in
+  `OP_SET_SLICE_STRIDED`: 146 calls moving 106,580 elements, most of it
+  in the backward. The in-place rule below rewrites element writes
+  (`OP_SET_INDEX`) but not slice writes, so a model that fills a matrix
+  column by column still copies the whole matrix per column. Open.
+
+A profile of every sub-parity model (`STANLI_PROFILE=1`, one gradient
+each) is what the last two kernel changes came from, and it says the
+remaining tail is mostly not a graph problem: in seven of those models a
+single precompiled kernel is half to nine-tenths of the gradient.
+`diamonds` was the extreme -- 90.9% in `OP_NORMAL_ID_GLM_LPDF`, whose
+"native" kernel built a var tape in the forward, threw it away, and
+built it again in the backward to call grad(). Differentiating once and
+stashing the partials took it from 0.48x to 0.89x. `prophet` was 82% in
+`OP_MATVEC`, where the accumulation was one serial dependency chain;
+four independent accumulators took it from 0.67x to 1.23x, bitwise
+unchanged. What is left in that class: `Mt_model` (62% in a scalar
+`bernoulli_lpmf`), `gp_regr` (55% in `multi_normal_cholesky_lpdf`, where
+the same partial-stashing measured a wash), `kronecker_gp` (38% in an
+eigendecomposition).
 
 **Where the wins come from: op granularity.** The interpreter's cost is
 per op, not per element: ~17-20 ns for a scalar density op forward +
@@ -473,6 +483,7 @@ what differs, and none of those are explained yet. Regenerate with
 | `kidscore_momiq` | 3 | 4,861 | 2.57x | 0.42 s | 2.47x |
 | `pilots` | 18 | 1,878 | 2.53x | 1.29 s | 3.49x |
 | `logistic_regression_rhs` | 3075 | 113,106 | 2.52x | 16.23 s | 1.28x |
+| `blr` | 6 | 1,728 | 2.44x | 0.21 s | 0.62x |
 | `kidscore_momhs` | 3 | 4,483 | 2.43x | 0.30 s | 3.75x |
 | `log10earn_height` | 3 | 11,560 | 2.34x | 1.75 s | 1.92x |
 | `dugongs_model` | 4 | 1,653 | 2.28x | 0.25 s | 4.17x |
@@ -481,7 +492,6 @@ what differs, and none of those are explained yet. Regenerate with
 | `GLM_Binomial_model` | 3 | 1,809 | 2.11x | 0.21 s | 3.50x |
 | `dogs_log` | 2 | 41,387 | 2.07x | 1.01 s | 1.66x |
 | `lsat_model` | 1006 | 91,173 | 2.00x | 4.66 s | 1.59x |
-| `blr` | 6 | 1,728 | 1.97x | 0.21 s | 3.50x |
 | `irt_2pl` | 144 | 37,468 | 1.86x | 2.17 s | 1.89x |
 | `grsm_latent_reg_irt` | 408 | 762,133 | 1.68x | 66.92 s | 2.23x |
 | `gpcm_latent_reg_irt` | 530 | 1,337,651 | 1.63x | 161.93 s | 2.68x |
@@ -495,6 +505,7 @@ what differs, and none of those are explained yet. Regenerate with
 | `eight_schools_centered` | 10 | 314 | 1.29x | 0.19 s | 3.80x |
 | `M0_model` | 2 | 15,595 | 1.29x | 0.37 s | 2.64x |
 | `nes_logit_model` | 2 | 7,653 | 1.23x | 0.38 s | 2.53x |
+| `prophet` | 62 | 69,789 | 1.23x | 117.68 s | 1.20x |
 | `nn_rbm1bJ10` | 7951 | 185,731 | 1.14x | 456.82 s | 0.97x |
 | `normal_mixture` | 3 | 88,239 | 1.12x | 1.13 s | 1.53x |
 | `low_dim_gauss_mix_collapse` | 5 | 95,373 | 1.11x | 4.45 s | 1.22x |
@@ -517,6 +528,7 @@ what differs, and none of those are explained yet. Regenerate with
 | `Mth_model` | 394 | 93,922 | 0.97x | 5.43 s | 1.19x |
 | `arma11` | 4 | 6,158 | 0.93x | 0.26 s | 2.17x |
 | `dogs_nonhierarchical` | 65 | 40,588 | 0.91x | 2.86 s | 1.08x |
+| `diamonds` | 26 | 31,497 | 0.89x | 48.55 s | 0.83x |
 | `garch11` | 4 | 9,664 | 0.86x | 0.43 s | 1.34x |
 | `Mh_model` | 388 | 38,956 | 0.85x | 2.66 s | 0.88x |
 | `multi_occupancy` | 106 | 58,996 | 0.85x | 7.34 s | 0.97x |
@@ -531,13 +543,11 @@ what differs, and none of those are explained yet. Regenerate with
 | `ldaK2` | 7 | 104,059 | 0.71x | 3.19 s | 0.25x |
 | `Mb_model` | 3 | 49,570 | 0.70x | 1.15 s | 0.86x |
 | `hmm_gaussian` | 14 | 263,917 | 0.69x | 18.75 s | 0.03x |
-| `prophet` | 62 | 69,789 | 0.67x | 117.68 s | 0.67x |
 | `soil_incubation` | 6 | 60,871 | 0.66x | 12.84 s | 0.56x |
 | `iohmm_reg` | 29 | 320,335 | 0.59x | 181.23 s | 0.72x |
-| `diamonds` | 26 | 31,497 | 0.48x | 48.55 s | 0.45x |
 | `Mtbh_model` | 154 | 42,791 | 0.45x | 2.38 s | 0.62x |
 
-120 models; 119 with both gradients; median per-gradient speedup 2.00x; 92/119 at or above CmdStan.
+120 models; 119 with both gradients; median per-gradient speedup 2.07x; 93/119 at or above CmdStan.
 
 ### The models the run could not complete
 
