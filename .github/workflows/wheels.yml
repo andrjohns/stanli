@@ -250,6 +250,72 @@ jobs:
             build-wasm/stanli.js
             build-wasm/stanli.wasm
 
+  # The public demo: web/ plus the two build artifacts, deployed to
+  # GitHub Pages on every main push. stancjs is stanc3's own js_of_ocaml
+  # target, cached like the embedded object (a miss costs the opam path
+  # once per stanc3 or OCaml bump).
+  pages:
+    name: deploy the browser demo
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: wasm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: web/
+
+      - name: Restore stancjs
+        id: stancjs-cache
+        uses: actions/cache@v4
+        with:
+          path: web/stancjs.bc.js
+          key: stancjs-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-jsoo6.4.1
+
+      - name: opam ${{ env.OPAM_VERSION }}
+        if: steps.stancjs-cache.outputs.cache-hit != 'true'
+        run: |
+          url=https://github.com/ocaml/opam/releases/download
+          curl -fsSL -o /tmp/opam \
+            "$url/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-linux"
+          sudo install -m 755 /tmp/opam /usr/local/bin/opam
+          opam init --bare --disable-sandboxing --no-setup -y
+        env:
+          OPAMYES: '1'
+
+      - name: Build stancjs
+        if: steps.stancjs-cache.outputs.cache-hit != 'true'
+        run: |
+          opam switch create stancjs "ocaml-base-compiler.$OCAML_VERSION" -y
+          git clone https://github.com/stan-dev/stanc3.git deps/stanc3-src
+          git -C deps/stanc3-src checkout -q "$STANC3_SRC_SHA"
+          (cd deps/stanc3-src &&
+           opam install . --switch=stancjs --deps-only -y &&
+           opam install --switch=stancjs -y \
+             js_of_ocaml.6.4.1 js_of_ocaml-compiler.6.4.1 \
+             js_of_ocaml-ppx.6.4.1 &&
+           eval "$(opam env --switch=stancjs)" &&
+           dune build src/stancjs/stancjs.bc.js)
+          cp deps/stanc3-src/_build/default/src/stancjs/stancjs.bc.js web/
+        env:
+          OPAMYES: '1'
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
   publish:
     # Tags only. PyPI versions can never be reused, so this must not fire
     # on a branch push.
