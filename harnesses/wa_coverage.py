@@ -74,8 +74,10 @@ def main():
         # write -inf (Survey_model's lp_parts is -inf below its support), and
         # conflating that with a lowering failure hid the truncation reason.
         note = f", {nbad}/{nvals} nonfinite" if nbad else ""
-        if tail == "complete":
-            rows.append((model, "COMPLETE", f"{nvars} vars{note}", nvals))
+        if tail.startswith("complete"):
+            mode = " (interpreted)" if "interpreted" in tail else ""
+            rows.append((model, "COMPLETE", f"{nvars} vars{mode}{note}",
+                         nvals))
         else:
             rows.append((model, "TRUNCATED", tail + note, nvals))
             reasons[short(tail)] += 1

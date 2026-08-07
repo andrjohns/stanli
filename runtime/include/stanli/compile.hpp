@@ -16,7 +16,11 @@
 #include <utility>
 #include <vector>
 
+#include <memory>
+
 namespace stanli {
+
+class WaInterp;
 
 struct CompileError : std::runtime_error {
   explicit CompileError(const std::string& what) : std::runtime_error(what) {}
@@ -88,6 +92,11 @@ struct CompiledModel {
     // say). `columns` then holds the prefix that did lower, and this says
     // what stopped it -- silently short CSV rows would be worse.
     std::string truncated;
+    // Set alongside `truncated`: the per-draw interpreter that runs the
+    // whole section, RNG draws and draw-dependent branches included.
+    // Drivers prefer it over the truncated graph (see wa_interp.hpp);
+    // the graph remains the fast path whenever lowering completes.
+    std::shared_ptr<WaInterp> interp;
 
     void bind(Executor& ex) const {
       for (const auto& f : fills) {

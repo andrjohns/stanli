@@ -11,10 +11,12 @@
 //   * the whole pipeline on tests/fixtures/wanames.stan, whose expected
 //     header was taken verbatim from a CmdStan run of the same model.
 #include <stanli/compile.hpp>
+#include <stanli/wa_interp.hpp>
 
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -116,11 +118,67 @@ void test_wanames_pipeline() {
     }
 }
 
+// Generated quantities the graph cannot express (RNG draws, a
+// draw-dependent branch) run through the interpreted fallback: same
+// columns contract, per-draw evaluation, seeded RNG stream.
+void test_interpreted_gq() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("N", 5);
+  CompiledModel cm =
+      compile_model(slurp("tests/fixtures/gqrng.tmir.sexp"), data);
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL gqrng: no interpreted write_array\n");
+    return;
+  }
+  WaInterp& wi = *cm.write_array->interp;
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry sig;
+  sig.r = {1.7};
+  params["sigma"] = sig;
+  wi.seed(42);
+  const std::vector<double> r1 = wi.eval(params);
+  expect_eq("gqrng header", joined(wi.columns()),
+            "sigma,yrep,crep,branchy,p");
+  if (r1.size() != 5) {
+    ++failures;
+    std::printf("FAIL gqrng: row size %zu\n", r1.size());
+    return;
+  }
+  auto expect_val = [&](const char* what, double got, double want) {
+    if (got != want) {
+      ++failures;
+      std::printf("FAIL gqrng %s: got %.17g want %.17g\n", what, got, want);
+    }
+  };
+  expect_val("sigma passthrough", r1[0], 1.7);
+  expect_val("branchy (sigma > 1)", r1[3], 1.0);
+  expect_val("prod", r1[4], 6.0);
+  const double crep = r1[2];
+  if (crep != std::floor(crep) || crep < 0.0 || crep > 5.0) {
+    ++failures;
+    std::printf("FAIL gqrng crep: %.17g not an int in [0,5]\n", crep);
+  }
+  wi.seed(42);
+  const std::vector<double> r2 = wi.eval(params);
+  if (r1 != r2) {
+    ++failures;
+    std::printf("FAIL gqrng: same seed, different row\n");
+  }
+  const std::vector<double> r3 = wi.eval(params);
+  if (r3[1] == r1[1]) {
+    ++failures;
+    std::printf("FAIL gqrng: RNG stream did not advance across draws\n");
+  }
+}
+
 }  // namespace
 
 int main() {
   test_naming_rules();
   test_wanames_pipeline();
+  test_interpreted_gq();
   if (failures == 0) std::printf("test_write_array OK\n");
   return failures == 0 ? 0 : 1;
 }

@@ -7,11 +7,13 @@
 // reference harness to compare against CmdStan at the same point.
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
+#include <stanli/wa_interp.hpp>
 
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -143,6 +145,36 @@ int main(int argc, char** argv) {
     // parameters and generated quantities.
     if (!cm.write_array) {
       std::fprintf(stderr, "WA none\n");
+    } else if (cm.write_array->interp) {
+      // The graph could not express the whole section; the per-draw
+      // interpreter runs all of it. Failures stay on stderr: stdout's
+      // machine-readable contract is already written.
+      try {
+        stanli::WaInterp& wi = *cm.write_array->interp;
+        wi.seed(1234);
+        std::map<std::string, stanli::DataMap::Entry> params;
+        for (const auto& v : cm.views) {
+          stanli::DataMap::Entry en;
+          const double* p = ex.value_ptr(v.slot);
+          en.r.assign(p, p + v.len);
+          if (v.rows > 0)
+            en.dims = {v.rows, v.len / v.rows};
+          else if (v.len > 1)
+            en.dims = {v.len};
+          params[v.name] = std::move(en);
+        }
+        const std::vector<double> row = wi.eval(params);
+        int64_t bad = 0;
+        for (double x : row)
+          if (!std::isfinite(x)) ++bad;
+        std::fprintf(stderr,
+                     "WA %zu vars %lld values %lld nonfinite complete "
+                     "(interpreted: %s)\n",
+                     wi.columns().size(), (long long)row.size(),
+                     (long long)bad, cm.write_array->truncated.c_str());
+      } catch (const std::exception& we) {
+        std::fprintf(stderr, "WA empty interp: %s\n", we.what());
+      }
     } else if (cm.write_array->columns.empty()) {
       std::fprintf(stderr, "WA empty %s\n", cm.write_array->truncated.c_str());
     } else {

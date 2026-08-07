@@ -8,6 +8,7 @@
 #include <stanli/island.hpp>
 #include <stanli/reroll.hpp>
 #include <stanli/sexp.hpp>
+#include <stanli/wa_interp.hpp>
 
 
 #include <cstdio>
@@ -1699,17 +1700,21 @@ struct Lowering {
 }  // namespace
 
 CompiledModel compile_model(const std::string& tmir_text, const DataMap& data) {
-  mir::Program prog = mir::read_program(sexp::parse(tmir_text));
+  // Shared because the interpreted write_array fallback, when needed,
+  // keeps the generate_quantities statements and UDF bodies alive for the
+  // model's whole life.
+  auto prog = std::make_shared<mir::Program>(
+      mir::read_program(sexp::parse(tmir_text)));
   Lowering lo(data);
-  CompiledModel cm = lo.run(prog);
-  if (!prog.generate_quantities.empty()) {
+  CompiledModel cm = lo.run(*prog);
+  if (!prog->generate_quantities.empty()) {
     // A second lowering, over the transformed data the first one already
     // interpreted: re-running prepare_data would double preparation time on
     // the models where preparation is the cost (nn_rbm1bJ100, 20.7 s).
     Lowering wa(data);
     wa.td.env() = lo.td.env();
     wa.int_env = lo.int_env_data;
-    CompiledModel::WriteArray w = wa.run_write_array(prog);
+    CompiledModel::WriteArray w = wa.run_write_array(*prog);
     if (w.n_unconstrained != cm.n_unconstrained) {
       // The two graphs read the same draw; if they disagree on its length the
       // write_array cannot be driven at all. Keep the model, drop the columns,
@@ -1719,6 +1724,21 @@ CompiledModel compile_model(const std::string& tmir_text, const DataMap& data) {
                     std::to_string(cm.n_unconstrained) +
                     (w.truncated.empty() ? "" : "; " + w.truncated);
       w.columns.clear();
+    }
+    if (!w.truncated.empty()) {
+      // The graph could not express the whole section; hand the model the
+      // per-draw interpreter, seeded with data + transformed data and the
+      // emission flags the guard blocks test.
+      auto env = lo.td.env();
+      for (const char* flag : {"emit_transformed_parameters__",
+                               "emit_generated_quantities__"}) {
+        DataMap::Entry one;
+        one.is_int = true;
+        one.i = {1};
+        one.r = {1.0};
+        env[flag] = one;
+      }
+      w.interp = std::make_shared<WaInterp>(prog, std::move(env));
     }
     cm.write_array = std::move(w);
   }
