@@ -11,10 +11,12 @@
 // against a real CmdStan run.
 #include <stanli/compile.hpp>
 #include <stanli/nuts.hpp>
+#include <stanli/wa_interp.hpp>
 
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -79,11 +81,19 @@ int main(int argc, char** argv) {
 
     // Draws are written through the write_array graph when there is one --
     // that is what supplies transformed parameters and generated quantities,
-    // and it fixes the column order to CmdStan's. Without it we can still
-    // report the constrained parameters the log_prob graph already computes.
-    const bool have_wa = cm.write_array && !cm.write_array->columns.empty();
+    // and it fixes the column order to CmdStan's. When the graph could not
+    // express the whole section, the per-draw interpreter produces every
+    // column instead (slower, but generated quantities run once per stored
+    // draw). Without either we still report the constrained parameters the
+    // log_prob graph already computes.
+    stanli::WaInterp* wi =
+        cm.write_array && cm.write_array->interp ? cm.write_array->interp.get()
+                                                 : nullptr;
+    const bool have_wa =
+        !wi && cm.write_array && !cm.write_array->columns.empty();
     if (cm.write_array && !cm.write_array->truncated.empty())
-      std::fprintf(stderr, "stanli_run: write_array truncated: %s\n",
+      std::fprintf(stderr, "stanli_run: write_array %s: %s\n",
+                   wi ? "interpreted (graph could not express)" : "truncated",
                    cm.write_array->truncated.c_str());
     std::unique_ptr<stanli::Executor> wex;
     if (have_wa) {
@@ -91,7 +101,34 @@ int main(int argc, char** argv) {
           std::move(cm.write_array->graph));
       cm.write_array->bind(*wex);
     }
-    const auto& cols = have_wa ? cm.write_array->columns : cm.views;
+
+    // Interpreted rows are computed up front: the header needs the first
+    // evaluation's column discovery, and the RNG stream runs across draws.
+    const auto constrained_by_name = [&](const std::vector<double>& q) {
+      for (size_t i = 0; i < q.size(); ++i) ex.params_data()[i] = q[i];
+      ex.run_forward_only();
+      std::map<std::string, stanli::DataMap::Entry> ps;
+      for (const auto& v : cm.views) {
+        stanli::DataMap::Entry en;
+        const double* p = ex.value_ptr(v.slot);
+        en.r.assign(p, p + v.len);
+        if (v.rows > 0)
+          en.dims = {v.rows, v.len / v.rows};
+        else if (v.len > 1)
+          en.dims = {v.len};
+        ps[v.name] = std::move(en);
+      }
+      return ps;
+    };
+    std::vector<std::vector<double>> irows;
+    if (wi) {
+      wi->seed(cfg.seed);
+      irows.reserve(draws.size());
+      for (const auto& q : draws) irows.push_back(wi->eval(constrained_by_name(q)));
+    }
+
+    const auto& cols =
+        wi ? wi->columns() : (have_wa ? cm.write_array->columns : cm.views);
     stanli::Executor& out = have_wa ? *wex : ex;
 
     std::string hdr;
@@ -104,9 +141,6 @@ int main(int argc, char** argv) {
     }
     std::printf("%s\n", hdr.c_str());
     for (size_t d = 0; d < draws.size(); ++d) {
-      const auto& q = draws[d];
-      for (size_t i = 0; i < q.size(); ++i) out.params_data()[i] = q[i];
-      out.run_forward_only();
       bool first = true;
       if (want_stats) {
         for (double v : stats.rows[d]) {
@@ -114,6 +148,17 @@ int main(int argc, char** argv) {
           first = false;
         }
       }
+      if (wi) {
+        for (double v : irows[d]) {
+          std::printf(first ? "%.17g" : ",%.17g", v);
+          first = false;
+        }
+        std::printf("\n");
+        continue;
+      }
+      const auto& q = draws[d];
+      for (size_t i = 0; i < q.size(); ++i) out.params_data()[i] = q[i];
+      out.run_forward_only();
       for (const auto& v : cols) {
         const double* p = out.value_ptr(v.slot);
         for (int64_t i = 0; i < v.len; ++i) {
