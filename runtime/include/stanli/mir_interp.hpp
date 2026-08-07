@@ -1146,7 +1146,9 @@ class MirInterp {
         e.name == "gamma_lpdf" || e.name == "uniform_lpdf" ||
         e.name == "student_t_lpdf" || e.name == "cauchy_lpdf" ||
         e.name == "bernoulli_logit_lpmf" || e.name == "std_normal_lpdf" ||
-        e.name == "binomial_logit_lpmf") {
+        e.name == "binomial_logit_lpmf" || e.name == "inv_gamma_lpdf" ||
+        e.name == "weibull_lpdf" || e.name == "logistic_lpdf" ||
+        e.name == "double_exponential_lpdf") {
       std::vector<Value> av;
       for (const auto& a : e.args) av.push_back(eval(a));
       size_t n = 1;
@@ -1192,6 +1194,15 @@ class MirInterp {
         else if (e.name == "student_t_lpdf")
           acc += stan::math::student_t_lpdf(sc(0, i), sc(1, i), sc(2, i),
                                             sc(3, i));
+        else if (e.name == "inv_gamma_lpdf")
+          acc += stan::math::inv_gamma_lpdf(sc(0, i), sc(1, i), sc(2, i));
+        else if (e.name == "weibull_lpdf")
+          acc += stan::math::weibull_lpdf(sc(0, i), sc(1, i), sc(2, i));
+        else if (e.name == "logistic_lpdf")
+          acc += stan::math::logistic_lpdf(sc(0, i), sc(1, i), sc(2, i));
+        else if (e.name == "double_exponential_lpdf")
+          acc += stan::math::double_exponential_lpdf(sc(0, i), sc(1, i),
+                                                     sc(2, i));
         else
           acc += stan::math::std_normal_lpdf(sc(0, i));
       }

@@ -333,9 +333,16 @@ int main() {
 
     const double m = std::fmax(1.25, -0.5) + std::fmin(1.25, -0.5) +
                      stan::math::inv(-0.5) + stan::math::inv_logit(1.25);
+    // The four the register-machine compiler knew and the interpreter did
+    // not. The compiled path falls back to the interpreter, so the
+    // interpreter's vocabulary has to cover the compiler's.
+    const double dens = stan::math::inv_gamma_lpdf(1.5, 2, 3) +
+                     stan::math::weibull_lpdf(1.5, 2, 3) +
+                     stan::math::logistic_lpdf(0.25, 0, 1) +
+                     stan::math::double_exponential_lpdf(0.25, 0, 1);
     using stan::math::var;
     var mu = 0.3;
-    var acc = stan::math::normal_lpdf<false>(mu, m, 1.0);
+    var acc = stan::math::normal_lpdf<false>(mu, m + dens, 1.0);
     acc.grad();
     expect_eq("tdvocab lp", lp, acc.val());
     expect_eq("tdvocab dmu", g, mu.adj());
