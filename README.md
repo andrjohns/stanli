@@ -13,10 +13,11 @@ pip install stanli
 ```
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md)
-  (gradient <!--gen:bench_span-->1.0x-6.3x<!--/gen--> on
-  <!--gen:bench_wins-->11 of the 13<!--/gen--> benchmark models,
-  <!--gen:bench_losses-->0.78x and 0.65x<!--/gen--> on those that still
-  defeat the graph passes; time-to-first-draw ~20x faster)
+  (median gradient <!--gen:corpus_median-->2.00x<!--/gen--> across
+  <!--gen:corpus_n_grad-->119<!--/gen--> posteriordb models,
+  <!--gen:corpus_at_par-->92<!--/gen--> of them at or above CmdStan;
+  <!--gen:bench_span-->1.0x-6.1x<!--/gen--> on the vectorized shapes that
+  suit it best; time-to-first-draw ~20x faster)
 - Model coverage: [docs/corpus-status.md](docs/corpus-status.md)
   (<!--gen:corpus_verified-->118/120<!--/gen--> posteriordb models
   differentially verified against CmdStan's log_prob and full gradient,
@@ -246,7 +247,7 @@ the corpus status).
    (density lanes feeding `log_mix`/`log_sum_exp` instead of the target
    fuse into an elementwise-lp density variant plus batched mixture
    kernels) and tape islands compile the leftover scalar residue into
-   single ops.
+   single ops where that is measurably cheaper than the ops.
 2. Windows wheels, and a CRAN shim package. The macOS (arm64, x86_64) and
    Linux (x86_64, aarch64) wheels are built and published by
    `.github/workflows/wheels.yml` on a version tag; Windows needs opam's

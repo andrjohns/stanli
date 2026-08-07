@@ -105,10 +105,15 @@ def main():
         t_cs_stanc = time.perf_counter() - t0
         exe = tmp / f"{model}_bench"
         tbb = math / "lib" / "tbb"
+        # rk45 is header-only Boost odeint; bdf/adams reach CVODES.
+        sun = lib("sundials_*") / "lib"
         cmd = ["clang++", "-std=c++17", "-O3", "-ffp-contract=off",
                "-D_REENTRANT", "-DBOOST_DISABLE_ASSERTS",
                "-include", str(hpp), str(REPO / "tools/bench_cmdstan_grad.cpp"),
-               f"-L{tbb}", "-ltbb", f"-Wl,-rpath,{tbb}", "-o", str(exe)]
+               f"-L{tbb}", "-ltbb", f"-Wl,-rpath,{tbb}",
+               *(str(sun / f"libsundials_{n}.a")
+                 for n in ("cvodes", "idas", "kinsol", "nvecserial")),
+               "-o", str(exe)]
         for i in inc:
             cmd.insert(3, f"-I{i}")
         t0 = time.perf_counter()

@@ -15,11 +15,13 @@
 //    the interleavings no hand-written test would think to write.
 #include <stanli/graph.hpp>
 #include <stanli/inplace.hpp>
+#include <stanli/island.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/reroll.hpp>
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <string>
 #include <utility>
@@ -303,6 +305,10 @@ static void test_random_graphs_preserve_gradients() {
     make_inplace_updates(g, {});
     forward_stores_to_loads(g, {});
     reroll(g, f2, tt, {});
+    // The whole pipeline, in order. Islands are forced on: these graphs
+    // are small, so the pass's cost estimate would decline nearly all of
+    // them, and it is the compiler that this test is for.
+    carve_islands(g, f2, tt, {});
     reduce_into_result(g, tt);
     const std::vector<double> got = run_grad(std::move(g), f2);
 
@@ -329,6 +335,7 @@ static void test_random_graphs_preserve_gradients() {
 }
 
 int main() {
+  setenv("STANLI_ISLAND_ALWAYS", "1", 1);  // see the fuzz loop
   test_whitelist_backwards_ignore_values();
   test_random_graphs_preserve_gradients();
   if (failures) { std::printf("%d failures\n", failures); return 1; }

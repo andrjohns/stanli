@@ -197,6 +197,67 @@ to 8, `radon_county` from 25,152 to 10, `election88_full` from 289,165
 to 65, `dogs` from 12,751 to 261, `low_dim_gauss_mix` (a mixture model,
 using the elementwise density form) to 16.
 
+## Tape islands (`island.cpp`, disable: `STANLI_NO_ISLAND=1`)
+
+Some code cannot be vectorized by anyone. A hidden Markov model's
+forward algorithm computes step t from step t-1, and every step depends
+on the parameters; the same is true of GARCH and ARMA state updates.
+Re-rolling correctly refuses these, because running the steps in
+parallel would change the arithmetic.
+
+This pass runs last, after all the others, so what it sees is by
+construction the code nothing else could help. It takes each long
+stretch of leftover scalar work and compiles it into a single
+instruction list -- the same idea as the ODE right-hand sides below,
+with a different instruction set -- run by one op instead of thousands.
+Values are numbered cells again, and a data array the region reads is
+copied into the program as constants rather than being read from the
+graph.
+
+Running it forward uses plain numbers. Running it backward re-executes
+the same instruction list under stan-math's own autodiff, on a scratch
+tape that is thrown away afterwards, and reads the derivatives out.
+That is the same arithmetic CmdStan's generated C++ performs for those
+statements, so the derivatives agree by construction rather than by
+testing.
+
+Collapsing thousands of operations into one sounds like it must be
+faster, and mostly it is not. Measured against the same build with the
+pass switched off, on all fourteen corpus models that have a region big
+enough to compile, it was faster on one, a wash on four, and slower on
+nine -- as much as 20x slower. The reason is that the op count was
+never the cost. A region of scalar arithmetic is already about as cheap
+as the arithmetic itself, and re-running it under autodiff costs what
+CmdStan costs, which is more.
+
+What made the one model different is that its steps copy a
+1,500-element state vector each. Those copies are real memory traffic
+that the cells make free, and the model runs 2.6x faster compiled.
+
+So the pass estimates both sides before committing -- what the
+operations move, against what the cell array costs to build (twice per
+evaluation, and once as autodiff values, which allocate) -- and keeps
+the compiled form only when it is the cheaper one. The estimate
+separates the fourteen exactly: the one it keeps is 3.6x on the
+right side of the line, and every region it drops is 4-20x on the wrong
+side. Setting `STANLI_ISLAND_ALWAYS=1` skips the estimate, which is how
+to ask why a particular region was left alone.
+
+What the pass refuses outright, before any of that:
+
+- Short runs (under 32 ops), where per-op dispatch is cheaper anyway.
+- Regions with more than six distinct inputs.
+- Densities written in the dropped-constants form, whose value depends
+  on which arguments are parameters -- the island binds all of them the
+  same way, which only reproduces the keep-everything form.
+- Regions that produce an entry in the target total, which must stay
+  visible to the passes that read them.
+
+The remaining work for this class is to generate the backward pass
+directly rather than replaying the forward one under autodiff. That is
+what would make the compiled form cheaper than the ops on the models
+where it is currently a wash.
+
 ## Compiled ODE right-hand sides (`ode_prog.cpp`, report fallbacks: `STANLI_DEBUG_ODE=1`)
 
 Models with differential equations pass a user-written function (the
@@ -243,6 +304,19 @@ Two smaller things live in the executor rather than in a pass:
 - All values live in one big array, all gradient values in another, and
   both are allocated once. A steady-state gradient evaluation performs
   no memory allocation at all.
+- Which function to call for each op is decided once, at setup, into two
+  flat lists -- one in forward order, one in reverse, with the ops that
+  have nothing to do backward left out of the second. An evaluation
+  walks the list rather than looking anything up per op. Both sweeps are
+  written out four at a time, which lets the processor work on several
+  calls at once instead of waiting to see where each one goes.
+
+That last one is as far as this goes: a tail-call threaded version, the
+usual next step, measured slower than the plain unrolled loop
+(`tools/bench_dispatch.cpp` keeps the comparison), and after these
+changes the cost of an op is dominated by loading its context rather
+than by the call. Fewer ops is the remaining lever, which is what every
+pass above is for.
 
 ## How we check all of this
 
@@ -250,7 +324,8 @@ Every optimization here changes the graph, and a wrong graph produces
 wrong numbers silently. Three layers of checking:
 
 - Unit tests per pass (`tests/test_reroll.cpp`, `tests/test_inplace.cpp`,
-  `tests/test_ode_prog.cpp`, `tests/test_pass_safety.cpp`). These
+  `tests/test_island.cpp`, `tests/test_ode_prog.cpp`,
+  `tests/test_pass_safety.cpp`). These
   include tests that the passes refuse the cases they must refuse, and
   a fuzz test that runs hundreds of random graphs through all passes
   and compares gradients before and after.
@@ -266,6 +341,8 @@ wrong numbers silently. Three layers of checking:
   models whose graphs a change affects.
 
 The environment variables (`STANLI_NO_INPLACE`, `STANLI_NO_CONSTFOLD`,
-`STANLI_NO_REROLL`) exist so that a wrong result can be attributed to a
-single pass quickly: turn them off one at a time and see which one
-changes the answer.
+`STANLI_NO_REROLL`, `STANLI_NO_ISLAND`) exist so that a wrong result can
+be attributed to a single pass quickly: turn them off one at a time and
+see which one changes the answer. They are also how each pass is
+measured -- every speed number in this file is the same build with one
+variable set and unset.

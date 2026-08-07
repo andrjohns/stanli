@@ -86,26 +86,44 @@ both sides `-O3` with FP contraction pinned off:
 
 <!--gen:bench_table_us-->| model | params | stanli | CmdStan | speedup |
 | --- | ---: | ---: | ---: | ---: |
-| `radon_pooled` | 3 | 53.1 us | 335.1 us | **6.3x** |
-| `arK` | 7 | 2.3 us | 12.1 us | **5.2x** |
-| `radon_hierarchical_intercept_centered` | 391 | 113.0 us | 577.0 us | **5.1x** |
-| `radon_county_intercept` | 388 | 89.8 us | 431.0 us | **4.8x** |
-| `eight_schools_noncentered` | 10 | 0.23 us | 0.73 us | **3.2x** |
-| `election88_full` | 90 | 297.0 us | 913.3 us | **3.1x** |
-| `bym2_offset_only` | 3845 | 41.2 us | 110.0 us | **2.7x** |
-| `kidscore_momiq` | 3 | 1.9 us | 3.8 us | **2.0x** |
-| `lsat_model` | 1006 | 46.9 us | 90.5 us | **1.9x** |
-| `wells_dist100ars_model` | 3 | 17.6 us | 18.4 us | **1.0x** |
-| `radon_county` | 389 | 84.3 us | 82.3 us | **1.0x** |
-| `low_dim_gauss_mix` | 5 | 127.5 us | 99.9 us | 0.78x |
-| `dogs` | 3 | 97.7 us | 63.2 us | 0.65x |<!--/gen-->
+| `radon_pooled` | 3 | 52.9 us | 320.9 us | **6.1x** |
+| `arK` | 7 | 2.4 us | 12.5 us | **5.2x** |
+| `radon_hierarchical_intercept_centered` | 391 | 111.6 us | 569.1 us | **5.1x** |
+| `radon_county_intercept` | 388 | 89.7 us | 431.6 us | **4.8x** |
+| `nes` | 10 | 19.7 us | 69.3 us | **3.5x** |
+| `eight_schools_noncentered` | 10 | 0.23 us | 0.74 us | **3.3x** |
+| `election88_full` | 90 | 295.3 us | 902.0 us | **3.0x** |
+| `bym2_offset_only` | 3845 | 39.6 us | 114.6 us | **2.9x** |
+| `dogs` | 3 | 22.0 us | 63.7 us | **2.9x** |
+| `kidscore_momiq` | 3 | 1.9 us | 4.9 us | **2.6x** |
+| `lsat_model` | 1006 | 45.5 us | 91.2 us | **2.0x** |
+| `state_space_stochastic_level_stochastic_seasonal` | 389 | 17.2 us | 26.3 us | **1.5x** |
+| `normal_mixture` | 3 | 79.0 us | 88.2 us | **1.1x** |
+| `low_dim_gauss_mix` | 5 | 88.9 us | 98.3 us | **1.1x** |
+| `wells_dist100ars_model` | 3 | 17.4 us | 19.0 us | **1.1x** |
+| `radon_county` | 389 | 83.2 us | 82.1 us | **1.0x** |
+| `arma11` | 4 | 6.7 us | 6.2 us | 0.93x |
+| `garch11` | 4 | 11.2 us | 9.7 us | 0.86x |
+| `hmm_drive_0` | 6 | 173.0 us | 132.8 us | 0.77x |
+| `hmm_example` | 4 | 36.3 us | 27.1 us | 0.75x |
+| `ldaK2` | 7 | 145.9 us | 104.1 us | 0.71x |
+| `iohmm_reg` | 29 | 545.2 us | 320.3 us | 0.59x |
+| `diamonds` | 26 | 65.8 us | 31.5 us | 0.48x |<!--/gen-->
 
 The wins come from op granularity. CmdStan's var tape allocates, walks, and
 frees one node per scalar operation per leapfrog step; stanli pays a fixed
 cost per *op*, and a vectorized statement over N elements amortizes that to
-nothing. The one loss is honest and understood: `low_dim_gauss_mix` writes
-`log_mix(theta, normal_lpdf(...), ...)` per observation, a shape the
-re-rolling pass correctly refuses to vectorize today.
+nothing. Across the whole posteriordb corpus the median is
+<!--gen:corpus_median-->2.00x<!--/gen--> and
+<!--gen:corpus_at_par-->92<!--/gen--> of
+<!--gen:corpus_n_grad-->119<!--/gen--> models are at or above CmdStan.
+
+The losses are honest and understood, and they are all one shape: a
+recurrence. `hmm_*`, `garch11` and `arma11` step through time with each
+step reading the last one's parameter-dependent result, which nothing can
+vectorize, so the work is scalar on both sides and CmdStan's generated C++
+is the faster way to run scalar work. `ldaK2` is a mixture over more than
+two components, which the fusion pass does not yet widen.
 
 ODE models are the other place stanli is still behind. An ODE right-hand
 side is the one user function that cannot be inlined at lowering time,

@@ -181,20 +181,30 @@ def main():
                        next((math / "lib").glob("sundials_*")) / "include",
                        next((math / "lib").glob("tbb_*")) / "include"]
                 tbb = math / "lib" / "tbb"
+                # rk45 is header-only Boost odeint, but bdf/adams reach
+                # CVODES: without these the link fails on one model and
+                # the row loses its CmdStan number with nothing to say why.
+                sun = next((math / "lib").glob("sundials_*")) / "lib"
                 gexe = work / "gradbench"
                 cmd = (["clang++", "-std=c++17", "-O3", "-ffp-contract=off",
                         "-D_REENTRANT", "-DBOOST_DISABLE_ASSERTS"] +
                        [f"-I{i}" for i in inc] +
                        ["-include", str(hpp),
                         str(REPO / "tools/bench_cmdstan_grad.cpp"),
-                        f"-L{tbb}", "-ltbb", f"-Wl,-rpath,{tbb}",
-                        "-o", str(gexe)])
-                if run(cmd, timeout):
+                        f"-L{tbb}", "-ltbb", f"-Wl,-rpath,{tbb}"] +
+                       [str(sun / f"libsundials_{n}.a")
+                        for n in ("cvodes", "idas", "kinsol", "nvecserial")] +
+                       ["-o", str(gexe)])
+                if not run(cmd, timeout):
+                    notes.append("cmdstan_grad_build_fail")
+                else:
                     n_params = int(row["params"] or 0)
                     g = run([str(gexe), str(dj), str(evals_for(n_params))],
                             timeout)
                     if g:
                         row["cmdstan_ns_grad"] = f"{float(g.stdout.split()[0]):.0f}"
+                    else:
+                        notes.append("cmdstan_grad_fail")
             t0 = time.perf_counter()
             s, st = run2([str(exe), "sample", "num_warmup=1000",
                           "num_samples=1000", "random", "seed=1",
