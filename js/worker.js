@@ -4,9 +4,17 @@
 // samples, delta} in; {status} progress messages and one {done} or
 // {error} out.
 "use strict";
-importScripts("stancjs.bc.js", "stanli.js");
+importScripts("stanli.js");
 
 const ready = createStanli();
+
+// stanc3 (2.8 MB of compiled OCaml) loads only when a request arrives
+// with Stan source. Apps that ship a fixed model precompile it to MIR
+// at build time and never pay for the compiler.
+function ensureStanc() {
+  if (typeof globalThis.stanc !== "function")
+    importScripts("stancjs.bc.js");
+}
 
 onmessage = async (e) => {
   const req = e.data;
@@ -14,13 +22,18 @@ onmessage = async (e) => {
   const say = (status) => postMessage({ status });
   try {
     const M = await ready;
-    say("compiling Stan -> MIR (stanc3)");
-    const sc = stanc("browser_model", req.code, ["debug-transformed-mir"]);
-    if (sc.errors) throw new Error(Array.from(sc.errors).join("\n"));
+    let mir = req.mir;
+    if (!mir) {
+      say("compiling Stan -> MIR (stanc3)");
+      ensureStanc();
+      const sc = stanc("browser_model", req.code, ["debug-transformed-mir"]);
+      if (sc.errors) throw new Error(Array.from(sc.errors).join("\n"));
+      mir = String(sc.result);
+    }
     const tStanc = performance.now();
 
     say("lowering MIR -> op graph");
-    const mirPtr = M.stringToNewUTF8(String(sc.result));
+    const mirPtr = M.stringToNewUTF8(mir);
     const dataPtr = M.stringToNewUTF8(req.dataJson || "{}");
     const errLen = 8192;
     const errPtr = M._malloc(errLen);

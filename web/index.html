@@ -50,7 +50,7 @@
   tr { cursor: pointer; }
   tr:hover td { background: #8881; }
   td.bad { color: #c33; font-weight: 600; }
-  .plots { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: .8rem; }
+  .plots { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: .4rem; }
   .plots canvas { border: 1px solid #8883; border-radius: 6px;
                   max-width: 100%; }
   .times { font-size: .8rem; opacity: .7; margin-top: .5rem; }
@@ -88,11 +88,11 @@ everything below happens in this tab.
   <span id="status"></span>
 </div>
 <div id="err"></div>
-<div id="out"></div>
 <div class="plots">
   <canvas id="trace" width="620" height="180" hidden></canvas>
   <canvas id="hist" width="420" height="180" hidden></canvas>
 </div>
+<div id="out"></div>
 <div class="times" id="times"></div>
 
 <script type="module">
