@@ -75,12 +75,42 @@ bool in_vocab(const Graph& g, const Op& op) {
     case OP_LOG_SUM_EXP:
     case OP_SOFTMAX:
       return op.n_in == 1;
+    case OP_STD_NORMAL_LPDF:
+    case OP_EXPONENTIAL_LPDF:
     case OP_NORMAL_LPDF:
+    case OP_LOGNORMAL_LPDF:
+    case OP_CAUCHY_LPDF:
+    case OP_GAMMA_LPDF:
+    case OP_INV_GAMMA_LPDF:
+    case OP_BETA_LPDF:
+    case OP_WEIBULL_LPDF:
+    case OP_LOGISTIC_LPDF:
+    case OP_DOUBLE_EXP_LPDF:
+    case OP_UNIFORM_LPDF:
       // Propto term-dropping depends on argument TYPES; the island binds
       // every argument as T, which only matches the <false> instantiation.
       return (op.variant & 0x80u) == 0 && scalar_ins(g, op);
     default:
       return false;
+  }
+}
+
+// Density opcode -> island instruction, or -1. Arity is op.n_in.
+int density_code(uint16_t oc) {
+  switch (oc) {
+    case OP_STD_NORMAL_LPDF: return IslandProg::STD_NORMAL;
+    case OP_EXPONENTIAL_LPDF: return IslandProg::EXPONENTIAL;
+    case OP_NORMAL_LPDF: return IslandProg::NORMAL;
+    case OP_LOGNORMAL_LPDF: return IslandProg::LOGNORMAL;
+    case OP_CAUCHY_LPDF: return IslandProg::CAUCHY;
+    case OP_GAMMA_LPDF: return IslandProg::GAMMA;
+    case OP_INV_GAMMA_LPDF: return IslandProg::INV_GAMMA;
+    case OP_BETA_LPDF: return IslandProg::BETA;
+    case OP_WEIBULL_LPDF: return IslandProg::WEIBULL;
+    case OP_LOGISTIC_LPDF: return IslandProg::LOGISTIC;
+    case OP_DOUBLE_EXP_LPDF: return IslandProg::DOUBLE_EXP;
+    case OP_UNIFORM_LPDF: return IslandProg::UNIFORM;
+    default: return -1;
   }
 }
 
@@ -305,15 +335,15 @@ struct Compiler {
         emit(IslandProg::LOG_MIX, write_reg(op.out), a, b, c);
         return ok;
       }
-      case OP_NORMAL_LPDF: {
-        if (op.n_in != 3) return false;
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        const int c = read_reg(op.in[2]);
-        emit(IslandProg::NORMAL, write_reg(op.out), a, b, c);
+      default: {
+        const int dc = density_code(op.opcode);
+        if (dc < 0 || op.n_in < 1 || op.n_in > 3) return false;
+        const int a = read_reg(op.in[0]);
+        const int b = op.n_in > 1 ? read_reg(op.in[1]) : 0;
+        const int c = op.n_in > 2 ? read_reg(op.in[2]) : 0;
+        emit((IslandProg::Code)dc, write_reg(op.out), a, b, c);
         return ok;
       }
-      default:
-        return false;
     }
   }
 };

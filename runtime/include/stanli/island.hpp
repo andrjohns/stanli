@@ -42,7 +42,23 @@ struct IslandProg {
     SOFTMAX,   // dst[0..len) = softmax(r[a..a+len))
     LSE2,      // dst = log_sum_exp(r[a], r[b])
     LOG_MIX,   // dst = log_mix(r[a], r[b], r[c])
-    NORMAL,    // dst = normal_lpdf<false>(r[a], r[b], r[c])
+    // Densities, propto-OFF only (the carver refuses propto). With no
+    // term-dropping the value does not depend on which arguments are
+    // autodiff, so binding all of them as T reproduces the scalar op's
+    // value exactly; the extra partials computed for data arguments are
+    // discarded when the executor hands the island a null adjoint.
+    STD_NORMAL,   // 1 arg
+    EXPONENTIAL,  // 2 args
+    NORMAL,       // 3 args
+    LOGNORMAL,
+    CAUCHY,
+    GAMMA,
+    INV_GAMMA,
+    BETA,
+    WEIBULL,
+    LOGISTIC,
+    DOUBLE_EXP,
+    UNIFORM,
   };
   struct Instr {
     Code code = CONST;
@@ -143,8 +159,42 @@ void run_island(const IslandProg& p, const T* const* in, T* out) {
       case IslandProg::LOG_MIX:
         d() = stan::math::log_mix(ra(), rb(), reg[(size_t)I.c]);
         break;
+      case IslandProg::STD_NORMAL:
+        d() = stan::math::std_normal_lpdf<false>(ra());
+        break;
+      case IslandProg::EXPONENTIAL:
+        d() = stan::math::exponential_lpdf<false>(ra(), rb());
+        break;
       case IslandProg::NORMAL:
         d() = stan::math::normal_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
+        break;
+      case IslandProg::LOGNORMAL:
+        d() = stan::math::lognormal_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
+        break;
+      case IslandProg::CAUCHY:
+        d() = stan::math::cauchy_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
+        break;
+      case IslandProg::GAMMA:
+        d() = stan::math::gamma_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
+        break;
+      case IslandProg::INV_GAMMA:
+        d() = stan::math::inv_gamma_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
+        break;
+      case IslandProg::BETA:
+        d() = stan::math::beta_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
+        break;
+      case IslandProg::WEIBULL:
+        d() = stan::math::weibull_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
+        break;
+      case IslandProg::LOGISTIC:
+        d() = stan::math::logistic_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
+        break;
+      case IslandProg::DOUBLE_EXP:
+        d() = stan::math::double_exponential_lpdf<false>(ra(), rb(),
+                                                         reg[(size_t)I.c]);
+        break;
+      case IslandProg::UNIFORM:
+        d() = stan::math::uniform_lpdf<false>(ra(), rb(), reg[(size_t)I.c]);
         break;
     }
   }
