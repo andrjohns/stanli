@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+- **Truncation and censoring work.** `y ~ normal(mu, sigma) T[0, 10]` did
+  not compile before: stanc3 rewrites a `T[,]` into the density minus
+  `log_diff_exp` of the bounds' `lcdf`s, and stanli had neither piece.
+  Both land here, along with the whole continuous distribution-function
+  family -- 87 `cdf`/`lcdf`/`lccdf` functions, continuous and count
+  alike, every one 0 ULP against CmdStan.
+
+- **Count distributions**: `neg_binomial`, `neg_binomial_2_log`,
+  `beta_neg_binomial`, `yule_simon`. Coverage is now 46 of Stan's 72
+  densities and 87 of its 105 distribution functions;
+  [docs/coverage.md](docs/coverage.md) lists what is missing and what each
+  gap actually needs.
+
+- **`-DSTANLI_LITE_LP=ON`** halves the runtime -- 14.9 MB to 7.79 MB
+  stripped -- by dropping stan-math's propto instantiations. Every
+  gradient and every `write_array` value stays bitwise identical across
+  the whole corpus; only `lp__` moves, by a per-model constant. The
+  chain a seed produces does change, because lp is added to the kinetic
+  energy and a shifted lp rounds differently there -- the same class of
+  difference as reseeding, not of different math. On by default for the
+  browser build, off for the wheel -- which takes `stanli.wasm` from 6.2
+  MB to 3.40 MB raw, 1.34 MB to 0.99 MB gzipped, while *gaining*
+  truncation and 76 functions. `stanli_exact_lp()`
+  in C, `stanli.exact_lp()` in Python, `fit.exactLp` in JS report which
+  build you have. See [docs/lite-lp.md](docs/lite-lp.md).
+
+- **`stanli_run` is a self-contained native sampler.** Built with the
+  stanc3 embed object it compiles the model in-process: `.stan` and
+  `data.json` in, CmdStan-shaped CSV out, with no toolchain and no
+  separate compiler binary to find. `cmake --install` now places it,
+  `stanli_check`, the shared library and the headers.
+
+- `tools/verify_lite.py` verifies the lite build against the exact one
+  (gradients bitwise, lp shift constant across evaluation points), and
+  `tools/verify_refs.py --no-lp` replays the corpus for a build whose
+  `lp__` is shifted by design.
+
 ## 0.3.0
 
 - Stan runs in the browser. stanc3 compiled to JavaScript through its
@@ -43,6 +82,8 @@
   now renders both READMEs with readme_renderer, the library PyPI
   itself uses, and fails if a table does not come out as one. `twine
   check` never caught this: the page rendered, it just rendered wrong.
+
+## 0.2.1
 
 - The sampler draws from CmdStan's generator now. It built
   `boost::ecuyer1988` from the seed while CmdStan builds

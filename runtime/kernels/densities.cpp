@@ -17,6 +17,7 @@
 #include <stan/math/prim.hpp>
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace stanli {
 namespace {
@@ -95,11 +96,34 @@ void mask_dispatch_elt(unsigned mask, KernelCtx& ctx, int64_t n, F&& f) {
   }
 }
 
+// The propto-off form. Without bit 0 the mask is ignored: with no terms
+// dropped the value is the same for every mask, so one all-active binding
+// covers them all and 2^NArgs - 1 instantiations stop existing. The
+// partials computed for data arguments are then discarded (density_bwd
+// skips an argument the executor gave no adjoint buffer).
+template <int NArgs, int Tier, typename F>
+void full_form(unsigned mask, KernelCtx& ctx, F&& ff) {
+  if constexpr ((Tier & STANLI_DENSITY_FULL_MASKS) != 0) {
+    mask_dispatch<NArgs>(mask, ctx, ff);
+  } else {
+    bind_args_m<NArgs, (1u << NArgs) - 1>(ctx, ff);
+  }
+}
+
+template <int NArgs, int Tier, typename F>
+void full_form_elt(unsigned mask, KernelCtx& ctx, int64_t n, F&& ff) {
+  if constexpr ((Tier & STANLI_DENSITY_FULL_MASKS) != 0) {
+    mask_dispatch_elt<NArgs>(mask, ctx, n, ff);
+  } else {
+    bind_args_elt_m<NArgs, (1u << NArgs) - 1>(ctx, n, ff);
+  }
+}
+
 // Elementwise-lp forward (variant bit 6): out is len N, out[n] is element
 // n's lp instead of the sum. One recorder call per element; the sink's
 // buffers aim each argument's single-double partial straight at its slot in
 // the [k * N + n] scratch layout, so nothing is copied afterward.
-template <int NArgs, typename FProp, typename FFull>
+template <int NArgs, int Tier, typename FProp, typename FFull>
 void density_fwd_elt(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
   sink s;
   const int64_t N = ctx.out.len;
@@ -108,22 +132,31 @@ void density_fwd_elt(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
     for (int k = 0; k < NArgs; ++k)
       s.buf[k] = ctx.scratch + static_cast<int64_t>(k) * N + n;
     active_sink() = &s;
-    if (ctx.variant & 0x80u) {
-      mask_dispatch_elt<NArgs>(mask, ctx, n, fp);
+    if constexpr ((Tier & STANLI_DENSITY_PROPTO) != 0) {
+      if (ctx.variant & 0x80u) {
+        mask_dispatch_elt<NArgs>(mask, ctx, n, fp);
+      } else {
+        full_form_elt<NArgs, Tier>(mask, ctx, n, ff);
+      }
     } else {
-      mask_dispatch_elt<NArgs>(mask, ctx, n, ff);
+      full_form_elt<NArgs, Tier>(mask, ctx, n, ff);
     }
     active_sink() = nullptr;
     ctx.out.data[n] = s.value;
   }
 }
 
-template <int NArgs, bool Masked, typename FProp, typename FFull>
+// Tier bits from optable.hpp decide which of the four instantiation
+// families this density actually has. A missing propto family is not a
+// refusal: the full form is a correct log density, just not the one
+// CmdStan's `~` computes, so it lands a constant higher.
+template <int NArgs, int Listed, typename FProp, typename FFull>
 void density_fwd_v(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
+  constexpr int Tier = density_tier(Listed);
   if (ctx.variant & 0x40u) {
     // Real-argument densities reuse the same lambdas: scalar bindings
     // instantiate the same generic templates.
-    density_fwd_elt<NArgs>(
+    density_fwd_elt<NArgs, Tier>(
         ctx, [&](int64_t, const auto&... a) { fp(a...); },
         [&](int64_t, const auto&... a) { ff(a...); });
     return;
@@ -138,16 +171,14 @@ void density_fwd_v(KernelCtx& ctx, FProp&& fp, FFull&& ff) {
                             ? (1u << NArgs) - 1  // default: all active
                             : (ctx.variant & 0x3fu);
   active_sink() = &s;
-  if (ctx.variant & 0x80u) {
-    mask_dispatch<NArgs>(mask, ctx, fp);
-  } else if constexpr (Masked) {
-    mask_dispatch<NArgs>(mask, ctx, ff);
+  if constexpr ((Tier & STANLI_DENSITY_PROPTO) != 0) {
+    if (ctx.variant & 0x80u) {
+      mask_dispatch<NArgs>(mask, ctx, fp);
+    } else {
+      full_form<NArgs, Tier>(mask, ctx, ff);
+    }
   } else {
-    // See the note on the list in optable.hpp: with propto off the value
-    // does not depend on the mask, so one binding covers all of them and
-    // 2^NArgs - 1 instantiations stop existing. The partials computed for
-    // data arguments are discarded (density_bwd skips a null adjoint).
-    bind_args_m<NArgs, (1u << NArgs) - 1>(ctx, ff);
+    full_form<NArgs, Tier>(mask, ctx, ff);
   }
   active_sink() = nullptr;
   ctx.out.data[0] = s.value;
@@ -210,10 +241,10 @@ int64_t density_scratch(const Op& op, const Slot* slots) {
 // ---- lpmfs: integer outcome from idata, not a propagator edge --------------
 // The elementwise variant hands each recorder call outcome element n; the
 // summed path keeps the whole-vector call. STANLI_LPMF_FWD expands both.
-#define STANLI_LPMF_FWD(fname, dist, NARGS)                                    \
+#define STANLI_LPMF_FWD_T(fname, dist, NARGS, TIER)                            \
   void fname(KernelCtx& ctx) {                                                 \
     if (ctx.variant & 0x40u) {                                                 \
-      density_fwd_elt<NARGS>(                                                  \
+      density_fwd_elt<NARGS, density_tier(TIER)>(                              \
           ctx,                                                                 \
           [&](int64_t n, const auto&... a) {                                   \
             stan::math::dist<true>(ctx.idata[n], a...);                        \
@@ -225,10 +256,12 @@ int64_t density_scratch(const Op& op, const Slot* slots) {
     }                                                                          \
     Eigen::Map<const Eigen::VectorXi> y(                                       \
         ctx.idata, static_cast<Eigen::Index>(ctx.n_idata));                    \
-    density_fwd_v<NARGS, true>(                                                      \
+    density_fwd_v<NARGS, TIER>(                                                \
         ctx, [&](const auto&... a) { stan::math::dist<true>(y, a...); },       \
         [&](const auto&... a) { stan::math::dist<false>(y, a...); });          \
   }
+#define STANLI_LPMF_FWD(fname, dist, NARGS)                                    \
+  STANLI_LPMF_FWD_T(fname, dist, NARGS, 3)
 
 STANLI_LPMF_FWD(poisson_log_fwd, poisson_log_lpmf, 1)
 STANLI_LPMF_FWD(bernoulli_logit_fwd, bernoulli_logit_lpmf, 1)
@@ -236,6 +269,14 @@ STANLI_LPMF_FWD(bernoulli_fwd, bernoulli_lpmf, 1)
 STANLI_LPMF_FWD(poisson_fwd, poisson_lpmf, 1)
 STANLI_LPMF_FWD(neg_binomial_2_fwd, neg_binomial_2_lpmf, 2)
 #undef STANLI_LPMF_FWD
+
+// The same shape, one line per distribution (STANLI_INT_DENSITY_LIST).
+#define STANLI_DEFINE_INT_DENSITY(code, fn, nreal, tier)                       \
+  STANLI_LPMF_FWD_T(fn##_fwd_gen, fn, nreal, tier)
+STANLI_INT_DENSITY_LIST(STANLI_DEFINE_INT_DENSITY)
+#undef STANLI_DEFINE_INT_DENSITY
+#undef STANLI_LPMF_FWD_T
+
 // Binomials carry two int groups; idata = [len_n, n..., len_N, N...].
 // A length of -1 marks a language-level int scalar (stan-math broadcasts
 // scalars; a size-1 vector would be a size error against a longer group).
@@ -259,7 +300,7 @@ const int* int_group_next(const int* p) {
     if (ctx.variant & 0x40u) {                                                 \
       const int* g1 = ctx.idata;                                               \
       const int* g2 = int_group_next(g1);                                      \
-      density_fwd_elt<1>(                                                      \
+      density_fwd_elt<1, 3>(                                                      \
           ctx,                                                                 \
           [&](int64_t n, const auto& theta) {                                  \
             stan::math::dist<true>(int_group_elem(g1, n),                      \
@@ -273,7 +314,7 @@ const int* int_group_next(const int* p) {
     }                                                                          \
     with_int_group(ctx.idata, [&](const auto& n, const int* rest) {            \
       with_int_group(rest, [&](const auto& N, const int*) {                    \
-        density_fwd_v<1, true>(                                                      \
+        density_fwd_v<1, 3>(                                                      \
             ctx,                                                               \
             [&](const auto& theta) { stan::math::dist<true>(n, N, theta); },   \
             [&](const auto& theta) { stan::math::dist<false>(n, N, theta); }); \
@@ -335,7 +376,7 @@ void uniform_fwd(KernelCtx& ctx) {
     std::fill(ctx.scratch, ctx.scratch + plen, 0.0);
     return;
   }
-  density_fwd_v<3, true>(
+  density_fwd_v<3, 3>(
       ctx, [](const auto&... a) { stan::math::uniform_lpdf<true>(a...); },
       [](const auto&... a) { stan::math::uniform_lpdf<false>(a...); });
   if (any_out && elt) {
@@ -356,22 +397,84 @@ void uniform_fwd(KernelCtx& ctx) {
 // share -- propto and per-argument activity from the variant byte,
 // elementwise output, the partials stashed for density_bwd to contract --
 // lives in density_fwd_v.
-#define STANLI_DEFINE_DENSITY_FWD(code, fn, n, masked)                             \
+#define STANLI_DEFINE_DENSITY_FWD(code, fn, n, tier)                             \
   void fn##_fwd_gen(KernelCtx& ctx) {                                      \
-    density_fwd_v<n, masked>(                                                      \
+    density_fwd_v<n, tier>(                                                      \
         ctx, [](const auto&... a) { stan::math::fn<true>(a...); },         \
         [](const auto&... a) { stan::math::fn<false>(a...); });            \
   }
 STANLI_SCALAR_DENSITY_LIST(STANLI_DEFINE_DENSITY_FWD)
 #undef STANLI_DEFINE_DENSITY_FWD
 
+// Distribution functions: one form, no propto, and no elementwise
+// variant either. reroll.cpp only ever fuses opcodes it opts in by name,
+// and cdfs are not among them, so variant bit 6 cannot arrive -- writing
+// this separately from density_fwd_v is what keeps the per-lane binding
+// from being instantiated for 75 functions that will never use it. It is
+// not merely wasted code: some cdfs do not survive being handed a bare
+// scalar rvar where their vector overload expects a container.
+template <int NArgs, int Tier, typename F>
+void cdf_fwd(KernelCtx& ctx, F&& f) {
+  // Cannot happen today -- reroll.cpp opts densities into the fusion by
+  // opcode and cdfs are in neither list -- but the failure if it ever did
+  // would be silent: out would be len N and only element 0 written. Say
+  // so instead. The branch costs nothing next to an incomplete beta.
+  if (ctx.variant & 0x40u)
+    throw std::runtime_error("cdf: elementwise variant not implemented");
+  sink s;
+  int64_t off = 0;
+  for (int k = 0; k < NArgs; ++k) {
+    s.buf[k] = ctx.scratch + off;
+    off += ctx.in[k].len;
+  }
+  const unsigned mask = ctx.variant == 0 ? (1u << NArgs) - 1
+                                         : (ctx.variant & 0x3fu);
+  active_sink() = &s;
+  full_form<NArgs, Tier>(mask, ctx, f);
+  active_sink() = nullptr;
+  ctx.out.data[0] = s.value;
+}
+
+#define STANLI_DEFINE_CDF_FWD(code, fn, n, tier)                         \
+  void fn##_fwd_gen(KernelCtx& ctx) {                                    \
+    cdf_fwd<n, density_tier(tier) & STANLI_DENSITY_FULL_MASKS>(          \
+        ctx, [](const auto&... a) { stan::math::fn(a...); });            \
+  }
+STANLI_SCALAR_CDF_LIST(STANLI_DEFINE_CDF_FWD)
+#undef STANLI_DEFINE_CDF_FWD
+
+// Integer-outcome cdfs. Same as above with the count read from idata,
+// the way the lpmfs read theirs -- a whole vector of outcomes in one
+// call, since the summed form is the only one these have.
+#define STANLI_DEFINE_INT_CDF_FWD(code, fn, nreal, tier)                 \
+  void fn##_fwd_gen(KernelCtx& ctx) {                                    \
+    Eigen::Map<const Eigen::VectorXi> y(                                 \
+        ctx.idata, static_cast<Eigen::Index>(ctx.n_idata));              \
+    cdf_fwd<nreal, density_tier(tier) & STANLI_DENSITY_FULL_MASKS>(      \
+        ctx, [&](const auto&... a) { stan::math::fn(y, a...); });        \
+  }
+STANLI_INT_CDF_LIST(STANLI_DEFINE_INT_CDF_FWD)
+#undef STANLI_DEFINE_INT_CDF_FWD
+
 }  // namespace
 
 void register_density_kernels() {
-#define STANLI_REGISTER_DENSITY(code, fn, n, masked) \
+#define STANLI_REGISTER_DENSITY(code, fn, n, tier) \
   register_kernel(code, Kernel{fn##_fwd_gen, density_bwd<n>, density_scratch<n>});
   STANLI_SCALAR_DENSITY_LIST(STANLI_REGISTER_DENSITY)
 #undef STANLI_REGISTER_DENSITY
+  // Discrete and ordered densities: the outcome sits in idata, so the
+  // real-argument count is what the shared backward contracts.
+#define STANLI_REGISTER_INT_DENSITY(code, fn, nreal, tier) \
+  register_kernel(code,                                    \
+                  Kernel{fn##_fwd_gen, density_bwd<nreal>, density_scratch<nreal>});
+  STANLI_INT_DENSITY_LIST(STANLI_REGISTER_INT_DENSITY)
+#undef STANLI_REGISTER_INT_DENSITY
+#define STANLI_REGISTER_CDF(code, fn, n, tier) \
+  register_kernel(code, Kernel{fn##_fwd_gen, density_bwd<n>, density_scratch<n>});
+  STANLI_SCALAR_CDF_LIST(STANLI_REGISTER_CDF)
+  STANLI_INT_CDF_LIST(STANLI_REGISTER_CDF)
+#undef STANLI_REGISTER_CDF
   // The list is the default. A density whose forward needs more than the
   // shared one registers after it and wins: uniform_lpdf has to decide
   // support itself, because stan-math returns LOG_ZERO out of support
