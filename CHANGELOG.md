@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+- Sizes re-measured on the current tree, since the density list nearly
+  doubled: the shared library is 22.2 MB installed and 7.8 MB in the wheel
+  (from 21.3 / 7.4), `libstanli` is 15.75 MB stripped exact and 8.43 MB
+  lite (from 14.93 / 7.79), and `stanli.wasm` is 4.10 MB raw / 1.15 MB
+  gzipped (from 3.60 / 1.05). Densities and distribution functions are now
+  12.03 MB of the shipped library, 54.9%.
+
+- **71 of Stan's 72 densities.** The multivariate and multinomial tail
+  lands: the wishart family, `multi_gp`, `multi_student_t`, `lkj_cov`,
+  `multi_normal_prec`, the multinomial family, `ordered_probit`, `wiener`,
+  and the three remaining GLMs. Only `gaussian_dlm_obs` is out, and for a
+  structural reason: it takes seven arguments and an op holds six.
+
+- Those tail densities are **compact** -- one instantiation of stan-math's
+  template instead of one per activity mask. Their gradients are bitwise
+  against CmdStan and their `lp__` sits a per-model constant higher,
+  measured and characterised in the new
+  [docs/compact-densities.md](docs/compact-densities.md), which also says
+  which densities are exact and how to make a tail one exact if you need
+  it. The trade is the same one `STANLI_LITE_LP` makes globally, applied
+  per density: `lp__` is a diagnostic, the gradient is what the sampler
+  integrates.
+
+- `ordered_probit` and `wiener` were written off as unreachable because
+  the recorder cannot do arithmetic on its scalar type. That is true of
+  the recorder and not of `stan::math::var`, so both work on a nested var
+  tape.
+
+- `Graph::add_op` used to write past `Op::in` without a word. A
+  seven-input op corrupted `n_in` and surfaced as a SIGBUS inside a
+  kernel; it throws at the point that knows now.
+
+- `multi_normal_prec`, `lkj_corr`, `hypergeometric` and `discrete_range`,
+  taking densities to 54 of 72 -- and none of the four needed a kernel
+  written from scratch. The first two are one template parameter on
+  `multi_normal` and `lkj_corr_cholesky`, whose argument shapes they share.
+  The other two are all-integer, so they are covered by a general rewrite:
+  `y ~ foo(...)` with every argument data contributes exactly zero, because
+  that is what CmdStan's `include_summand` does with it. See the three
+  tiers at the top of docs/coverage.md.
+
+- Three more densities, and a propto bug they exposed: `poisson_log_glm`,
+  `neg_binomial_2_log_glm` and `beta_binomial`, all bitwise against
+  CmdStan. GLM ops were the one density shape the lowering gave no variant
+  at all, so their kernels hardcoded `propto=false` and
+  `poisson_log_glm`'s lp landed `sum(log(y!))` away from CmdStan's with the
+  gradients already exact. `bernoulli_logit_glm` had the same hardcoding
+  and got away with it because bernoulli has no constant to drop. 50 of 72
+  densities now.
+
 - The browser build uses SIMD128. Worth 2% on most shapes and 11% on a
   matrix-heavy model for 0.03 MB gzipped, and every corpus model's
   gradients come out bitwise identical to the scalar build -- with FP

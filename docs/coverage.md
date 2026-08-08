@@ -7,106 +7,93 @@ with a generated single-function model.
 
 | family | supported |
 |---|---|
-| densities (`_lpdf`, `_lpmf`) | 47 / 72 |
+| densities (`_lpdf`, `_lpmf`) | 71 / 72 |
 | distribution functions (`_cdf`, `_lcdf`, `_lccdf`) | 90 / 105 |
 | scalar math (all-real signature) | 47 / 129 |
 
-Everything supported matches CmdStan **bitwise** -- 0 ULP on every
-argument
-slot, at three evaluation points. That is the standard here; a density that
-merely agrees to 1e-12 is a bug report, not a feature.
+Every supported density's **gradients** match CmdStan bitwise, at three
+evaluation points. That is the standard here, and a density whose
+gradients merely agree to 1e-12 is a bug report, not a feature.
+
+`lp__` is bitwise too for everything models actually lean on. It is
+**not** for the multivariate and multinomial tail, which is built the
+compact way: one instantiation instead of `2^N`, so `lp__` comes out a
+per-model constant higher while every gradient stays exact. Which
+densities, why, and how to check:
+[docs/compact-densities.md](compact-densities.md).
 
 Adding one is a line in an X-macro list in
 `runtime/include/stanli/optable.hpp`, which generates the opcode, the
 kernel, its registration, the lowering table entry and the interpreter
 branch together. See `docs/hacking.md`.
 
-## The gaps, and what each one actually needs
+## Three ways in, cheapest first
 
-### Ordinal regression -- `ordered_logistic` is in, `ordered_probit` is not
+Not every density needs a kernel, and reaching for one first is how this
+list stayed short longer than it had to.
 
-`ordered_logistic` works and matches CmdStan bitwise. Getting there needed
-three things, and the first was a wrong diagnosis: the recorder's Eigen
-edge already *has* `partials_vec_`, so the vector-of-vectors partials were
-never the problem. What actually blocked it was that the failing edge was
-the **scalar** one -- `bind_args_m` compiles both shape branches, and a
-cutpoint set bound as a scalar picks stan-math overloads the scalar edge
-cannot serve. `VecMask` (densities.cpp) marks an argument as a vector
-whatever its length, which is correct anyway: a one-element cutpoint set
-is a one-element vector.
+**1. Rewrite, when the rewrite is exact.** `y ~ foo(...)` with every
+argument data contributes EXACTLY zero: CmdStan's generated code calls
+`foo_lpdf<propto=true>` on all-double arguments, `include_summand` comes
+back false, and the term is dropped before any arithmetic. That is a
+general rule, not an approximation, and it needs no kernel at all -- which
+is the whole of `hypergeometric` and `discrete_range`, whose arguments are
+all integers so every use of them lands here. `target +=` of the same call
+is a compile-time constant through the data interpreter. (The one
+divergence: a model whose data is outside the density's support -- CmdStan
+throws from its checks, stanli contributes 0. Such a model rejects every
+draw either way.)
 
-The other two: the outcome goes over as a `std::vector<int>`, because
-`ordered_logistic` asks `scalar_seq_view` for a mutable `data()` that an
-`Eigen::Map<const VectorXi>` cannot give (and a `std::vector` is what
-CmdStan's generated code passes, so it is the instantiation the references
-came from); and `rvar` gained a `Scalar` member -- see below.
+What does NOT belong here is a rewrite that changes the arithmetic.
+`multi_normal_prec(y | mu, P)` is `multi_normal(y | mu, inverse(P))`
+mathematically, but it costs a K^3 inverse per evaluation and stops
+matching CmdStan bitwise, which is the oracle this project runs on. The
+kernel below was fifteen lines.
 
-`ordered_probit` is still out, for the recorder's structural reason:
-`c_vec[i].coeff(0) - lambda_vec[i]` does arithmetic on the scalar type.
+**2. Clone, when a signature already exists.** `multi_normal_prec` takes
+the same three arguments in the same shapes as `multi_normal`;
+`lkj_corr` the same two as `lkj_corr_cholesky`. Both were one template
+parameter on an existing kernel. Worth checking for before writing
+anything: the remaining pairs (`wishart`/`inv_wishart`,
+`multi_gp`/`multi_gp_cholesky`, `multi_student_t`/its cholesky form) are
+clones of each other, so the first of each pair pays for two.
 
-### Multivariate -- wishart, `multi_student_t`, `multi_normal_prec`,
-`multi_gp`, `lkj_corr`, `gaussian_dlm_obs`
+**3. Write the kernel.** The var-tape-replay pattern is correct by
+construction and needs no hand-written derivative: build a nested tape,
+call stan-math, `grad()` it. What makes each one bespoke is only the SHAPE
+PLUMBING -- how a matrix or an array-of-vectors argument reaches the
+kernel -- not the math. The shared helpers (`tail_m`, `tail_v`,
+`tail_scatter_*` in `runtime/kernels/matrix_fns.cpp`) reduce each to about
+twenty lines.
 
-Matrix arguments, each with its own shape plumbing. `multi_normal`,
-`multi_normal_cholesky`, `lkj_corr_cholesky` and `dirichlet` are already
-in as hand-written kernels; these would follow the same pattern, one at a
-time.
+This tier also has no restriction on what the density does with its scalar
+type, which the recorder does: `ordered_probit` computes
+`c_vec[i].coeff(0) - lambda_vec[i]` and `wiener` does `res *= 0.0`, and
+`stan::math::var` has those operators where `rvar` deliberately does not.
+Both were written off as unreachable until they were tried on a var tape.
 
-### GLM fast paths -- `poisson_log_glm`, `neg_binomial_2_log_glm`,
-`binomial_logit_glm`, `categorical_logit_glm`, `ordered_logistic_glm`
+These kernels are **compact** -- one instantiation, every argument bound
+as autodiff -- so `lp__` carries a per-model constant while the gradients
+stay exact. [docs/compact-densities.md](compact-densities.md) is the
+contract.
 
-`bernoulli_logit_glm` is in and shows the shape: a data matrix in a
-row-major slot with its dims in `idata`. These matter for coverage rather
-than speed -- brms and rstanarm emit the GLM form directly, so a model
-using one does not merely run slower, it does not run.
+## What is left
 
-### Multinomial family -- `multinomial`, `multinomial_logit`,
-`dirichlet_multinomial`, `beta_binomial`, `hypergeometric`,
-`discrete_range`
+**`gaussian_dlm_obs`** -- the only unsupported density, and for a
+structural reason rather than a mathematical one. It takes seven
+arguments; `Op::in` holds six. Raising the limit would add bytes to every
+`Op` and every `KernelCtx` in every model, for one dynamic-linear-model
+density, so the lowering refuses and says why. (`add_op` used to write
+past the array without a word: a seven-input op corrupted `n_in` and
+surfaced as a SIGBUS inside the kernel. It throws now.)
 
-Integer outcomes that are not one int per lane: an array of counts, or two
-int groups. `binomial` already carries two groups
-(`with_int_group` in `densities.cpp`); the rest need their own layouts.
-`hypergeometric` and `discrete_range` have no real arguments at all, so
-they contribute a constant and no gradient.
+**Vector `alpha` in the GLMs.** `bernoulli_logit_glm`, `poisson_log_glm`
+and `neg_binomial_2_log_glm` take the intercept as a scalar; stan-math
+also allows a per-row vector. The kernels refuse that form by name.
 
-### The 18 remaining distribution functions
-
-`binomial` and `beta_binomial` carry a second int group (the trial count)
-and `discrete_range` is integers all the way down, so those nine want a
-layout rather than a list line -- `with_int_group` in `densities.cpp`
-shows
-the shape.
-
-`neg_binomial_2`'s three reparameterize to `neg_binomial` by computing
-`phi / mu` **on the scalar type**, which is the recorder's hard limit
-again (see below). The other six are `von_mises` and
-`skew_double_exponential`, also below.
-
-### Two that will not work as they stand
-
-- **`von_mises_cdf`** does `res *= 0.0` on the scalar type at a degenerate
-  endpoint. The recorder computes in doubles and carries no tape, so that
-  assignment would change the value and leave the partials describing the
-  old one. `rvar` deliberately has no arithmetic operators, which is why
-  this fails to compile rather than silently producing a wrong gradient.
-`skew_double_exponential`'s three cdfs used to be listed here for a
-related reason and are now in. The cause was the same missing trait: we
-register `is_fvar<rvar>`, and stan-math's fvar `value_type` specialization
-is written `typename std::decay_t<T>::Scalar` -- which applies to
-`const rvar&` as much as to `rvar`, and asked for a member `rvar` did not
-have. A real `fvar` defines `Scalar`; we claimed the trait without
-honouring that part of its contract. One member declaration, and three
-cdfs plus `ordered_logistic` compiled.
-
-### `wiener_lpdf`
-
-The only remaining all-real scalar density, and it fails the same way
-`von_mises_cdf` does: it computes with the scalar type directly
-(`square(y - tau)`, comparisons against doubles) rather than deriving
-partials in doubles. Same fix would be needed -- a tape, or a
-hand-written
-kernel.
+**`corr_matrix` and `cholesky_factor_cov` parameter transforms.** Not
+densities, but they are why `lkj_corr` and the wisharts have to be
+reached through a transformed parameter rather than declared directly.
 
 ## Truncation and censoring
 

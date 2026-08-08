@@ -29,13 +29,13 @@ pip install stanli
   <!--gen:corpus_bitwise-->45<!--/gen--> of them bitwise identical, worst
   relative deviation <!--gen:corpus_worst-->2.6e-12<!--/gen-->; per-model
   accuracy in relative terms and ULPs is listed there)
-- Install size: one 21.3 MB shared library, a 7.4 MB wheel. Breakdown
+- Install size: one 22.2 MB shared library, a 7.8 MB wheel. Breakdown
   in [Binary size](#binary-size) below; the browser build halves the
   runtime with `STANLI_LITE_LP` ([docs/lite-lp.md](docs/lite-lp.md)).
-- Distribution coverage: [docs/coverage.md](docs/coverage.md) (47 of 72
-  densities, 90 of 105 cdf/lcdf/lccdf, truncation, censoring and ordinal
-  regression; every one bitwise against CmdStan, and what is missing says
-  why)
+- Distribution coverage: [docs/coverage.md](docs/coverage.md) (71 of 72
+  densities, 90 of 105 cdf/lcdf/lccdf, truncation, censoring, ordinal
+  regression and the count GLMs; every one bitwise against CmdStan, and
+  what is missing says why)
 - How this is possible, for statisticians:
   [docs/how-it-works.md](docs/how-it-works.md)
 - Design doc: `docs/superpowers/specs/2026-08-04-stan-portable-runtime-design.md`
@@ -144,17 +144,17 @@ Stage by stage:
 
 ## Binary size
 
-One self-contained shared library, 21.3 MB installed, 7.4 MB compressed
-in the wheel. Attributing its 21.0 MB of code and data by symbol:
+One self-contained shared library, 22.2 MB installed, 7.8 MB compressed
+in the wheel. Attributing its 21.9 MB of code and data by symbol:
 
 | | | |
 | --- | ---: | ---: |
-| densities and distribution functions | 11.43 MB | 54.4% |
-| embedded stanc3 (all OCaml) | 5.73 MB | 27.3% |
-| stan-math, everything else | 0.64 MB | 3.1% |
-| Boost, nlohmann/json, NUTS, libc++, unattributed | 1.53 MB | 7.3% |
-| stanli itself | 0.84 MB | 4.0% |
-| Eigen (out-of-line) | 0.68 MB | 3.2% |
+| densities and distribution functions | 12.03 MB | 54.9% |
+| embedded stanc3 (all OCaml) | 5.73 MB | 26.1% |
+| stan-math, everything else | 0.78 MB | 3.6% |
+| Boost, nlohmann/json, NUTS, libc++, unattributed | 1.61 MB | 7.3% |
+| stanli itself | 0.92 MB | 4.2% |
+| Eigen (out-of-line) | 0.71 MB | 3.3% |
 | SUNDIALS | 0.14 MB | 0.7% |
 
 The densities are the majority, and the split above is measured the same
@@ -179,7 +179,7 @@ functions cost 0.03 MB between them, because an elementwise kernel with a
 hand-written derivative instantiates nothing.
 
 **`-DSTANLI_LITE_LP=ON` halves the runtime.** Dropping the propto family
-entirely takes `libstanli` from 14.9 MB to 7.79 MB stripped, at the cost
+entirely takes `libstanli` from 15.8 MB to 8.4 MB stripped, at the cost
 of an `lp__` that differs from CmdStan's by a per-model constant. Every
 gradient stays bit-identical; a pinned seed draws a different but equally
 valid chain, because the sampler adds `lp` to the kinetic energy and a
@@ -200,41 +200,34 @@ the cost of ~8x slower model compilation.
 ### The browser build
 
 A different binary with different economics: no embedded stanc3, because
-the compiler ships separately as JavaScript, and `STANLI_LITE_LP` on by
-default. `stanli.wasm` is 3.47 MB raw and 1.01 MB gzipped, of which
-3.33 MB is code, attributed the same way:
+the compiler ships separately as JavaScript. `stanli.wasm` is 5.79 MB raw
+and 1.52 MB gzipped.
 
-| | | |
+Where that goes, measured by stubbing every density, cdf and tail kernel
+and relinking:
+
+| | raw | gzip |
 | --- | ---: | ---: |
-| stanli itself | 1.35 MB | 40.5% |
-| densities and distribution functions | 0.95 MB | 28.4% |
-| stan-math, everything else | 0.42 MB | 12.5% |
-| Eigen (out-of-line) | 0.26 MB | 7.7% |
-| libc++, NUTS, runtime, unattributed | 0.21 MB | 6.4% |
-| SUNDIALS | 0.06 MB | 1.7% |
-| nlohmann/json | 0.05 MB | 1.5% |
-| Boost | 0.05 MB | 1.4% |
+| core runtime | 2.26 MB | 0.69 MB |
+| densities and distribution functions | 3.53 MB | 0.83 MB |
 
-The densities are 28% here against 54% in the wheel, and stanli's own
-code leads instead. Two reasons: the propto instantiations are gone, and
-`densities.cpp` is the one file the browser build compiles at `-Oz`
-rather than `-O3`, which was worth 8.5 MB of wasm and costs about 10% on
-a mixture model. What is left of stanli grows as a share because the
-interpreter and the register machine are templates that survive both.
+Densities are 55% of the compressed download, which is what
+[docs/density-pack.md](docs/density-pack.md) is about: a core plus an
+on-demand pack, so a model pays for the densities it uses. `densities.cpp`
+is also the one file the browser build compiles at `-Oz` rather than
+`-O3`, worth 8.5 MB of wasm and about 10% on a mixture model.
 
 stanc3 as JavaScript is a separate 2.84 MB, 0.40 MB gzipped, and a page
-that ships precompiled MIR never fetches it. So the floor for sampling a
-known model in a browser is the 1.01 MB runtime alone.
+that ships precompiled MIR never fetches it.
 
-**The browser `lp__` is not CmdStan's.** `STANLI_LITE_LP` is what makes
-the numbers above, and it drops the propto instantiations, so `~`
-evaluates the full density and `lp__` differs from CmdStan's by a
-per-model constant. Gradients and every `write_array` value stay bitwise
-identical, and the posterior is the same posterior, but do not compare a
-browser `lp__` against a CmdStan run or feed it to anything reading log
-densities as absolute numbers. The wheels ship the exact build.
-`stanli_exact_lp()` reports which one is loaded. Details in
-[docs/lite-lp.md](docs/lite-lp.md).
+The browser build reports the same `lp__` as the wheels.
+`STANLI_LITE_LP` used to default on here, which halved the download and
+shifted `lp__` by a per-model constant; it is off everywhere now, so a
+browser run and a CmdStan run can be compared directly.
+`stanli_exact_lp()` still reports which build is loaded, for anyone who
+turns the flag back on. See [docs/lite-lp.md](docs/lite-lp.md), and
+[docs/density-pack.md](docs/density-pack.md) for the plan to get the
+download back down without giving up `lp__`.
 
 ## Python
 

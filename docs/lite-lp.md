@@ -34,7 +34,7 @@ every `write_array` value is **bitwise identical** to the exact build, and
 
 | | exact | lite |
 |---|---|---|
-| `libstanli` stripped (macOS arm64) | 14.93 MB | 7.79 MB |
+| `libstanli` stripped (macOS arm64) | 15.75 MB | 8.43 MB |
 | gradients vs CmdStan | bitwise | bitwise |
 | `lp__` vs CmdStan | bitwise | constant offset |
 | draws for a pinned seed | -- | different chain, same posterior |
@@ -110,7 +110,7 @@ python3 tools/verify_lite.py deps/posteriordb
 1. **Gradients bitwise.** Not "close" -- the same computation.
 2. **The lp shift is constant.** Evaluated at three points in the
    unconstrained space, `lp_exact - lp_lite` must come out the same every
-   time. This is the load-bearing check: a shift that *moved* with the
+   time. This is the check that matters: a shift that *moved* with the
    parameters would mean a dropped term was not constant after all, which
    is the only way this flag can be wrong, and it would show up as an O(1)
    relative change.
