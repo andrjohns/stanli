@@ -32,6 +32,21 @@ file(GLOB _boost ${DEPS}/math/lib/boost_*)
 file(GLOB _sundials ${DEPS}/math/lib/sundials_*)
 file(GLOB _tbb ${DEPS}/math/lib/tbb_*)
 
+# std::thread in nuts.cpp (parallel chains). libstdc++ needs -pthread at
+# LINK time for it, and every consumer of the static library inherits the
+# translation unit whether or not it ever starts a chain -- so this is
+# PUBLIC on the libraries rather than added per executable. macOS hides
+# the requirement (pthreads live in libSystem), which is why this only
+# ever fails on Linux, and only in CI.
+#
+# Not under Emscripten: wasm threads need -pthread plus a
+# cross-origin-isolated page, thread_safe_build() is false there, and
+# emscripten's libc resolves the symbols without the flag.
+if(NOT EMSCRIPTEN)
+  set(THREADS_PREFER_PTHREAD_FLAG ON)
+  find_package(Threads REQUIRED)
+endif()
+
 # Everything that includes stan-math (or stan) links this interface target.
 add_library(stanmath INTERFACE)
 target_include_directories(stanmath INTERFACE
@@ -65,6 +80,31 @@ option(STANLI_LITE_LP
   OFF)
 if(STANLI_LITE_LP)
   target_compile_definitions(stanmath INTERFACE STANLI_LITE_LP=1)
+endif()
+
+# Chains in threads. stan-math's autodiff stack is a plain static unless
+# STAN_THREADS is defined, in which case it is thread_local (__thread on
+# gcc/clang). The legacy kernels and tape islands build NESTED var tapes
+# on that stack, so without this two chains in two threads share one tape
+# and corrupt each other -- which is why stanli_thread_safe() exists and
+# why num_threads is CLAMPED rather than honoured on a build without it.
+#
+# On by default, because the cost was measured and is not there. The TLS
+# indirection lands on every var operation, so the model to worry about
+# is one dominated by the nested-tape path: a 200-step ordered_logistic
+# recurrence spending 72% of its gradient inside a legacy op measured
+# 44,695 ns without and 44,370 ns with, and eight schools 221.4 against
+# 223.0 -- noise in both directions. Against that, 8 chains on 8 threads
+# is 5.9x, and the output is byte-identical to the sequential run.
+#
+# Off under Emscripten: wasm threads need -pthread and a
+# cross-origin-isolated page, and the browser build runs one chain per
+# worker instead.
+option(STANLI_THREADS
+  "thread_local autodiff stack: parallel chains (measured free; see docs/benchmarks.md)"
+  ON)
+if(STANLI_THREADS AND NOT EMSCRIPTEN)
+  target_compile_definitions(stanmath INTERFACE STAN_THREADS=1)
 endif()
 
 if(EMSCRIPTEN)
@@ -150,9 +190,11 @@ add_library(stanli_shared SHARED
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/kernels/mixture.cpp
+  runtime/kernels/message.cpp
   runtime/kernels/island.cpp
   runtime/src/island.cpp
   runtime/src/nuts.cpp
+  runtime/src/diagnose.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp
   runtime/src/wa_interp.cpp
@@ -162,7 +204,7 @@ add_library(stanli_shared SHARED
   runtime/src/data.cpp
   tests/tbb_stub.cpp)
 target_include_directories(stanli_shared PUBLIC runtime/include)
-target_link_libraries(stanli_shared PUBLIC stanmath sundials)
+target_link_libraries(stanli_shared PUBLIC stanmath sundials Threads::Threads)
 set_target_properties(stanli_shared PROPERTIES OUTPUT_NAME stanli)
 
 # Export only the C API. Everything else in here (stan-math, Eigen, the
@@ -235,9 +277,11 @@ add_library(stanli STATIC
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/kernels/mixture.cpp
+  runtime/kernels/message.cpp
   runtime/kernels/island.cpp
   runtime/src/island.cpp
   runtime/src/nuts.cpp
+  runtime/src/diagnose.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp
   runtime/src/wa_interp.cpp
@@ -247,6 +291,9 @@ add_library(stanli STATIC
   runtime/src/data.cpp)
 target_include_directories(stanli PUBLIC runtime/include)
 target_link_libraries(stanli PUBLIC stanmath sundials)
+if(NOT EMSCRIPTEN)
+  target_link_libraries(stanli PUBLIC Threads::Threads)
+endif()
 
 # The browser/WASM build: the same runtime and C ABI over the MIR-text
 # entry point (no embedded stanc; stanc.js supplies the MIR in JS). One
@@ -336,4 +383,9 @@ stanli_add_test(test_constfold)
 stanli_add_test(test_write_array)
 stanli_add_test(test_mixture)
 stanli_add_test(test_island)
+stanli_add_test(test_diagnose)
+stanli_add_test(test_multichain)
+stanli_add_test(test_newtrans)
+stanli_add_test(test_rejectprint)
+stanli_add_test(test_odevariadic)
 endif()  # NOT EMSCRIPTEN

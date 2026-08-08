@@ -1648,8 +1648,137 @@ struct Lowering {
     return std::nullopt;
   }
 
+  // The modern variadic family: ode_rk45 / ode_bdf / ode_adams / ode_ckrk
+  // and their _tol forms.
+  //
+  //   ode_SOLVER(f, y0, t0, ts, ...args)
+  //   ode_SOLVER_tol(f, y0, t0, ts, rtol, atol, max_steps, ...args)
+  //
+  // Everything after the fixed prefix is passed straight through to the
+  // right-hand side, in any number and any type. They reduce to the same
+  // calling convention integrate_ode_* has always used -- autodiff reals
+  // packed in order, data reals packed in order, integers as compile-time
+  // constants -- so the kernel and the register machine are unchanged;
+  // only the packing at this end is new.
+  std::optional<Val> lower_ode_variadic(const mir::Expr& e) {
+    static const std::vector<std::pair<const char*, OdeSpec::Solver>>
+        kSolvers = {{"ode_bdf", OdeSpec::BDF},
+                    {"ode_adams", OdeSpec::ADAMS},
+                    {"ode_rk45", OdeSpec::RK45},
+                    {"ode_ckrk", OdeSpec::CKRK}};
+    std::string base = e.name;
+    bool with_tol = false;
+    if (base.size() > 4 && base.compare(base.size() - 4, 4, "_tol") == 0) {
+      with_tol = true;
+      base = base.substr(0, base.size() - 4);
+    }
+    const auto sit = std::find_if(
+        kSolvers.begin(), kSolvers.end(),
+        [&](const auto& s) { return base == s.first; });
+    if (sit == kSolvers.end()) return std::nullopt;
+
+    const size_t fixed = with_tol ? 7 : 4;
+    if (e.args.size() < fixed) fail(e.name + ": unexpected arity", e.raw);
+    auto spec = std::make_shared<OdeSpec>();
+    if (fun_defs.find(e.args[0].name) == fun_defs.end())
+      fail(e.name + ": unknown right-hand side " + e.args[0].name, e.raw);
+    spec->adopt(fun_defs);
+    spec->rhs_name = e.args[0].name;
+    spec->solver = sit->second;
+    spec->stiff = spec->solver == OdeSpec::BDF ||
+                  spec->solver == OdeSpec::ADAMS;
+    // stan-math's defaults, per solver: the CVODES pair is far tighter
+    // than the Runge-Kutta pair, and using one set for both is how
+    // one_comp_mm's gradients ended up 2.9e-6 off CmdStan once already.
+    if (spec->stiff) {
+      spec->rtol = 1e-10;
+      spec->atol = 1e-10;
+      spec->max_steps = 100000000;
+    }
+    spec->t0 = const_values(e.args[2]).at(0);
+    spec->ts = const_values(e.args[3]);
+    if (with_tol) {
+      spec->rtol = const_values(e.args[4]).at(0);
+      spec->atol = const_values(e.args[5]).at(0);
+      spec->max_steps = (long)const_values(e.args[6]).at(0);
+    }
+
+    // Classify and pack. Data arguments fold into the spec here and never
+    // reach the graph; autodiff ones are concatenated in argument order
+    // into the single theta input the op takes, which is the order
+    // compile_rhs_args assigns their register sub-ranges in.
+    std::vector<RhsArg> rargs;
+    std::vector<Val> param_parts;
+    for (size_t k = fixed; k < e.args.size(); ++k) {
+      const mir::Expr& a = e.args[k];
+      RhsArg ra;
+      const bool is_int = a.type_.find("UInt") != std::string::npos;
+      if (is_int && a.data_only) {
+        ra.is_int = true;
+        ra.ints = const_ints(a);
+      } else if (a.data_only) {
+        // One evaluation, held in a local. Calling const_values(a) twice
+        // and taking begin() from one temporary and end() from the other
+        // is an invalid range, and it does not fail loudly: it appended
+        // hundreds of garbage doubles to x_r and surfaced much later as
+        // "ode parameters and data[927] is nan".
+        const std::vector<double> vals = const_values(a);
+        ra.len = (int)vals.size();
+        spec->x_r.insert(spec->x_r.end(), vals.begin(), vals.end());
+      } else {
+        if (is_int)
+          fail(e.name + ": integer argument " + std::to_string(k - fixed + 1) +
+                   " is not data",
+               e.raw);
+        const Val v = lower_expr(a);
+        ra.is_param = true;
+        ra.len = (int)info[v.slot].len;
+        param_parts.push_back(v);
+      }
+      rargs.push_back(std::move(ra));
+    }
+
+    Val z0 = lower_expr(e.args[1]);
+    const int64_t S = info[z0.slot].len;
+    const int64_t N = (int64_t)spec->ts.size();
+
+    // One contiguous theta. A model with a single parameter argument --
+    // which is most of them -- gets its slot used directly and pays for
+    // no copy at all; more than one chains through CONCAT2, whose
+    // backward already splits the adjoint back out.
+    Val theta;
+    if (param_parts.empty()) {
+      theta = {const_slot(0.0), {}};  // len 1, unread: n_th is 0
+    } else {
+      theta = param_parts[0];
+      int64_t acc = info[theta.slot].len;
+      for (size_t k = 1; k < param_parts.size(); ++k) {
+        const int64_t add = info[param_parts[k].slot].len;
+        theta = emit(OP_CONCAT2, {theta.slot, param_parts[k].slot}, acc + add);
+        acc += add;
+      }
+    }
+
+    spec->args = rargs;
+    spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), (int)S, rargs);
+    // Falling back to the interpreter is correct but ~30x slower, so make
+    // it findable rather than silent.
+    if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ODE"))
+      std::fprintf(stderr,
+                   "stanli: ODE right-hand side %s falls back to the "
+                   "interpreter: %s\n",
+                   spec->rhs_name.c_str(), spec->prog.why.c_str());
+
+    Val v = emit(OP_ODE, {z0.slot, theta.slot}, N * S, {}, {(int)N, (int)S});
+    g.ops.back().udata = spec.get();
+    g.udata_pool.push_back(std::move(spec));
+    decl_dims_pending = {N, S};
+    return v;
+  }
+
   // The integrate_ode_* family.
   std::optional<Val> lower_ode_fn(const mir::Expr& e) {
+    if (auto v = lower_ode_variadic(e)) return v;
     if (e.name.rfind("integrate_ode_", 0) == 0) {
       // integrate_ode_*(f, z_init, t0, ts, theta, x_r, x_i[, rtol, atol,
       // max_steps]). Everything but z_init and theta is data, and is
@@ -1662,6 +1791,8 @@ struct Lowering {
       spec->adopt(fun_defs);
       spec->rhs_name = e.args[0].name;
       spec->stiff = e.name.find("bdf") != std::string::npos;
+      spec->legacy = true;
+      spec->solver = spec->stiff ? OdeSpec::BDF : OdeSpec::RK45;
       // stan-math's own defaults differ per solver: rk45 1e-6/1e-6/1e6,
       // bdf 1e-10/1e-10/1e8. Using one set for both left one_comp_mm's
       // gradients 2.9e-6 off CmdStan.
@@ -1685,6 +1816,12 @@ struct Lowering {
       const int64_t N = (int64_t)spec->ts.size();
       // Compile the right-hand side now that its argument sizes are known.
       // A failure here is not a compile error: the interpreter still runs it.
+      spec->args.resize(3);
+      spec->args[0].is_param = true;
+      spec->args[0].len = (int)info[theta.slot].len;
+      spec->args[1].len = (int)spec->x_r.size();
+      spec->args[2].is_int = true;
+      spec->args[2].ints = spec->x_i;
       spec->prog = compile_rhs(*spec->rhs(), *spec->funs(), (int)S,
                                (int)info[theta.slot].len,
                                (int)spec->x_r.size(), spec->x_i);
@@ -1721,12 +1858,42 @@ struct Lowering {
     int64_t raw_len = con_len;
     if (tr.kind == mir::Transform::Simplex)
       raw_len = n_batch * (inner_con - 1);
+    // sum_to_zero_vector[K]: K constrained from K-1 unconstrained, and
+    // unlike the simplex it is volume-preserving, so there is no jacobian
+    // term at all.
+    if (tr.kind == mir::Transform::SumToZero)
+      raw_len = n_batch * (inner_con - 1);
+    // unit_vector[K] is K from K: the constraint costs no dimension, it
+    // just curves the space (and does carry a jacobian).
     if (tr.kind == mir::Transform::CholeskyCorr) {
       // cholesky_factor_corr[K]: K*K constrained, K*(K-1)/2 unconstrained.
       const int64_t K = inner_con;
       n_batch = 1;
       raw_len = K * (K - 1) / 2;
       con_len = K * K;
+    }
+    // The matrix-valued transforms take their dimensions from the read
+    // dims rather than from the flattened length, which cannot tell
+    // corr_matrix[3] from cov_matrix[2].
+    int64_t chol_M = 0, chol_N = 0;
+    if (tr.kind == mir::Transform::Correlation ||
+        tr.kind == mir::Transform::Covariance) {
+      const int64_t K = inner_con;
+      n_batch = 1;
+      raw_len = tr.kind == mir::Transform::Correlation
+                    ? K * (K - 1) / 2        // k_choose_2
+                    : K + K * (K - 1) / 2;   // K + k_choose_2
+      con_len = K * K;
+    }
+    if (tr.kind == mir::Transform::CholeskyCov) {
+      // cholesky_factor_cov[M, N] reads two dims; [K] is the square case.
+      chol_M = eval_int(s.read_dims[s.read_dims.size() >= 2
+                                        ? s.read_dims.size() - 2
+                                        : s.read_dims.size() - 1]);
+      chol_N = s.read_dims.size() >= 2 ? inner_con : chol_M;
+      n_batch = 1;
+      raw_len = (chol_N * (chol_N + 1)) / 2 + (chol_M - chol_N) * chol_N;
+      con_len = chol_M * chol_N;
     }
     if (s.read_dims.size() > 1) {
       std::vector<int64_t> dims;
@@ -1782,6 +1949,49 @@ struct Lowering {
       case mir::Transform::PositiveOrdered:
         opcode = OP_CONSTRAIN_POS_ORDERED;
         break;
+      // offset / multiplier: the affine transform, and the modern
+      // non-centering idiom. stanc3 emits three tags depending on which
+      // halves were written, so the missing half becomes its identity
+      // (offset 0, multiplier 1) and one kernel serves all three.
+      case mir::Transform::Offset:
+      case mir::Transform::Multiplier:
+      case mir::Transform::OffsetMultiplier: {
+        opcode = OP_CONSTRAIN_OFFSET_MULT;
+        const int zero = const_slot(0.0);
+        const int one = const_slot(1.0);
+        if (tr.kind == mir::Transform::Offset) {
+          ins.push_back(lower_expr(tr.args[0]).slot);
+          ins.push_back(one);
+        } else if (tr.kind == mir::Transform::Multiplier) {
+          ins.push_back(zero);
+          ins.push_back(lower_expr(tr.args[0]).slot);
+        } else {
+          ins.push_back(lower_expr(tr.args[0]).slot);
+          ins.push_back(lower_expr(tr.args[1]).slot);
+        }
+        break;
+      }
+      case mir::Transform::UnitVector:
+        opcode = OP_CONSTRAIN_UNIT_VECTOR;
+        break;
+      case mir::Transform::SumToZero:
+        opcode = OP_CONSTRAIN_SUM_TO_ZERO;
+        break;
+      case mir::Transform::Correlation:
+        opcode = OP_CONSTRAIN_CORR_MATRIX;
+        psi.rows = inner_con;
+        psi.cols = inner_con;
+        break;
+      case mir::Transform::Covariance:
+        opcode = OP_CONSTRAIN_COV_MATRIX;
+        psi.rows = inner_con;
+        psi.cols = inner_con;
+        break;
+      case mir::Transform::CholeskyCov:
+        opcode = OP_CONSTRAIN_CHOL_COV;
+        psi.rows = chol_M;
+        psi.cols = chol_N;
+        break;
       default:
         fail("unsupported parameter transform", tr.raw);
     }
@@ -1790,7 +2000,15 @@ struct Lowering {
     if (opcode == OP_CONSTRAIN_SIMPLEX || opcode == OP_CONSTRAIN_ORDERED ||
         opcode == OP_CONSTRAIN_POS_ORDERED)
       tr_idata = {(int)n_batch, (int)inner_con};
-    if (opcode == OP_CONSTRAIN_CHOL_CORR) tr_idata = {(int)inner_con};
+    if (opcode == OP_CONSTRAIN_UNIT_VECTOR ||
+        opcode == OP_CONSTRAIN_SUM_TO_ZERO)
+      tr_idata = {(int)n_batch, (int)inner_con};
+    if (opcode == OP_CONSTRAIN_CHOL_CORR ||
+        opcode == OP_CONSTRAIN_CORR_MATRIX ||
+        opcode == OP_CONSTRAIN_COV_MATRIX)
+      tr_idata = {(int)inner_con};
+    if (opcode == OP_CONSTRAIN_CHOL_COV)
+      tr_idata = {(int)chol_M, (int)chol_N};
     Val con = emit(opcode, ins, con_len, psi, tr_idata, jac);
     jac_slots.push_back(jac);
     scope[s.decl_id] = con.slot;
@@ -1964,6 +2182,55 @@ struct Lowering {
         // Compiler-internal checks (FnCheck / FnValidateSize): sizes are
         // enforced at data binding; value checks are skipped.
         if (s.fn_name == "FnCheck" || s.fn_name == "FnValidateSize") return;
+        // A vector offset/multiplier makes stanc emit check_matching_dims
+        // as a named call rather than an FnCheck. It is a pure SHAPE
+        // check, and every shape here is static -- a mismatch would have
+        // failed this lowering long before the check ran -- so skipping
+        // it is exact rather than a relaxation. Deliberately not a
+        // `check_*` prefix match: a value check like check_positive_finite
+        // rejects a draw at runtime, and skipping one of those would
+        // silently accept points CmdStan refuses.
+        if (s.fn_name == "check_matching_dims") return;
+        // reject() and print(): the message is a mix of string literals
+        // and expressions, so the literals become the op's chunk list and
+        // the expressions become its inputs. reject throws
+        // std::domain_error at forward time, which is the same exception
+        // from the same place CmdStan's generated code throws it, so the
+        // sampler counts it as a rejected proposal rather than a failure.
+        if (s.fn_name == "FnReject" || s.fn_name == "FnPrint") {
+          auto spec = std::make_shared<MessageSpec>();
+          std::vector<int> ins;
+          std::string pending;
+          for (const auto& a : s.fn_args) {
+            if (a.kind == mir::Expr::LitStr) {
+              pending += a.lit_s;
+              continue;
+            }
+            // Each value input closes the chunk that precedes it. Op::in
+            // holds six, and a message longer than that is a diagnostic
+            // nobody will miss the tail of -- but say so rather than
+            // corrupting the op.
+            if (ins.size() >= 6)
+              fail(std::string(s.fn_name == "FnReject" ? "reject" : "print") +
+                       " with more than 6 printed values",
+                   s.raw);
+            spec->chunks.push_back(pending);
+            pending.clear();
+            ins.push_back(lower_expr(a).slot);
+          }
+          spec->chunks.push_back(pending);  // trailing literal, if any
+          Op op;
+          op.opcode = s.fn_name == "FnReject" ? OP_REJECT : OP_PRINT;
+          op.n_in = (int)ins.size();
+          for (size_t k = 0; k < ins.size(); ++k) op.in[k] = ins[k];
+          // The output is a dead scalar: every op writes somewhere, and
+          // nothing reads this one.
+          op.out = add_slot(1, false);
+          op.udata = spec.get();
+          g.udata_pool.push_back(spec);
+          g.ops.push_back(op);
+          return;
+        }
         if (s.fn_name == "FnWriteParam") {
           // One CSV column, at the point the emission happens: this is what
           // fixes the column order to CmdStan's. Arrays of containers are

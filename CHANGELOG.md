@@ -1,5 +1,121 @@
 # Changelog
 
+## 0.5.0
+
+Workflow and language reach. 0.4.x could sample a model but not tell you
+whether the run was any good, and a 2026 model written with
+`offset`/`multiplier` would not compile at all. This one runs four
+chains in parallel with the diagnostics to judge them, and lowers every
+parameter transform Stan has.
+
+### Multi-chain sampling and diagnostics
+
+- **`sample()` runs four chains by default, in parallel.** R-hat needs
+  more than one chain, so a single-chain default made convergence
+  uncheckable. Chain `c` uses CmdStan's stream for `(seed, chain id
+  c+1)`, so a matched seed means a matched stream per chain. Eight
+  schools does all four in about 70 ms.
+- **Threading changes nothing about the answer.** Each chain owns its
+  executor and its RNG stream, so the draws are byte-identical to a
+  sequential run -- checked in `tests/test_multichain.cpp` and
+  `tests/test_python.py`, and on the CLI across four models including one
+  that spends 72% of its gradient in a nested var tape.
+- **`fit.summary()`**: mean, MCSE, sd, quantiles, bulk and tail ESS, and
+  rank-normalized split-R-hat (Vehtari et al. 2021), computed by stan's
+  own estimators so the numbers agree with `stansummary`.
+- **`fit.diagnose()`**: the checks a workflow actually turns on --
+  divergent transitions, max-treedepth saturation, **E-BFMI**, R-hat, and
+  bulk/tail ESS -- each either confirmed or reported with the number that
+  failed and what to do about it.
+- `fit.draws("mu")` keeps the chain axis; `fit["mu"]` concatenates, which
+  is what `sample()` returned before, so existing code is unaffected.
+  `fit.to_arviz()` hands off an InferenceData with the sampler stats
+  attached.
+- New sampler controls, in Python, the C ABI and `stanli_run`: `chains`,
+  `thin`, `save_warmup`, `inits` (unconstrained), `init_radius`,
+  `max_depth`, `parallel_chains`. `stanli_run` gains `--chains`,
+  `--num-threads`, `--thin`, `--save-warmup`, `--init-radius` and
+  `--summary`.
+- `stanli_sample_multi`, `stanli_summary_stats`, `stanli_diagnose_text`
+  and `stanli_thread_safe` join the C ABI.
+
+**`STAN_THREADS` is on for native builds, and it was measured before it
+was turned on.** stan-math's autodiff stack becomes thread-local, which
+costs a TLS indirection on every var operation -- so the model to worry
+about is one dominated by the nested-tape path. A 200-step
+`ordered_logistic` recurrence spending 72% of its gradient inside a
+legacy op measured 44,695 ns without and 44,370 ns with; eight schools
+221.4 against 223.0. Noise in both directions, against 5.9x for 8 chains
+on 8 threads.
+
+The bug that made this worth doing carefully: stan-math's AD stack
+pointer is thread-local under `STAN_THREADS` and starts **null** in every
+new thread, so each child thread must instantiate a `ChainableStack`
+before touching the AD system. CmdStan never writes that line because
+TBB's scheduler-entry hook does it for every worker -- and this build
+stubs TBB out. Raw `std::thread`s segfaulted inside `start_nested()`
+until `run_nuts_chains` did it itself.
+
+### The modern ODE interface
+
+`ode_rk45`, `ode_bdf`, `ode_adams`, `ode_ckrk` and their `_tol` forms.
+Only the deprecated `integrate_ode_*` family lowered before, so a model
+written against the interface Stan has recommended for years did not
+compile.
+
+The two differ in more than spelling: the modern right-hand side takes a
+`vector` state and returns a `vector`, and everything after `ts` is
+passed through in any number and any type, where the old one fixed
+exactly `(theta, x_r, x_i)`. Both now reduce to one calling convention --
+autodiff reals packed in order, data reals packed in order, integers as
+compile-time constants -- so the register machine that made ODE
+right-hand sides 29-39x faster is unchanged and serves both.
+
+Each solver dispatches to its own stan-math entry point. Mapping
+`ode_adams` onto BDF, or `ode_ckrk` onto RK45, agrees to solver tolerance
+on an easy system and is still the wrong integrator for the user who
+chose one for its stability -- and it would have passed a casual test.
+
+The interpreter fallback follows: a right-hand side the compiler cannot
+take still runs, as it always has, because the spec now carries the
+argument list the fallback needs to split the packed arguments back into
+the function's declared parameters. Coverage never shrinks, only speed.
+
+Verified against a CmdStan build of the same model at three points, 11
+interfaces including the deprecated one, worst 1.1e-14 relative
+(`harnesses/ode_sweep.py`). One bug found on the way, and it is the kind
+worth naming: the data-argument packing called `const_values(a)` twice
+and took `begin()` from one temporary and `end()` from the other. That is
+an invalid range and it does not fail loudly -- it appended hundreds of
+garbage doubles and surfaced much later as `ode parameters and
+data[927] is nan`.
+
+### Parameter transforms, reject and print
+
+- **`offset` / `multiplier`.** The modern non-centering idiom, and what
+  brms generates. Its offset and multiplier may themselves be parameters,
+  scalar or per-element. It parsed into the MIR before this and then hit
+  `unsupported parameter transform` in the lowering.
+- **`unit_vector`, `sum_to_zero_vector`, `corr_matrix`, `cov_matrix`,
+  `cholesky_factor_cov`** (square and rectangular). That completes the
+  set, and it is what lets `lkj_corr` and the wisharts be declared
+  directly rather than reached through a transformed parameter.
+- **`reject` and `print`**, in both placements: `transformed data`, where
+  a taken reject fails the compile the way CmdStan fails to construct the
+  model, and the model block, where it lowers to an op that throws
+  `std::domain_error` during the forward sweep -- the same exception from
+  the same place CmdStan throws it, so the sampler reads it as a rejected
+  proposal. A reject under a condition on a *parameter* still does not
+  lower, because the condition does not; that is the parameter-dependent
+  control flow gap, not a reject gap.
+- All 20 transforms verify **bitwise** against a CmdStan build of the
+  same model (`harnesses/transform_sweep.py`). One of them took a second
+  pass: with a vector multiplier, the adjoint has to accumulate the value
+  term and the Jacobian term as two separate `+=` rather than one sum of
+  two, because stan-math builds the lp term before the value and the
+  reverse sweep contracts them in that order. `a += b; a += c` does not
+  round like `a += (b + c)`, and that was the whole of a 1-ULP gap.
+
 ## 0.4.1
 
 Three bugs in features 0.4.0 introduced. Two refused to compile, one was
