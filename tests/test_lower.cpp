@@ -839,6 +839,93 @@ int main() {
     }
   }
 
+  // Every shape 0.4.0 got wrong, in one model and one gradient. See
+  // tests/fixtures/shapes.stan. The three fixtures above each pin one
+  // construct and name the fix that broke; this one shares a graph, a data
+  // block and a parameter vector between them, so it is the check that one
+  // construct does not disturb another. All nine gradients have to come out
+  // for it to pass.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_int("K", 2);
+    d.set_real_array("t", {0.5, 1.75, 2.25});
+    // Both 2-D data blocks are stored first index fastest, which is what
+    // the JSON reader produces: y = {{1,2},{3,4},{5,6}} and
+    // p = {{0.3,0.7},{0.4,0.6},{0.2,0.8}}.
+    d.set_real_array("y", {1, 3, 5, 2, 4, 6}, {3, 2});
+    d.set_real_array("p", {0.3, 0.4, 0.2, 0.7, 0.6, 0.8}, {3, 2});
+    d.set_real_array("Sigma", {2.0, 0.5, 0.5, 1.0}, {2, 2});
+    CompiledModel sm = compile_model(slurp("tests/fixtures/shapes.tmir.sexp"),
+                                     d);
+    Executor sex(std::move(sm.graph));
+    sm.bind(sex);
+    // Declaration order: mu, theta[3], sigma, m[2], a[2].
+    const double pts[2][9] = {
+        {0.35, -0.2, 0.4, 0.15, -0.3, 0.5, -0.45, 0.25, -0.1},
+        {-0.4, 0.55, -0.15, 0.3, 0.2, -0.35, 0.6, -0.2, 0.45}};
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 9; ++i) sex.params_data()[i] = pts[c][i];
+      double grad[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+      const double lp = sex.gradient(grad);
+
+      using stan::math::var;
+      var u_mu = pts[c][0], u_sig = pts[c][4];
+      var au0 = pts[c][7], au1 = pts[c][8];
+      Eigen::Matrix<var, Eigen::Dynamic, 1> theta(3), m(2), alpha(2);
+      for (int i = 0; i < 3; ++i) theta(i) = pts[c][1 + i];
+      m(0) = pts[c][5];
+      m(1) = pts[c][6];
+      var mu = u_mu, sigma = stan::math::exp(u_sig);
+      alpha(0) = stan::math::exp(au0);
+      alpha(1) = stan::math::exp(au1);
+
+      Eigen::VectorXd t(3);
+      t << 0.5, 1.75, 2.25;
+      std::vector<Eigen::VectorXd> ys(3, Eigen::VectorXd(2));
+      ys[0] << 1, 2;
+      ys[1] << 3, 4;
+      ys[2] << 5, 6;
+      std::vector<Eigen::VectorXd> ps(3, Eigen::VectorXd(2));
+      ps[0] << 0.3, 0.7;
+      ps[1] << 0.4, 0.6;
+      ps[2] << 0.2, 0.8;
+      Eigen::MatrixXd Sd(2, 2);
+      Sd << 2.0, 0.5, 0.5, 1.0;
+
+      // Jacobians in declaration order, then the four statements in the
+      // order the model writes them.
+      var acc = u_sig + au0 + au1;
+      acc += stan::math::normal_lpdf<true>(t, mu, sigma);
+      acc -= 3.0 * stan::math::log_diff_exp(
+                       stan::math::normal_lcdf(10.0, mu, sigma),
+                       stan::math::normal_lcdf(0.0, mu, sigma));
+      acc += stan::math::normal_lpdf<true>(t, theta, 1.0);
+      for (int i = 0; i < 3; ++i)
+        acc -= stan::math::log_diff_exp(
+            stan::math::normal_lcdf(10.0, theta(i), 1.0),
+            stan::math::normal_lcdf(0.0, theta(i), 1.0));
+      acc += stan::math::multi_normal_lpdf<true>(ys, m, Sd);
+      acc += stan::math::dirichlet_lpdf<true>(ps, alpha);
+      acc.grad();
+
+      const double want[9] = {u_mu.adj(),     theta(0).adj(), theta(1).adj(),
+                              theta(2).adj(), u_sig.adj(),    m(0).adj(),
+                              m(1).adj(),     au0.adj(),      au1.adj()};
+      // Eight of the nine are bitwise. d/d_mu carries the truncation
+      // normalizer, which the graph computes as one scaled log_diff_exp
+      // where this reference and CmdStan both accumulate, so it lands
+      // inside the 2 ULP budget rather than on it. The failure this test
+      // exists for is not subtle: permuting the observations against the
+      // components moves a gradient by whole digits.
+      for (int i = 0; i < 9; ++i)
+        expect_ulp("shapes g" + std::to_string(i), grad[i], want[i]);
+      const double tol = 8 * 2.220446049250313e-16 * std::abs(acc.val());
+      check(std::abs(lp - acc.val()) <= tol,
+            "shapes: lp matches the var path");
+    }
+  }
+
   // Ordinal regression, against an independent var-path reference. Same
   // reason as the truncation case: CI has no CmdStan, and this is the one
   // density whose cutpoint argument is a shared vector rather than a
