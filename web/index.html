@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>stanli: Stan in the browser</title>
+<title>stanli: Stan Language Interpreter in the browser</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -70,7 +70,7 @@
 </style>
 </head>
 <body>
-<h1>stanli: full Stan in the browser</h1>
+<h1>stanli: The Stan Language Interpreter - full Stan in the browser</h1>
 <p class="sub">stanc3 (OCaml&rarr;JS) compiles the model, stanli.wasm
 lowers it to an op graph and runs NUTS. No server, no C++ toolchain;
 everything below happens in this tab.
@@ -641,10 +641,6 @@ disagreement anywhere is
 <!--gen:corpus_worst-->2.6e-12<!--/gen--> relative. Per-model results:
 <a href="https://github.com/seantalts/stanli/blob/main/docs/corpus-status.md">corpus
 status</a>.</p>
-<p>This page runs the same runtime the PyPI wheels ship, built the same
-way, so gradients, generated quantities and <code>lp__</code> all match
-CmdStan here too. <code>pip install stanli</code>, or read the
-<a href="https://github.com/seantalts/stanli">source</a>.</p>
 </footer>
 </body>
 </html>
