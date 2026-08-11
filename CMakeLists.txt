@@ -437,6 +437,9 @@ stanli_add_test(test_mir)
 stanli_add_test(test_transforms)
 stanli_add_test(test_eltwise)
 stanli_add_test(test_lower)
+stanli_add_test(test_lower_views)
+stanli_add_test(test_lower_view_contract)
+stanli_add_test(test_lower_array_contract)
 stanli_add_test(test_data)
 stanli_add_test(test_e2e)
 stanli_add_test(test_reroll)
@@ -461,4 +464,11 @@ stanli_add_test(test_rejectprint)
 stanli_add_test(test_odevariadic)
 stanli_add_test(test_estimate)
 stanli_add_test(test_brmsmono)
+
+# The C ABI lives only in the shared library. Test it through that shipped
+# boundary rather than compiling capi.cpp into the C++ unit-test library.
+add_executable(test_capi tests/test_capi.cpp)
+target_link_libraries(test_capi PRIVATE stanli_shared)
+add_test(NAME test_capi COMMAND test_capi
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()  # NOT EMSCRIPTEN
