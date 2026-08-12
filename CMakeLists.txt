@@ -23,6 +23,9 @@ project(stanli C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(DATAMAP_FROM_JSON "Build DataMap JSON construction support" ON)
+option(DATAMAP_FROM_CONTEXT "Build DataMap var_context construction support" ON)
+
 # The one exception: walnuts.cpp wraps the vendored walnutpie headers,
 # which are written against C++20 concepts. It includes no stan-math --
 # just the executor interface and Eigen -- so the newer standard stays
@@ -239,6 +242,12 @@ add_library(stanli_shared SHARED
   runtime/src/data.cpp
   tests/tbb_stub.cpp)
 target_include_directories(stanli_shared PUBLIC runtime/include)
+if(DATAMAP_FROM_JSON)
+  target_compile_definitions(stanli_shared PUBLIC DATAMAP_FROM_JSON)
+endif()
+if(DATAMAP_FROM_CONTEXT)
+  target_compile_definitions(stanli_shared PUBLIC DATAMAP_FROM_CONTEXT)
+endif()
 target_compile_definitions(stanli_shared
                            PRIVATE STANLI_BUILD_ID="${STANLI_BUILD_ID}")
 # ${CMAKE_DL_LIBS}: bs_model_construct calls dladdr to find its own path.
@@ -335,6 +344,12 @@ add_library(stanli STATIC
   runtime/src/constfold.cpp
   runtime/src/data.cpp)
 target_include_directories(stanli PUBLIC runtime/include)
+if(DATAMAP_FROM_JSON)
+  target_compile_definitions(stanli PUBLIC DATAMAP_FROM_JSON)
+endif()
+if(DATAMAP_FROM_CONTEXT)
+  target_compile_definitions(stanli PUBLIC DATAMAP_FROM_CONTEXT)
+endif()
 target_compile_definitions(stanli PRIVATE STANLI_BUILD_ID="${STANLI_BUILD_ID}")
 # The BridgeStan facade is native-only: it finds its own sidecar manifest
 # with dladdr, and a browser has neither dlopen nor a second process to

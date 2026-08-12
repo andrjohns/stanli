@@ -9,6 +9,14 @@
 #include <string>
 #include <vector>
 
+#ifdef DATAMAP_FROM_CONTEXT
+namespace stan {
+namespace io {
+class var_context;
+}
+}  // namespace stan
+#endif
+
 namespace stanli {
 
 class DataMap {
@@ -19,6 +27,11 @@ class DataMap {
     std::vector<int> i;
     std::vector<int64_t> dims;  // empty = scalar
   };
+
+  DataMap() = default;
+#ifdef DATAMAP_FROM_CONTEXT
+  explicit DataMap(const stan::io::var_context& context);
+#endif
 
   void set_int(const std::string& name, long v) {
     Entry e;
@@ -57,8 +70,10 @@ class DataMap {
     return it->second;
   }
 
+#ifdef DATAMAP_FROM_JSON
   static DataMap from_json_file(const std::string& path);
   static DataMap from_json(const std::string& text);
+#endif
 
  private:
   std::map<std::string, Entry> m_;

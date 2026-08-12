@@ -1,13 +1,49 @@
 #include <stanli/data.hpp>
 
-#include "../third_party/nlohmann_json.hpp"
+#ifdef DATAMAP_FROM_CONTEXT
+#include <stan/io/var_context.hpp>
+#endif
 
+#ifdef DATAMAP_FROM_JSON
+#include "../third_party/nlohmann_json.hpp"
+#endif
+
+#ifdef DATAMAP_FROM_JSON
 #include <fstream>
 #include <functional>
 #include <sstream>
+#endif
 
 namespace stanli {
 
+#ifdef DATAMAP_FROM_CONTEXT
+
+DataMap::DataMap(const stan::io::var_context& context) {
+  std::vector<std::string> names;
+  context.names_r(names);
+  for (const std::string& name : names) {
+    Entry e;
+    e.r = context.vals_r(name);
+    const std::vector<size_t> dims = context.dims_r(name);
+    e.dims.assign(dims.begin(), dims.end());
+    m_[name] = std::move(e);
+  }
+
+  names.clear();
+  context.names_i(names);
+  for (const std::string& name : names) {
+    Entry e;
+    e.is_int = true;
+    e.i = context.vals_i(name);
+    e.r.assign(e.i.begin(), e.i.end());
+    const std::vector<size_t> dims = context.dims_i(name);
+    e.dims.assign(dims.begin(), dims.end());
+    m_[name] = std::move(e);
+  }
+}
+#endif
+
+#ifdef DATAMAP_FROM_JSON
 using nlohmann::json;
 
 static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
@@ -125,5 +161,6 @@ DataMap DataMap::from_json_file(const std::string& path) {
   ss << f.rdbuf();
   return from_json(ss.str());
 }
+#endif
 
 }  // namespace stanli
