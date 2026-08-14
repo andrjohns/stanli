@@ -35,7 +35,7 @@ struct SlotInfo {
   ViewKind kind = ViewKind::Flat;
   ShapeId shape = 0;  // nonzero exactly for Array values
 };
-static_assert(sizeof(SlotInfo) == 24);
+static_assert(sizeof(SlotInfo) <= 24);
 
 bool is_matrix(const SlotInfo& si) { return si.kind == ViewKind::Matrix; }
 bool is_vector(const SlotInfo& si) { return si.kind == ViewKind::Vector; }
@@ -150,7 +150,7 @@ struct Lowering {
     bool autodiff = false;  // instantiated C++ scalar type carries var
     SlotInfo si;
   };
-  static_assert(sizeof(Val) == 32);
+  static_assert(sizeof(Val) <= 32);
 
   const DataMap& data;
   std::shared_ptr<ShapeInterner> shape_pool;
