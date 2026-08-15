@@ -227,6 +227,7 @@ set(STANLI_RUNTIME_SOURCES
   runtime/src/walnuts.cpp
   runtime/src/diagnose.cpp
   runtime/src/estimate.cpp
+  runtime/src/pathfinder.cpp
   runtime/src/mir_reader.cpp
   runtime/src/lower.cpp
   runtime/src/wa_interp.cpp
@@ -343,7 +344,7 @@ if(EMSCRIPTEN)
     "SHELL:-s MAXIMUM_MEMORY=4GB"
     "SHELL:-s STACK_SIZE=8MB"
     "SHELL:-s ENVIRONMENT=web,worker,node"
-    "SHELL:-s EXPORTED_FUNCTIONS=_stanli_model_new,_stanli_model_new_from_stan,_stanli_has_embedded_stanc,_stanli_exact_lp,_stanli_model_free,_stanli_n_unconstrained,_stanli_grad,_stanli_sample,_stanli_n_constrained,_stanli_constrained_name,_stanli_constrain,_stanli_wa_n_columns,_stanli_wa_column_name,_stanli_wa_seed,_stanli_wa_row,_stanli_sample_stream,_stanli_sample_walnuts_stream,_malloc,_free"
+    "SHELL:-s EXPORTED_FUNCTIONS=_stanli_model_new,_stanli_model_new_from_stan,_stanli_has_embedded_stanc,_stanli_exact_lp,_stanli_model_free,_stanli_n_unconstrained,_stanli_grad,_stanli_sample,_stanli_n_constrained,_stanli_constrained_name,_stanli_constrain,_stanli_wa_n_columns,_stanli_wa_column_name,_stanli_wa_seed,_stanli_wa_row,_stanli_sample_stream,_stanli_sample_walnuts_stream,_stanli_run_pathfinder,_malloc,_free"
     "SHELL:-s EXPORTED_RUNTIME_METHODS=cwrap,UTF8ToString,stringToNewUTF8,HEAPF64,addFunction,removeFunction"
     "SHELL:-s ALLOW_TABLE_GROWTH=1")
 endif()
@@ -402,7 +403,7 @@ set(STANLI_TESTS
   test_structured_checks test_mir_unary_fallback test_constfold
   test_write_array test_pool test_bridgestan test_mixture test_island
   test_adjoint test_diagnose test_multichain test_newtrans test_rejectprint
-  test_odevariadic test_estimate test_brmsmono test_structured_arrays)
+  test_odevariadic test_estimate test_brmsmono test_structured_arrays test_pathfinder)
 foreach(STANLI_TEST IN LISTS STANLI_TESTS)
   stanli_add_test(${STANLI_TEST})
 endforeach()
