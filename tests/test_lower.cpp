@@ -1635,6 +1635,133 @@ int main() {
     }
   }
 
+  // A scalar int outcome against vectorized real arguments. See
+  // tests/fixtures/intbcast.stan: the outcome rides in idata, which had no
+  // way to say "this was one int, not an array of one", so the kernel handed
+  // stan-math a size-1 container and every such call threw a size-consistency
+  // error against the longer real arguments. The reference here is the call
+  // CmdStan would instantiate -- a bare int -- so it checks the broadcast
+  // itself, not just that the throw stopped.
+  {
+    const int n = 3;
+    DataMap d;
+    d.set_int("n", n);
+    CompiledModel bm =
+        compile_model(slurp("tests/fixtures/intbcast.tmir.sexp"), d);
+    Executor bex(std::move(bm.graph));
+    bm.bind(bex);
+    // Declaration order: theta[2], lambda.
+    const double pts[2][3] = {{0.3, -0.45, 0.7}, {-0.6, 0.15, -1.1}};
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 3; ++i) bex.params_data()[i] = pts[c][i];
+      double grad[3] = {0, 0, 0};
+      const double lp = bex.gradient(grad);
+
+      using stan::math::var;
+      Eigen::Matrix<var, Eigen::Dynamic, 1> th(2);
+      th(0) = pts[c][0];
+      th(1) = pts[c][1];
+      var lam = pts[c][2];
+      Eigen::Matrix<var, Eigen::Dynamic, 1> r = stan::math::exp(th);
+      Eigen::VectorXd a(2), b(2), cut(3);
+      a << 2.0, 3.0;
+      b << 1.3, 1.4;
+      cut << -1.0, 0.5, 2.0;
+      var acc = stan::math::beta_neg_binomial_lpmf<false>(n, r, a, b);
+      acc += stan::math::beta_neg_binomial_lcdf(n, r, a, b);
+      acc += stan::math::poisson_log_lpmf<false>(n, th);
+      // The cutpoints are one whole argument, not lanes: broadcasting the
+      // outcome to their length would multiply this term by three.
+      acc += stan::math::ordered_logistic_lpmf<false>(2, lam, cut);
+      acc.grad();
+
+      // Measured bitwise on arm64/clang at both points, which is what the
+      // replication predicts: N copies of the outcome reduce in the same
+      // order as one broadcast scalar. The few-ULP window is the headroom
+      // the other var-path comparisons in this file carry, for a toolchain
+      // that reassociates the shared subexpressions differently.
+      const double tol = 8 * 2.220446049250313e-16;
+      const double want[3] = {th(0).adj(), th(1).adj(), lam.adj()};
+      bool gok = true;
+      for (int i = 0; i < 3; ++i)
+        gok = gok && std::abs(grad[i] - want[i]) <=
+                         tol * std::max(1.0, std::abs(want[i]));
+      check(gok, "intbcast: gradients match the scalar-outcome var path");
+      check(
+          std::abs(lp - acc.val()) <= tol * std::max(1.0, std::abs(acc.val())),
+          "intbcast: lp matches the scalar-outcome var path");
+    }
+  }
+
+  // Two-argument log_sum_exp / log_diff_exp on containers. See
+  // tests/fixtures/lsepair.stan: Stan vectorizes both elementwise with
+  // scalar broadcast, and the lowering used to emit them at width 1, so
+  // every container form died at the assignment that consumed the result.
+  {
+    // mat is column-major: the JSON reader stores the first index fastest.
+    const std::vector<double> matv = {0.5, 1.5, 1.25, 0.25, 2.0, 2.5};
+    DataMap d;
+    d.set_int_array("counts", {1, 2, 3});
+    d.set_real_array("mat", matv, {2, 3});
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/lsepair.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    // Declaration order: a[3], b.
+    const double pts[2][4] = {{0.4, -0.7, 0.25, 0.6},
+                              {-0.3, 0.9, -0.15, -0.45}};
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 4; ++i) lex.params_data()[i] = pts[c][i];
+      double grad[4] = {0, 0, 0, 0};
+      const double lp = lex.gradient(grad);
+
+      using stan::math::log_diff_exp;
+      using stan::math::log_sum_exp;
+      using stan::math::var;
+      std::vector<var> a = {pts[c][0], pts[c][1], pts[c][2]};
+      var b = pts[c][3];
+      std::vector<var> hi = {a[0] + 8, a[1] + 8, a[2] + 8};
+      // Each `sum` is one reduction over its own result, so the reference
+      // reassociates the same way the graph does and can be held bitwise.
+      var acc = 0;
+      var s = 0;
+      for (int i = 0; i < 3; ++i) s += log_diff_exp(hi[i], a[i]);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i) s += log_diff_exp(hi[i], b);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i) s += log_sum_exp(b, hi[i]);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i) s += log_sum_exp(var(i + 1), b);
+      acc += s;
+      s = 0;
+      for (size_t i = 0; i < matv.size(); ++i)
+        s += log_diff_exp(matv[i] + 8, b);
+      acc += s;
+      // `sum(na[1]) + sum(na[2])` is one target term, so the two element
+      // sums join each other before they reach the accumulator.
+      var n1 = 0, n2 = 0;
+      for (int i = 0; i < 3; ++i) n1 += log_sum_exp(b, hi[i]);
+      for (int i = 0; i < 3; ++i) n2 += log_sum_exp(b, a[i]);
+      acc += n1 + n2;
+      acc.grad();
+
+      bool gok = true;
+      for (int i = 0; i < 3; ++i) gok = gok && grad[i] == a[i].adj();
+      check(gok, "lsepair: element gradients bitwise against the var path");
+      // b is the broadcast operand of six of these ops. mixture.cpp sums
+      // an op's N broadcast contributions into a local before touching the
+      // adjoint, where the scalar var path folds them in one at a time, so
+      // this one lands inside the project's 2 ULP budget rather than on it.
+      expect_ulp("lsepair b grad", grad[3], b.adj());
+      const double tol = 8 * 2.220446049250313e-16 * std::abs(acc.val());
+      check(std::abs(lp - acc.val()) <= tol,
+            "lsepair: lp matches the var path");
+    }
+  }
+
   // array[N] vector[K] data into a vectorized multivariate density. See
   // tests/fixtures/mnarr.stan: the data path stores this shape the way it
   // stores a matrix, and the kernel wants each element contiguous, so the
@@ -2832,6 +2959,51 @@ int main() {
       threw2 = std::string(e.what()).find("not_a_real_fn") != std::string::npos;
     }
     check(threw2, "unsupported function rejected with its name");
+  }
+
+  {
+    // Data whose JSON shape disagrees with its declaration. CmdStan's
+    // var_context validates every declared dimension before it reads a
+    // value and throws std::invalid_argument naming the variable and both
+    // shapes; stanli used to walk off the end of the short array instead,
+    // which surfaced as whatever std::vector::at happened to say. A host
+    // distinguishing bad data from a broken model reads the exception
+    // type, so the type is the contract.
+    DataMap d;
+    d.set_int("J", 8);
+    d.set_real_array("y", std::vector<double>(kY, kY + 7));
+    d.set_real_array("sigma", std::vector<double>(kSigma, kSigma + 8));
+    bool rejected = false;
+    std::string msg;
+    try {
+      compile_model(slurp("tests/fixtures/es.tmir.sexp"), d);
+    } catch (const std::invalid_argument& e) {
+      rejected = true;
+      msg = e.what();
+    } catch (const std::exception& e) {
+      msg = e.what();
+    }
+    check(rejected, "short data array rejected as invalid_argument: " + msg);
+    check(msg.find("mismatch in dimension") != std::string::npos &&
+              msg.find("name=y") != std::string::npos &&
+              msg.find("(8)") != std::string::npos &&
+              msg.find("(7)") != std::string::npos,
+          "the rejection names the variable and both shapes: " + msg);
+
+    // Too many values is the same disagreement; reading the declared
+    // prefix and dropping the rest would be silent data loss.
+    DataMap wide;
+    wide.set_int("J", 8);
+    wide.set_real_array("y", std::vector<double>(kY, kY + 8));
+    wide.set_real_array("sigma", std::vector<double>(9, 1.0));
+    bool wide_rejected = false;
+    try {
+      compile_model(slurp("tests/fixtures/es.tmir.sexp"), wide);
+    } catch (const std::invalid_argument&) {
+      wide_rejected = true;
+    } catch (const std::exception&) {
+    }
+    check(wide_rejected, "over-long data array is rejected too");
   }
 
   if (failures == 0) std::printf("test_lower OK\n");
