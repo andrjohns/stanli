@@ -465,6 +465,49 @@ class MirInterp {
 
   static double val(const T& x) { return stan::math::value_of(x); }
 
+  // Arity of a bound transform called as a function, or 0 for any other
+  // name. The three directions of one transform share an arity, so the name
+  // alone decides how many arguments to expect.
+  static size_t bound_transform_arity(const std::string& name) {
+    static const std::pair<const char*, size_t> kStems[] = {
+        {"lower_bound_", 2},
+        {"upper_bound_", 2},
+        {"lower_upper_bound_", 3},
+        {"offset_multiplier_", 3}};
+    for (const auto& stem : kStems) {
+      const std::string prefix(stem.first);
+      if (name.compare(0, prefix.size(), prefix) != 0) continue;
+      const std::string tail = name.substr(prefix.size());
+      if (tail == "constrain" || tail == "jacobian" || tail == "unconstrain")
+        return stem.second;
+    }
+    return 0;
+  }
+
+  // One element of a bound transform, through stan-math's own scalar
+  // overloads: the free direction is stan-math's inverse rather than a
+  // hand-written one, so the two directions cannot drift apart here. `b2` is
+  // unread by the two-argument transforms.
+  static T bound_transform(const std::string& name, const T& x, const T& b1,
+                           const T& b2) {
+    if (name == "lower_bound_unconstrain") return stan::math::lb_free(x, b1);
+    if (name == "upper_bound_unconstrain") return stan::math::ub_free(x, b1);
+    if (name == "lower_upper_bound_unconstrain")
+      return stan::math::lub_free(x, b1, b2);
+    if (name == "offset_multiplier_unconstrain")
+      return stan::math::offset_multiplier_free(x, b1, b2);
+    // The constrain and jacobian directions differ only in a target
+    // increment, and this path has no target.
+    if (name == "lower_bound_constrain" || name == "lower_bound_jacobian")
+      return stan::math::lb_constrain(x, b1);
+    if (name == "upper_bound_constrain" || name == "upper_bound_jacobian")
+      return stan::math::ub_constrain(x, b1);
+    if (name == "lower_upper_bound_constrain" ||
+        name == "lower_upper_bound_jacobian")
+      return stan::math::lub_constrain(x, b1, b2);
+    return stan::math::offset_multiplier_constrain(x, b1, b2);
+  }
+
   static bool check_scalar_type(const mir::Expr& e) {
     return e.unsized.depth == 0 && (e.unsized.leaf == mir::UnsizedLeaf::Int ||
                                     e.unsized.leaf == mir::UnsizedLeaf::Real);
@@ -845,6 +888,40 @@ class MirInterp {
       }
       return o;
     };
+    // Two-argument scalar math with one int argument (bessel_first_kind
+    // and friends): bin's broadcast and shape rules, but the int side
+    // reaches stan-math as an int, which is what those overloads take.
+    // `int_first` says which position holds it. No layout correction like
+    // the graph kernel's -- every container here is column-major, arrays
+    // included, so a matrix and an int array of the same dims already pair
+    // element for element, which is the pairing stan-math makes.
+    auto bin_int = [&](bool int_first, auto f) {
+      Value a = eval(e.args[0]), b = eval(e.args[1]);
+      if (!shapes_match(a, b)) fail(e.name + ": incompatible shapes", e.raw);
+      const Value& re = int_first ? b : a;
+      const Value& iv = int_first ? a : b;
+      Value o;
+      const size_t n = broadcast_size(a, b);
+      o.r.resize(n);
+      o.dims = broadcast_dims(a, b);
+      const bool rs = re.r.size() == 1, is = iv.r.size() == 1;
+      for (size_t i = 0; i < n; ++i) {
+        const size_t k = is ? 0 : i;
+        const int q = iv.is_int && k < iv.i.size()
+                          ? iv.i[k]
+                          : (int)std::llround(val(iv.r[k]));
+        o.r[i] = f(re.r[rs ? 0 : i], q);
+      }
+      // Only falling_factorial and rising_factorial have an int,int
+      // overload that answers int; everywhere else two int arguments still
+      // make a real, so stanc's own result type decides rather than the
+      // arguments.
+      if (e.type_ == "UInt" && n == 1) {
+        o.is_int = true;
+        o.i = {(int)val(o.r[0])};
+      }
+      return o;
+    };
     auto un = [&](auto f) {
       Value a = eval(e.args[0]);
       Value o;
@@ -1042,6 +1119,40 @@ class MirInterp {
     if (e.name == "owens_t")
       return bin(
           [](const T& x, const T& y) { return stan::math::owens_t(x, y); });
+    if (e.name == "bessel_first_kind")
+      return bin_int(true, [](const T& x, int k) {
+        return stan::math::bessel_first_kind(k, x);
+      });
+    if (e.name == "bessel_second_kind")
+      return bin_int(true, [](const T& x, int k) {
+        return stan::math::bessel_second_kind(k, x);
+      });
+    if (e.name == "modified_bessel_first_kind")
+      return bin_int(true, [](const T& x, int k) {
+        return stan::math::modified_bessel_first_kind(k, x);
+      });
+    if (e.name == "modified_bessel_second_kind")
+      return bin_int(true, [](const T& x, int k) {
+        return stan::math::modified_bessel_second_kind(k, x);
+      });
+    if (e.name == "binary_log_loss")
+      return bin_int(true, [](const T& x, int k) {
+        return stan::math::binary_log_loss(k, x);
+      });
+    if (e.name == "lmgamma")
+      return bin_int(
+          true, [](const T& x, int k) { return stan::math::lmgamma(k, x); });
+    if (e.name == "falling_factorial")
+      return bin_int(false, [](const T& x, int k) {
+        return stan::math::falling_factorial(x, k);
+      });
+    if (e.name == "rising_factorial")
+      return bin_int(false, [](const T& x, int k) {
+        return stan::math::rising_factorial(x, k);
+      });
+    if (e.name == "ldexp")
+      return bin_int(false,
+                     [](const T& x, int k) { return stan::math::ldexp(x, k); });
     // --O1 partial evaluation rewrites `x * log(y)` to lmultiply(x, y);
     // multiply_log computes exactly x * log(y), so the value is bitwise
     // what the unoptimized form produced.
@@ -1071,8 +1182,37 @@ class MirInterp {
                                  c.r[c.r.size() == 1 ? 0 : i]);
       return o;
     }
-    if (e.name == "PMinus__") return un([](const T& x) { return -x; });
-    if (e.name == "PPlus__") return un([](const T& x) { return x; });
+    // Stan's bound transforms, callable as functions rather than written on
+    // a declaration: elementwise over every container shape, with each bound
+    // either one value for the whole container or one value per element.
+    // The interpreter serves transformed data and the interpreted
+    // write_array, both of which the generated model instantiates with
+    // `jacobian__ = false`, so the `_jacobian` direction is the constrained
+    // value and nothing else -- there is no target here to increment.
+    const size_t bound_arity = bound_transform_arity(e.name);
+    if (bound_arity != 0 && bound_arity == e.args.size()) {
+      std::vector<Value> a;
+      a.reserve(e.args.size());
+      for (const mir::Expr& arg : e.args) a.push_back(eval(arg));
+      const auto at = [&](size_t k, size_t i) {
+        return a[k].r[a[k].r.size() == 1 ? 0 : i];
+      };
+      Value o;
+      o.dims = a[0].dims;
+      o.r.resize(a[0].r.size());
+      for (size_t i = 0; i < o.r.size(); ++i)
+        o.r[i] = bound_transform(e.name, at(0, i), at(1, i),
+                                 a.size() > 2 ? at(2, i) : T(0));
+      return o;
+    }
+    // minus and plus are the named spellings of the unary operators, so
+    // they are the same identity and the same negation over the same
+    // shapes. The graph lowering knows them too; teaching only one side is
+    // what let a vectorized log_sum_exp leave elements uninitialized here.
+    if (e.name == "PMinus__" || (e.name == "minus" && e.args.size() == 1))
+      return un([](const T& x) { return -x; });
+    if (e.name == "PPlus__" || (e.name == "plus" && e.args.size() == 1))
+      return un([](const T& x) { return x; });
     if (e.name == "exp")
       return un([](const T& x) { return stan::math::exp(x); });
     if (e.name == "log")
@@ -1505,6 +1645,17 @@ class MirInterp {
   }
     STANLI_SCALAR_UNARY_LIST(STANLI_INTERP_UNARY)
 #undef STANLI_INTERP_UNARY
+
+    // The two unaries the shared list cannot generate. std_normal_qf is
+    // stanc3's alias for inv_Phi (Lower_expr.ml maps it onto
+    // stan::math::inv_Phi), and trigamma's derivative is the derivative of
+    // AS121's recurrence rather than a formula, so both take Math's own
+    // overload: on doubles that is the prim call, on var it is the tape the
+    // graph kernel replays.
+    if (e.name == "std_normal_qf" && e.args.size() == 1)
+      return un([](const T& x) { return stan::math::inv_Phi(x); });
+    if (e.name == "trigamma" && e.args.size() == 1)
+      return un([](const T& x) { return stan::math::trigamma(x); });
 
     // Categorical arguments are containers as a whole, not elementwise
     // broadcasts. Preserve scalar-vs-array outcome overloads and the

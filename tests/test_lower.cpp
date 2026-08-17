@@ -1693,6 +1693,64 @@ int main() {
     }
   }
 
+  // The cumulative-distribution side of the discrete densities. See
+  // tests/fixtures/dcdf.stan: the lpmfs had been listed for a long time
+  // and their cdfs had not, so every one of these was an unsupported
+  // function. neg_binomial_2_cdf is the one-integer-group shape the
+  // generated int cdfs already had; binomial and beta_binomial carry two
+  // groups (outcome and trials) and needed the [len, vals...] layout
+  // their lpmfs use. The reference is the call CmdStan would instantiate,
+  // so the scalar lines check the broadcast rather than just the absence
+  // of a throw.
+  {
+    DataMap d;
+    d.set_int("n", 3);
+    d.set_int_array("ns", {1, 2, 3});
+    d.set_int_array("N", {5, 7, 9});
+    CompiledModel bm = compile_model(slurp("tests/fixtures/dcdf.tmir.sexp"), d);
+    Executor bex(std::move(bm.graph));
+    bm.bind(bex);
+    // Both points keep every parameter inside (0, 1), which is a
+    // probability for binomial and a positive mean or shape for the other
+    // two, so one unconstrained vector serves all three families.
+    const double pts[2][3] = {{0.3, 0.45, 0.7}, {0.6, 0.15, 0.9}};
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 3; ++i) bex.params_data()[i] = pts[c][i];
+      double grad[3] = {0, 0, 0};
+      const double lp = bex.gradient(grad);
+
+      using stan::math::var;
+      Eigen::Matrix<var, Eigen::Dynamic, 1> th(3);
+      for (int i = 0; i < 3; ++i) th(i) = pts[c][i];
+      Eigen::Matrix<var, Eigen::Dynamic, 1> b = stan::math::exp(th);
+      // The integer groups reach the kernels as Eigen vectors of int.
+      // The real arguments all reach them as the recording scalar, data
+      // or not: the cdfs are tier 0, so there is one all-active
+      // instantiation rather than one per activity mask, and the
+      // reference has to bind the same way to be the same computation.
+      Eigen::VectorXi ns(3), NN(3);
+      ns << 1, 2, 3;
+      NN << 5, 7, 9;
+      Eigen::Matrix<var, Eigen::Dynamic, 1> phi(3), bb(3);
+      phi << 2.0, 3.0, 4.0;
+      bb << 1.3, 1.4, 1.5;
+      const int n = 3;
+      var acc = stan::math::neg_binomial_2_cdf(ns, b, phi);
+      acc += stan::math::binomial_lcdf(ns, NN, th);
+      acc += stan::math::binomial_lccdf(n, 9, th);
+      acc += stan::math::binomial_cdf(ns, NN, th);
+      acc += stan::math::beta_binomial_lcdf(ns, NN, b, bb);
+      acc += stan::math::beta_binomial_lccdf(n, 9, b, bb);
+      acc += stan::math::beta_binomial_cdf(ns, NN, b, bb);
+      acc.grad();
+
+      // Same activity on both sides, so this is bitwise: no tolerance.
+      for (int i = 0; i < 3; ++i)
+        expect_eq("dcdf g" + std::to_string(i), grad[i], th(i).adj());
+      expect_eq("dcdf lp", lp, acc.val());
+    }
+  }
+
   // Two-argument log_sum_exp / log_diff_exp on containers. See
   // tests/fixtures/lsepair.stan: Stan vectorizes both elementwise with
   // scalar broadcast, and the lowering used to emit them at width 1, so
@@ -1759,6 +1817,303 @@ int main() {
       const double tol = 8 * 2.220446049250313e-16 * std::abs(acc.val());
       check(std::abs(lp - acc.val()) <= tol,
             "lsepair: lp matches the var path");
+    }
+  }
+
+  // Two-argument scalar math with an int argument. See
+  // tests/fixtures/binint.stan. The int side has no derivative, so the
+  // whole gradient belongs to the real side, and the interesting case is
+  // the pairing: a matrix is column-major, an int array's trailing extents
+  // are row-major, and stan-math pairs n[i][j] with m(i, j).
+  {
+    const int kk = 2;
+    const std::vector<int> counts = {0, 1, 2};
+    // {{0, 3}, {1, 2}}: distinct, so a swapped pairing is a factor of two.
+    const int expo[2][2] = {{0, 3}, {1, 2}};
+    const int expo3[2][2][2] = {{{0, 3}, {1, 2}}, {{2, 0}, {3, 1}}};
+    // Through the JSON reader, because expo3 is rank three and the data
+    // path is the only thing that stores an array of that rank. `nn` is
+    // the same shape as `expo` below but read rather than built from a
+    // literal: the interpreter reaches a data variable and a literal by
+    // different paths, and only one of them is covered by `expo`.
+    DataMap d = DataMap::from_json(R"({"k": )" + std::to_string(kk) + R"(,
+            "counts": [0, 1, 2],
+            "expo3": [[[0, 3], [1, 2]], [[2, 0], [3, 1]]],
+            "nn": [[2, 0], [3, 1]]})");
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/binint.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    // Declaration order: a[3], b.
+    const double pts[2][4] = {{0.4, -0.7, 0.25, 0.6},
+                              {-0.3, 0.9, -0.15, -0.45}};
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 4; ++i) lex.params_data()[i] = pts[c][i];
+      double grad[4] = {0, 0, 0, 0};
+      const double lp = lex.gradient(grad);
+
+      using stan::math::var;
+      std::vector<var> a = {pts[c][0], pts[c][1], pts[c][2]};
+      var b = pts[c][3];
+      std::vector<var> p;
+      for (int i = 0; i < 3; ++i) p.push_back(stan::math::exp(a[i]) + 1);
+      // One reduction per target statement, in statement order, so the
+      // reference reassociates the way the graph does.
+      var acc = 0, s = 0;
+      for (int i = 0; i < 3; ++i) s += stan::math::bessel_first_kind(kk, a[i]);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i)
+        s += stan::math::modified_bessel_first_kind(kk, a[i]);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i) s += stan::math::bessel_second_kind(kk, p[i]);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i)
+        s += stan::math::modified_bessel_second_kind(kk, p[i]);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i) s += stan::math::lmgamma(kk, p[i]);
+      acc += s;
+      acc += stan::math::binary_log_loss(1, stan::math::inv_logit(b));
+      s = 0;
+      for (int i = 0; i < 3; ++i) s += stan::math::falling_factorial(p[i], kk);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i)
+        s += stan::math::rising_factorial(p[i], counts[i]);
+      acc += s;
+      s = 0;
+      for (int i = 0; i < 3; ++i) s += stan::math::ldexp(a[i], counts[i]);
+      acc += s;
+      // m = [[a1, a2], [a3, b]], summed column-major, each entry against
+      // the int array entry at the SAME logical position.
+      const std::vector<var> mcol = {a[0], a[2], a[1], b};
+      const int ecol[4] = {expo[0][0], expo[1][0], expo[0][1], expo[1][1]};
+      s = 0;
+      for (int i = 0; i < 4; ++i) s += stan::math::ldexp(mcol[i], ecol[i]);
+      acc += s;
+      // An array of matrices against a deeper int array. The extents that
+      // set the pairing are the leaf's, so each element repeats the case
+      // above with its own slice of expo3; `sum(am[1]) + sum(am[2])` is one
+      // target statement, so the two element sums join before the
+      // accumulator sees them.
+      var e1 = 0, e2 = 0;
+      for (int i = 0; i < 4; ++i) {
+        const int lo[4] = {expo3[0][0][0], expo3[0][1][0], expo3[0][0][1],
+                           expo3[0][1][1]};
+        const int hi[4] = {expo3[1][0][0], expo3[1][1][0], expo3[1][0][1],
+                           expo3[1][1][1]};
+        e1 += stan::math::ldexp(mcol[i], lo[i]);
+        e2 += stan::math::ldexp(mcol[i] + 1, hi[i]);
+      }
+      acc += e1 + e2;
+      s = 0;
+      for (int i = 0; i < 3; ++i) s += stan::math::ldexp(b, counts[i]);
+      acc += s;
+      // Transformed data: the MIR interpreter's own copies of the same
+      // shapes. 39 is [[1, 2], [3, 4]] against the literal {{0, 3}, {1, 2}}
+      // and 38 the same matrix against the data array {{2, 0}, {3, 1}},
+      // both paired n[i][j] with m(i, j). A flat pairing would answer 45
+      // and 31.
+      acc += stan::math::ldexp(1.5, 0) + stan::math::ldexp(2.5, 1) +
+             stan::math::ldexp(3.5, 2) + stan::math::lmgamma(2, 1.75) + 39.0 +
+             38.0;
+      acc.grad();
+
+      // Measured bitwise at both points: the graph builds the same lanes
+      // in the same order the reference tape does.
+      bool gok = grad[3] == b.adj();
+      for (int i = 0; i < 3; ++i) gok = gok && grad[i] == a[i].adj();
+      check(gok, "binint: gradients bitwise against the var path");
+      const double tol = 8 * 2.220446049250313e-16 * std::abs(acc.val());
+      check(std::abs(lp - acc.val()) <= tol, "binint: lp matches the var path");
+      stan::math::recover_memory();
+    }
+  }
+
+  // The one-argument scalar math library over containers. See
+  // tests/fixtures/unaryfns.stan: transformed data runs the MIR interpreter
+  // on doubles and the model block runs the graph kernels, so a name wired
+  // into one and not the other is caught here rather than as a wrong lp.
+  {
+    const std::vector<double> matv = {0.5, 1.5, 1.25, 0.25, 2.0, 2.5};
+    DataMap d;
+    d.set_real_array("mat", matv, {2, 3});
+    CompiledModel um =
+        compile_model(slurp("tests/fixtures/unaryfns.tmir.sexp"), d);
+    Executor uex(std::move(um.graph));
+    um.bind(uex);
+    // Transformed data: evaluated once by the interpreter, on doubles. Its
+    // reference is spelled the way the block is, left to right, each sum
+    // ascending from zero, because that is the arithmetic the interpreter
+    // performs.
+    const double tdx[3] = {0.5, 1.5, 2.5};
+    const double tdm[3] = {1.5, 2.5, 3.5};
+    double s_gamma = 0, s_tri = 0, s_minus = 0, s_plus = 0;
+    for (int i = 0; i < 3; ++i) {
+      s_gamma += stan::math::tgamma(tdx[i]);
+      s_tri += stan::math::trigamma(tdx[i]);
+      s_minus += -tdm[i];
+      s_plus += tdm[i];
+    }
+    const double td_sum =
+        s_gamma + s_tri + stan::math::inv_Phi(0.6) +
+        stan::math::std_normal_log_qf(-0.5) + stan::math::lambert_w0(0.5) +
+        stan::math::lambert_wm1(-0.2) + stan::math::inv_erfc(0.75) +
+        stan::math::Phi_approx(0.25) + s_minus + s_plus;
+
+    const double pts[2][3] = {{0.4, -0.7, 0.25}, {-0.3, 0.9, -0.15}};
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 3; ++i) uex.params_data()[i] = pts[c][i];
+      double grad[3] = {0, 0, 0};
+      const double lp = uex.gradient(grad);
+
+      using stan::math::var;
+      std::vector<var> a = {pts[c][0], pts[c][1], pts[c][2]};
+      std::vector<var> u, lu, wm, pos;
+      for (int i = 0; i < 3; ++i) {
+        u.push_back(stan::math::inv_logit(a[i]));
+        lu.push_back(stan::math::log(u[i]));
+        wm.push_back(-0.2 * u[i]);
+        pos.push_back(stan::math::exp(a[i]));
+      }
+      var acc = 0, s = 0;
+#define TERM(expr)                         \
+  s = 0;                                   \
+  for (int i = 0; i < 3; ++i) s += (expr); \
+  acc += s;
+      TERM(stan::math::tgamma(pos[i]))
+      TERM(stan::math::trigamma(pos[i]))
+      TERM(stan::math::lambert_w0(pos[i]))
+      TERM(stan::math::lambert_wm1(wm[i]))
+      TERM(stan::math::inv_Phi(u[i]))
+      TERM(stan::math::std_normal_log_qf(lu[i]))
+      TERM(stan::math::inv_erfc(u[i]))
+      TERM(stan::math::Phi_approx(a[i]))
+      TERM(-a[i])
+      TERM(a[i])
+#undef TERM
+      s = 0;
+      for (double m : matv) s += stan::math::Phi_approx(m + a[0]);
+      acc += s;
+      // `sum(na[1]) + sum(na[2])` is one target term, so the two element
+      // sums join each other before they reach the accumulator.
+      var n1 = 0, n2 = 0;
+      for (int i = 0; i < 3; ++i) n1 += stan::math::tgamma(pos[i]);
+      for (int i = 0; i < 3; ++i) n2 += stan::math::tgamma(u[i]);
+      acc += n1 + n2;
+      acc += td_sum;
+      acc.grad();
+
+      // Each element of `a` feeds a dozen terms through `u`, `pos` and
+      // `lu`, and the graph folds a slot's contributions in op order where
+      // the var chain folds them one vari at a time, so this lands inside
+      // the project's 2 ULP budget rather than on it -- measured at 1 ULP
+      // on one element of one point and 0 everywhere else. The per-function
+      // pullbacks themselves are pinned bitwise in
+      // tests/test_mir_unary_fallback.cpp.
+      for (int i = 0; i < 3; ++i)
+        expect_ulp("unaryfns grad", grad[i], a[i].adj());
+      const double tol = 8 * 2.220446049250313e-16 * std::abs(acc.val());
+      check(std::abs(lp - acc.val()) <= tol,
+            "unaryfns: lp matches the var path");
+    }
+  }
+
+  // Stan's bound transforms called as functions. See
+  // tests/fixtures/boundfn.stan: all twelve names, over the container
+  // shapes and both bound widths, inside the `_jacobian` user function the
+  // conformance sweep generates. The lowering refused every one of them,
+  // and the jacobian direction is the half that can be silently wrong --
+  // it has to add the log absolute jacobian determinant in log_prob and
+  // nothing at all in write_array.
+  {
+    // md in slot order (first index fastest), which is also what a 2x2
+    // Eigen matrix stores.
+    const std::vector<double> mdv = {0.5, 1.5, 1.25, 0.25};
+    DataMap d;
+    d.set_real_array("md", mdv, {2, 2});
+    CompiledModel bm =
+        compile_model(slurp("tests/fixtures/boundfn.tmir.sexp"), d);
+    Executor bex(std::move(bm.graph));
+    bm.bind(bex);
+    // Declaration order: a[2], s.
+    const double pts[2][3] = {{0.4, -0.7, 1.25}, {-0.3, 0.9, -0.45}};
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 3; ++i) bex.params_data()[i] = pts[c][i];
+      double grad[3] = {0, 0, 0};
+      const double lp = bex.gradient(grad);
+
+      using stan::math::var;
+      using Vec = Eigen::Matrix<var, -1, 1>;
+      Vec a(2);
+      a << pts[c][0], pts[c][1];
+      var s = pts[c][2];
+      Vec lo(2), hi(2);
+      for (int i = 0; i < 2; ++i) {
+        lo(i) = a(i) - 4.0;
+        hi(i) = stan::math::exp(a(i)) + 1.0;
+      }
+      Eigen::Matrix<var, -1, -1> m(2, 2);
+      for (int i = 0; i < 4; ++i) m(i) = mdv[i];
+      // Every `sum` in the fixture is one ascending reduction over its own
+      // result, and OP_SUM_VEC accumulates the same way.
+      const auto vsum = [](const auto& v) {
+        var t = 0;
+        for (int i = 0; i < v.size(); ++i) t += v(i);
+        return t;
+      };
+      // The four jacobian increments land on lp__, which the model adds to
+      // the returned contribution.
+      var jac = 0;
+      var cc = 0;
+      cc += vsum(stan::math::lb_constrain(a, s));
+      cc += vsum(stan::math::lb_constrain<true>(a, lo, jac));
+      cc += vsum(stan::math::lb_free(stan::math::lb_constrain(a, s), s));
+      cc += vsum(stan::math::ub_constrain(m, s));
+      cc += vsum(stan::math::ub_constrain<true>(a, hi, jac));
+      cc += vsum(stan::math::ub_free(stan::math::ub_constrain(a, s), s));
+      cc += vsum(stan::math::lub_constrain(a, lo, hi));
+      cc += vsum(stan::math::lub_constrain<true>(a, var(-3.0), var(3.0), jac));
+      cc += vsum(
+          stan::math::lub_free(stan::math::lub_constrain(a, lo, hi), lo, hi));
+      cc += vsum(stan::math::offset_multiplier_constrain(a, s, var(2.5)));
+      cc += vsum(stan::math::offset_multiplier_constrain(a, s, var(2.5)));
+      cc += vsum(stan::math::offset_multiplier_constrain<true>(a, lo, hi, jac));
+      cc += vsum(stan::math::offset_multiplier_free(a, lo, hi));
+      var acc = cc + jac;
+      acc.grad();
+
+      for (int i = 0; i < 2; ++i)
+        expect_ulp("boundfn a grad", grad[i], a(i).adj());
+      expect_ulp("boundfn s grad", grad[2], s.adj());
+      const double tol = 8 * 2.220446049250313e-16 * std::abs(acc.val());
+      check(std::abs(lp - acc.val()) <= tol,
+            "boundfn: lp matches the var path");
+      stan::math::recover_memory();
+    }
+    // write_array runs the same calls with `jacobian__ = false`, so the
+    // `total` column is the returned contribution alone. log_prob adds the
+    // four jacobian increments to it, and each of those is nonzero here.
+    check(bm.write_array && bm.write_array->truncated.empty(),
+          "boundfn write_array compiled");
+    if (bm.write_array && bm.write_array->truncated.empty()) {
+      Executor wex(std::move(bm.write_array->graph));
+      bm.write_array->bind(wex);
+      for (int i = 0; i < 3; ++i) wex.params_data()[i] = pts[0][i];
+      wex.run_forward_only();
+      for (int i = 0; i < 3; ++i) bex.params_data()[i] = pts[0][i];
+      const double lp = bex.forward();
+      bool found = false;
+      for (const auto& col : bm.write_array->columns) {
+        if (col.name != "total") continue;
+        found = true;
+        check(*wex.value_ptr(col.slot) != lp,
+              "boundfn: write_array drops the jacobian increments");
+      }
+      check(found, "boundfn write_array has total");
     }
   }
 

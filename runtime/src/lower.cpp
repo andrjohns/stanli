@@ -1450,6 +1450,140 @@ struct Lowering {
     return emit_value(opcode, {a, b}, n, si);
   }
 
+  // Two-argument scalar math with one int argument
+  // (STANLI_SCALAR_BINARY_INT_FIRST_LIST and its SECOND twin): elementwise
+  // with scalar broadcast like the all-real binaries, but shape_of does not
+  // apply. Those two sides may legitimately carry different views --
+  // `ldexp(matrix, array[,] int)` is a matrix, `falling_factorial(real,
+  // array[,] int)` is an array -- so the result takes the real side's view
+  // when it has one and the int side's when the real side is a scalar,
+  // which is what the signature list says in every case.
+  Val lower_binary_int(uint16_t opcode, bool int_first, const mir::Expr& e) {
+    Val a = lower_expr(e.args[0]);
+    Val b = lower_expr(e.args[1]);
+    const Val& re = int_first ? b : a;
+    const Val& iv = int_first ? a : b;
+    const int64_t lr = g.slots[re.slot].len, li = g.slots[iv.slot].len;
+    // Only a language scalar broadcasts. A one-element container against a
+    // wider one is the size error stan-math throws, not a broadcast.
+    if (!is_scalar(re) && !is_scalar(iv) && lr != li)
+      fail(e.name + ": arguments must match in size", e.raw);
+    const SlotInfo si = is_scalar(re) ? iv.si : re.si;
+    // The one place the two flat orders disagree: a matrix leaf is stored
+    // column-major and an int array's trailing two extents are row-major.
+    // Handing the kernel that leaf's rows and cols is what tells it to undo
+    // the difference; see IntLane in kernels/scalar_binary.cpp.
+    std::vector<int> idata;
+    if (!is_scalar(iv)) {
+      if (is_matrix(re.si)) {
+        idata = {(int)re.si.rows, (int)re.si.cols};
+      } else if (is_array(re.si)) {
+        const ArrayShape& s = array_shape(re.si);
+        if (s.leaf == ViewKind::Matrix)
+          idata = {(int)s.dims[s.dims.size() - 2], (int)s.dims.back()};
+      }
+    }
+    return emit_value(opcode, {a, b}, std::max(lr, li), si, std::move(idata));
+  }
+
+  // Stan's bound transforms, callable as ordinary functions rather than
+  // written on a declaration. `<t>_constrain(x, bounds...)` is the value
+  // half of the declaration transform, `<t>_jacobian(...)` is the same
+  // value and also adds the transform's log absolute jacobian determinant
+  // to the target, and `<t>_unconstrain(y, bounds...)` is the inverse.
+  //
+  // stanc3 marks the jacobian direction with an FnJacobian suffix and emits
+  // no separate target statement for it, so the increment has to come from
+  // here -- and only in log_prob, because the generated model instantiates
+  // write_array with `jacobian__ = false`, which drops it.
+  //
+  // Argument 0 always carries the result's shape: every signature in the
+  // library pairs it either with scalar bounds or with bounds of exactly
+  // its own type, and none of them widens a scalar first argument against a
+  // container bound.
+  std::optional<Val> lower_bound_transform(const mir::Expr& e) {
+    struct Transform {
+      const char* stem;
+      uint16_t opcode;
+      size_t arity;
+    };
+    static const Transform kTransforms[] = {
+        {"lower_bound_", OP_CONSTRAIN_LOWER, 2},
+        {"upper_bound_", OP_CONSTRAIN_UPPER, 2},
+        {"lower_upper_bound_", OP_CONSTRAIN_LU, 3},
+        {"offset_multiplier_", OP_CONSTRAIN_OFFSET_MULT, 3},
+    };
+    const Transform* tr = nullptr;
+    std::string direction;
+    for (const Transform& t : kTransforms) {
+      const std::string prefix(t.stem);
+      if (e.name.compare(0, prefix.size(), prefix) != 0) continue;
+      const std::string tail = e.name.substr(prefix.size());
+      if (tail != "constrain" && tail != "jacobian" && tail != "unconstrain")
+        continue;
+      tr = &t;
+      direction = tail;
+    }
+    if (tr == nullptr || e.args.size() != tr->arity) return std::nullopt;
+
+    std::vector<Val> a;
+    a.reserve(e.args.size());
+    for (const mir::Expr& arg : e.args) a.push_back(lower_expr(arg));
+    const int64_t n = g.slots[a[0].slot].len;
+    SlotInfo si = a[0].si;
+    std::vector<int> ins;
+    bool autodiff = false;
+    for (const Val& v : a) {
+      const int64_t len = g.slots[v.slot].len;
+      if (len != 1 && len != n)
+        fail(e.name + ": bound is neither one value nor one per element",
+             e.raw);
+      si.param_free = si.param_free && v.si.param_free;
+      autodiff = autodiff || v.autodiff;
+      ins.push_back(v.slot);
+    }
+
+    if (direction == "unconstrain") return free_transform(tr->opcode, a, si, n);
+    // The declaration kernels, unchanged: they carry the arithmetic that was
+    // measured against stan-math's rev overloads, which composing exp,
+    // inv_logit, and fma out of the elementwise ops would not reproduce.
+    // They always write the jacobian, so `_constrain` allocates the output
+    // and simply leaves it unrooted -- no term reaches the target, and its
+    // adjoint stays zero, which is exactly the no-lp overload's gradient.
+    const int jac = add_slot(1, /*is_param=*/false);
+    Val v = emit_raw(tr->opcode, ins, n, si, {}, jac, autodiff);
+    if (direction == "jacobian" && !in_write_array) target_terms.push_back(jac);
+    return v;
+  }
+
+  // The inverse transforms. stan-math has no rev overloads for these: its
+  // `log(y - lb)` is ordinary var arithmetic, which is what these
+  // elementwise ops emit, so the composition is the reference rather than an
+  // approximation of it, and no new kernel is needed.
+  Val free_transform(uint16_t opcode, const std::vector<Val>& a, SlotInfo si,
+                     int64_t n) {
+    // An intermediate keeps the argument's logical view only when it is as
+    // wide as the argument; `ub - lb` on two scalars is one value.
+    const auto elt = [&](uint16_t op, const Val& x, const Val& y) {
+      const int64_t w = std::max(g.slots[x.slot].len, g.slots[y.slot].len);
+      return emit_value(op, {x, y}, w, w == n ? si : SlotInfo{});
+    };
+    const auto un = [&](uint16_t op, const Val& x) {
+      return emit_value(op, {x}, g.slots[x.slot].len, x.si);
+    };
+    switch (opcode) {
+      case OP_CONSTRAIN_LOWER:  // lb_free: log(y - lb)
+        return un(OP_LOGV, elt(OP_SUB, a[0], a[1]));
+      case OP_CONSTRAIN_UPPER:  // ub_free: log(ub - y)
+        return un(OP_LOGV, elt(OP_SUB, a[1], a[0]));
+      case OP_CONSTRAIN_LU:  // lub_free: logit((y - lb) / (ub - lb))
+        return un(OP_LOGIT, elt(OP_DIV, elt(OP_SUB, a[0], a[1]),
+                                elt(OP_SUB, a[2], a[1])));
+      default:  // offset_multiplier_free: (y - mu) / sigma
+        return elt(OP_DIV, elt(OP_SUB, a[0], a[1]), a[2]);
+    }
+  }
+
   // Value of a data-only expression at compile time. The interpreter
   // handles most cases; a UDF-local constant lives only as a slot, so fall
   // back to that slot's recorded fill.
@@ -1699,6 +1833,7 @@ struct Lowering {
     // The stan-library names split into disjoint groups; each helper owns
     // one and declines the rest.
     if (auto v = lower_density_fn(e)) return *v;
+    if (auto v = lower_bound_transform(e)) return *v;
     if (auto v = lower_eltwise_fn(e)) return *v;
     if (auto v = lower_matrix_fn(e)) return *v;
     if (auto v = lower_ode_fn(e)) return *v;
@@ -1808,6 +1943,14 @@ struct Lowering {
   {#fn, {code, nreal + 1, 1, false, DensityShape::Plain, -1, true}},
         STANLI_INT_CDF_LIST(STANLI_INT_CDF_TABLE)
 #undef STANLI_INT_CDF_TABLE
+        // The binomials' cdfs: an outcome group and a trials group, so
+        // the two-group branch below writes both as [len, vals...] and
+        // spells a language-level scalar -1. lane_outcome stays false --
+        // that flag replicates the ONE group these do not have, and the
+        // -1 length is how these broadcast instead.
+#define STANLI_TWO_INT_CDF_TABLE(code, fn, nreal, t) {#fn, {code, nreal + 2, 2}},
+        STANLI_TWO_INT_CDF_LIST(STANLI_TWO_INT_CDF_TABLE)
+#undef STANLI_TWO_INT_CDF_TABLE
         // The ordinal densities have the same argument counts but not the
         // same meaning: their trailing cutpoint vector is one argument, so
         // a scalar outcome stays one lane whatever its length.
@@ -2193,6 +2336,21 @@ struct Lowering {
       return emit_value(bit->second, {a, b}, n, si);
     }
 
+    // The same surface with one int argument, from the two int lists in
+    // optable.hpp. The flag is which position holds the int, which is the
+    // only thing that varies across the nine.
+    static const std::map<std::string, std::pair<uint16_t, bool>> kBinInt = {
+#define STANLI_BINARY_INT_TABLE(code, name, fn) {#name, {code, true}},
+        STANLI_SCALAR_BINARY_INT_FIRST_LIST(STANLI_BINARY_INT_TABLE)
+#undef STANLI_BINARY_INT_TABLE
+#define STANLI_BINARY_INT_TABLE(code, name, fn) {#name, {code, false}},
+            STANLI_SCALAR_BINARY_INT_SECOND_LIST(STANLI_BINARY_INT_TABLE)
+#undef STANLI_BINARY_INT_TABLE
+    };
+    auto iit = kBinInt.find(e.name);
+    if (iit != kBinInt.end() && e.args.size() == 2)
+      return lower_binary_int(iit->second.first, iit->second.second, e);
+
     // Elementwise unaries + reductions.
     static const std::map<std::string, uint16_t> kUn = {
 // Generated from STANLI_SCALAR_UNARY_LIST (optable.hpp), which also made
@@ -2201,6 +2359,16 @@ struct Lowering {
         STANLI_SCALAR_UNARY_LIST(STANLI_UNARY_TABLE)
 #undef STANLI_UNARY_TABLE
             {"PMinus__", OP_NEG},
+        // minus is the named spelling of the unary operator, so it is the
+        // same negation over the same shapes.
+        {"minus", OP_NEG},
+        // stanc3's Lower_expr.ml maps std_normal_qf onto stan::math::inv_Phi;
+        // one opcode keeps the two spellings from drifting apart.
+        {"std_normal_qf", OP_INV_PHI},
+        // trigamma is the one unary whose derivative has no closed form to
+        // put in the shared list: Math differentiates AS121's recurrence
+        // through its own tape, so the kernel does too (scalar_unary_ad.cpp).
+        {"trigamma", OP_TRIGAMMA},
         {"exp", OP_EXPV},
         {"log", OP_LOGV},
         {"inv_logit", OP_INV_LOGIT},
@@ -2228,7 +2396,9 @@ struct Lowering {
       si.param_free = a.si.param_free;
       return emit_value(uit->second, {a}, g.slots[a.slot].len, si);
     }
-    if (e.name == "PPlus__") return lower_expr(e.args[0]);
+    // plus, and its operator spelling, are the identity on every shape.
+    if (e.name == "PPlus__" || (e.name == "plus" && e.args.size() == 1))
+      return lower_expr(e.args[0]);
     if (e.name == "logit") {
       Val a = lower_expr(e.args[0]);
       return emit_value(OP_LOGIT, {a}, g.slots[a.slot].len, a.si);
