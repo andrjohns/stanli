@@ -34,6 +34,47 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
+# Sanitizers, for running the test suite under. Empty by default and never
+# a shipped flavour: this is a way to run ctest, not a build anyone
+# installs, so it deliberately does not touch STANLI_BUILD_ID.
+#
+# Global rather than an option on the stanmath interface target, because
+# the bugs worth catching do not respect target boundaries -- the vendored
+# SUNDIALS C and the C++20 walnuts translation unit have to be
+# instrumented on the same terms as the kernels.
+#
+# Address is what the two memory bugs that reached main in August wanted:
+# both produced WRONG NUMBERS rather than a crash in the common case (a
+# GLM outcome mapped `rows` integers out of a 3-integer group; the island
+# register file handed out a var from an already-recovered nested tape),
+# and only the first of those is a heap overflow ASan can see. The second
+# is invisible to any sanitizer, because stan-math's arena recovers by
+# rewinding a bump pointer (stack_alloc.hpp recover_nested) and never
+# returns the bytes to the allocator.
+#
+# `address,undefined` works too, and is clean: all 51 tests pass with zero
+# runtime errors on Apple clang 17, arm64, with -fno-sanitize-recover
+# below in force. CI runs `address` alone only because that result has not
+# been reproduced on the Linux toolchain, whose UBSan differs -- the two
+# bugs above are both ASan's kind, so the job leads with what it can show
+# working, and adding `,undefined` here is the whole change if someone
+# confirms it there.
+set(STANLI_SANITIZE "" CACHE STRING
+    "Sanitizers to build the tests with, e.g. `address` (empty: none)")
+if(STANLI_SANITIZE)
+  # -g even in Release: a sanitizer report without a symbolized stack is a
+  # bug number nobody can act on.
+  add_compile_options(-fsanitize=${STANLI_SANITIZE} -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=${STANLI_SANITIZE})
+  # UndefinedBehaviorSanitizer prints and CARRIES ON by default, so a
+  # suite that trips it still exits 0 and CI still goes green. Trap it
+  # instead: a check nobody's exit code depends on is the failure this
+  # whole job exists to close.
+  if(STANLI_SANITIZE MATCHES "undefined")
+    add_compile_options(-fno-sanitize-recover=undefined)
+  endif()
+endif()
+
 set(DEPS ${CMAKE_CURRENT_SOURCE_DIR}/deps)
 file(GLOB _eigen ${DEPS}/math/lib/eigen_*)
 file(GLOB _boost ${DEPS}/math/lib/boost_*)
@@ -428,5 +469,19 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME test_conformance_harness
            COMMAND ${Python3_EXECUTABLE} tests/test_conformance.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  # The corpus replay's per-point verdicts, over a stub stanli_check. The
+  # oracle itself needs posteriordb and a real binary and so runs in CI
+  # rather than here; what runs here is the classification it depends on,
+  # which is what let a segfault at an unreferenced point go unreported.
+  #
+  # Not on Windows: the stub is a /bin/sh script that kills itself with
+  # SIGSEGV, and what the test asserts is that a negative returncode is
+  # read as a crash. Both halves are POSIX, and so is the corpus check
+  # this defends, which only ever runs on Linux and macOS.
+  if(NOT WIN32)
+    add_test(NAME test_verify_refs
+             COMMAND ${Python3_EXECUTABLE} tests/test_verify_refs.py
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  endif()
 endif()
 endif()  # NOT EMSCRIPTEN
