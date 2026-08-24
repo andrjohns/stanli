@@ -18,7 +18,7 @@ The harness now records file read, parse, compile, construction, and binding
 only; that column should be refreshed as a unit rather than mixing definitions.
 Targeted preparation measurements later on this page use the new mode.
 
-Three targeted 2026-08-23 remeasurements are newer than the full snapshot below.
+Four targeted 2026-08-23 remeasurements are newer than the full snapshot below.
 Packed row-wise `log_sum_exp` reduces `ldaK2` from 15,854 ops to 22 and
 154 to 94 us/gradient (1.11x CmdStan), and `ldaK5` from 434,126 ops to 156
 and 6.82 to 3.70 ms/gradient (1.51x CmdStan). `ldaK5` file-to-bound-model
@@ -28,7 +28,9 @@ strided stores still dispatch once each, but update four cells instead of
 copying all 730. Native Bernoulli forwards then move `Mt_model` from 30.6 to
 19.2 us (0.62x to 0.99x CmdStan), `Mth_model` from 113.2 to 57.3 us (0.90x to
 1.77x), and the stacked `Mtbh_model` result from 47.4 to 26.8 us (0.95x to
-1.68x). The committed full-corpus tables retain one measurement definition
+1.68x). Native symmetric-eigen pullbacks remove the reverse-time eigensolves
+in `kronecker_gp`, moving it from 289.0 to 185.7 us/gradient (0.75x to 1.17x
+CmdStan). The committed full-corpus tables retain one measurement definition
 and will be refreshed as a unit.
 
 ## Per-gradient latency

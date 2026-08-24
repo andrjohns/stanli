@@ -314,6 +314,29 @@ directions read one instruction at a time and decide what to do with it,
 where CmdStan's compiler has inlined the equivalent straight into the
 model's machine code.
 
+## Native symmetric eigendecomposition pullbacks (`matrix_fns.cpp`)
+
+Stan Math's reverse overloads for `eigenvalues_sym` and `eigenvectors_sym`
+retain a full symmetric eigendecomposition on their autodiff tape. The old
+kernels ran the primitive double operation in the forward sweep, discarded
+that decomposition, then rebuilt the input on a nested tape and solved it
+again during the backward sweep.
+
+The forward kernels now retain exactly the missing half of the solver result
+in scratch: eigenvectors beside an eigenvalue output, and eigenvalues beside
+an eigenvector output. Their backwards transcribe Stan Math's matrix
+pullbacks expression for expression, using the retained decomposition and
+plain doubles. `forward_value_only()` keeps the original eigenvalues-only
+solver and writes no backward scratch, so initialization does not pay for
+work it will not use; a later gradient always refreshes the scratch with a
+normal forward first.
+
+On `kronecker_gp`, two matrices each feed both symmetric-eigen operations.
+This removes four reverse-time eigensolves per gradient and moves median
+latency from 289.0 to 185.7 us (1.56x internally, 1.17x CmdStan). The two
+forward operations on each matrix remain separate; sharing them would need a
+paired graph operation and is deliberately outside this kernel-only change.
+
 ## Compiled ODE right-hand sides (`ode_prog.cpp`, report fallbacks: `STANLI_DEBUG_ODE=1`)
 
 An ODE model passes a user function (the right-hand side) to a solver

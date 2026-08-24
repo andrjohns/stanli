@@ -161,9 +161,10 @@ Alongside it, the tail fixes the profile already names:
   case is already closed by the elementwise-lp fusion.
 - **Kernel-bound stragglers**, in the shape of the `diamonds` and
   `prophet` fixes. `Mt_model` is now closed: direct Bernoulli partials move it
-  from 30.6 to 19.2 us/gradient, or 0.99x CmdStan. Remaining examples include
-  `gp_regr` (55% in `multi_normal_cholesky_lpdf`) and `kronecker_gp` (38% in
-  an eigendecomposition).
+  from 30.6 to 19.2 us/gradient, or 0.99x CmdStan. `kronecker_gp` is closed as
+  well: retaining each symmetric eigendecomposition for its native pullback
+  moves it from 289.0 to 185.7 us/gradient, or 1.17x CmdStan. `gp_regr` remains
+  (55% in `multi_normal_cholesky_lpdf`).
 - **Two loose threads.** `lotka_volterra` is 0.61x per gradient yet blows
   the 900 s sampling cap CmdStan clears in 6.2 s — untraced, and
   `tools/sampler_trace.py` is the tool. `sir`'s benchmark probe point
