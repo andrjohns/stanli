@@ -9,6 +9,7 @@
 #include <stanli/graph.hpp>
 #include <stanli/legacy.hpp>
 #include <stanli/optable.hpp>
+#include <stanli/packet.hpp>
 
 #include <stan/math.hpp>
 
@@ -543,32 +544,66 @@ void transpose_bwd(KernelCtx& ctx) {
 // SelfAdjointEigenSolver, which is what stan-math uses.
 void eigvals_fwd(KernelCtx& ctx) {
   const int64_t n = ctx.idata[0];
+  if (n == 0) return;
   MatD a = CMapM(ctx.in[0].data, n, n);
-  Eigen::Map<VecD>(ctx.out.data, n) = stan::math::eigenvalues_sym(a);
+  if (values_only()) {
+    Eigen::Map<VecD>(ctx.out.data, n) = stan::math::eigenvalues_sym(a);
+    return;
+  }
+  // Keep the decomposition that stan-math's reverse callback would retain.
+  // The old backward rebuilt a nested var matrix and decomposed it again;
+  // retaining the vectors makes the pullback the same two GEMMs with no
+  // second eigensolve or tape.  Use stan-math's exact check spelling before
+  // dropping to the Eigen solver its prim implementation wraps.
+  stan::math::check_symmetric("eigenvalues_sym", "m", a);
+  Eigen::SelfAdjointEigenSolver<MatD> solver(a);
+  Eigen::Map<VecD>(ctx.out.data, n) = solver.eigenvalues();
+  MapM(ctx.scratch, n, n) = solver.eigenvectors();
 }
 void eigvals_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
   const int64_t n = ctx.idata[0];
-  nary_bwd(ctx, [&](std::vector<VarV>& xs) {
-    VarM a(n, n);
-    for (int64_t j = 0; j < n; ++j)
-      for (int64_t i = 0; i < n; ++i) a(i, j) = xs[0](j * n + i);
-    return stan::math::eigenvalues_sym(a);
-  });
+  if (n == 0) return;
+  CMapM eigenvecs(ctx.scratch, n, n);
+  CMapV eigenvals_adj(ctx.out_adj_vec.data, n);
+  // stan/math/rev/fun/eigenvalues_sym.hpp, in the same association order.
+  MapM(ctx.in_adj[0].data, n, n) +=
+      eigenvecs * eigenvals_adj.asDiagonal() * eigenvecs.transpose();
 }
 void eigvecs_fwd(KernelCtx& ctx) {
   const int64_t n = ctx.idata[0];
+  if (n == 0) return;
   MatD a = CMapM(ctx.in[0].data, n, n);
-  MapM(ctx.out.data, n, n) = stan::math::eigenvectors_sym(a);
+  // eigenvectors_sym's prim check deliberately names eigenvalues_sym; retain
+  // that observable spelling together with its underlying full solver.
+  stan::math::check_symmetric("eigenvalues_sym", "m", a);
+  Eigen::SelfAdjointEigenSolver<MatD> solver(a);
+  MapM(ctx.out.data, n, n) = solver.eigenvectors();
+  if (!values_only()) Eigen::Map<VecD>(ctx.scratch, n) = solver.eigenvalues();
 }
 void eigvecs_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
   const int64_t n = ctx.idata[0];
-  nary_bwd(ctx, [&](std::vector<VarV>& xs) {
-    VarM a(n, n);
-    for (int64_t j = 0; j < n; ++j)
-      for (int64_t i = 0; i < n; ++i) a(i, j) = xs[0](j * n + i);
-    return stan::math::eigenvectors_sym(a);
-  });
+  if (n == 0) return;
+  CMapM eigenvecs(ctx.out.data, n, n);
+  CMapV eigenvals(ctx.scratch, n);
+  CMapM eigenvecs_adj(ctx.out_adj_vec.data, n, n);
+  // stan/math/rev/fun/eigenvectors_sym.hpp, expression for expression.
+  Eigen::MatrixXd f = (1 / (eigenvals.rowwise().replicate(n).transpose() -
+                            eigenvals.rowwise().replicate(n))
+                               .array());
+  f.diagonal().setZero();
+  MapM(ctx.in_adj[0].data, n, n) +=
+      eigenvecs * f.cwiseProduct(eigenvecs.transpose() * eigenvecs_adj) *
+      eigenvecs.transpose();
 }
+
+int64_t eigvals_scratch(const Op& op, const Slot*) {
+  const int64_t n = op.idata[0];
+  return n * n;
+}
+
+int64_t eigvecs_scratch(const Op& op, const Slot*) { return op.idata[0]; }
 
 // ---- tail densities: one nested var tape, no hand-written derivative ----
 // Everything below binds EVERY argument as var, calls the unmodified
@@ -982,9 +1017,9 @@ void register_matrix_kernels() {
   register_kernel(OP_MDIVIDE_RIGHT,
                   Kernel{solve_fwd<false>, solve_bwd<false>, nullptr});
   register_kernel(OP_EIGENVALUES_SYM,
-                  Kernel{eigvals_fwd, eigvals_bwd, nullptr});
+                  Kernel{eigvals_fwd, eigvals_bwd, eigvals_scratch});
   register_kernel(OP_EIGENVECTORS_SYM,
-                  Kernel{eigvecs_fwd, eigvecs_bwd, nullptr});
+                  Kernel{eigvecs_fwd, eigvecs_bwd, eigvecs_scratch});
   register_kernel(OP_TRANSPOSE, Kernel{transpose_fwd, transpose_bwd, nullptr});
   register_kernel(OP_LKJ_CORR_CHOL_LPDF, Kernel{lkj_fwd, lkj_bwd, nullptr});
   register_kernel(OP_LKJ_CORR_LPDF, Kernel{lkjc_fwd, lkjc_bwd, nullptr});
