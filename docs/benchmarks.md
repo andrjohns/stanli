@@ -18,7 +18,8 @@ The harness now records file read, parse, compile, construction, and binding
 only; that column should be refreshed as a unit rather than mixing definitions.
 Targeted preparation measurements later on this page use the new mode.
 
-Five targeted 2026-08-23 remeasurements are newer than the full snapshot below.
+Six targeted remeasurements from 2026-08-23 and 2026-08-24 are newer than the
+full snapshot below.
 Packed row-wise `log_sum_exp` reduces `ldaK2` from 15,854 ops to 22 and
 154 to 94 us/gradient (1.11x CmdStan), and `ldaK5` from 434,126 ops to 156
 and 6.82 to 3.70 ms/gradient (1.51x CmdStan). `ldaK5` file-to-bound-model
@@ -34,8 +35,11 @@ CmdStan). Preserving the separate initial-state and parameter scalar types in
 ODE solves removes one inactive sensitivity system from
 `one_comp_mm_elim_abs`, moving it from 699 to 639 us/gradient (1.09x
 internally, 0.67x to 0.74x CmdStan); ODE models whose two inputs are active are
-unchanged. The committed full-corpus tables retain one measurement definition
-and will be refreshed as a unit.
+unchanged. A native partial matrix for the exact single-observation,
+Cholesky-factor-active density in `gp_regr` moves it from 6.05 to 4.20
+us/gradient (1.44x internally, 0.77x to 1.12x CmdStan). The committed
+full-corpus tables retain one measurement definition and will be refreshed as
+a unit.
 
 ## Per-gradient latency
 
