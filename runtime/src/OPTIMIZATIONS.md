@@ -360,6 +360,16 @@ values and once for derivatives. The first solve already computes
 everything the derivatives need, so it is kept instead of thrown away
 and the second solve is gone.
 
+The ODE opcode also records the scalar types chosen by stanc separately for
+the initial state and parameters. This is not inferred from executor adjoint
+storage: a value can have an adjoint buffer without being instantiated as a
+Stan `var`. The solver therefore integrates only the sensitivity systems for
+inputs that are actually autodiff types, while retaining a fixed Jacobian
+scratch layout and gating inactive columns in the backward sweep. On
+`one_comp_mm_elim_abs`, whose initial state is data, this reduces the
+sensitivity width from four to three and median latency from 699 to 639 us
+per gradient (1.09x); fully active ODE models are unchanged.
+
 Together these made the ODE models 29-39x faster.
 
 ## Executor details (`executor.cpp`)

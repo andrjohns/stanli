@@ -164,7 +164,10 @@ Alongside it, the tail fixes the profile already names:
   from 30.6 to 19.2 us/gradient, or 0.99x CmdStan. `kronecker_gp` is closed as
   well: retaining each symmetric eigendecomposition for its native pullback
   moves it from 289.0 to 185.7 us/gradient, or 1.17x CmdStan. `gp_regr` remains
-  (55% in `multi_normal_cholesky_lpdf`).
+  (55% in `multi_normal_cholesky_lpdf`). Preserving mixed ODE scalar types
+  removes the inactive initial-state sensitivity from
+  `one_comp_mm_elim_abs`, moving it from 699 to 639 us/gradient; the remaining
+  ODE gap is inside the solver/RHS execution rather than graph dispatch.
 - **Two loose threads.** `lotka_volterra` is 0.61x per gradient yet blows
   the 900 s sampling cap CmdStan clears in 6.2 s — untraced, and
   `tools/sampler_trace.py` is the tool. `sir`'s benchmark probe point

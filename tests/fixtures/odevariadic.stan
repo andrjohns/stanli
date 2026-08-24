@@ -28,6 +28,7 @@ data {
   array[N] real ts;
   real d_real;
   array[1] int d_int;
+  vector[2] y0_data;
 }
 parameters {
   real<lower=0> a;
@@ -44,6 +45,9 @@ transformed parameters {
       ode_rk45_tol(rhs, y0, 0.0, ts, 1e-8, 1e-8, 100000, a, b);
   array[N] vector[2] z_mixed =
       ode_rk45(rhs_mixed, y0, 0.0, ts, a, p, d_real, d_int);
+  array[N] vector[2] z_data_y = ode_rk45(rhs, y0_data, 0.0, ts, a, b);
+  array[N] vector[2] z_data_theta =
+      ode_rk45(rhs, y0, 0.0, ts, d_real, 0.1);
 }
 model {
   a ~ lognormal(0, 1);
@@ -53,5 +57,6 @@ model {
   for (n in 1:N) {
     target += sum(z_rk45[n]) + sum(z_bdf[n]) + sum(z_adams[n]);
     target += sum(z_ckrk[n]) + sum(z_tol[n]) + sum(z_mixed[n]);
+    target += sum(z_data_y[n]) + sum(z_data_theta[n]);
   }
 }

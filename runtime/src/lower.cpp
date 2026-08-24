@@ -3236,6 +3236,12 @@ struct Lowering {
                    "interpreter: %s\n",
                    spec->rhs_name.c_str(), spec->prog.why.c_str());
     Val v = emit_value(OP_ODE, {z0, theta}, N * S, result_si, {(int)N, (int)S});
+    // Bit 2 says the low bits explicitly describe the C++ scalar types
+    // selected by stanc's adlevels: bit 0 for y0, bit 1 for theta. Runtime
+    // adjoint storage is deliberately not used for this decision -- a
+    // write_array value can depend on q while still instantiating on double.
+    g.ops.back().variant = (uint8_t)(0x4u | (z0.autodiff ? 0x1u : 0u) |
+                                     (theta.autodiff ? 0x2u : 0u));
     g.ops.back().udata = spec.get();
     g.udata_pool.push_back(std::move(spec));
     return v;

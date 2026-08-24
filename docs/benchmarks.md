@@ -18,7 +18,7 @@ The harness now records file read, parse, compile, construction, and binding
 only; that column should be refreshed as a unit rather than mixing definitions.
 Targeted preparation measurements later on this page use the new mode.
 
-Four targeted 2026-08-23 remeasurements are newer than the full snapshot below.
+Five targeted 2026-08-23 remeasurements are newer than the full snapshot below.
 Packed row-wise `log_sum_exp` reduces `ldaK2` from 15,854 ops to 22 and
 154 to 94 us/gradient (1.11x CmdStan), and `ldaK5` from 434,126 ops to 156
 and 6.82 to 3.70 ms/gradient (1.51x CmdStan). `ldaK5` file-to-bound-model
@@ -30,7 +30,11 @@ copying all 730. Native Bernoulli forwards then move `Mt_model` from 30.6 to
 1.77x), and the stacked `Mtbh_model` result from 47.4 to 26.8 us (0.95x to
 1.68x). Native symmetric-eigen pullbacks remove the reverse-time eigensolves
 in `kronecker_gp`, moving it from 289.0 to 185.7 us/gradient (0.75x to 1.17x
-CmdStan). The committed full-corpus tables retain one measurement definition
+CmdStan). Preserving the separate initial-state and parameter scalar types in
+ODE solves removes one inactive sensitivity system from
+`one_comp_mm_elim_abs`, moving it from 699 to 639 us/gradient (1.09x
+internally, 0.67x to 0.74x CmdStan); ODE models whose two inputs are active are
+unchanged. The committed full-corpus tables retain one measurement definition
 and will be refreshed as a unit.
 
 ## Per-gradient latency
@@ -312,6 +316,14 @@ reading the jacobian out of the same solve that produced the values
 removes a second, independently stepped solve. Anything the compiler
 cannot express keeps the interpreter, so coverage never shrinks;
 `STANLI_DEBUG_ODE=1` reports when that happens.
+
+A later mixed-activity specialization also preserves Stan Math's separate
+scalar types for the initial state and parameters. Previously either active
+input promoted both to reverse mode and integrated sensitivities for both.
+On `one_comp_mm_elim_abs` the initial state is data, so the sensitivity width
+falls from four to three and median latency from 699 to 639 us/gradient. The
+fully active `lotka_volterra` and `soil_incubation` shapes take the same path
+as before and remain flat within measurement noise.
 
 Preparation scales too: the largest corpus model (`nn_rbm1bJ100`, MNIST,
 60,000 rows, 79,411 parameters) lowers to a 132,024-op graph. Its old 23.80 s

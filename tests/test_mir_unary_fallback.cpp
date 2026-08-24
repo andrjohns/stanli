@@ -474,20 +474,6 @@ void test_ode_fallback() {
   spec->args[2].ints = x_i;
   spec->prog = compile_rhs(f, defs, 1, 1, 1, x_i);
 
-  stanli::Graph g;
-  const int initial = g.add_slot(1, false);
-  const int parameter = g.add_slot(1, true);
-  const int solution = g.add_slot(1, false);
-  const int op =
-      g.add_op(stanli::OP_ODE, {initial, parameter}, solution, {1, 1});
-  g.ops[(size_t)op].udata = spec.get();
-  g.udata_pool.push_back(spec);
-  g.result_slot = solution;
-  stanli::Executor executor(std::move(g));
-  *executor.value_ptr(initial) = 1.1;
-  *executor.param_ptr(parameter) = 0.2;
-  double gradient = 0;
-  const double got = executor.gradient(&gradient);
   const double want = 1.1 * std::exp(std::sin(0.2) * 0.4);
   if (spec->prog.ok ||
       spec->prog.why.find("function sin") == std::string::npos) {
@@ -495,9 +481,29 @@ void test_ode_fallback() {
     std::printf("FAIL ODE did not exercise unary fallback: %s\n",
                 spec->prog.why.c_str());
   }
-  expect_close("ODE fallback value", got, want, 2e-8);
-  expect_close("ODE fallback gradient", gradient, want * 0.4 * std::cos(0.2),
-               2e-8);
+
+  const auto run = [&](uint8_t variant, const char* label) {
+    stanli::Graph g;
+    const int initial = g.add_slot(1, false);
+    const int parameter = g.add_slot(1, true);
+    const int solution = g.add_slot(1, false);
+    const int op =
+        g.add_op(stanli::OP_ODE, {initial, parameter}, solution, {1, 1});
+    g.ops[(size_t)op].variant = variant;
+    g.ops[(size_t)op].udata = spec.get();
+    g.udata_pool.push_back(spec);
+    g.result_slot = solution;
+    stanli::Executor executor(std::move(g));
+    *executor.value_ptr(initial) = 1.1;
+    *executor.param_ptr(parameter) = 0.2;
+    double gradient = 0;
+    const double got = executor.gradient(&gradient);
+    expect_close(std::string("ODE fallback value ") + label, got, want, 2e-8);
+    expect_close(std::string("ODE fallback gradient ") + label, gradient,
+                 want * 0.4 * std::cos(0.2), 2e-8);
+  };
+  run(0x0u, "legacy var/var");
+  run(0x6u, "data y/active theta");
 }
 
 }  // namespace
