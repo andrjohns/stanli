@@ -204,7 +204,7 @@ bool gen_adjoint(IslandProg& p) {
     const Program::Instr& I = orig[i];
     if (I.code == Program::CALL) {
       // The kernel's backward may read its input VALUES, not just its
-      // scratch (backward_ignores_input_values is a whitelist, not a
+      // scratch (backward_ignores_values is a whitelist, not a
       // guarantee), and some read their output values too -- so both are
       // checkpointed whenever a later instruction overwrites them.
       Program::Call& call = fwd.calls[(size_t)I.a];

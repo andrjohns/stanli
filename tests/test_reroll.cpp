@@ -4,6 +4,7 @@
 #include "graph_helpers.hpp"
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
+#include <stanli/inplace.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/reroll.hpp>
 
@@ -1197,6 +1198,72 @@ static void test_write_fusion_bails() {
   }
 }
 
+// Reroll creates slice stores after the compiler's first in-place pass has
+// already run. Two disjoint comb runs model Mtbh's column fills: the first
+// store must copy its fill-backed base, while the second can reuse that fresh
+// result when the pass runs again.
+static void test_post_reroll_slice_inplace() {
+  Graph g;
+  Fills fills;
+  const int a = g.add_slot(8, true), sigma = g.add_slot(1, true);
+  const int yh = g.add_slot(8, false);
+  fills.emplace_back(yh, std::vector<double>(8, -0.25));
+  const int yd = g.add_slot(8, false);
+  fills.emplace_back(yd, std::vector<double>(8, 0.75));
+
+  for (int l = 0; l < 4; ++l) {
+    const int v = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {a}, v, {l});
+    g.add_op(OP_SET_INDEX_INPLACE, {yh, v}, yh, {2 * l});
+  }
+  // A non-lane scalar op separates the two affine store regions.
+  const int sep = g.add_slot(1, false);
+  g.add_op(OP_SUM_VEC, {a}, sep);
+  for (int l = 0; l < 4; ++l) {
+    const int v = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {a}, v, {4 + l});
+    g.add_op(OP_SET_INDEX_INPLACE, {yh, v}, yh, {1 + 2 * l});
+  }
+  const int lp = g.add_slot(1, false);
+  const int id = g.add_op(OP_NORMAL_LPDF, {yd, yh, sigma}, lp);
+  g.ops[(size_t)id].variant = 0x06;
+  std::vector<int> terms{sep, lp};
+
+  Graph ref = g;
+  std::vector<int> ref_terms = terms;
+  reduce_into_result(ref, ref_terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  Fills optimized_fills = fills;
+  std::vector<int> optimized_terms = terms;
+  reroll(g, optimized_fills, optimized_terms, {});
+  expect("reroll made two strided stores",
+         writefuse::count(g, OP_SET_SLICE_STRIDED) == 2);
+  std::vector<int> roots = optimized_terms;
+  expect("post-reroll rewrites later slice",
+         make_inplace_updates(g, roots) == 1);
+  expect("post-reroll preserves first copy",
+         writefuse::count(g, OP_SET_SLICE_STRIDED) == 1 &&
+             writefuse::count(g, OP_SET_SLICE_STRIDED_INPLACE) == 1);
+  reduce_into_result(g, optimized_terms);
+
+  Executor ex(std::move(g));
+  for (const auto& f : optimized_fills) {
+    double* p = ex.value_ptr(f.first);
+    for (size_t j = 0; j < f.second.size(); ++j) p[j] = f.second[j];
+  }
+  for (int64_t i = 0; i < ex.n_params(); ++i) ex.params_data()[i] = fill_at(i);
+  std::vector<double> first(1 + ex.n_params()), second(1 + ex.n_params());
+  first[0] = ex.gradient(first.data() + 1);
+  second[0] = ex.gradient(second.data() + 1);
+  for (size_t i = 0; i < want.size() && i < first.size(); ++i) {
+    expect_close(("post-reroll v" + std::to_string(i)).c_str(), first[i],
+                 want[i]);
+    expect_close(("post-reroll repeat v" + std::to_string(i)).c_str(),
+                 second[i], first[i]);
+  }
+}
+
 // (k) The losscurve shape: a run whose value chain is scalar end to end,
 // because its lane-varying inputs all come from HOISTED producers. Widening
 // such an op hands the kernels scalar inputs with a vector output, and their
@@ -1407,6 +1474,7 @@ int main() {
   test_sparse_candidate_cost();
   test_write_fusion();
   test_write_fusion_bails();
+  test_post_reroll_slice_inplace();
   test_write_fusion_scalar_chain();
   test_e2e_fixtures();
   if (failures) {

@@ -278,6 +278,22 @@ void set_slice_bwd(KernelCtx& ctx) {
       ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[start + i];
 }
 
+// OP_SET_SLICE_INPLACE: out IS in[0]. Untouched adjoints already pass
+// through because those two adjoint buffers alias. Overwritten cells belong
+// to the RHS instead, so route them there and clear them from the base.
+void set_slice_inplace_fwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0];
+  for (int64_t i = 0; i < ctx.in[1].len; ++i)
+    ctx.out.data[start + i] = ctx.in[1].data[i];
+}
+void set_slice_inplace_bwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0], len = ctx.in[1].len;
+  if (ctx.in_adj[1].data)
+    for (int64_t i = 0; i < len; ++i)
+      ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[start + i];
+  for (int64_t i = 0; i < len; ++i) ctx.out_adj_vec.data[start + i] = 0.0;
+}
+
 // OP_SET_SLICE_STRIDED: out = copy(in[0]) with
 // out[start + i*stride] = in[1][i], idata = {start, stride}. The write-side
 // mirror of OP_SLICE_STRIDED: a loop filling a column-major matrix row by
@@ -310,6 +326,23 @@ void set_slice_strided_bwd(KernelCtx& ctx) {
   }
 }
 
+// OP_SET_SLICE_STRIDED_INPLACE: the comb-shaped counterpart above, with
+// out and in[0] sharing both value and adjoint storage.
+void set_slice_strided_inplace_fwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0], stride = ctx.idata[1];
+  for (int64_t i = 0; i < ctx.in[1].len; ++i)
+    ctx.out.data[start + i * stride] = ctx.in[1].data[i];
+}
+void set_slice_strided_inplace_bwd(KernelCtx& ctx) {
+  const int64_t start = ctx.idata[0], stride = ctx.idata[1],
+                len = ctx.in[1].len;
+  if (ctx.in_adj[1].data)
+    for (int64_t i = 0; i < len; ++i)
+      ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[start + i * stride];
+  for (int64_t i = 0; i < len; ++i)
+    ctx.out_adj_vec.data[start + i * stride] = 0.0;
+}
+
 }  // namespace
 
 // Called from Executor's constructor path; a static registrar object in a
@@ -326,8 +359,13 @@ void register_elementwise_kernels() {
                                                set_index_inplace_bwd, nullptr});
   register_kernel(OP_SLICE, Kernel{slice_fwd, slice_bwd, nullptr});
   register_kernel(OP_SET_SLICE, Kernel{set_slice_fwd, set_slice_bwd, nullptr});
+  register_kernel(OP_SET_SLICE_INPLACE, Kernel{set_slice_inplace_fwd,
+                                               set_slice_inplace_bwd, nullptr});
   register_kernel(OP_SET_SLICE_STRIDED, Kernel{set_slice_strided_fwd,
                                                set_slice_strided_bwd, nullptr});
+  register_kernel(OP_SET_SLICE_STRIDED_INPLACE,
+                  Kernel{set_slice_strided_inplace_fwd,
+                         set_slice_strided_inplace_bwd, nullptr});
   register_kernel(OP_SLICE_STRIDED,
                   Kernel{slice_strided_fwd, slice_strided_bwd, nullptr});
   register_kernel(OP_GATHER, Kernel{gather_fwd, gather_bwd, nullptr});

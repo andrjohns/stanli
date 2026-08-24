@@ -18,12 +18,15 @@ The harness now records file read, parse, compile, construction, and binding
 only; that column should be refreshed as a unit rather than mixing definitions.
 Targeted preparation measurements later on this page use the new mode.
 
-One targeted 2026-08-23 remeasurement is newer than the full snapshot below.
+Two targeted 2026-08-23 remeasurements are newer than the full snapshot below.
 Packed row-wise `log_sum_exp` reduces `ldaK2` from 15,854 ops to 22 and
 154 to 94 us/gradient (1.11x CmdStan), and `ldaK5` from 434,126 ops to 156
 and 6.82 to 3.70 ms/gradient (1.51x CmdStan). `ldaK5` file-to-bound-model
-preparation also falls from about 0.59 s to 0.27 s. The committed full-corpus
-tables retain one measurement definition and will be refreshed as a unit.
+preparation also falls from about 0.59 s to 0.27 s. In-place slice stores move
+`Mtbh_model` from 106.5 to 47.4 us/gradient (0.43x to 0.95x CmdStan): its 146
+strided stores still dispatch once each, but update four cells instead of
+copying all 730. The committed full-corpus tables retain one measurement
+definition and will be refreshed as a unit.
 
 ## Per-gradient latency
 
@@ -106,6 +109,10 @@ by the model's *shape*, not its size.
   rather than higher is per-op dispatch against CmdStan's inlined
   scalar code, one interpreted instruction at a time in each
   direction (the island section below has the per-region numbers).
+- **Matrix-filling updates.** `Mtbh_model` re-rolls 584 element writes into
+  146 strided stores. A second in-place pass now keeps one initial copy and
+  makes all 146 stores destructive, reducing their profile share from 42.4%
+  to 5.5% and moving the model from 0.43x to 0.95x CmdStan.
 
 **Slower (a shrinking tail, mostly 0.5-0.9x):**
 
@@ -113,10 +120,6 @@ by the model's *shape*, not its size.
   right-hand side against CmdStan's fully inlined one inside the same
   CVODES solver. (They were 0.015x before the right-hand side compiled;
   see below.)
-- **`Mtbh_model` (0.45x)**, the slowest model, spends 36% in
-  `OP_SET_SLICE_STRIDED`. The in-place rule rewrites element writes but
-  not slice writes, so a model that fills a matrix column by column
-  still copies the whole matrix per column. Open.
 
 A profile of every sub-parity model (`STANLI_PROFILE=1`) says the
 remaining tail is mostly not a graph problem: in seven of those models
@@ -153,6 +156,11 @@ headline measurements:
   integer-outcome fusion closed the `dogs` family (0.65x -> 2.8x).
   57 of the 120 corpus models change under the passes, against 28
   before write-side fusion.
+- **Post-reroll in-place slices** (chained partial matrix fills):
+  `Mtbh_model` keeps the same 1,585-op graph, but 146 stores now move four
+  values rather than copying a 730-value matrix. Median gradient latency
+  falls 106.5 -> 47.4 us (2.24x); direct replay remains within 3.61e-15 of
+  the CmdStan references across 465 values.
 - **Elementwise-lp fusion** (the mixture idiom): `low_dim_gauss_mix`
   7,208 ops -> 16, crossing parity (0.78x -> 1.07x); `normal_mixture`
   13 ops, 1.09x.

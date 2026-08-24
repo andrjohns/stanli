@@ -479,6 +479,52 @@ static void test_live_in_and_out_slot() {
     expect_close("liveinout v" + std::to_string(i), got[i], want[i]);
 }
 
+static Graph build_slice_island(int n_updates, int width,
+                                std::vector<int>& terms) {
+  Graph g;
+  const int seed = g.add_slot(1, true);
+  const int rhs = g.add_slot(2, true);
+  const int vec = g.add_slot(width, false);
+  g.add_op(OP_REP_VEC, {seed}, vec);  // vector-out barrier before the region
+  for (int k = 0; k < n_updates; ++k)
+    // Repeated overlapping windows exercise last-write-wins in the generated
+    // adjoint: each later MOVR must consume the cells before an earlier one.
+    g.add_op(OP_SET_SLICE_INPLACE, {vec, rhs}, vec, {k % 5});
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_LOG_SUM_EXP, {vec}, lp);
+  g.result_slot = lp;
+  terms.push_back(lp);
+  return g;
+}
+
+static void test_inplace_slices_carved() {
+  std::vector<int> ref_terms;
+  Graph ref = build_slice_island(36, 40, ref_terms);
+  const std::vector<double> want = run_grad(std::move(ref), {});
+
+  std::vector<int> terms;
+  Graph g = build_slice_island(36, 40, terms);
+  Fills fills;
+  expect("slice inplace island carved",
+         carve_islands(g, fills, terms, {}) == 1);
+  const std::vector<double> got = run_grad(std::move(g), {});
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("slice island v" + std::to_string(i), got[i], want[i]);
+}
+
+// In-place slice cost is the RHS window, not the wide aliased output. If it
+// were charged as a full-vector copy, this register-heavy region would look
+// profitable and the carver would build a 4K-register island for tiny writes.
+static void test_inplace_slice_cost_refuses_wide_state() {
+  std::vector<int> terms;
+  Graph g = build_slice_island(36, 4096, terms);
+  Fills fills;
+  const size_t before = g.ops.size();
+  expect("wide inplace slices not carved",
+         carve_islands(g, fills, terms, {}) == 0);
+  expect("wide inplace slice graph unchanged", g.ops.size() == before);
+}
+
 int main() {
   // What the compiler does with a region, on graphs small enough to
   // reason about. The cost estimate would refuse most of them -- it is
@@ -488,6 +534,7 @@ int main() {
   test_hmm_parity();
   test_env_disable();
   test_live_in_and_out_slot();
+  test_inplace_slices_carved();
   test_short_run_untouched();
   test_propto_density_refused();
   test_unsupported_op_splits();
@@ -499,6 +546,7 @@ int main() {
   test_wide_state_refused();
   test_vector_copies_carved();
   test_scalar_chain_carved();
+  test_inplace_slice_cost_refuses_wide_state();
   if (failures) {
     std::printf("%d failures\n", failures);
     return 1;

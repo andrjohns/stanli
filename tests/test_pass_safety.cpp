@@ -1,13 +1,13 @@
 // Safety properties the graph passes depend on, tested directly rather
 // than through the models that happen to exercise them.
 //
-// 1. The whitelist is real. `backward_ignores_input_values(op)` is what
+// 1. The whitelist is real. `backward_ignores_values(op)` is what
 //    lets a destructive write happen before an op's backward runs. Every
-//    opcode it claims is checked by poisoning the input buffers with NaN
-//    between the forward and backward sweeps: a kernel that reads values
-//    there produces NaN adjoints and fails. This is the check that would
-//    have caught the log_sum_exp bug immediately -- it was found instead
-//    by the corpus A/B, after 8 models had been silently wrong.
+//    opcode it claims is checked by poisoning every input and output value
+//    buffer with NaN between the forward and backward sweeps: a kernel that
+//    reads values there produces NaN adjoints and fails. This is the check
+//    that would have caught the log_sum_exp bug immediately -- it was found
+//    instead by the corpus A/B, after 8 models had been silently wrong.
 //
 // 2. The passes are gradient-preserving on randomly generated graphs
 //    built from the shapes real models produce (write chains, read-backs,
@@ -43,12 +43,12 @@ using stanli::testutil::reduce_into_result;
 
 // ---- 1. the whitelist ------------------------------------------------------
 
-// Runs one opcode's forward, optionally poisons every input value, then
-// runs its backward and returns the resulting input adjoints.
+// Runs one opcode's forward, optionally poisons all input and output values,
+// then runs its backward and returns the resulting input adjoints.
 static std::vector<double> route_adjoints(uint16_t oc, bool poison) {
   const int64_t N = 6;
-  std::vector<double> vec(N), out(N, 0.0), scalar{0.75};
-  std::vector<double> vec_adj(N, 0.0), out_adj(N, 0.0), scalar_adj{0.0};
+  std::vector<double> vec(N), out(N, 0.0), rhs{0.75, -0.3, 1.1};
+  std::vector<double> vec_adj(N, 0.0), out_adj(N, 0.0), rhs_adj(3, 0.0);
   // Extra operands for the multi-argument mixture ops, and the scratch the
   // native ones stash partials in (a separate arena a destructive write
   // never touches -- which is exactly why their backward is value-free).
@@ -84,8 +84,24 @@ static std::vector<double> route_adjoints(uint16_t oc, bool poison) {
       idata = {2};
       out_len = N;
       ctx.n_in = 2;
-      ctx.in[1] = Desc{scalar.data(), 1};
-      ctx.in_adj[1] = Desc{scalar_adj.data(), 1};
+      ctx.in[1] = Desc{rhs.data(), 1};
+      ctx.in_adj[1] = Desc{rhs_adj.data(), 1};
+      break;
+    case OP_SET_SLICE:
+    case OP_SET_SLICE_INPLACE:
+      idata = {2};
+      out_len = N;
+      ctx.n_in = 2;
+      ctx.in[1] = Desc{rhs.data(), 3};
+      ctx.in_adj[1] = Desc{rhs_adj.data(), 3};
+      break;
+    case OP_SET_SLICE_STRIDED:
+    case OP_SET_SLICE_STRIDED_INPLACE:
+      idata = {0, 2};
+      out_len = N;
+      ctx.n_in = 2;
+      ctx.in[1] = Desc{rhs.data(), 3};
+      ctx.in_adj[1] = Desc{rhs_adj.data(), 3};
       break;
     case OP_LOG_SUM_EXP:
       out_len = 1;
@@ -119,7 +135,9 @@ static std::vector<double> route_adjoints(uint16_t oc, bool poison) {
       return {};
   }
   // The in-place form writes through its first input: one buffer.
-  const bool aliased = oc == OP_SET_INDEX_INPLACE;
+  const bool aliased = oc == OP_SET_INDEX_INPLACE ||
+                       oc == OP_SET_SLICE_INPLACE ||
+                       oc == OP_SET_SLICE_STRIDED_INPLACE;
   ctx.out = Desc{aliased ? vec.data() : out.data(), out_len};
   ctx.idata = idata.data();
   ctx.n_idata = (int64_t)idata.size();
@@ -129,22 +147,23 @@ static std::vector<double> route_adjoints(uint16_t oc, bool poison) {
 
   // Seed adjoints, then destroy the values the way a later destructive
   // write would. Adjoint buffers are deliberately left alone.
-  for (int64_t i = 0; i < out_len; ++i) out_adj[i] = 1.0 + 0.5 * i;
-  ctx.out_adj = out_adj[0];
-  ctx.out_adj_vec = Desc{out_adj.data(), out_len};
+  double* seeded_adj = aliased ? vec_adj.data() : out_adj.data();
+  for (int64_t i = 0; i < out_len; ++i) seeded_adj[i] = 1.0 + 0.5 * i;
+  ctx.out_adj = seeded_adj[0];
+  ctx.out_adj_vec = Desc{seeded_adj, out_len};
   if (poison) {
     const double nan = std::nan("");
     for (int64_t i = 0; i < N; ++i) vec[i] = nan;
-    scalar[0] = nan;
+    for (double& x : rhs) x = nan;
     b_in[0] = nan;
     c_in[0] = nan;
-    if (!aliased)
-      for (int64_t i = 0; i < out_len; ++i) out[i] = nan;
+    double* output_values = aliased ? vec.data() : out.data();
+    for (int64_t i = 0; i < out_len; ++i) output_values[i] = nan;
   }
   k.backward(ctx);
 
   std::vector<double> got = vec_adj;
-  got.push_back(scalar_adj[0]);
+  got.insert(got.end(), rhs_adj.begin(), rhs_adj.end());
   got.push_back(b_adj[0]);
   got.push_back(c_adj[0]);
   return got;
@@ -164,7 +183,7 @@ static void test_whitelist_backwards_ignore_values() {
   }
   int checked = 0;
   for (uint16_t oc = 1; oc < OP_COUNT_; ++oc) {
-    if (!backward_ignores_input_values(oc)) continue;
+    if (!backward_ignores_values(oc)) continue;
     const std::string name = opcode_name(oc);
     const std::vector<double> clean = route_adjoints(oc, /*poison=*/false);
     if (clean.empty()) {
@@ -179,7 +198,7 @@ static void test_whitelist_backwards_ignore_values() {
     for (size_t i = 0; i < clean.size(); ++i) {
       if (clean[i] != poisoned[i] || !std::isfinite(poisoned[i])) {
         ++failures;
-        std::printf("FAIL %s backward reads input values (adj[%zu] %g -> %g)\n",
+        std::printf("FAIL %s backward reads values (adj[%zu] %g -> %g)\n",
                     name.c_str(), i, clean[i], poisoned[i]);
         break;
       }
@@ -293,6 +312,7 @@ static void test_random_graphs_preserve_gradients() {
     make_inplace_updates(g, {});
     forward_stores_to_loads(g, {});
     reroll(g, f2, tt, {});
+    make_inplace_updates(g, tt);  // slice stores reroll just created
     // The whole pipeline, in order. Islands are forced on: these graphs
     // are small, so the pass's cost estimate would decline nearly all of
     // them, and it is the compiler that this test is for.
