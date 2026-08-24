@@ -140,7 +140,7 @@ struct Program {
   // way every value is. `bwd_in`/`bwd_out` are where the VALUES live at
   // backward time -- the same registers, unless the adjoint generator
   // had to checkpoint them (some kernel backwards re-read their inputs;
-  // backward_ignores_input_values is a whitelist, not a guarantee).
+  // backward_ignores_values is a whitelist, not a guarantee).
   struct Call {
     uint16_t opcode = 0;
     uint8_t variant = 0;

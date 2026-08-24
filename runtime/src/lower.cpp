@@ -197,7 +197,7 @@ struct PrepTrace {
   }
 
   Row& next() {
-    // There are currently 18 rows with a write_array graph. Keep this a fixed
+    // There are currently 20 rows with a write_array graph. Keep this a fixed
     // buffer so the profiler itself cannot show up as allocator work.
     if (size_ >= rows_.size()) std::abort();
     return rows_[size_++];
@@ -4237,6 +4237,14 @@ struct Lowering {
                target_terms.size(), out.views.size(), PrepTrace::Extra::Reroll,
                rerolled.regions, rerolled.list_steps, false, 0,
                rerolled.candidate_steps, rerolled.row_steps);
+    // Re-roll can replace many element writes with copying slice stores.
+    // Give those new ops the same last-use proof as the scalar stores.
+    const auto post_reroll_inplace_time = prep.start();
+    const int post_reroll_inplace =
+        rerolled.regions ? make_inplace_updates(g, roots) : 0;
+    prep.graph(prep_graph, "post_reroll_inplace", post_reroll_inplace_time, g,
+               out.fills, target_terms.size(), out.views.size(),
+               PrepTrace::Extra::Rewrites, post_reroll_inplace);
     const auto finalize_time = prep.start();
     // Nothing reads a result here, but forward() asserts a scalar result
     // slot, so point it at one.
@@ -4308,6 +4316,17 @@ struct Lowering {
                target_terms.size(), out.views.size(), PrepTrace::Extra::Reroll,
                rerolled.regions, rerolled.list_steps, false, 0,
                rerolled.candidate_steps, rerolled.row_steps);
+    // Target terms may have been replaced by vector reductions, so rebuild
+    // the implicit-root set before considering the slice stores reroll made.
+    std::vector<int> post_reroll_roots = roots;
+    post_reroll_roots.insert(post_reroll_roots.end(), target_terms.begin(),
+                             target_terms.end());
+    const auto post_reroll_inplace_time = prep.start();
+    const int post_reroll_inplace =
+        rerolled.regions ? make_inplace_updates(g, post_reroll_roots) : 0;
+    prep.graph(prep_graph, "post_reroll_inplace", post_reroll_inplace_time, g,
+               out.fills, target_terms.size(), out.views.size(),
+               PrepTrace::Extra::Rewrites, post_reroll_inplace);
     // LAST, after every other pass has had first crack: compile whatever
     // scalar residue survives (recurrences the re-roll can never widen)
     // into island ops. Off under STANLI_NO_ISLAND.

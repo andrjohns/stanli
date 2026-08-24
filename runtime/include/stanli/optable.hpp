@@ -34,7 +34,9 @@ namespace stanli {
   X(OP_SET_INDEX_INPLACE)           \
   X(OP_SLICE)                       \
   X(OP_SET_SLICE)                   \
+  X(OP_SET_SLICE_INPLACE)           \
   X(OP_SET_SLICE_STRIDED)           \
+  X(OP_SET_SLICE_STRIDED_INPLACE)   \
   X(OP_SLICE_STRIDED)               \
   X(OP_GATHER)                      \
   X(OP_CONCAT2)                     \
@@ -679,6 +681,7 @@ constexpr uint8_t kRerollDensity = 1 << 0;
 constexpr uint8_t kRerollIdataDensity = 1 << 1;
 constexpr uint8_t kRerollAnyDensity = kRerollDensity | kRerollIdataDensity;
 constexpr uint8_t kRerollWidenable = 1 << 2;
+// Backward reads adjoints/scratch only, never input or output value buffers.
 constexpr uint8_t kBackwardValueFree = 1 << 3;
 }  // namespace op_trait
 
@@ -737,14 +740,19 @@ constexpr uint8_t op_traits(uint16_t opcode) {
     case OP_LOG1M_INV_LOGIT:
       return op_trait::kRerollWidenable;
 
-    // Backward routes adjoints without rereading input values. This permits
-    // a later destructive update to reuse the input buffer safely.
+    // Backward routes adjoints without rereading input OR output values. This
+    // permits a later destructive update to reuse an input buffer, and a
+    // store-produced output to become the next update's base.
     case OP_INDEX:
     case OP_SLICE:
     case OP_SLICE_STRIDED:
     case OP_GATHER:
     case OP_SET_INDEX:
     case OP_SET_INDEX_INPLACE:
+    case OP_SET_SLICE:
+    case OP_SET_SLICE_INPLACE:
+    case OP_SET_SLICE_STRIDED:
+    case OP_SET_SLICE_STRIDED_INPLACE:
     case OP_LOG_SUM_EXP:
     case OP_LOG_SUM_EXP_ROWS:
       return op_trait::kBackwardValueFree;

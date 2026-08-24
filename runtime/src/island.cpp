@@ -134,6 +134,7 @@ bool in_vocab(const Graph& g, const Op& op) {
     case OP_SET_INDEX_INPLACE:
     case OP_SLICE:
     case OP_SET_SLICE:
+    case OP_SET_SLICE_INPLACE:
       return op.n_idata == 1;
     case OP_DOT:
       return op.n_in == 2 && g.slots[op.in[0]].len == g.slots[op.in[1]].len;
@@ -367,10 +368,14 @@ struct Compiler {
         emit(Program::MOV, d + idx, val);
         return ok;
       }
-      case OP_SET_SLICE: {
+      case OP_SET_SLICE:
+      case OP_SET_SLICE_INPLACE: {
         const int start = op.idata[0];
         const int64_t vlen = g.slots[op.in[1]].len;
         if (op.n_in != 2 || start < 0 || start + vlen > out_len) return false;
+        if (op.opcode == OP_SET_SLICE_INPLACE &&
+            (op.out != op.in[0] || op.in[0] == op.in[1]))
+          return false;
         const int base = read_reg(op.in[0]);
         const int val = read_reg(op.in[1]);
         if (base_dead_here(op.in[0])) reg_of[op.out] = base;
@@ -519,10 +524,15 @@ int carve_islands(Graph& g,
     // and for asking why a region was left alone.)
     if (compiled && !std::getenv("STANLI_ISLAND_ALWAYS")) {
       int64_t graph_elems = 0;
-      for (size_t u = i; u < j; ++u)
-        graph_elems += g.ops[u].opcode == OP_SET_INDEX_INPLACE
-                           ? 1
-                           : g.slots[g.ops[u].out].len;
+      for (size_t u = i; u < j; ++u) {
+        const Op& op = g.ops[u];
+        if (op.opcode == OP_SET_INDEX_INPLACE)
+          graph_elems += 1;
+        else if (op.opcode == OP_SET_SLICE_INPLACE)
+          graph_elems += g.slots[op.in[1]].len;
+        else
+          graph_elems += g.slots[op.out].len;
+      }
       const int64_t graph_cost = graph_elems + kOpCost * (int64_t)(j - i);
       // A CALL should read as cost-NEUTRAL: it runs the graph's own
       // kernel with the graph's own per-call overhead (context assembly,

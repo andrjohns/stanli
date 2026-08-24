@@ -339,14 +339,14 @@ compare the sampler diagnostic columns distributionally.
 The bugs worth recording share a shape: the graph looked right, the op
 count did not change, and the numbers were silently wrong.
 
-- **A destructive write ahead of a backward that re-reads its
-  inputs.** The in-place pass turns "copy the vector, then modify one
-  element" into "modify the element in place", which destroys the old
-  value. The reverse sweep runs after all forward writes, so this is
-  safe only if no earlier op's `backward` needs the destroyed value.
-  The allowlist `backward_ignores_input_values` names the ops whose
-  backward only routes adjoints and never re-reads its inputs; only
-  those may sit in front of an in-place write, and
+- **A destructive write whose producer or an earlier reader re-reads
+  values in backward.** The in-place pass turns "copy the vector, then
+  modify it" into "modify it in place", which destroys the old value.
+  The reverse sweep runs after all forward writes, so this is safe only
+  if neither the op that produced the current version nor any earlier
+  reader needs the destroyed input or output values. The allowlist
+  `backward_ignores_values` names the ops whose backward only routes
+  adjoints or reads scratch; both sides of that proof must be on it, and
   [`test_pass_safety.cpp`](../tests/test_pass_safety.cpp) pins the
   property for each one. Before this rule existed, eight corpus models
   were wrong by up to 1.7e+05 relative, with their op counts

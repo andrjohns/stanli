@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -89,6 +90,270 @@ static Graph build_chain(int L, Fills& fills, std::vector<int>& terms,
     prev = nxt;
   }
   return g;
+}
+
+// Two copying slices over a fill-backed vector. The first must keep its copy
+// so every evaluation starts from the fill; the second can reuse that fresh
+// output. The windows overlap deliberately: reverse must clear the later
+// write's cells before the earlier write routes them to its RHS.
+static Graph build_slice_chain(bool strided, Fills& fills,
+                               std::vector<int>& first_pos,
+                               std::vector<int>& second_pos) {
+  const int N = 10, K = 4;
+  Graph g;
+  const int a = g.add_slot(K, true);
+  const int b = g.add_slot(K, true);
+  const int base = g.add_slot(N, false);
+  std::vector<double> base_values(N);
+  for (int i = 0; i < N; ++i) base_values[(size_t)i] = -0.4 + 0.1 * i;
+  fills.emplace_back(base, base_values);
+
+  const int first = g.add_slot(N, false);
+  const int second = g.add_slot(N, false);
+  if (strided) {
+    g.add_op(OP_SET_SLICE_STRIDED, {base, a}, first, {0, 2});
+    g.add_op(OP_SET_SLICE_STRIDED, {first, b}, second, {2, 2});
+    first_pos = {0, 2, 4, 6};
+    second_pos = {2, 4, 6, 8};
+  } else {
+    g.add_op(OP_SET_SLICE, {base, a}, first, {1});
+    g.add_op(OP_SET_SLICE, {first, b}, second, {3});
+    first_pos = {1, 2, 3, 4};
+    second_pos = {3, 4, 5, 6};
+  }
+  const int weights = g.add_slot(N, false);
+  std::vector<double> w(N);
+  for (int i = 0; i < N; ++i) w[(size_t)i] = 0.5 + 0.25 * i;
+  fills.emplace_back(weights, w);
+  const int result = g.add_slot(1, false);
+  g.add_op(OP_DOT, {second, weights}, result);
+  g.result_slot = result;
+  return g;
+}
+
+static void test_slice_chain(bool strided) {
+  const std::string tag = strided ? "strided slice" : "contiguous slice";
+  Fills fills;
+  std::vector<int> first_pos, second_pos;
+  Graph g = build_slice_chain(strided, fills, first_pos, second_pos);
+  Graph ref = g;
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  expect((tag + " one later rewrite").c_str(),
+         make_inplace_updates(g, {}) == 1);
+  int copying = 0, inplace = 0;
+  for (const Op& op : g.ops) {
+    if (strided) {
+      copying += op.opcode == OP_SET_SLICE_STRIDED;
+      inplace += op.opcode == OP_SET_SLICE_STRIDED_INPLACE;
+    } else {
+      copying += op.opcode == OP_SET_SLICE;
+      inplace += op.opcode == OP_SET_SLICE_INPLACE;
+    }
+  }
+  expect((tag + " keeps fill copy").c_str(), copying == 1);
+  expect((tag + " uses one shared buffer").c_str(), inplace == 1);
+
+  const std::vector<double> got = run_grad_twice(std::move(g), fills);
+  expect((tag + " gradient sizes").c_str(), got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close((tag + " v" + std::to_string(i)).c_str(), got[i], want[i]);
+
+  // Parameter slots a then b occupy the eight returned gradient cells.
+  for (size_t k = 0; k < first_pos.size(); ++k) {
+    bool overwritten = false;
+    for (int p : second_pos) overwritten = overwritten || p == first_pos[k];
+    const double expected = overwritten ? 0.0 : 0.5 + 0.25 * first_pos[k];
+    expect_close((tag + " first rhs " + std::to_string(k)).c_str(), got[1 + k],
+                 expected);
+    expect_close((tag + " second rhs " + std::to_string(k)).c_str(),
+                 got[1 + first_pos.size() + k], 0.5 + 0.25 * second_pos[k]);
+  }
+}
+
+static void test_slice_rewrite_bails() {
+  {  // A base read outside the graph is never overwritten.
+    Fills fills;
+    std::vector<int> first_pos, second_pos;
+    Graph g = build_slice_chain(true, fills, first_pos, second_pos);
+    const int second_base = g.ops[1].in[0];
+    expect("slice root blocks rewrite",
+           make_inplace_updates(g, {second_base}) == 0);
+  }
+  {  // Direct base/RHS aliasing is unsafe in both sweeps.
+    Graph g;
+    const int rhs = g.add_slot(4, true);
+    const int fill = g.add_slot(4, false);
+    const int fresh = g.add_slot(4, false);
+    g.add_op(OP_SET_SLICE, {fill, rhs}, fresh, {0});
+    const int out = g.add_slot(4, false);
+    g.add_op(OP_SET_SLICE, {fresh, fresh}, out, {0});
+    expect("slice base-rhs alias refused", make_inplace_updates(g, {}) == 0);
+  }
+  {  // A malformed comb fails closed without overflowing its bound check.
+    Graph g;
+    const int rhs = g.add_slot(4, true);
+    const int fill = g.add_slot(8, false);
+    const int fresh = g.add_slot(8, false);
+    g.add_op(OP_SET_SLICE, {fill, rhs}, fresh, {0});
+    const int out = g.add_slot(8, false);
+    g.add_op(OP_SET_SLICE_STRIDED, {fresh, rhs}, out,
+             {7, std::numeric_limits<int>::max()});
+    expect("slice malformed range refused", make_inplace_updates(g, {}) == 0);
+  }
+  {  // Pre-existing destructive writers do not make a fill a fresh value.
+    Graph g;
+    const int rhs = g.add_slot(2, true);
+    const int fill = g.add_slot(6, false);
+    const int scalar = g.add_slot(1, true);
+    g.add_op(OP_SET_INDEX_INPLACE, {fill, scalar}, fill, {0});
+    const int out = g.add_slot(6, false);
+    g.add_op(OP_SET_SLICE, {fill, rhs}, out, {1});
+    expect("prior inplace writer is not a producer",
+           make_inplace_updates(g, {}) == 0);
+  }
+  {  // An output-reading aliased op invalidates an earlier safe producer.
+    Graph g;
+    const int rhs = g.add_slot(2, true);
+    const int fill = g.add_slot(4, false);
+    const int fresh = g.add_slot(4, false);
+    g.add_op(OP_SET_SLICE, {fill, rhs}, fresh, {0});
+    g.add_op(OP_EXPV, {fresh}, fresh);
+    const int out = g.add_slot(4, false);
+    g.add_op(OP_SET_SLICE, {fresh, rhs}, out, {2});
+    expect("aliased exp clears producer safety",
+           make_inplace_updates(g, {}) == 0);
+  }
+  {  // A malformed destructive opcode must not certify a fresh output.
+    Graph g;
+    const int rhs = g.add_slot(2, true);
+    const int fill = g.add_slot(4, false);
+    const int fresh = g.add_slot(4, false);
+    g.add_op(OP_SET_SLICE, {fill, rhs}, fresh, {0});
+    const int malformed = g.add_slot(4, false);
+    g.add_op(OP_SET_SLICE_INPLACE, {fresh, rhs}, malformed, {0});
+    const int out = g.add_slot(4, false);
+    g.add_op(OP_SET_SLICE, {malformed, rhs}, out, {2});
+    expect("malformed inplace is not a safe producer",
+           make_inplace_updates(g, {}) == 0);
+  }
+}
+
+// Last-use and earlier-reader proofs are not enough: the op that produced the
+// base can need its own output value during reverse. EXPV does. Its first
+// update must therefore copy, while that copying store safely produces the
+// version a second update may reuse.
+static void test_output_reading_producer_keeps_copy() {
+  Graph g;
+  const int p = g.add_slot(4, true);
+  const int first_rhs = g.add_slot(2, true);
+  const int second_rhs = g.add_slot(2, true);
+  const int exp_p = g.add_slot(4, false);
+  g.add_op(OP_EXPV, {p}, exp_p);
+  const int old = g.add_slot(1, false);
+  g.add_op(OP_INDEX, {exp_p}, old, {0});
+  const int first = g.add_slot(4, false);
+  g.add_op(OP_SET_SLICE, {exp_p, first_rhs}, first, {0});
+  const int second = g.add_slot(4, false);
+  g.add_op(OP_SET_SLICE, {first, second_rhs}, second, {2});
+  const int sum = g.add_slot(1, false);
+  g.add_op(OP_SUM_VEC, {second}, sum);
+  const int result = g.add_slot(1, false);
+  g.add_op(OP_ADD, {old, sum}, result);
+  g.result_slot = result;
+
+  Graph ref = g;
+  const std::vector<double> want = run_grad(std::move(ref), {});
+  expect("exp producer keeps first slice copy",
+         make_inplace_updates(g, {}) == 1);
+  int copying = 0, inplace = 0;
+  for (const Op& op : g.ops) {
+    copying += op.opcode == OP_SET_SLICE;
+    inplace += op.opcode == OP_SET_SLICE_INPLACE;
+  }
+  expect("exp producer one copying slice", copying == 1);
+  expect("exp producer later slice inplace", inplace == 1);
+  const std::vector<double> got = run_grad_twice(std::move(g), {});
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("exp producer v" + std::to_string(i)).c_str(), got[i],
+                 want[i]);
+}
+
+// Reroll can leave scalar destructive stores after the slice stores it
+// creates. If an earlier slice is then aliased back to its base, both sides
+// of every already-in-place op must follow that rename. Resolving only in[0]
+// leaves out pointing at the tombstoned slot (the five-model corpus failure
+// this regression was distilled from).
+static void test_slice_rename_rebinds_existing_inplace_output() {
+  Graph g;
+  const int a = g.add_slot(2, true);
+  const int b = g.add_slot(2, true);
+  const int scalar = g.add_slot(1, true);
+  const int base = g.add_slot(6, false);
+  const int first = g.add_slot(6, false);
+  g.add_op(OP_SET_SLICE, {base, a}, first, {0});
+  const int second = g.add_slot(6, false);
+  g.add_op(OP_SET_SLICE, {first, b}, second, {2});
+  g.add_op(OP_SET_INDEX_INPLACE, {second, scalar}, second, {5});
+  const int weights = g.add_slot(6, false);
+  const int result = g.add_slot(1, false);
+  g.add_op(OP_DOT, {second, weights}, result);
+  g.result_slot = result;
+  Fills fills{{base, {0.1, 0.2, 0.3, 0.4, 0.5, 0.6}},
+              {weights, {0.5, 0.75, 1.0, 1.25, 1.5, 1.75}}};
+
+  Graph ref = g;
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+  expect("slice rename rewrites later copy", make_inplace_updates(g, {}) == 1);
+  expect("slice rename tombstones old output", g.slots[second].len == 0);
+  const Op& terminal = g.ops[2];
+  expect("existing inplace output follows input rename",
+         terminal.opcode == OP_SET_INDEX_INPLACE && terminal.in[0] == first &&
+             terminal.out == first);
+  const std::vector<double> got = run_grad_twice(std::move(g), fills);
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("slice rebind v" + std::to_string(i)).c_str(), got[i],
+                 want[i]);
+}
+
+// Store-to-load forwarding caches the last scalar element write. An
+// intervening in-place slice invalidates that cache: the later read must see
+// the slice RHS, not the stale scalar value.
+static void test_slice_invalidates_store_forwarding(bool strided) {
+  const std::string tag =
+      strided ? "strided slice invalidates" : "slice invalidates";
+  Graph g;
+  const int scalar = g.add_slot(1, true);
+  const int rhs = g.add_slot(2, true);
+  const int template_vec = g.add_slot(4, false);
+  const int base = g.add_slot(4, false);
+  // This first functional store keeps its fill copy and is an explicitly
+  // value-free producer. Store forwarding will cache its element.
+  g.add_op(OP_SET_INDEX, {template_vec, scalar}, base, {1});
+  const int updated = g.add_slot(4, false);
+  if (strided)
+    g.add_op(OP_SET_SLICE_STRIDED, {base, rhs}, updated, {1, 2});
+  else
+    g.add_op(OP_SET_SLICE, {base, rhs}, updated, {1});
+  const int read = g.add_slot(1, false);
+  g.add_op(OP_INDEX, {updated}, read, {1});
+  // Keep the INDEX itself out of the root set so forwarding would really
+  // drop it if the intervening slice failed to invalidate the cache.
+  const int result = g.add_slot(1, false);
+  g.add_op(OP_EXP, {read}, result);
+  g.result_slot = result;
+
+  Graph ref = g;
+  const std::vector<double> want = run_grad(std::move(ref), {});
+  expect((tag + " rewrites").c_str(), make_inplace_updates(g, {}) == 1);
+  expect((tag + " keeps later read").c_str(),
+         forward_stores_to_loads(g, {}) == 0);
+  int reads = 0;
+  for (const Op& op : g.ops) reads += op.opcode == OP_INDEX;
+  expect((tag + " index survives").c_str(), reads == 1);
+  const std::vector<double> got = run_grad_twice(std::move(g), {});
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close((tag + " v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
 static void test_chain_collapses() {
@@ -393,6 +658,13 @@ static void test_env_disable() {
 
 int main() {
   test_chain_collapses();
+  test_slice_chain(false);
+  test_slice_chain(true);
+  test_slice_rewrite_bails();
+  test_output_reading_producer_keeps_copy();
+  test_slice_rename_rebinds_existing_inplace_output();
+  test_slice_invalidates_store_forwarding(false);
+  test_slice_invalidates_store_forwarding(true);
   test_env_disable();
   test_native_lse_allows_destructive();
   test_store_to_load_forwarding();

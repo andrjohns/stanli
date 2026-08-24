@@ -57,7 +57,8 @@ order, from `lower.cpp`:
 2. store-to-load forwarding (`inplace.cpp`)
 3. constant folding (`constfold.cpp`)
 4. loop re-rolling (`reroll.cpp`)
-5. tape islands (`island.cpp`)
+5. in-place updates again, for slice stores created by re-rolling
+6. tape islands (`island.cpp`)
 
 ## In-place updates (`inplace.cpp`, disable: `STANLI_NO_INPLACE=1`)
 
@@ -68,23 +69,39 @@ N*N/2 numbers. One real model (radon_county_intercept, N = 12,573)
 spent 90 ms per gradient and 2.6 GB of memory this way.
 
 The fix: if nothing ever looks at the old version of the vector again,
-change the element directly in the existing buffer. "Nothing looks at
-it again" has two parts:
+change the element directly in the existing buffer. Re-rolling can create
+contiguous or strided slice stores only after the first in-place pass, so the
+same proof runs again after re-rolling. "Nothing looks at it again" has two
+parts:
 
 - No later op reads the old version; the write is the last use of that
   buffer.
 - No earlier op needs the old values during the gradient step. Some
   ops recompute their derivative from their input buffer when the
   gradient runs, which happens after all the writes. Only ops whose
-  gradient step just moves numbers around, without re-reading input
+  gradient step just moves numbers around, without re-reading input or output
   values, may sit before an in-place write. There is an explicit list
-  of those ops (`backward_ignores_input_values`) and a test that checks
+  of those ops (`backward_ignores_values`) and a test that checks
   each one really has that property.
 
 The second condition was learned the hard way: without it, eight models
 were silently wrong by large amounts with nothing visibly different
 about their graphs. The full-corpus comparison at the end of this file
 is what caught it.
+
+Every chain keeps one copying write when its base is a declaration fill rather
+than an op result. That copy restores the full buffer on every evaluation;
+later element or slice writes can share its fresh output. In reverse, untouched
+slice cells pass through the aliased base/output adjoint buffer automatically.
+Overwritten cells are routed to the slice RHS and then cleared from that shared
+buffer, so an earlier write cannot count them again. Direct base/RHS aliases,
+malformed ranges, roots, parameters, and bases without a value-free producer
+before the write all remain copying.
+
+On `Mtbh_model`, re-rolling creates 146 strided stores of four values into a
+730-cell matrix. Re-running this pass leaves the initial full copy and turns
+all 146 stores into four-cell updates, reducing median gradient latency from
+106.5 to 47.4 us (2.24x).
 
 ## Store-to-load forwarding (`inplace.cpp`, same switch)
 
