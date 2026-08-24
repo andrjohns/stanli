@@ -1,8 +1,9 @@
 // Matrix-valued legacy ops: GP covariance, cholesky_decompose, diag_matrix,
-// multi_normal(_cholesky). Forward runs the prim (double) implementation;
-// backward replays the same call on a nested var tape and seeds the output
-// adjoints with the dot trick. Correct by construction against the code
-// CmdStan runs, at the cost of a nested tape per gradient.
+// multi_normal(_cholesky). Most forwards run the prim (double)
+// implementation and backwards replay the same call on a nested var tape,
+// seeded with the dot trick. The profiled single-vector Cholesky density below
+// is the compact native exception: it retains Stan Math's closed-form matrix
+// partials from forward to backward.
 //
 // Matrices live in slots column-major, matching Eigen and the rest of the
 // pipeline, so a flat slot maps straight onto Map<MatrixXd>.
@@ -285,8 +286,98 @@ void mnprec_fwd(KernelCtx& ctx) {
   ctx.out.data[0] = mn_eval<false, kMnPrec>(ctx);
 }
 void mnprec_bwd(KernelCtx& ctx) { mn_eval<true, kMnPrec>(ctx); }
-void mnc_fwd(KernelCtx& ctx) { ctx.out.data[0] = mn_eval<false, kMnChol>(ctx); }
-void mnc_bwd(KernelCtx& ctx) { mn_eval<true, kMnChol>(ctx); }
+
+// gp_regr's single-observation Cholesky density has data y and mu, active L,
+// and propto=true. In that exact instantiation Stan Math's partials
+// propagator computes a closed-form L pullback in doubles, then builds a var
+// edge around it. Retain that matrix in scratch during the forward instead of
+// rebuilding an AoS var matrix and nested tape in both sweeps. The equality
+// checks here are deliberately strict: every other activity, propto, and
+// vectorized shape stays on mn_eval's generic replay.
+inline bool mnc_native_variant(uint8_t variant, const int* idata,
+                               int64_t n_idata) {
+  return variant == 0x84u && idata != nullptr && n_idata == 2 &&
+         idata[0] >= 0 && idata[1] == 1;
+}
+
+bool mnc_native_shape(const KernelCtx& ctx) {
+  if (!mnc_native_variant(ctx.variant, ctx.idata, ctx.n_idata) ||
+      ctx.n_in != 3 || ctx.out.len != 1)
+    return false;
+  const int64_t n = ctx.idata[0];
+  return ctx.in[0].len == n && ctx.in[1].len == n && ctx.in[2].len == n * n;
+}
+
+double mnc_native_fwd(KernelCtx& ctx) {
+  static constexpr const char* function = "multi_normal_cholesky_lpdf";
+  const int64_t n = ctx.idata[0];
+  CMapV y(ctx.in[0].data, n), mu(ctx.in[1].data, n);
+  CMapM L(ctx.in[2].data, n, n);
+
+  // Copy the pinned single-vector Stan Math overload's checks and
+  // arithmetic order. That overload intentionally does not call
+  // check_cholesky_factor; changing its observable domain here would make the
+  // native and fallback paths disagree.
+  stan::math::check_size_match(function, "Size of random variable", y.size(),
+                               "size of location parameter", mu.size());
+  stan::math::check_size_match(function, "Size of random variable", y.size(),
+                               "rows of covariance parameter", L.rows());
+  stan::math::check_size_match(function, "Size of random variable", y.size(),
+                               "columns of covariance parameter", L.cols());
+  stan::math::check_finite(function, "Location parameter", mu);
+  stan::math::check_not_nan(function, "Random variable", y);
+  if (n == 0) return 0.0;
+
+  VecD y_minus_mu = y - mu;
+  MatD inv_L = stan::math::mdivide_left_tri<Eigen::Lower>(L);
+  Eigen::RowVectorXd half;
+  half = (inv_L.template triangularView<Eigen::Lower>() *
+          y_minus_mu.template cast<double>())
+             .transpose();
+
+  VecD scaled_diff;
+  if (!values_only()) {
+    scaled_diff =
+        (half * inv_L.template triangularView<Eigen::Lower>()).transpose();
+  }
+
+  double logp(0.0);
+  logp += stan::math::sum(stan::math::log(inv_L.diagonal()));
+  if (!values_only()) {
+    MapM partials(ctx.scratch, n, n);
+    partials.setZero();
+    partials += scaled_diff * half - inv_L.transpose();
+  }
+  logp -= 0.5 * stan::math::sum(stan::math::dot_self(half));
+  return logp;
+}
+
+void mnc_fwd(KernelCtx& ctx) {
+  ctx.out.data[0] = mnc_native_shape(ctx) ? mnc_native_fwd(ctx)
+                                          : mn_eval<false, kMnChol>(ctx);
+}
+void mnc_bwd(KernelCtx& ctx) {
+  if (!mnc_native_shape(ctx)) {
+    mn_eval<true, kMnChol>(ctx);
+    return;
+  }
+  if (!ctx.in_adj[2].data) return;
+  const int64_t n = ctx.idata[0];
+  for (int64_t i = 0; i < n * n; ++i)
+    ctx.in_adj[2].data[i] += ctx.out_adj * ctx.scratch[i];
+}
+
+int64_t mnc_scratch(const Op& op, const Slot* slots) {
+  if (!mnc_native_variant(op.variant, op.idata, op.n_idata) || op.n_in != 3 ||
+      op.out < 0 || slots == nullptr)
+    return 0;
+  const int64_t n = op.idata[0];
+  if (op.in[0] < 0 || op.in[1] < 0 || op.in[2] < 0 ||
+      slots[op.in[0]].len != n || slots[op.in[1]].len != n ||
+      slots[op.in[2]].len != n * n || slots[op.out].len != 1)
+    return 0;
+  return n * n;
+}
 
 // ---- general matrix product: out = A * B ----------------------------------
 // idata = {rows_a, cols_a, cols_b}; either side may carry adjoints.
@@ -1007,7 +1098,8 @@ void register_matrix_kernels() {
                   Kernel{olglm_fwd, olglm_bwd, nullptr});
   register_kernel(OP_DIAG_MATRIX, Kernel{diag_fwd, diag_bwd, nullptr});
   register_kernel(OP_CHOLESKY, Kernel{chol_fwd, chol_bwd, nullptr});
-  register_kernel(OP_MULTI_NORMAL_CHOL_LPDF, Kernel{mnc_fwd, mnc_bwd, nullptr});
+  register_kernel(OP_MULTI_NORMAL_CHOL_LPDF,
+                  Kernel{mnc_fwd, mnc_bwd, mnc_scratch});
   register_kernel(OP_MULTI_NORMAL_LPDF, Kernel{mn_fwd, mn_bwd, nullptr});
   register_kernel(OP_MULTI_NORMAL_PREC_LPDF,
                   Kernel{mnprec_fwd, mnprec_bwd, nullptr});

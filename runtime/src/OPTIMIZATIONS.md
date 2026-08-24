@@ -337,6 +337,21 @@ latency from 289.0 to 185.7 us (1.56x internally, 1.17x CmdStan). The two
 forward operations on each matrix remain separate; sharing them would need a
 paired graph operation and is deliberately outside this kernel-only change.
 
+## Native single-vector Cholesky normal (`matrix_fns.cpp`)
+
+The `gp_regr` likelihood is one `multi_normal_cholesky_lpdf` observation with
+data `y` and `mu`, an active Cholesky factor, and `propto=true`. Stan Math has
+an analytic matrix partial for that exact instantiation, but the generic
+kernel rebuilt an elementwise var matrix and nested tape in both sweeps.
+
+The exact `variant=0x84`, one-observation shape now evaluates Stan Math's
+triangular inverse, half-vector, value, and full factor-partial matrix in the
+same expression order during forward, retaining the partial matrix in
+scratch. Backward is only the seeded accumulation into the factor. All other
+activity masks, vectorized observations, and non-propto calls keep the generic
+Stan Math replay. On `gp_regr` the density falls from 2.48 to 0.70 us and the
+whole gradient from 6.05 to 4.20 us (1.44x internally, 1.12x CmdStan).
+
 ## Compiled ODE right-hand sides (`ode_prog.cpp`, report fallbacks: `STANLI_DEBUG_ODE=1`)
 
 An ODE model passes a user function (the right-hand side) to a solver

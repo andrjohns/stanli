@@ -163,8 +163,9 @@ Alongside it, the tail fixes the profile already names:
   `prophet` fixes. `Mt_model` is now closed: direct Bernoulli partials move it
   from 30.6 to 19.2 us/gradient, or 0.99x CmdStan. `kronecker_gp` is closed as
   well: retaining each symmetric eigendecomposition for its native pullback
-  moves it from 289.0 to 185.7 us/gradient, or 1.17x CmdStan. `gp_regr` remains
-  (55% in `multi_normal_cholesky_lpdf`). Preserving mixed ODE scalar types
+  moves it from 289.0 to 185.7 us/gradient, or 1.17x CmdStan. `gp_regr` is
+  closed too: retaining the exact active-Cholesky partial matrix moves it from
+  6.05 to 4.20 us/gradient, or 1.12x CmdStan. Preserving mixed ODE scalar types
   removes the inactive initial-state sensitivity from
   `one_comp_mm_elim_abs`, moving it from 699 to 639 us/gradient; the remaining
   ODE gap is inside the solver/RHS execution rather than graph dispatch.
