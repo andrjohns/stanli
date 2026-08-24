@@ -18,15 +18,18 @@ The harness now records file read, parse, compile, construction, and binding
 only; that column should be refreshed as a unit rather than mixing definitions.
 Targeted preparation measurements later on this page use the new mode.
 
-Two targeted 2026-08-23 remeasurements are newer than the full snapshot below.
+Three targeted 2026-08-23 remeasurements are newer than the full snapshot below.
 Packed row-wise `log_sum_exp` reduces `ldaK2` from 15,854 ops to 22 and
 154 to 94 us/gradient (1.11x CmdStan), and `ldaK5` from 434,126 ops to 156
 and 6.82 to 3.70 ms/gradient (1.51x CmdStan). `ldaK5` file-to-bound-model
 preparation also falls from about 0.59 s to 0.27 s. In-place slice stores move
 `Mtbh_model` from 106.5 to 47.4 us/gradient (0.43x to 0.95x CmdStan): its 146
 strided stores still dispatch once each, but update four cells instead of
-copying all 730. The committed full-corpus tables retain one measurement
-definition and will be refreshed as a unit.
+copying all 730. Native Bernoulli forwards then move `Mt_model` from 30.6 to
+19.2 us (0.62x to 0.99x CmdStan), `Mth_model` from 113.2 to 57.3 us (0.90x to
+1.77x), and the stacked `Mtbh_model` result from 47.4 to 26.8 us (0.95x to
+1.68x). The committed full-corpus tables retain one measurement definition
+and will be refreshed as a unit.
 
 ## Per-gradient latency
 
@@ -161,6 +164,15 @@ headline measurements:
   values rather than copying a 730-value matrix. Median gradient latency
   falls 106.5 -> 47.4 us (2.24x); direct replay remains within 3.61e-15 of
   the CmdStan references across 465 values.
+- **Native Bernoulli forwards** (recorder-bound scalar and short-vector
+  calls): both Bernoulli parameterizations have one real argument and one
+  analytic partial, so they write that column directly into the density
+  scratch instead of constructing the generic recorder edge. Summed vector
+  logits preserve Eigen's packet `exp`, select, and reduction order while
+  reusing the partial column as their `ntheta` workspace. `Mt_model` falls
+  30.6 -> 19.2 us, `Mth_model` 113.2 -> 57.3 us, and `Mtbh_model` 47.4 ->
+  26.8 us after the slice fix. The combined `Mtbh_model` improvement is
+  106.5 -> 26.8 us (3.98x), ending at 1.68x CmdStan.
 - **Elementwise-lp fusion** (the mixture idiom): `low_dim_gauss_mix`
   7,208 ops -> 16, crossing parity (0.78x -> 1.07x); `normal_mixture`
   13 ops, 1.09x.
