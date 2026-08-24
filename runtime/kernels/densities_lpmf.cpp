@@ -10,11 +10,214 @@ namespace stanli {
 namespace dens {
 
 STANLI_LPMF_FWD(poisson_log_fwd, poisson_log_lpmf, 1)
-STANLI_LPMF_FWD(bernoulli_logit_fwd, bernoulli_logit_lpmf, 1)
-STANLI_LPMF_FWD(bernoulli_fwd, bernoulli_lpmf, 1)
+STANLI_LPMF_FWD(bernoulli_logit_recorded_fwd, bernoulli_logit_lpmf, 1)
 STANLI_LPMF_FWD(poisson_fwd, poisson_lpmf, 1)
 STANLI_LPMF_FWD(neg_binomial_2_fwd, neg_binomial_2_lpmf, 2)
 #undef STANLI_LPMF_FWD
+
+namespace {
+
+// The generic density recorder is valuable for distributions with several
+// arguments and complicated partials. Bernoulli's only real argument has a
+// closed-form partial, though, and these kernels commonly appear hundreds of
+// times in a graph. Keep Stan Math responsible for Bernoulli values and all
+// scalar calls; the hot vector-logit branch below mirrors its body and packet
+// reduction exactly. Both write the one partial column directly into
+// density_bwd<1>'s existing scratch layout.
+inline bool bernoulli_arg_active(const KernelCtx& ctx) {
+  return ctx.variant == 0 || (ctx.variant & 0x01u) != 0;
+}
+
+inline bool bernoulli_drop_propto(const KernelCtx& ctx) {
+  constexpr bool has_propto = (density_tier(3) & STANLI_DENSITY_PROPTO) != 0;
+  return has_propto && (ctx.variant & 0x80u) != 0 && !bernoulli_arg_active(ctx);
+}
+
+template <bool Logit>
+double bernoulli_value(int y, double theta, bool drop) {
+  if constexpr (Logit) {
+    return drop ? stan::math::bernoulli_logit_lpmf<true>(y, theta)
+                : stan::math::bernoulli_logit_lpmf<false>(y, theta);
+  } else {
+    return drop ? stan::math::bernoulli_lpmf<true>(y, theta)
+                : stan::math::bernoulli_lpmf<false>(y, theta);
+  }
+}
+
+template <bool Logit>
+double bernoulli_value(const Eigen::Map<const Eigen::VectorXi>& y,
+                       const Desc& theta, bool drop) {
+  if (theta.len == 1) {
+    if constexpr (Logit) {
+      return drop ? stan::math::bernoulli_logit_lpmf<true>(y, theta.data[0])
+                  : stan::math::bernoulli_logit_lpmf<false>(y, theta.data[0]);
+    } else {
+      return drop ? stan::math::bernoulli_lpmf<true>(y, theta.data[0])
+                  : stan::math::bernoulli_lpmf<false>(y, theta.data[0]);
+    }
+  }
+  const Eigen::Map<const Eigen::VectorXd> theta_vec(theta.data, theta.len);
+  if constexpr (Logit) {
+    return drop ? stan::math::bernoulli_logit_lpmf<true>(y, theta_vec)
+                : stan::math::bernoulli_logit_lpmf<false>(y, theta_vec);
+  } else {
+    return drop ? stan::math::bernoulli_lpmf<true>(y, theta_vec)
+                : stan::math::bernoulli_lpmf<false>(y, theta_vec);
+  }
+}
+
+inline double bernoulli_partial(int y, double theta) {
+  return y == 1 ? stan::math::inv(theta) : stan::math::inv(theta - 1.0);
+}
+
+// This deliberately mirrors the strict inequalities and even the high-tail
+// partial in the pinned Stan Math implementation. In particular, infinities
+// are accepted (only NaN is rejected), and z == +/-20 takes the middle arm.
+inline double bernoulli_logit_partial(int y, double theta) {
+  const double sign = 2.0 * y - 1.0;
+  const double z = sign * theta;
+  const double exp_m_z = std::exp(-z);
+  if (z > 20.0) return -exp_m_z;
+  if (z >= -20.0) return sign * exp_m_z / (exp_m_z + 1.0);
+  return sign;
+}
+
+// The hot summed/vector shape needs Eigen's packet exp and reduction order to
+// stay bitwise with Stan Math. Its one partial column is also exactly the size
+// of ntheta, so use that existing scratch as the temporary and then overwrite
+// it with the finished partials. Compared with the recorder path this removes
+// both the ntheta allocation and the recorder edge/partial allocation.
+void bernoulli_logit_vector_fwd(KernelCtx& ctx) {
+  static constexpr const char* function = "bernoulli_logit_lpmf";
+  static constexpr double cutoff = 20.0;
+  const Desc& theta = ctx.in[0];
+  const Eigen::Map<const Eigen::VectorXi> y(
+      ctx.idata, static_cast<Eigen::Index>(ctx.n_idata));
+  const Eigen::Map<const Eigen::VectorXd> theta_vec(theta.data, theta.len);
+
+  stan::math::check_consistent_sizes(function, "Random variable", y,
+                                     "Probability parameter", theta_vec);
+  std::fill_n(ctx.scratch, static_cast<size_t>(theta.len + 1), 0.0);
+  if (stan::math::size_zero(y, theta_vec)) {
+    ctx.out.data[0] = 0.0;
+    return;
+  }
+  stan::math::check_bounded(function, "n", y, 0, 1);
+  decltype(auto) theta_val = stan::math::to_ref(
+      stan::math::as_value_column_array_or_scalar(theta_vec));
+  stan::math::check_not_nan(function, "Logit transformed probability parameter",
+                            theta_val);
+  if (bernoulli_drop_propto(ctx)) {
+    ctx.out.data[0] = 0.0;
+    return;
+  }
+
+  const auto& n_col = stan::math::as_column_vector_or_scalar(y);
+  const auto& n_double = stan::math::value_of_rec(n_col);
+  const auto signs = 2 * stan::math::as_array_or_scalar(n_double) - 1;
+  Eigen::Map<Eigen::ArrayXd> ntheta(ctx.scratch, theta.len);
+  ntheta = signs * theta_val;
+  Eigen::ArrayXd exp_m_ntheta = stan::math::exp(-ntheta);
+  ctx.out.data[0] = stan::math::sum(
+      (ntheta > cutoff)
+          .select(-exp_m_ntheta,
+                  (ntheta < -cutoff)
+                      .select(ntheta, -stan::math::log1p(exp_m_ntheta))));
+
+  if (!bernoulli_arg_active(ctx)) {
+    ntheta.setZero();
+    return;
+  }
+  ntheta =
+      (ntheta > cutoff)
+          .select(-exp_m_ntheta,
+                  (ntheta >= -cutoff)
+                      .select(stan::math::promote_scalar<double>(
+                                  signs * exp_m_ntheta / (exp_m_ntheta + 1)),
+                              stan::math::promote_scalar<double>(signs)));
+  ctx.scratch[theta.len] = 1.0;
+}
+
+template <bool Logit>
+void bernoulli_native_fwd(KernelCtx& ctx) {
+  const bool active = bernoulli_arg_active(ctx);
+  const bool drop = bernoulli_drop_propto(ctx);
+  const Desc& theta = ctx.in[0];
+
+  if ((ctx.variant & 0x40u) != 0) {
+    const int64_t n = ctx.out.len;
+    std::fill_n(ctx.scratch, static_cast<size_t>(2 * n), 0.0);
+    for (int64_t i = 0; i < n; ++i) {
+      const double theta_i = theta.data[theta.len == 1 ? 0 : i];
+      ctx.out.data[i] = bernoulli_value<Logit>(ctx.idata[i], theta_i, drop);
+      if (active) {
+        ctx.scratch[i] = Logit ? bernoulli_logit_partial(ctx.idata[i], theta_i)
+                               : bernoulli_partial(ctx.idata[i], theta_i);
+        ctx.scratch[n + i] = 1.0;
+      }
+    }
+    return;
+  }
+
+  const Eigen::Map<const Eigen::VectorXi> y(
+      ctx.idata, static_cast<Eigen::Index>(ctx.n_idata));
+  ctx.out.data[0] = bernoulli_value<Logit>(y, theta, drop);
+  std::fill_n(ctx.scratch, static_cast<size_t>(theta.len + 1), 0.0);
+
+  // Both functions return a literal zero before constructing their partials
+  // edge for an empty input. Preserve that disconnected topology: multiplying
+  // an empty density by an infinite downstream adjoint must not form inf * 0.
+  if (!active || drop || ctx.n_idata == 0 || theta.len == 0) return;
+  ctx.scratch[theta.len] = 1.0;
+
+  if (theta.len == 1) {
+    if constexpr (Logit) {
+      double partial = 0.0;
+      for (int64_t i = 0; i < ctx.n_idata; ++i)
+        partial += bernoulli_logit_partial(ctx.idata[i], theta.data[0]);
+      ctx.scratch[0] = partial;
+    } else {
+      int64_t successes = 0;
+      for (int64_t i = 0; i < ctx.n_idata; ++i) successes += ctx.idata[i];
+      if (successes == ctx.n_idata) {
+        ctx.scratch[0] = static_cast<double>(ctx.n_idata) / theta.data[0];
+      } else if (successes == 0) {
+        ctx.scratch[0] =
+            static_cast<double>(ctx.n_idata) / (theta.data[0] - 1.0);
+      } else {
+        ctx.scratch[0] =
+            static_cast<double>(successes) * stan::math::inv(theta.data[0]);
+        ctx.scratch[0] += static_cast<double>(ctx.n_idata - successes) *
+                          stan::math::inv(theta.data[0] - 1.0);
+      }
+    }
+    return;
+  }
+
+  for (int64_t i = 0; i < theta.len; ++i)
+    ctx.scratch[i] = Logit
+                         ? bernoulli_logit_partial(ctx.idata[i], theta.data[i])
+                         : bernoulli_partial(ctx.idata[i], theta.data[i]);
+}
+
+}  // namespace
+
+void bernoulli_fwd(KernelCtx& ctx) { bernoulli_native_fwd<false>(ctx); }
+void bernoulli_logit_fwd(KernelCtx& ctx) {
+  // A scalar theta against vector y contracts its lane partials with Eigen's
+  // reduction order. Keep the recorder for that uncommon shape; the native
+  // path covers scalar/scalar, vector/vector, and every rerolled elementwise
+  // call without changing the contraction by a few ULPs.
+  if ((ctx.variant & 0x40u) == 0 && ctx.in[0].len == 1 && ctx.n_idata > 1) {
+    bernoulli_logit_recorded_fwd(ctx);
+    return;
+  }
+  if ((ctx.variant & 0x40u) == 0 && ctx.in[0].len > 1) {
+    bernoulli_logit_vector_fwd(ctx);
+    return;
+  }
+  bernoulli_native_fwd<true>(ctx);
+}
 
 // The same shape, one line per distribution (STANLI_INT_DENSITY_LIST).
 #define STANLI_DEFINE_INT_DENSITY(code, fn, nreal, tier) \
