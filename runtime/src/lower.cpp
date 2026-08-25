@@ -607,6 +607,26 @@ struct Lowering {
         }
         fail("unsupported int index expression", e.raw);
       }
+      case mir::Expr::TernaryIf: {
+        if (e.args.size() != 3)
+          fail("malformed conditional size expression", e.raw);
+        const bool condition = eval_int(e.args[0]) != 0;
+        return eval_int(e.args[condition ? 1 : 2]);
+      }
+      case mir::Expr::EOr: {
+        if (e.args.size() != 2)
+          fail("malformed logical size expression", e.raw);
+        return eval_int(e.args[0]) != 0 || eval_int(e.args[1]) != 0;
+      }
+      case mir::Expr::EAnd: {
+        if (e.args.size() != 2)
+          fail("malformed logical size expression", e.raw);
+        return eval_int(e.args[0]) != 0 && eval_int(e.args[1]) != 0;
+      }
+      case mir::Expr::Promotion:
+        if (e.args.size() != 1)
+          fail("malformed promoted size expression", e.raw);
+        return eval_int(e.args[0]);
       case mir::Expr::FunApp:
         if (e.name == "Plus__")
           return eval_int(e.args[0]) + eval_int(e.args[1]);
