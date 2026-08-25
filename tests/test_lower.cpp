@@ -3303,6 +3303,27 @@ int main() {
     CompiledModel off_model = compile_model(mir, off);
     check(off_model.n_unconstrained == 1,
           "conditional size: false arms allow zero extents");
+  // Matrix functions used in transformed data run through MirInterp rather
+  // than the graph kernels. diag_matrix must preserve column-major layout and
+  // zero every off-diagonal entry on that path too.
+  {
+    DataMap d;
+    d.set_real_array("diagonal", {1.0, 2.0, 3.0}, {3});
+    CompiledModel dm =
+        compile_model(slurp("tests/fixtures/diagtd.tmir.sexp"), d);
+    Executor dex(std::move(dm.graph));
+    dm.bind(dex);
+    dex.params_data()[0] = 0.4;
+    double gradient[1] = {0.0};
+    const double lp = dex.gradient(gradient);
+
+    using stan::math::var;
+    var theta = 0.4;
+    var reference_lp = stan::math::normal_lpdf<true>(theta, 2.0, 1.0);
+    reference_lp.grad();
+    expect_eq("transformed-data diag_matrix: lp", lp, reference_lp.val());
+    expect_eq("transformed-data diag_matrix: gradient", gradient[0],
+              theta.adj());
   }
 
   // Vector fma from --O1 partial evaluation (`k .* t + c` becomes
