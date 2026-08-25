@@ -3284,6 +3284,27 @@ int main() {
     expect_eq("int size: gradient", grad[0], y.adj());
   }
 
+  // Declaration extents may use data-only conditional expressions.  The
+  // condition and only its selected arm are compile-time integer expressions;
+  // compound conditions retain Stan's short-circuit semantics.
+  {
+    const std::string mir = slurp("tests/fixtures/conditional_size.tmir.sexp");
+
+    DataMap on =
+        DataMap::from_json(R"({"enabled": 1, "n": 2, "x": [[1, 2], [3, 4]]})");
+    CompiledModel on_model = compile_model(mir, on);
+    check(on_model.n_unconstrained == 4,
+          "conditional size: true arms size parameters");
+
+    DataMap off;
+    off.set_int("enabled", 0);
+    off.set_int("n", 2);
+    off.set_real_array("x", {}, {0, 0});
+    CompiledModel off_model = compile_model(mir, off);
+    check(off_model.n_unconstrained == 1,
+          "conditional size: false arms allow zero extents");
+  }
+
   // Vector fma from --O1 partial evaluation (`k .* t + c` becomes
   // fma(k, t, c)): OP_FMA is FUSED, so the reference is stan::math::fma,
   // and the data avoids powers of two -- with t = 2.0/-1.0/0.5 the
