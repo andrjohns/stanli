@@ -576,6 +576,27 @@ int main() {
     expect_eq("ndlit lp", lp, wt * q[1] + s3 * q[2]);
   }
 
+  // An uninitialized UDF local still denotes a value before its first write.
+  // A data-dependent count that comes out zero leaves the local zero-width,
+  // so the guarded loop that fills it performs no indexed assignment and the
+  // declaration is the only mention the lowering ever sees. The name still
+  // has to return an (empty) array rather than fail as unknown.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_int_array("input", {4, 5, 6});  // nothing equals 9
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/udf_empty_local.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.1;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    // No match means no `selected` term: std_normal on theta and nothing else.
+    expect_eq("empty UDF local lp", lp, -0.5 * 0.1 * 0.1);
+    expect_eq("empty UDF local grad", grad, -0.1);
+  }
+
   // Model-block UDFs on parameters, inlined: scalar chain, vector return,
   // statement body with local accumulator + loop.
   {
@@ -3353,6 +3374,28 @@ int main() {
     for (int i = 0; i < 6; ++i)
       expect_ulp("tcrossprod: g" + std::to_string(i), gradient[i],
                  a(i).adj());
+  }
+
+  // A scalar replicated as a row vector uses the vector replication opcode,
+  // but must retain its row-vector type for downstream expression lowering.
+  {
+    DataMap d;
+    CompiledModel tm =
+        compile_model(slurp("tests/fixtures/rep_row_vector.tmir.sexp"), d);
+    Executor tex(std::move(tm.graph));
+    tm.bind(tex);
+    const double q = 0.3;
+    tex.params_data()[0] = q;
+    double gradient = 0;
+    const double lp = tex.gradient(&gradient);
+
+    using stan::math::var;
+    var theta = q;
+    Eigen::Matrix<var, 1, -1> x = stan::math::rep_row_vector(theta, 4);
+    var reference_lp = stan::math::normal_lpdf<true>(x, 0, 1);
+    reference_lp.grad();
+    expect_eq("rep_row_vector: lp", lp, reference_lp.val());
+    expect_ulp("rep_row_vector: gradient", gradient, theta.adj());
   }
 
   // Vector fma from --O1 partial evaluation (`k .* t + c` becomes
