@@ -3539,6 +3539,18 @@ struct Lowering {
       return emit_value(OP_TRANSPOSE, {a}, g.slots[a.slot].len, si,
                         {(int)a.si.rows, (int)a.si.cols});
     }
+    if (e.name == "tcrossprod" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail("tcrossprod: needs a matrix", e.raw);
+      SlotInfo transpose_si =
+          matrix_view(a.si.cols, a.si.rows, a.si.param_free);
+      Val transpose =
+          emit_value(OP_TRANSPOSE, {a}, g.slots[a.slot].len, transpose_si,
+                     {(int)a.si.rows, (int)a.si.cols});
+      SlotInfo si = matrix_view(a.si.rows, a.si.rows, a.si.param_free);
+      return emit_value(OP_GEMM, {a, transpose}, a.si.rows * a.si.rows, si,
+                        {(int)a.si.rows, (int)a.si.cols, (int)a.si.rows});
+    }
     if ((e.name == "diag_pre_multiply" || e.name == "diag_post_multiply") &&
         e.args.size() == 2) {
       // diag_pre_multiply(v, M) = diag_matrix(v) * M (and the mirror);

@@ -1516,6 +1516,21 @@ class MirInterp {
       r.r = {s};
       return r;
     }
+    if (e.name == "tcrossprod" && e.args.size() == 1) {
+      Value a = eval(e.args[0]);
+      if (a.dims.size() != 2) fail("tcrossprod: needs a matrix", e.raw);
+      const int64_t rows = a.dims[0], cols = a.dims[1];
+      r.dims = {rows, rows};
+      r.r.assign((size_t)(rows * rows), T(0.0));
+      for (int64_t j = 0; j < rows; ++j)
+        for (int64_t k = 0; k < cols; ++k) {
+          const T& rhs = a.r.at((size_t)(k * rows + j));
+          for (int64_t i = 0; i < rows; ++i)
+            r.r[(size_t)(j * rows + i)] +=
+                a.r.at((size_t)(k * rows + i)) * rhs;
+        }
+      return r;
+    }
     if (e.name == "diag_matrix" && e.args.size() == 1) {
       Value diagonal = eval(e.args[0]);
       const int64_t n = (int64_t)diagonal.r.size();
