@@ -3303,241 +3303,266 @@ int main() {
     CompiledModel off_model = compile_model(mir, off);
     check(off_model.n_unconstrained == 1,
           "conditional size: false arms allow zero extents");
-    // Matrix functions used in transformed data run through MirInterp rather
-    // than the graph kernels. diag_matrix must preserve column-major layout and
-    // zero every off-diagonal entry on that path too.
-    {
+  }
+
+  // Matrix functions used in transformed data run through MirInterp rather
+  // than the graph kernels. diag_matrix must preserve column-major layout and
+  // zero every off-diagonal entry on that path too.
+  {
+    DataMap d;
+    d.set_real_array("diagonal", {1.0, 2.0, 3.0}, {3});
+    CompiledModel dm =
+        compile_model(slurp("tests/fixtures/diagtd.tmir.sexp"), d);
+    Executor dex(std::move(dm.graph));
+    dm.bind(dex);
+    dex.params_data()[0] = 0.4;
+    double gradient[1] = {0.0};
+    const double lp = dex.gradient(gradient);
+
+    using stan::math::var;
+    var theta = 0.4;
+    var reference_lp = stan::math::normal_lpdf<true>(theta, 2.0, 1.0);
+    reference_lp.grad();
+    expect_eq("transformed-data diag_matrix: lp", lp, reference_lp.val());
+    expect_eq("transformed-data diag_matrix: gradient", gradient[0],
+              theta.adj());
+  }
+
+  // Vector fma from --O1 partial evaluation (`k .* t + c` becomes
+  // fma(k, t, c)): OP_FMA is FUSED, so the reference is stan::math::fma,
+  // and the data avoids powers of two -- with t = 2.0/-1.0/0.5 the
+  // products are exact and fused equals unfused bitwise, which once let
+  // both implementations pass this test.
+  {
+    DataMap d = DataMap::from_json(R"({"N": 3, "t": [1.7, -0.3, 0.9]})");
+    CompiledModel fm =
+        compile_model(slurp("tests/fixtures/vecfma.tmir.sexp"), d);
+    Executor fex(std::move(fm.graph));
+    fm.bind(fex);
+    const double q[6] = {0.3, -0.2, 1.1, 0.7, -0.4, 0.9};  // k[3], c[3]
+    for (int i = 0; i < 6; ++i) fex.params_data()[i] = q[i];
+    double grad[6] = {0, 0, 0, 0, 0, 0};
+    const double lp = fex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> k(3), c(3);
+    for (int i = 0; i < 3; ++i) k(i) = q[i];
+    for (int i = 0; i < 3; ++i) c(i) = q[3 + i];
+    Eigen::VectorXd t(3);
+    t << 1.7, -0.3, 0.9;
+    Eigen::Matrix<var, -1, 1> mu(3);
+    for (int i = 0; i < 3; ++i) mu(i) = stan::math::fma(k(i), t(i), c(i));
+    var acc = stan::math::normal_lpdf<false>(mu, 0, 1);
+    acc.grad();
+    check(lp == acc.val(), "vector fma: lp bitwise against the var path");
+    bool g_ok = true;
+    for (int i = 0; i < 3; ++i)
+      if (grad[i] != k(i).adj() || grad[3 + i] != c(i).adj()) g_ok = false;
+    check(g_ok, "vector fma: gradients bitwise against the var path");
+  }
+
+  // Where the CSV's three sections meet. stanc marks the boundaries with
+  // early-return guards on emit_transformed_parameters__ /
+  // emit_generated_quantities__; lowering pins both flags on, so the
+  // recorded indices are the only thing left that says which column is a
+  // constrained parameter and which a generated quantity.
+  {
+    // conj's header, verified against CmdStan in tests/test_sampling.cpp,
+    // is mu_c,sigma,prec,mu,sd_from_prec,resid.<i>: two constrained
+    // parameters, one transformed parameter, three generated quantities.
+    DataMap d = DataMap::from_json_file("tests/fixtures/conj.json");
+    CompiledModel wm = compile_model(slurp("tests/fixtures/conj.tmir.sexp"), d);
+    check(wm.write_array.has_value(), "conj: write_array compiled");
+    if (wm.write_array) {
+      expect_eq("conj columns", (double)wm.write_array->columns.size(), 6);
+      expect_eq("conj n_tp_start", (double)wm.write_array->n_tp_start, 2);
+      expect_eq("conj n_gq_start", (double)wm.write_array->n_gq_start, 3);
+    }
+  }
+  {
+    // Parameters only: every column is a constrained parameter, so both
+    // boundaries sit at the end.
+    DataMap d;
+    d.set_int("K", 3);
+    CompiledModel wm = compile_model(slurp("tests/fixtures/simp.tmir.sexp"), d);
+    check(wm.write_array.has_value(), "simp: write_array compiled");
+    if (wm.write_array) {
+      expect_eq("simp columns", (double)wm.write_array->columns.size(), 1);
+      expect_eq("simp n_tp_start", (double)wm.write_array->n_tp_start, 1);
+      expect_eq("simp n_gq_start", (double)wm.write_array->n_gq_start, 1);
+    }
+
+    // The unconstrained layout: simplex[3] is two free values behind three
+    // constrained ones, and its metadata carries that exact naming shape.
+    check(wm.unc_params.size() == 1, "simp: one unconstrained parameter");
+    if (wm.unc_params.size() == 1) {
+      const auto& u = wm.unc_params[0];
+      check(u.name == "theta", "simp unc name");
+      expect_eq("simp unc len", (double)u.len, 2);
+      check(u.dims == std::vector<int64_t>{2}, "simp unc dims");
+      check(u.transform == mir::Transform::Simplex, "simp unc transform");
+    }
+  }
+  {
+    // One of every transform: the unconstrained lengths are what the
+    // reader has to slice the draw with, and only the declared dims tell
+    // corr_matrix[3] from cov_matrix[3].
+    DataMap d = DataMap::from_json_file("tests/fixtures/newtrans.json");
+    CompiledModel nm =
+        compile_model(slurp("tests/fixtures/newtrans.tmir.sexp"), d);
+    check(nm.unc_params.size() == nm.param_names.size(),
+          "newtrans: one unc_param per declared parameter");
+    int64_t total = 0;
+    bool names_ok = nm.unc_params.size() == nm.param_names.size();
+    for (size_t i = 0; i < nm.unc_params.size(); ++i) {
+      total += nm.unc_params[i].len;
+      if (i < nm.param_names.size() &&
+          nm.unc_params[i].name != nm.param_names[i])
+        names_ok = false;
+    }
+    check(names_ok, "newtrans: unc_params agree with param_names");
+    expect_eq("newtrans unc total", (double)total, (double)nm.n_unconstrained);
+    struct Want {
+      const char* name;
+      int64_t len;
+      std::vector<int64_t> dims;
+      mir::Transform::Kind kind;
+    };
+    const std::vector<Want> want{
+        {"a", 1, {}, mir::Transform::OffsetMultiplier},
+        {"b", 3, {3}, mir::Transform::OffsetMultiplier},
+        {"c", 1, {}, mir::Transform::Offset},
+        {"d", 1, {}, mir::Transform::Multiplier},
+        {"mu_p", 3, {3}, mir::Transform::Identity},
+        {"sg_p", 3, {3}, mir::Transform::Lower},
+        {"e", 3, {3}, mir::Transform::OffsetMultiplier},
+        {"u", 3, {3}, mir::Transform::UnitVector},
+        {"z", 3, {3}, mir::Transform::SumToZero},
+        {"R", 3, {3}, mir::Transform::Correlation},
+        {"S", 6, {6}, mir::Transform::Covariance},
+        {"Lc", 6, {6}, mir::Transform::CholeskyCov},
+        {"Lr", 9, {9}, mir::Transform::CholeskyCov}};
+    check(nm.unc_params.size() == want.size(), "newtrans: 13 parameters");
+    for (size_t i = 0; i < want.size() && i < nm.unc_params.size(); ++i) {
+      const auto& u = nm.unc_params[i];
+      const std::string tag = std::string("newtrans ") + want[i].name;
+      check(u.name == want[i].name, tag + " name");
+      expect_eq(tag + " len", (double)u.len, (double)want[i].len);
+      check(u.dims == want[i].dims, tag + " dims");
+      check(u.transform == want[i].kind, tag + " transform");
+    }
+  }
+
+  // stanc's generated constructor executes data constraints before it
+  // constructs the model. These are construction errors, not bad draws that
+  // may survive until a density or transform happens to notice them.
+  {
+    const std::string mir = slurp("tests/fixtures/newtrans.tmir.sexp");
+    auto rejected_s = [&](double s) {
       DataMap d;
-      d.set_real_array("diagonal", {1.0, 2.0, 3.0}, {3});
-      CompiledModel dm =
-          compile_model(slurp("tests/fixtures/diagtd.tmir.sexp"), d);
-      Executor dex(std::move(dm.graph));
-      dm.bind(dex);
-      dex.params_data()[0] = 0.4;
-      double gradient[1] = {0.0};
-      const double lp = dex.gradient(gradient);
-
-      using stan::math::var;
-      var theta = 0.4;
-      var reference_lp = stan::math::normal_lpdf<true>(theta, 2.0, 1.0);
-      reference_lp.grad();
-      expect_eq("transformed-data diag_matrix: lp", lp, reference_lp.val());
-      expect_eq("transformed-data diag_matrix: gradient", gradient[0],
-                theta.adj());
-    }
-
-    // Vector fma from --O1 partial evaluation (`k .* t + c` becomes
-    // fma(k, t, c)): OP_FMA is FUSED, so the reference is stan::math::fma,
-    // and the data avoids powers of two -- with t = 2.0/-1.0/0.5 the
-    // products are exact and fused equals unfused bitwise, which once let
-    // both implementations pass this test.
-    {
-      DataMap d = DataMap::from_json(R"({"N": 3, "t": [1.7, -0.3, 0.9]})");
-      CompiledModel fm =
-          compile_model(slurp("tests/fixtures/vecfma.tmir.sexp"), d);
-      Executor fex(std::move(fm.graph));
-      fm.bind(fex);
-      const double q[6] = {0.3, -0.2, 1.1, 0.7, -0.4, 0.9};  // k[3], c[3]
-      for (int i = 0; i < 6; ++i) fex.params_data()[i] = q[i];
-      double grad[6] = {0, 0, 0, 0, 0, 0};
-      const double lp = fex.gradient(grad);
-
-      using stan::math::var;
-      Eigen::Matrix<var, -1, 1> k(3), c(3);
-      for (int i = 0; i < 3; ++i) k(i) = q[i];
-      for (int i = 0; i < 3; ++i) c(i) = q[3 + i];
-      Eigen::VectorXd t(3);
-      t << 1.7, -0.3, 0.9;
-      Eigen::Matrix<var, -1, 1> mu(3);
-      for (int i = 0; i < 3; ++i) mu(i) = stan::math::fma(k(i), t(i), c(i));
-      var acc = stan::math::normal_lpdf<false>(mu, 0, 1);
-      acc.grad();
-      check(lp == acc.val(), "vector fma: lp bitwise against the var path");
-      bool g_ok = true;
-      for (int i = 0; i < 3; ++i)
-        if (grad[i] != k(i).adj() || grad[3 + i] != c(i).adj()) g_ok = false;
-      check(g_ok, "vector fma: gradients bitwise against the var path");
-    }
-
-    // Where the CSV's three sections meet. stanc marks the boundaries with
-    // early-return guards on emit_transformed_parameters__ /
-    // emit_generated_quantities__; lowering pins both flags on, so the
-    // recorded indices are the only thing left that says which column is a
-    // constrained parameter and which a generated quantity.
-    {
-      // conj's header, verified against CmdStan in tests/test_sampling.cpp,
-      // is mu_c,sigma,prec,mu,sd_from_prec,resid.<i>: two constrained
-      // parameters, one transformed parameter, three generated quantities.
-      DataMap d = DataMap::from_json_file("tests/fixtures/conj.json");
-      CompiledModel wm =
-          compile_model(slurp("tests/fixtures/conj.tmir.sexp"), d);
-      check(wm.write_array.has_value(), "conj: write_array compiled");
-      if (wm.write_array) {
-        expect_eq("conj columns", (double)wm.write_array->columns.size(), 6);
-        expect_eq("conj n_tp_start", (double)wm.write_array->n_tp_start, 2);
-        expect_eq("conj n_gq_start", (double)wm.write_array->n_gq_start, 3);
-      }
-    }
-    {
-      // Parameters only: every column is a constrained parameter, so both
-      // boundaries sit at the end.
-      DataMap d;
-      d.set_int("K", 3);
-      CompiledModel wm =
-          compile_model(slurp("tests/fixtures/simp.tmir.sexp"), d);
-      check(wm.write_array.has_value(), "simp: write_array compiled");
-      if (wm.write_array) {
-        expect_eq("simp columns", (double)wm.write_array->columns.size(), 1);
-        expect_eq("simp n_tp_start", (double)wm.write_array->n_tp_start, 1);
-        expect_eq("simp n_gq_start", (double)wm.write_array->n_gq_start, 1);
-      }
-
-      // The unconstrained layout: simplex[3] is two free values behind three
-      // constrained ones, and its metadata carries that exact naming shape.
-      check(wm.unc_params.size() == 1, "simp: one unconstrained parameter");
-      if (wm.unc_params.size() == 1) {
-        const auto& u = wm.unc_params[0];
-        check(u.name == "theta", "simp unc name");
-        expect_eq("simp unc len", (double)u.len, 2);
-        check(u.dims == std::vector<int64_t>{2}, "simp unc dims");
-        check(u.transform == mir::Transform::Simplex, "simp unc transform");
-      }
-    }
-    {
-      // One of every transform: the unconstrained lengths are what the
-      // reader has to slice the draw with, and only the declared dims tell
-      // corr_matrix[3] from cov_matrix[3].
-      DataMap d = DataMap::from_json_file("tests/fixtures/newtrans.json");
-      CompiledModel nm =
-          compile_model(slurp("tests/fixtures/newtrans.tmir.sexp"), d);
-      check(nm.unc_params.size() == nm.param_names.size(),
-            "newtrans: one unc_param per declared parameter");
-      int64_t total = 0;
-      bool names_ok = nm.unc_params.size() == nm.param_names.size();
-      for (size_t i = 0; i < nm.unc_params.size(); ++i) {
-        total += nm.unc_params[i].len;
-        if (i < nm.param_names.size() &&
-            nm.unc_params[i].name != nm.param_names[i])
-          names_ok = false;
-      }
-      check(names_ok, "newtrans: unc_params agree with param_names");
-      expect_eq("newtrans unc total", (double)total,
-                (double)nm.n_unconstrained);
-      struct Want {
-        const char* name;
-        int64_t len;
-        std::vector<int64_t> dims;
-        mir::Transform::Kind kind;
-      };
-      const std::vector<Want> want{
-          {"a", 1, {}, mir::Transform::OffsetMultiplier},
-          {"b", 3, {3}, mir::Transform::OffsetMultiplier},
-          {"c", 1, {}, mir::Transform::Offset},
-          {"d", 1, {}, mir::Transform::Multiplier},
-          {"mu_p", 3, {3}, mir::Transform::Identity},
-          {"sg_p", 3, {3}, mir::Transform::Lower},
-          {"e", 3, {3}, mir::Transform::OffsetMultiplier},
-          {"u", 3, {3}, mir::Transform::UnitVector},
-          {"z", 3, {3}, mir::Transform::SumToZero},
-          {"R", 3, {3}, mir::Transform::Correlation},
-          {"S", 6, {6}, mir::Transform::Covariance},
-          {"Lc", 6, {6}, mir::Transform::CholeskyCov},
-          {"Lr", 9, {9}, mir::Transform::CholeskyCov}};
-      check(nm.unc_params.size() == want.size(), "newtrans: 13 parameters");
-      for (size_t i = 0; i < want.size() && i < nm.unc_params.size(); ++i) {
-        const auto& u = nm.unc_params[i];
-        const std::string tag = std::string("newtrans ") + want[i].name;
-        check(u.name == want[i].name, tag + " name");
-        expect_eq(tag + " len", (double)u.len, (double)want[i].len);
-        check(u.dims == want[i].dims, tag + " dims");
-        check(u.transform == want[i].kind, tag + " transform");
-      }
-    }
-
-    // stanc's generated constructor executes data constraints before it
-    // constructs the model. These are construction errors, not bad draws that
-    // may survive until a density or transform happens to notice them.
-    {
-      const std::string mir = slurp("tests/fixtures/newtrans.tmir.sexp");
-      auto rejected_s = [&](double s) {
-        DataMap d;
-        d.set_real("m", 0.3);
-        d.set_real("s", s);
-        try {
-          (void)compile_model(mir, d);
-        } catch (const std::domain_error& e) {
-          return std::string(e.what()).find("s") != std::string::npos;
-        }
-        return false;
-      };
-      check(rejected_s(-1.0), "data lower bound rejects before construction");
-      check(rejected_s(std::numeric_limits<double>::quiet_NaN()),
-            "data lower bound rejects NaN");
-
-      DataMap at_bound;
-      at_bound.set_real("m", 0.3);
-      at_bound.set_real("s", 0.5);
-      bool accepted = true;
+      d.set_real("m", 0.3);
+      d.set_real("s", s);
       try {
-        (void)compile_model(mir, at_bound);
-      } catch (const std::exception&) {
-        accepted = false;
-      }
-      check(accepted, "data lower bound is inclusive");
-    }
-    {
-      // An upper check over an array must inspect every element. The fourth
-      // value is outside 1:K; flattening or checking only the first lane
-      // accepts data generated Stan rejects in its constructor.
-      DataMap d;
-      d.set_int("K", 3);
-      d.set_int("y", 2);
-      d.set_int_array("ys", {1, 2, 4});
-      bool rejected = false;
-      try {
-        (void)compile_model(slurp("tests/fixtures/cat.tmir.sexp"), d);
+        (void)compile_model(mir, d);
       } catch (const std::domain_error& e) {
-        rejected = std::string(e.what()).find("ys") != std::string::npos;
+        return std::string(e.what()).find("s") != std::string::npos;
       }
-      check(rejected, "container data upper bound rejects a later element");
-    }
+      return false;
+    };
+    check(rejected_s(-1.0), "data lower bound rejects before construction");
+    check(rejected_s(std::numeric_limits<double>::quiet_NaN()),
+          "data lower bound rejects NaN");
 
-    {
-      // Generated Stan checks constrained transformed parameters while it
-      // evaluates a draw, not while it constructs the model. The data check
-      // above and this runtime check share FnCheck in MIR but must retain their
-      // distinct execution phases.
-      DataMap d = bound_check_data();
+    DataMap at_bound;
+    at_bound.set_real("m", 0.3);
+    at_bound.set_real("s", 0.5);
+    bool accepted = true;
+    try {
+      (void)compile_model(mir, at_bound);
+    } catch (const std::exception&) {
+      accepted = false;
+    }
+    check(accepted, "data lower bound is inclusive");
+  }
+  {
+    // An upper check over an array must inspect every element. The fourth
+    // value is outside 1:K; flattening or checking only the first lane
+    // accepts data generated Stan rejects in its constructor.
+    DataMap d;
+    d.set_int("K", 3);
+    d.set_int("y", 2);
+    d.set_int_array("ys", {1, 2, 4});
+    bool rejected = false;
+    try {
+      (void)compile_model(slurp("tests/fixtures/cat.tmir.sexp"), d);
+    } catch (const std::domain_error& e) {
+      rejected = std::string(e.what()).find("ys") != std::string::npos;
+    }
+    check(rejected, "container data upper bound rejects a later element");
+  }
+
+  {
+    // Generated Stan checks constrained transformed parameters while it
+    // evaluates a draw, not while it constructs the model. The data check
+    // above and this runtime check share FnCheck in MIR but must retain their
+    // distinct execution phases.
+    DataMap d = bound_check_data();
+    CompiledModel checked =
+        compile_model(slurp("tests/fixtures/data_and_tp_checks.tmir.sexp"), d);
+    Executor cex(std::move(checked.graph));
+    checked.bind(cex);
+    cex.params_data()[0] = -1.0;
+    double grad = 0.0;
+    bool rejected = false;
+    try {
+      (void)cex.gradient(&grad);
+    } catch (const std::domain_error& e) {
+      rejected = std::string(e.what()).find("z") != std::string::npos;
+    }
+    check(rejected, "transformed-parameter bound rejects the draw");
+
+    cex.params_data()[0] = 0.0;
+    bool accepted = true;
+    double lp = 0.0;
+    try {
+      lp = cex.gradient(&grad);
+    } catch (const std::exception&) {
+      accepted = false;
+    }
+    check(accepted && lp == 0.0 && grad == 3.0,
+          "transformed-parameter bound is inclusive");
+  }
+  {
+    // Parameter-free does not mean construction-time: a transformed
+    // parameter derived only from unconstrained data is still checked at the
+    // generated log_prob/write_array statement where it was declared.
+    DataMap d = bound_check_data(-1.0);
+    bool constructed = true;
+    bool rejected = false;
+    try {
       CompiledModel checked = compile_model(
           slurp("tests/fixtures/data_and_tp_checks.tmir.sexp"), d);
       Executor cex(std::move(checked.graph));
       checked.bind(cex);
-      cex.params_data()[0] = -1.0;
+      cex.params_data()[0] = 0.0;
       double grad = 0.0;
-      bool rejected = false;
       try {
         (void)cex.gradient(&grad);
       } catch (const std::domain_error& e) {
-        rejected = std::string(e.what()).find("z") != std::string::npos;
+        rejected = std::string(e.what()).find("from_data") != std::string::npos;
       }
-      check(rejected, "transformed-parameter bound rejects the draw");
-
-      cex.params_data()[0] = 0.0;
-      bool accepted = true;
-      double lp = 0.0;
-      try {
-        lp = cex.gradient(&grad);
-      } catch (const std::exception&) {
-        accepted = false;
-      }
-      check(accepted && lp == 0.0 && grad == 3.0,
-            "transformed-parameter bound is inclusive");
+    } catch (const std::exception&) {
+      constructed = false;
     }
-    {
-      // Parameter-free does not mean construction-time: a transformed
-      // parameter derived only from unconstrained data is still checked at the
-      // generated log_prob/write_array statement where it was declared.
-      DataMap d = bound_check_data(-1.0);
+    check(constructed && rejected,
+          "data-derived transformed bound rejects only at evaluation");
+  }
+  {
+    // Runtime-sized container bounds fail in the generated statement, not
+    // while the graph is being compiled. Equal flat widths are likewise not
+    // enough to make matrix orientations compatible.
+    auto rejects_at_evaluation = [&](DataMap d, double x,
+                                     const std::string& name) {
       bool constructed = true;
       bool rejected = false;
       try {
@@ -3545,61 +3570,34 @@ int main() {
             slurp("tests/fixtures/data_and_tp_checks.tmir.sexp"), d);
         Executor cex(std::move(checked.graph));
         checked.bind(cex);
-        cex.params_data()[0] = 0.0;
+        cex.params_data()[0] = x;
         double grad = 0.0;
         try {
           (void)cex.gradient(&grad);
-        } catch (const std::domain_error& e) {
-          rejected =
-              std::string(e.what()).find("from_data") != std::string::npos;
+        } catch (const std::invalid_argument& e) {
+          rejected = std::string(e.what()).find(name) != std::string::npos;
         }
       } catch (const std::exception&) {
         constructed = false;
       }
-      check(constructed && rejected,
-            "data-derived transformed bound rejects only at evaluation");
-    }
-    {
-      // Runtime-sized container bounds fail in the generated statement, not
-      // while the graph is being compiled. Equal flat widths are likewise not
-      // enough to make matrix orientations compatible.
-      auto rejects_at_evaluation = [&](DataMap d, double x,
-                                       const std::string& name) {
-        bool constructed = true;
-        bool rejected = false;
-        try {
-          CompiledModel checked = compile_model(
-              slurp("tests/fixtures/data_and_tp_checks.tmir.sexp"), d);
-          Executor cex(std::move(checked.graph));
-          checked.bind(cex);
-          cex.params_data()[0] = x;
-          double grad = 0.0;
-          try {
-            (void)cex.gradient(&grad);
-          } catch (const std::invalid_argument& e) {
-            rejected = std::string(e.what()).find(name) != std::string::npos;
-          }
-        } catch (const std::exception&) {
-          constructed = false;
-        }
-        return constructed && rejected;
-      };
-      check(rejects_at_evaluation(bound_check_data(0.0, 1, 2), 0.0, "bounded"),
-            "vector-bound shape mismatch is a runtime error");
-      check(rejects_at_evaluation(bound_check_data(0.0, 1, 2), -1.0, "bounded"),
-            "dimension check precedes later scalar bound checks");
-      check(rejects_at_evaluation(bound_check_data(0.0, 1, 1, 1, 2, 2, 1), 0.0,
-                                  "bounded_matrix"),
-            "equal-width matrix-bound mismatch is a runtime error");
-    }
+      return constructed && rejected;
+    };
+    check(rejects_at_evaluation(bound_check_data(0.0, 1, 2), 0.0, "bounded"),
+          "vector-bound shape mismatch is a runtime error");
+    check(rejects_at_evaluation(bound_check_data(0.0, 1, 2), -1.0, "bounded"),
+          "dimension check precedes later scalar bound checks");
+    check(rejects_at_evaluation(bound_check_data(0.0, 1, 1, 1, 2, 2, 1), 0.0,
+                                "bounded_matrix"),
+          "equal-width matrix-bound mismatch is a runtime error");
+  }
 
-    {
-      // Stan Math's hypergeometric implementation performs support checks
-      // before dropping an all-data propto term. Without a native density
-      // implementation, accepting the model as a constant zero would therefore
-      // be exact only for valid data and silently accept invalid data. The
-      // honest boundary is to refuse both.
-      const std::string hypergeometric_mir = R"(
+  {
+    // Stan Math's hypergeometric implementation performs support checks
+    // before dropping an all-data propto term. Without a native density
+    // implementation, accepting the model as a constant zero would therefore
+    // be exact only for valid data and silently accept invalid data. The
+    // honest boundary is to refuse both.
+    const std::string hypergeometric_mir = R"(
 ((functions_block ())
  (input_vars
   ((n <opaque> SInt) (N <opaque> SInt) (a <opaque> SInt)
@@ -3622,745 +3620,734 @@ int main() {
     (meta <opaque>)))))
 )";
 
-      check(stan::math::hypergeometric_lpmf<true>(1, 2, 3, 4) == 0.0,
-            "all-data propto oracle drops a valid density");
-      bool oracle_rejected = false;
-      try {
-        (void)stan::math::hypergeometric_lpmf<true>(4, 4, 3, 3);
-      } catch (const std::domain_error&) {
-        oracle_rejected = true;
-      }
-      check(oracle_rejected,
-            "all-data propto oracle still checks invalid support");
-
-      auto lowering_refuses = [&](int n, int N, int a, int b) {
-        DataMap d;
-        d.set_int("n", n);
-        d.set_int("N", N);
-        d.set_int("a", a);
-        d.set_int("b", b);
-        try {
-          (void)compile_model(hypergeometric_mir, d);
-        } catch (const CompileError& e) {
-          return std::string(e.what()).find("hypergeometric_lpmf") !=
-                 std::string::npos;
-        }
-        return false;
-      };
-      check(lowering_refuses(1, 2, 3, 4),
-            "unsupported valid all-data propto density is refused");
-      check(lowering_refuses(4, 4, 3, 3),
-            "unsupported invalid all-data propto density is refused");
+    check(stan::math::hypergeometric_lpmf<true>(1, 2, 3, 4) == 0.0,
+          "all-data propto oracle drops a valid density");
+    bool oracle_rejected = false;
+    try {
+      (void)stan::math::hypergeometric_lpmf<true>(4, 4, 3, 3);
+    } catch (const std::domain_error&) {
+      oracle_rejected = true;
     }
+    check(oracle_rejected,
+          "all-data propto oracle still checks invalid support");
 
-    {
-      // An all-data propto categorical term returns zero, but only after Stan
-      // Math validates the outcome and probability/logit vector. Compare the
-      // whole observable contract, including which competing error wins and
-      // the scalar-vs-array overload selected for a length-one outcome.
-      struct Outcome {
-        std::string kind;
-        std::string message;
-        double value = 0.0;
-      };
-      auto observe = [](auto&& call) {
-        Outcome out;
-        try {
-          out.value = call();
-          out.kind = "value";
-        } catch (const std::domain_error& e) {
-          out.kind = "domain_error";
-          out.message = e.what();
-        } catch (const std::invalid_argument& e) {
-          out.kind = "invalid_argument";
-          out.message = e.what();
-        } catch (const std::exception& e) {
-          out.kind = "other";
-          out.message = e.what();
-        }
-        return out;
-      };
-      auto oracle = [&](const std::string& fn, bool scalar,
-                        const std::vector<int>& outcome,
-                        const std::vector<double>& arg, bool propto) {
-        return observe([&] {
-          Eigen::Map<const Eigen::VectorXd> v(arg.data(),
-                                              (Eigen::Index)arg.size());
-          if (fn == "categorical_lpmf") {
-            if (propto)
-              return scalar
-                         ? stan::math::categorical_lpmf<true>(outcome.at(0), v)
-                         : stan::math::categorical_lpmf<true>(outcome, v);
-            return scalar
-                       ? stan::math::categorical_lpmf<false>(outcome.at(0), v)
-                       : stan::math::categorical_lpmf<false>(outcome, v);
-          }
-          if (propto)
-            return scalar
-                       ? stan::math::categorical_logit_lpmf<true>(outcome.at(0),
-                                                                  v)
-                       : stan::math::categorical_logit_lpmf<true>(outcome, v);
-          return scalar ? stan::math::categorical_logit_lpmf<false>(
-                              outcome.at(0), v)
-                        : stan::math::categorical_logit_lpmf<false>(outcome, v);
-        });
-      };
-      auto lowered = [&](const std::string& fn, bool scalar,
-                         const std::vector<int>& outcome,
-                         const std::vector<double>& arg, bool propto) {
-        return observe([&] {
-          DataMap d;
-          if (scalar)
-            d.set_int("outcome", outcome.at(0));
-          else
-            d.set_int_array("outcome", outcome);
-          d.set_real_array("arg", arg);
-          CompiledModel model = compile_model(
-              categorical_check_mir(fn, scalar, (int)outcome.size(),
-                                    (int)arg.size(), propto),
-              d);
-          Executor ex(std::move(model.graph));
-          model.bind(ex);
-          return ex.forward();
-        });
-      };
-      auto same_as_stan = [&](const std::string& label, const std::string& fn,
-                              bool scalar, std::vector<int> outcome,
-                              std::vector<double> arg, bool propto = true) {
-        const Outcome want = oracle(fn, scalar, outcome, arg, propto);
-        const Outcome got = lowered(fn, scalar, outcome, arg, propto);
-        check(got.kind == want.kind, label + " exception class");
-        check(got.message == want.message, label + " exception message");
-        if (want.kind == "value")
-          expect_eq(label + " value", got.value, want.value);
-      };
-      auto local_autodiff_oracle = [&](const std::string& fn, bool scalar,
-                                       const std::vector<int>& outcome,
-                                       const std::vector<double>& arg) {
-        return observe([&] {
-          Eigen::Matrix<stan::math::var, -1, 1> v((Eigen::Index)arg.size());
-          for (size_t i = 0; i < arg.size(); ++i) v((Eigen::Index)i) = arg[i];
-          try {
-            stan::math::var lp =
-                fn == "categorical_lpmf"
-                    ? (scalar ? stan::math::categorical_lpmf<true>(
-                                    outcome.at(0), v)
-                              : stan::math::categorical_lpmf<true>(outcome, v))
-                    : (scalar ? stan::math::categorical_logit_lpmf<true>(
-                                    outcome.at(0), v)
-                              : stan::math::categorical_logit_lpmf<true>(
-                                    outcome, v));
-            const double value = lp.val();
-            stan::math::recover_memory();
-            return value;
-          } catch (...) {
-            stan::math::recover_memory();
-            throw;
-          }
-        });
-      };
-      auto local_autodiff_lowered = [&](const std::string& fn, bool scalar,
-                                        const std::vector<int>& outcome,
-                                        const std::vector<double>& arg) {
-        return observe([&] {
-          DataMap d;
-          if (scalar)
-            d.set_int("outcome", outcome.at(0));
-          else
-            d.set_int_array("outcome", outcome);
-          d.set_real_array("arg", arg);
-          CompiledModel model = compile_model(
-              categorical_check_mir(fn, scalar, (int)outcome.size(),
-                                    (int)arg.size(), true, true),
-              d);
-          Executor ex(std::move(model.graph));
-          model.bind(ex);
-          ex.params_data()[0] = 0.0;
-          return ex.forward();
-        });
-      };
-      auto same_local_autodiff_as_stan = [&](const std::string& label,
-                                             const std::string& fn, bool scalar,
-                                             std::vector<int> outcome,
-                                             std::vector<double> arg) {
-        const Outcome want = local_autodiff_oracle(fn, scalar, outcome, arg);
-        const Outcome got = local_autodiff_lowered(fn, scalar, outcome, arg);
-        check(got.kind == want.kind, label + " exception class");
-        check(got.message == want.message, label + " exception message");
-        if (want.kind == "value")
-          expect_eq(label + " value", got.value, want.value);
-      };
-
-      const double nan = std::numeric_limits<double>::quiet_NaN();
-      const double inf = std::numeric_limits<double>::infinity();
-      same_as_stan("categorical scalar valid", "categorical_lpmf", true, {2},
-                   {0.2, 0.3, 0.5});
-      same_as_stan("categorical zero probability", "categorical_lpmf", true,
-                   {2}, {1.0, 0.0, 0.0});
-      same_as_stan("categorical scalar outcome", "categorical_lpmf", true, {4},
-                   {0.2, 0.3, 0.5});
-      same_as_stan("categorical outcome before simplex", "categorical_lpmf",
-                   true, {4}, {0.2, 0.2, 0.2});
-      same_as_stan("categorical later array outcome", "categorical_lpmf", false,
-                   {1, 4, 2}, {0.2, 0.3, 0.5});
-      same_as_stan("categorical length-one array", "categorical_lpmf", false,
-                   {4}, {0.2, 0.3, 0.5});
-      same_as_stan("categorical empty outcome", "categorical_lpmf", false, {},
-                   {0.2, 0.3, 0.5});
-      same_as_stan("categorical empty still checks simplex", "categorical_lpmf",
-                   false, {}, {0.2, 0.2, 0.2});
-      same_as_stan("categorical scalar empty probabilities", "categorical_lpmf",
-                   true, {1}, {});
-      same_as_stan("categorical empty probabilities", "categorical_lpmf", false,
-                   {}, {});
-      same_as_stan("categorical normalized valid", "categorical_lpmf", false,
-                   {1, 3}, {0.2, 0.3, 0.5}, false);
-      same_as_stan("categorical normalized bad simplex", "categorical_lpmf",
-                   true, {1}, {0.2, 0.2, 0.2}, false);
-      same_as_stan("categorical normalized invalid outcome", "categorical_lpmf",
-                   false, {1, 4}, {0.2, 0.3, 0.5}, false);
-      same_as_stan("categorical normalized empty outcome", "categorical_lpmf",
-                   false, {}, {0.2, 0.3, 0.5}, false);
-
-      same_as_stan("categorical logit scalar valid", "categorical_logit_lpmf",
-                   true, {2}, {-1.0, 0.0, 1.0});
-      same_as_stan("categorical logit scalar outcome", "categorical_logit_lpmf",
-                   true, {4}, {-1.0, 0.0, 1.0});
-      same_as_stan("categorical logit outcome before finite",
-                   "categorical_logit_lpmf", true, {4}, {0.0, nan, 1.0});
-      same_as_stan("categorical logit later array outcome",
-                   "categorical_logit_lpmf", false, {1, 4, 2},
-                   {-1.0, 0.0, 1.0});
-      same_as_stan("categorical logit length-one array",
-                   "categorical_logit_lpmf", false, {4}, {-1.0, 0.0, 1.0});
-      same_as_stan("categorical logit empty checks NaN",
-                   "categorical_logit_lpmf", false, {}, {0.0, nan, 1.0});
-      same_as_stan("categorical logit checks infinity",
-                   "categorical_logit_lpmf", true, {1}, {0.0, inf, 1.0});
-      same_as_stan("categorical logit empty vectors", "categorical_logit_lpmf",
-                   false, {}, {});
-      same_as_stan("categorical logit scalar empty vector",
-                   "categorical_logit_lpmf", true, {1}, {});
-      same_as_stan("categorical logit normalized valid",
-                   "categorical_logit_lpmf", false, {1, 3}, {-1.0, 0.0, 1.0},
-                   false);
-      same_as_stan("categorical logit normalized infinite",
-                   "categorical_logit_lpmf", true, {1}, {0.0, inf, 1.0}, false);
-      same_as_stan("categorical logit normalized invalid outcome",
-                   "categorical_logit_lpmf", false, {1, 4}, {-1.0, 0.0, 1.0},
-                   false);
-      same_as_stan("categorical logit normalized empty outcome",
-                   "categorical_logit_lpmf", false, {}, {-1.0, 0.0, 1.0},
-                   false);
-      same_as_stan("categorical logit normalized empty vectors",
-                   "categorical_logit_lpmf", false, {}, {}, false);
-
-      // A local declared AutoDiffable remains a var in generated C++ even when
-      // assigned entirely from data. Its graph slot is parameter-free, so the
-      // exact op can own the value, but propto must still retain the summand.
-      same_local_autodiff_as_stan("categorical local autodiff valid",
-                                  "categorical_lpmf", true, {2},
-                                  {0.2, 0.3, 0.5});
-      same_local_autodiff_as_stan("categorical local autodiff length-one array",
-                                  "categorical_lpmf", false, {2},
-                                  {0.2, 0.3, 0.5});
-      {
-        DataMap local_data;
-        local_data.set_int_array("outcome", {2});
-        local_data.set_real_array("arg", {0.2, 0.3, 0.5});
-        CompiledModel local_model = compile_model(
-            categorical_check_mir("categorical_lpmf", false, 1, 3, true, true),
-            local_data);
-        Executor local_ex(std::move(local_model.graph));
-        local_model.bind(local_ex);
-        local_ex.params_data()[0] = 0.0;
-        expect_eq("categorical propto value-only double instantiation",
-                  local_ex.forward_value_only(), 0.0);
+    auto lowering_refuses = [&](int n, int N, int a, int b) {
+      DataMap d;
+      d.set_int("n", n);
+      d.set_int("N", N);
+      d.set_int("a", a);
+      d.set_int("b", b);
+      try {
+        (void)compile_model(hypergeometric_mir, d);
+      } catch (const CompileError& e) {
+        return std::string(e.what()).find("hypergeometric_lpmf") !=
+               std::string::npos;
       }
-      same_local_autodiff_as_stan("categorical local autodiff invalid",
-                                  "categorical_lpmf", true, {4},
-                                  {0.2, 0.3, 0.5});
-      same_local_autodiff_as_stan("categorical logit local autodiff valid",
-                                  "categorical_logit_lpmf", false, {1, 3},
-                                  {-1.0, 0.0, 1.0});
-      same_local_autodiff_as_stan("categorical logit local autodiff invalid",
-                                  "categorical_logit_lpmf", false, {1, 4},
-                                  {-1.0, 0.0, 1.0});
-      auto check_local_exact_graph = [&](const std::string& label,
-                                         const std::string& fn, bool scalar,
-                                         const std::vector<int>& outcome,
-                                         const std::vector<double>& arg) {
-        DataMap local_data;
+      return false;
+    };
+    check(lowering_refuses(1, 2, 3, 4),
+          "unsupported valid all-data propto density is refused");
+    check(lowering_refuses(4, 4, 3, 3),
+          "unsupported invalid all-data propto density is refused");
+  }
+
+  {
+    // An all-data propto categorical term returns zero, but only after Stan
+    // Math validates the outcome and probability/logit vector. Compare the
+    // whole observable contract, including which competing error wins and
+    // the scalar-vs-array overload selected for a length-one outcome.
+    struct Outcome {
+      std::string kind;
+      std::string message;
+      double value = 0.0;
+    };
+    auto observe = [](auto&& call) {
+      Outcome out;
+      try {
+        out.value = call();
+        out.kind = "value";
+      } catch (const std::domain_error& e) {
+        out.kind = "domain_error";
+        out.message = e.what();
+      } catch (const std::invalid_argument& e) {
+        out.kind = "invalid_argument";
+        out.message = e.what();
+      } catch (const std::exception& e) {
+        out.kind = "other";
+        out.message = e.what();
+      }
+      return out;
+    };
+    auto oracle = [&](const std::string& fn, bool scalar,
+                      const std::vector<int>& outcome,
+                      const std::vector<double>& arg, bool propto) {
+      return observe([&] {
+        Eigen::Map<const Eigen::VectorXd> v(arg.data(),
+                                            (Eigen::Index)arg.size());
+        if (fn == "categorical_lpmf") {
+          if (propto)
+            return scalar ? stan::math::categorical_lpmf<true>(outcome.at(0), v)
+                          : stan::math::categorical_lpmf<true>(outcome, v);
+          return scalar ? stan::math::categorical_lpmf<false>(outcome.at(0), v)
+                        : stan::math::categorical_lpmf<false>(outcome, v);
+        }
+        if (propto)
+          return scalar ? stan::math::categorical_logit_lpmf<true>(
+                              outcome.at(0), v)
+                        : stan::math::categorical_logit_lpmf<true>(outcome, v);
+        return scalar
+                   ? stan::math::categorical_logit_lpmf<false>(outcome.at(0), v)
+                   : stan::math::categorical_logit_lpmf<false>(outcome, v);
+      });
+    };
+    auto lowered = [&](const std::string& fn, bool scalar,
+                       const std::vector<int>& outcome,
+                       const std::vector<double>& arg, bool propto) {
+      return observe([&] {
+        DataMap d;
         if (scalar)
-          local_data.set_int("outcome", outcome.at(0));
+          d.set_int("outcome", outcome.at(0));
         else
-          local_data.set_int_array("outcome", outcome);
-        local_data.set_real_array("arg", arg);
-        CompiledModel local_model =
+          d.set_int_array("outcome", outcome);
+        d.set_real_array("arg", arg);
+        CompiledModel model =
+            compile_model(categorical_check_mir(fn, scalar, (int)outcome.size(),
+                                                (int)arg.size(), propto),
+                          d);
+        Executor ex(std::move(model.graph));
+        model.bind(ex);
+        return ex.forward();
+      });
+    };
+    auto same_as_stan = [&](const std::string& label, const std::string& fn,
+                            bool scalar, std::vector<int> outcome,
+                            std::vector<double> arg, bool propto = true) {
+      const Outcome want = oracle(fn, scalar, outcome, arg, propto);
+      const Outcome got = lowered(fn, scalar, outcome, arg, propto);
+      check(got.kind == want.kind, label + " exception class");
+      check(got.message == want.message, label + " exception message");
+      if (want.kind == "value")
+        expect_eq(label + " value", got.value, want.value);
+    };
+    auto local_autodiff_oracle = [&](const std::string& fn, bool scalar,
+                                     const std::vector<int>& outcome,
+                                     const std::vector<double>& arg) {
+      return observe([&] {
+        Eigen::Matrix<stan::math::var, -1, 1> v((Eigen::Index)arg.size());
+        for (size_t i = 0; i < arg.size(); ++i) v((Eigen::Index)i) = arg[i];
+        try {
+          stan::math::var lp =
+              fn == "categorical_lpmf"
+                  ? (scalar
+                         ? stan::math::categorical_lpmf<true>(outcome.at(0), v)
+                         : stan::math::categorical_lpmf<true>(outcome, v))
+                  : (scalar ? stan::math::categorical_logit_lpmf<true>(
+                                  outcome.at(0), v)
+                            : stan::math::categorical_logit_lpmf<true>(outcome,
+                                                                       v));
+          const double value = lp.val();
+          stan::math::recover_memory();
+          return value;
+        } catch (...) {
+          stan::math::recover_memory();
+          throw;
+        }
+      });
+    };
+    auto local_autodiff_lowered = [&](const std::string& fn, bool scalar,
+                                      const std::vector<int>& outcome,
+                                      const std::vector<double>& arg) {
+      return observe([&] {
+        DataMap d;
+        if (scalar)
+          d.set_int("outcome", outcome.at(0));
+        else
+          d.set_int_array("outcome", outcome);
+        d.set_real_array("arg", arg);
+        CompiledModel model =
             compile_model(categorical_check_mir(fn, scalar, (int)outcome.size(),
                                                 (int)arg.size(), true, true),
-                          local_data);
-        bool found_exact = false;
-        int exact_slot = -1;
-        bool found_decomposition = false;
-        for (const Op& op : local_model.graph.ops) {
-          if (op.opcode == OP_CATEGORICAL) {
-            found_exact = true;
-            exact_slot = op.out;
-          }
-          found_decomposition =
-              found_decomposition || op.opcode == OP_INDEX ||
-              op.opcode == OP_GATHER || op.opcode == OP_LOGV ||
-              op.opcode == OP_LOG_SOFTMAX || op.opcode == OP_SUM_VEC;
-        }
-        bool exact_value_used = exact_slot == local_model.graph.result_slot;
-        for (const Op& op : local_model.graph.ops)
-          for (int i = 0; i < op.n_in; ++i)
-            exact_value_used = exact_value_used || op.in[i] == exact_slot;
-        check(found_exact, label + " exact op");
-        check(exact_value_used, label + " exact op owns target value");
-        check(!found_decomposition, label + " no unchecked decomposition");
-      };
-      check_local_exact_graph("categorical local autodiff", "categorical_lpmf",
-                              true, {4}, {0.2, 0.3, 0.5});
-      check_local_exact_graph("categorical logit local autodiff",
-                              "categorical_logit_lpmf", false, {1, 4},
-                              {-1.0, 0.0, 1.0});
+                          d);
+        Executor ex(std::move(model.graph));
+        model.bind(ex);
+        ex.params_data()[0] = 0.0;
+        return ex.forward();
+      });
+    };
+    auto same_local_autodiff_as_stan =
+        [&](const std::string& label, const std::string& fn, bool scalar,
+            std::vector<int> outcome, std::vector<double> arg) {
+          const Outcome want = local_autodiff_oracle(fn, scalar, outcome, arg);
+          const Outcome got = local_autodiff_lowered(fn, scalar, outcome, arg);
+          check(got.kind == want.kind, label + " exception class");
+          check(got.message == want.message, label + " exception message");
+          if (want.kind == "value")
+            expect_eq(label + " value", got.value, want.value);
+        };
 
-      auto malformed_refused = [](const std::string& mir, const DataMap& data) {
-        try {
-          (void)compile_model(mir, data);
-        } catch (const std::exception& e) {
-          return std::string(e.what()).find("categorical") != std::string::npos;
-        }
-        return false;
-      };
-      {
-        std::string mir = categorical_check_mir("categorical_lpmf", true, 1, 3);
-        const std::string from = "(Var outcome)";
-        mir.replace(mir.find(from), from.size(), "(Var anchor)");
-        DataMap malformed_data;
-        malformed_data.set_int("outcome", 2);
-        malformed_data.set_real_array("arg", {0.2, 0.3, 0.5});
-        check(malformed_refused(mir, malformed_data),
-              "categorical rejects data-only parameter outcome metadata");
-      }
-      {
-        std::string mir = categorical_check_mir("categorical_lpmf", true, 1, 3);
-        const std::string from = "outcome <opaque> SInt";
-        mir.replace(mir.find(from), from.size(), "outcome <opaque> SReal");
-        DataMap malformed_data;
-        malformed_data.set_real("outcome", 2.0);
-        malformed_data.set_real_array("arg", {0.2, 0.3, 0.5});
-        check(malformed_refused(mir, malformed_data),
-              "categorical rejects real binding with integer metadata");
-      }
-      {
-        std::string mir = slurp("tests/fixtures/cat.tmir.sexp");
-        const std::string from =
-            "((pattern (Var theta))\n"
-            "               (meta ((type_ UVector) (loc <opaque>) (adlevel "
-            "AutoDiffable))))";
-        const size_t pos = mir.find(from);
-        check(pos != std::string::npos,
-              "categorical malformed arg mutation found target");
-        if (pos != std::string::npos) {
-          std::string to = from;
-          to.replace(to.find("AutoDiffable"), std::strlen("AutoDiffable"),
-                     "DataOnly");
-          mir.replace(pos, from.size(), to);
-        }
-        DataMap malformed_data =
-            DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
-        check(malformed_refused(mir, malformed_data),
-              "categorical rejects data-only parameter vector metadata");
-      }
-      {
-        const std::string mir = categorical_check_mir("categorical_lpmf", false,
-                                                      2, 3, true, false, true);
-        DataMap malformed_data =
-            DataMap::from_json(R"({"outcome":[[1,2]],"arg":[0.2,0.3,0.5]})");
-        check(malformed_refused(mir, malformed_data),
-              "categorical rejects flattened rank-two outcome metadata");
-      }
-      for (bool in_gq : {false, true}) {
-        const std::string malformed =
-            categorical_transformed_data_mismatch_mir(in_gq);
-        check(malformed.find("(Var td_outcome)") != std::string::npos,
-              "categorical transformed-data fixture rewrites outcome");
-        DataMap malformed_data;
-        malformed_data.set_real("source", 2.0);
-        malformed_data.set_int("outcome", 2);
-        malformed_data.set_real_array("arg", {0.2, 0.3, 0.5});
-        check(malformed_refused(malformed, malformed_data),
-              std::string("categorical rejects transformed-data binding in ") +
-                  (in_gq ? "generated quantities" : "log probability"));
-      }
-      {
-        std::string malformed = categorical_write_array_mir(
-            slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false);
-        const size_t gq = malformed.find("(generate_quantities");
-        const size_t call =
-            malformed.find("(FunApp (StanLib categorical_lpmf", gq);
-        const size_t outcome = malformed.find("(Var y)", call);
-        check(gq != std::string::npos && call != std::string::npos &&
-                  outcome != std::string::npos,
-              "categorical missing-binding mutation found target");
-        if (outcome != std::string::npos)
-          malformed.replace(outcome, std::strlen("(Var y)"), "(Var missing)");
-        DataMap malformed_data =
-            DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
-        check(malformed_refused(malformed, malformed_data),
-              "categorical rejects missing GQ binding before fallback");
-      }
-      {
-        std::string malformed = categorical_write_array_mir(
-            slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false,
-            false, false, true);
-        const size_t gq = malformed.find("(generate_quantities");
-        const size_t call =
-            malformed.find("(FunApp (StanLib categorical_lpmf", gq);
-        const std::string vector_arg =
-            "((pattern (Var theta))\n"
-            "             (meta ((type_ UVector) (adlevel DataOnly)))))";
-        const size_t arg = malformed.find(vector_arg, call);
-        check(gq != std::string::npos && call != std::string::npos &&
-                  arg != std::string::npos,
-              "categorical malformed fallback mutation found target");
-        if (arg != std::string::npos) {
-          const std::string scalar_arg =
-              "((pattern (Lit Real 1.0))\n"
-              "             (meta ((type_ UReal) (adlevel DataOnly)))))";
-          malformed.replace(arg, vector_arg.size(), scalar_arg);
-        }
-        DataMap malformed_data =
-            DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
-        check(malformed_refused(malformed, malformed_data),
-              "categorical rejects malformed GQ signature before fallback");
-      }
-      {
-        std::string malformed = categorical_write_array_mir(
-            slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false,
-            false, true, true);
-        const size_t gq = malformed.find("(generate_quantities");
-        const size_t call =
-            malformed.find("(FunApp (UserDefined data_categorical", gq);
-        const std::string vector_arg =
-            "((pattern (Var theta))\n"
-            "             (meta ((type_ UVector) (adlevel DataOnly)))))";
-        const size_t arg = malformed.find(vector_arg, call);
-        check(gq != std::string::npos && call != std::string::npos &&
-                  arg != std::string::npos,
-              "categorical malformed UDF fallback mutation found target");
-        if (arg != std::string::npos) {
-          const std::string scalar_arg =
-              "((pattern (Lit Real 1.0))\n"
-              "             (meta ((type_ UReal) (adlevel DataOnly)))))";
-          malformed.replace(arg, vector_arg.size(), scalar_arg);
-        }
-        DataMap malformed_data =
-            DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
-        check(malformed_refused(malformed, malformed_data),
-              "categorical rejects malformed UDF actual before fallback");
-      }
-      {
-        std::string malformed = categorical_write_array_mir(
-            slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false,
-            false, true, true);
-        const std::string formal = "(DataOnly p UVector)";
-        const size_t formal_at = malformed.find(formal);
-        const size_t gq = malformed.find("(generate_quantities");
-        const size_t call =
-            malformed.find("(FunApp (UserDefined data_categorical", gq);
-        const std::string actual =
-            "((pattern (Var theta))\n"
-            "             (meta ((type_ UVector) (adlevel DataOnly)))))";
-        const size_t actual_at = malformed.find(actual, call);
-        check(formal_at != std::string::npos && gq != std::string::npos &&
-                  call != std::string::npos && actual_at != std::string::npos,
-              "categorical malformed UDF binding mutation found target");
-        if (actual_at != std::string::npos) {
-          std::string scalar_actual = actual;
-          scalar_actual.replace(scalar_actual.find("UVector"),
-                                std::strlen("UVector"), "UReal");
-          malformed.replace(actual_at, actual.size(), scalar_actual);
-        }
-        if (formal_at != std::string::npos)
-          malformed.replace(formal_at, formal.size(), "(DataOnly p UReal)");
-        DataMap malformed_data =
-            DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
-        check(malformed_refused(malformed, malformed_data),
-              "categorical rejects UDF metadata that contradicts its binding");
-      }
-      for (const std::string& fn :
-           {"categorical_lpmf", "categorical_logit_lpmf"}) {
-        DataMap malformed_data;
-        malformed_data.set_int("outcome", 2);
-        malformed_data.set_real_array(
-            "arg", fn == "categorical_lpmf"
-                       ? std::vector<double>{0.2, 0.3, 0.5}
-                       : std::vector<double>{-1.0, 0.0, 1.0});
-        bool direct_refused = false;
-        try {
-          (void)compile_model(categorical_udf_mir(fn, true, true, false, true),
-                              malformed_data);
-        } catch (const std::exception& e) {
-          const std::string msg = e.what();
-          direct_refused = msg.find("data-only") != std::string::npos &&
-                           msg.find("parameter") != std::string::npos;
-        }
-        check(direct_refused, fn + " rejects parameter at data UDF formal");
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    same_as_stan("categorical scalar valid", "categorical_lpmf", true, {2},
+                 {0.2, 0.3, 0.5});
+    same_as_stan("categorical zero probability", "categorical_lpmf", true, {2},
+                 {1.0, 0.0, 0.0});
+    same_as_stan("categorical scalar outcome", "categorical_lpmf", true, {4},
+                 {0.2, 0.3, 0.5});
+    same_as_stan("categorical outcome before simplex", "categorical_lpmf", true,
+                 {4}, {0.2, 0.2, 0.2});
+    same_as_stan("categorical later array outcome", "categorical_lpmf", false,
+                 {1, 4, 2}, {0.2, 0.3, 0.5});
+    same_as_stan("categorical length-one array", "categorical_lpmf", false, {4},
+                 {0.2, 0.3, 0.5});
+    same_as_stan("categorical empty outcome", "categorical_lpmf", false, {},
+                 {0.2, 0.3, 0.5});
+    same_as_stan("categorical empty still checks simplex", "categorical_lpmf",
+                 false, {}, {0.2, 0.2, 0.2});
+    same_as_stan("categorical scalar empty probabilities", "categorical_lpmf",
+                 true, {1}, {});
+    same_as_stan("categorical empty probabilities", "categorical_lpmf", false,
+                 {}, {});
+    same_as_stan("categorical normalized valid", "categorical_lpmf", false,
+                 {1, 3}, {0.2, 0.3, 0.5}, false);
+    same_as_stan("categorical normalized bad simplex", "categorical_lpmf", true,
+                 {1}, {0.2, 0.2, 0.2}, false);
+    same_as_stan("categorical normalized invalid outcome", "categorical_lpmf",
+                 false, {1, 4}, {0.2, 0.3, 0.5}, false);
+    same_as_stan("categorical normalized empty outcome", "categorical_lpmf",
+                 false, {}, {0.2, 0.3, 0.5}, false);
 
-        DataMap gq_data = DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
-        bool gq_accepted = true;
-        try {
-          CompiledModel gq_model = compile_model(
-              categorical_write_array_mir(slurp("tests/fixtures/cat.tmir.sexp"),
-                                          fn, false, false, true),
-              gq_data);
-        } catch (const std::exception& e) {
-          (void)e;
-          gq_accepted = false;
-        }
-        check(gq_accepted, fn + " accepts GQ parameter at data UDF formal");
-      }
+    same_as_stan("categorical logit scalar valid", "categorical_logit_lpmf",
+                 true, {2}, {-1.0, 0.0, 1.0});
+    same_as_stan("categorical logit scalar outcome", "categorical_logit_lpmf",
+                 true, {4}, {-1.0, 0.0, 1.0});
+    same_as_stan("categorical logit outcome before finite",
+                 "categorical_logit_lpmf", true, {4}, {0.0, nan, 1.0});
+    same_as_stan("categorical logit later array outcome",
+                 "categorical_logit_lpmf", false, {1, 4, 2}, {-1.0, 0.0, 1.0});
+    same_as_stan("categorical logit length-one array", "categorical_logit_lpmf",
+                 false, {4}, {-1.0, 0.0, 1.0});
+    same_as_stan("categorical logit empty checks NaN", "categorical_logit_lpmf",
+                 false, {}, {0.0, nan, 1.0});
+    same_as_stan("categorical logit checks infinity", "categorical_logit_lpmf",
+                 true, {1}, {0.0, inf, 1.0});
+    same_as_stan("categorical logit empty vectors", "categorical_logit_lpmf",
+                 false, {}, {});
+    same_as_stan("categorical logit scalar empty vector",
+                 "categorical_logit_lpmf", true, {1}, {});
+    same_as_stan("categorical logit normalized valid", "categorical_logit_lpmf",
+                 false, {1, 3}, {-1.0, 0.0, 1.0}, false);
+    same_as_stan("categorical logit normalized infinite",
+                 "categorical_logit_lpmf", true, {1}, {0.0, inf, 1.0}, false);
+    same_as_stan("categorical logit normalized invalid outcome",
+                 "categorical_logit_lpmf", false, {1, 4}, {-1.0, 0.0, 1.0},
+                 false);
+    same_as_stan("categorical logit normalized empty outcome",
+                 "categorical_logit_lpmf", false, {}, {-1.0, 0.0, 1.0}, false);
+    same_as_stan("categorical logit normalized empty vectors",
+                 "categorical_logit_lpmf", false, {}, {}, false);
 
-      DataMap d;
-      d.set_int("outcome", 2);
-      d.set_real_array("arg", {0.2, 0.3, 0.5});
-      CompiledModel model = compile_model(
-          categorical_check_mir("categorical_lpmf", true, 1, 3), d);
-      Executor ex(std::move(model.graph));
-      model.bind(ex);
-      ex.params_data()[0] = 0.75;
-      double grad = 0.0;
-      expect_eq("categorical check zero target", ex.gradient(&grad), 0.75);
-      expect_eq("categorical check disconnected gradient", grad, 1.0);
-
-      DataMap effect_data;
-      effect_data.set_int("outcome", 2);
-      effect_data.set_real_array("arg", {0.2, 0.3, 0.5});
-      std::optional<CompiledModel> effect_model;
-      {
-        stanli_test::StdoutCapture captured;
-        effect_model =
-            compile_model(categorical_effect_check_mir(), effect_data);
-        check(captured.finish().empty(),
-              "categorical outcome effect absent while compiling");
-      }
-      Executor effect_ex(std::move(effect_model->graph));
-      effect_model->bind(effect_ex);
-      effect_ex.params_data()[0] = 0.25;
-      for (int i = 0; i < 2; ++i) {
-        stanli_test::StdoutCapture captured;
-        expect_eq("categorical effect target " + std::to_string(i),
-                  effect_ex.gradient(&grad), 0.25);
-        check(captured.finish() == "categorical effect\n",
-              "categorical outcome effect executes once " + std::to_string(i));
-      }
-    }
-
+    // A local declared AutoDiffable remains a var in generated C++ even when
+    // assigned entirely from data. Its graph slot is parameter-free, so the
+    // exact op can own the value, but propto must still retain the summand.
+    same_local_autodiff_as_stan("categorical local autodiff valid",
+                                "categorical_lpmf", true, {2}, {0.2, 0.3, 0.5});
+    same_local_autodiff_as_stan("categorical local autodiff length-one array",
+                                "categorical_lpmf", false, {2},
+                                {0.2, 0.3, 0.5});
     {
-      // Error path: an unsupported function is reported by name, never
-      // silently miscompiled. Mutate a known-good fixture's density name.
-      std::string txt = slurp("tests/fixtures/es.tmir.sexp");
-      const std::string from = "normal_lpdf", to = "not_a_real_fn";
-      for (size_t pos = txt.find(from); pos != std::string::npos;
-           pos = txt.find(from, pos + to.size()))
-        txt.replace(pos, from.size(), to);
-      bool threw2 = false;
+      DataMap local_data;
+      local_data.set_int_array("outcome", {2});
+      local_data.set_real_array("arg", {0.2, 0.3, 0.5});
+      CompiledModel local_model = compile_model(
+          categorical_check_mir("categorical_lpmf", false, 1, 3, true, true),
+          local_data);
+      Executor local_ex(std::move(local_model.graph));
+      local_model.bind(local_ex);
+      local_ex.params_data()[0] = 0.0;
+      expect_eq("categorical propto value-only double instantiation",
+                local_ex.forward_value_only(), 0.0);
+    }
+    same_local_autodiff_as_stan("categorical local autodiff invalid",
+                                "categorical_lpmf", true, {4}, {0.2, 0.3, 0.5});
+    same_local_autodiff_as_stan("categorical logit local autodiff valid",
+                                "categorical_logit_lpmf", false, {1, 3},
+                                {-1.0, 0.0, 1.0});
+    same_local_autodiff_as_stan("categorical logit local autodiff invalid",
+                                "categorical_logit_lpmf", false, {1, 4},
+                                {-1.0, 0.0, 1.0});
+    auto check_local_exact_graph = [&](const std::string& label,
+                                       const std::string& fn, bool scalar,
+                                       const std::vector<int>& outcome,
+                                       const std::vector<double>& arg) {
+      DataMap local_data;
+      if (scalar)
+        local_data.set_int("outcome", outcome.at(0));
+      else
+        local_data.set_int_array("outcome", outcome);
+      local_data.set_real_array("arg", arg);
+      CompiledModel local_model =
+          compile_model(categorical_check_mir(fn, scalar, (int)outcome.size(),
+                                              (int)arg.size(), true, true),
+                        local_data);
+      bool found_exact = false;
+      int exact_slot = -1;
+      bool found_decomposition = false;
+      for (const Op& op : local_model.graph.ops) {
+        if (op.opcode == OP_CATEGORICAL) {
+          found_exact = true;
+          exact_slot = op.out;
+        }
+        found_decomposition = found_decomposition || op.opcode == OP_INDEX ||
+                              op.opcode == OP_GATHER || op.opcode == OP_LOGV ||
+                              op.opcode == OP_LOG_SOFTMAX ||
+                              op.opcode == OP_SUM_VEC;
+      }
+      bool exact_value_used = exact_slot == local_model.graph.result_slot;
+      for (const Op& op : local_model.graph.ops)
+        for (int i = 0; i < op.n_in; ++i)
+          exact_value_used = exact_value_used || op.in[i] == exact_slot;
+      check(found_exact, label + " exact op");
+      check(exact_value_used, label + " exact op owns target value");
+      check(!found_decomposition, label + " no unchecked decomposition");
+    };
+    check_local_exact_graph("categorical local autodiff", "categorical_lpmf",
+                            true, {4}, {0.2, 0.3, 0.5});
+    check_local_exact_graph("categorical logit local autodiff",
+                            "categorical_logit_lpmf", false, {1, 4},
+                            {-1.0, 0.0, 1.0});
+
+    auto malformed_refused = [](const std::string& mir, const DataMap& data) {
       try {
-        compile_model(txt, data);
-      } catch (const CompileError& e) {
-        threw2 =
-            std::string(e.what()).find("not_a_real_fn") != std::string::npos;
+        (void)compile_model(mir, data);
+      } catch (const std::exception& e) {
+        return std::string(e.what()).find("categorical") != std::string::npos;
       }
-      check(threw2, "unsupported function rejected with its name");
+      return false;
+    };
+    {
+      std::string mir = categorical_check_mir("categorical_lpmf", true, 1, 3);
+      const std::string from = "(Var outcome)";
+      mir.replace(mir.find(from), from.size(), "(Var anchor)");
+      DataMap malformed_data;
+      malformed_data.set_int("outcome", 2);
+      malformed_data.set_real_array("arg", {0.2, 0.3, 0.5});
+      check(malformed_refused(mir, malformed_data),
+            "categorical rejects data-only parameter outcome metadata");
+    }
+    {
+      std::string mir = categorical_check_mir("categorical_lpmf", true, 1, 3);
+      const std::string from = "outcome <opaque> SInt";
+      mir.replace(mir.find(from), from.size(), "outcome <opaque> SReal");
+      DataMap malformed_data;
+      malformed_data.set_real("outcome", 2.0);
+      malformed_data.set_real_array("arg", {0.2, 0.3, 0.5});
+      check(malformed_refused(mir, malformed_data),
+            "categorical rejects real binding with integer metadata");
+    }
+    {
+      std::string mir = slurp("tests/fixtures/cat.tmir.sexp");
+      const std::string from =
+          "((pattern (Var theta))\n"
+          "               (meta ((type_ UVector) (loc <opaque>) (adlevel "
+          "AutoDiffable))))";
+      const size_t pos = mir.find(from);
+      check(pos != std::string::npos,
+            "categorical malformed arg mutation found target");
+      if (pos != std::string::npos) {
+        std::string to = from;
+        to.replace(to.find("AutoDiffable"), std::strlen("AutoDiffable"),
+                   "DataOnly");
+        mir.replace(pos, from.size(), to);
+      }
+      DataMap malformed_data =
+          DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
+      check(malformed_refused(mir, malformed_data),
+            "categorical rejects data-only parameter vector metadata");
+    }
+    {
+      const std::string mir = categorical_check_mir("categorical_lpmf", false,
+                                                    2, 3, true, false, true);
+      DataMap malformed_data =
+          DataMap::from_json(R"({"outcome":[[1,2]],"arg":[0.2,0.3,0.5]})");
+      check(malformed_refused(mir, malformed_data),
+            "categorical rejects flattened rank-two outcome metadata");
+    }
+    for (bool in_gq : {false, true}) {
+      const std::string malformed =
+          categorical_transformed_data_mismatch_mir(in_gq);
+      check(malformed.find("(Var td_outcome)") != std::string::npos,
+            "categorical transformed-data fixture rewrites outcome");
+      DataMap malformed_data;
+      malformed_data.set_real("source", 2.0);
+      malformed_data.set_int("outcome", 2);
+      malformed_data.set_real_array("arg", {0.2, 0.3, 0.5});
+      check(malformed_refused(malformed, malformed_data),
+            std::string("categorical rejects transformed-data binding in ") +
+                (in_gq ? "generated quantities" : "log probability"));
+    }
+    {
+      std::string malformed = categorical_write_array_mir(
+          slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false);
+      const size_t gq = malformed.find("(generate_quantities");
+      const size_t call =
+          malformed.find("(FunApp (StanLib categorical_lpmf", gq);
+      const size_t outcome = malformed.find("(Var y)", call);
+      check(gq != std::string::npos && call != std::string::npos &&
+                outcome != std::string::npos,
+            "categorical missing-binding mutation found target");
+      if (outcome != std::string::npos)
+        malformed.replace(outcome, std::strlen("(Var y)"), "(Var missing)");
+      DataMap malformed_data =
+          DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
+      check(malformed_refused(malformed, malformed_data),
+            "categorical rejects missing GQ binding before fallback");
+    }
+    {
+      std::string malformed = categorical_write_array_mir(
+          slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false,
+          false, false, true);
+      const size_t gq = malformed.find("(generate_quantities");
+      const size_t call =
+          malformed.find("(FunApp (StanLib categorical_lpmf", gq);
+      const std::string vector_arg =
+          "((pattern (Var theta))\n"
+          "             (meta ((type_ UVector) (adlevel DataOnly)))))";
+      const size_t arg = malformed.find(vector_arg, call);
+      check(gq != std::string::npos && call != std::string::npos &&
+                arg != std::string::npos,
+            "categorical malformed fallback mutation found target");
+      if (arg != std::string::npos) {
+        const std::string scalar_arg =
+            "((pattern (Lit Real 1.0))\n"
+            "             (meta ((type_ UReal) (adlevel DataOnly)))))";
+        malformed.replace(arg, vector_arg.size(), scalar_arg);
+      }
+      DataMap malformed_data =
+          DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
+      check(malformed_refused(malformed, malformed_data),
+            "categorical rejects malformed GQ signature before fallback");
+    }
+    {
+      std::string malformed = categorical_write_array_mir(
+          slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false,
+          false, true, true);
+      const size_t gq = malformed.find("(generate_quantities");
+      const size_t call =
+          malformed.find("(FunApp (UserDefined data_categorical", gq);
+      const std::string vector_arg =
+          "((pattern (Var theta))\n"
+          "             (meta ((type_ UVector) (adlevel DataOnly)))))";
+      const size_t arg = malformed.find(vector_arg, call);
+      check(gq != std::string::npos && call != std::string::npos &&
+                arg != std::string::npos,
+            "categorical malformed UDF fallback mutation found target");
+      if (arg != std::string::npos) {
+        const std::string scalar_arg =
+            "((pattern (Lit Real 1.0))\n"
+            "             (meta ((type_ UReal) (adlevel DataOnly)))))";
+        malformed.replace(arg, vector_arg.size(), scalar_arg);
+      }
+      DataMap malformed_data =
+          DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
+      check(malformed_refused(malformed, malformed_data),
+            "categorical rejects malformed UDF actual before fallback");
+    }
+    {
+      std::string malformed = categorical_write_array_mir(
+          slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false,
+          false, true, true);
+      const std::string formal = "(DataOnly p UVector)";
+      const size_t formal_at = malformed.find(formal);
+      const size_t gq = malformed.find("(generate_quantities");
+      const size_t call =
+          malformed.find("(FunApp (UserDefined data_categorical", gq);
+      const std::string actual =
+          "((pattern (Var theta))\n"
+          "             (meta ((type_ UVector) (adlevel DataOnly)))))";
+      const size_t actual_at = malformed.find(actual, call);
+      check(formal_at != std::string::npos && gq != std::string::npos &&
+                call != std::string::npos && actual_at != std::string::npos,
+            "categorical malformed UDF binding mutation found target");
+      if (actual_at != std::string::npos) {
+        std::string scalar_actual = actual;
+        scalar_actual.replace(scalar_actual.find("UVector"),
+                              std::strlen("UVector"), "UReal");
+        malformed.replace(actual_at, actual.size(), scalar_actual);
+      }
+      if (formal_at != std::string::npos)
+        malformed.replace(formal_at, formal.size(), "(DataOnly p UReal)");
+      DataMap malformed_data =
+          DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
+      check(malformed_refused(malformed, malformed_data),
+            "categorical rejects UDF metadata that contradicts its binding");
+    }
+    for (const std::string& fn :
+         {"categorical_lpmf", "categorical_logit_lpmf"}) {
+      DataMap malformed_data;
+      malformed_data.set_int("outcome", 2);
+      malformed_data.set_real_array("arg",
+                                    fn == "categorical_lpmf"
+                                        ? std::vector<double>{0.2, 0.3, 0.5}
+                                        : std::vector<double>{-1.0, 0.0, 1.0});
+      bool direct_refused = false;
+      try {
+        (void)compile_model(categorical_udf_mir(fn, true, true, false, true),
+                            malformed_data);
+      } catch (const std::exception& e) {
+        const std::string msg = e.what();
+        direct_refused = msg.find("data-only") != std::string::npos &&
+                         msg.find("parameter") != std::string::npos;
+      }
+      check(direct_refused, fn + " rejects parameter at data UDF formal");
+
+      DataMap gq_data = DataMap::from_json(R"({"K":3,"y":2,"ys":[3,1,3]})");
+      bool gq_accepted = true;
+      try {
+        CompiledModel gq_model = compile_model(
+            categorical_write_array_mir(slurp("tests/fixtures/cat.tmir.sexp"),
+                                        fn, false, false, true),
+            gq_data);
+      } catch (const std::exception& e) {
+        (void)e;
+        gq_accepted = false;
+      }
+      check(gq_accepted, fn + " accepts GQ parameter at data UDF formal");
     }
 
+    DataMap d;
+    d.set_int("outcome", 2);
+    d.set_real_array("arg", {0.2, 0.3, 0.5});
+    CompiledModel model =
+        compile_model(categorical_check_mir("categorical_lpmf", true, 1, 3), d);
+    Executor ex(std::move(model.graph));
+    model.bind(ex);
+    ex.params_data()[0] = 0.75;
+    double grad = 0.0;
+    expect_eq("categorical check zero target", ex.gradient(&grad), 0.75);
+    expect_eq("categorical check disconnected gradient", grad, 1.0);
+
+    DataMap effect_data;
+    effect_data.set_int("outcome", 2);
+    effect_data.set_real_array("arg", {0.2, 0.3, 0.5});
+    std::optional<CompiledModel> effect_model;
     {
-      // A declared-int variable supplied with non-integer values. CmdStan's
-      // var_context rejects this at read time; stanli used to bind it as a
-      // typeless real entry, and the failure surfaced later as whatever
-      // consumer touched it first ("gather index must be int data").
-      DataMap d = DataMap::from_json(
-          R"({"k": 2, "idx": [1.0, 2.5], "lo": 2, "hi": 3, "i1": 1, "j1": 2,
+      stanli_test::StdoutCapture captured;
+      effect_model = compile_model(categorical_effect_check_mir(), effect_data);
+      check(captured.finish().empty(),
+            "categorical outcome effect absent while compiling");
+    }
+    Executor effect_ex(std::move(effect_model->graph));
+    effect_model->bind(effect_ex);
+    effect_ex.params_data()[0] = 0.25;
+    for (int i = 0; i < 2; ++i) {
+      stanli_test::StdoutCapture captured;
+      expect_eq("categorical effect target " + std::to_string(i),
+                effect_ex.gradient(&grad), 0.25);
+      check(captured.finish() == "categorical effect\n",
+            "categorical outcome effect executes once " + std::to_string(i));
+    }
+  }
+
+  {
+    // Error path: an unsupported function is reported by name, never
+    // silently miscompiled. Mutate a known-good fixture's density name.
+    std::string txt = slurp("tests/fixtures/es.tmir.sexp");
+    const std::string from = "normal_lpdf", to = "not_a_real_fn";
+    for (size_t pos = txt.find(from); pos != std::string::npos;
+         pos = txt.find(from, pos + to.size()))
+      txt.replace(pos, from.size(), to);
+    bool threw2 = false;
+    try {
+      compile_model(txt, data);
+    } catch (const CompileError& e) {
+      threw2 = std::string(e.what()).find("not_a_real_fn") != std::string::npos;
+    }
+    check(threw2, "unsupported function rejected with its name");
+  }
+
+  {
+    // A declared-int variable supplied with non-integer values. CmdStan's
+    // var_context rejects this at read time; stanli used to bind it as a
+    // typeless real entry, and the failure surfaced later as whatever
+    // consumer touched it first ("gather index must be int data").
+    DataMap d = DataMap::from_json(
+        R"({"k": 2, "idx": [1.0, 2.5], "lo": 2, "hi": 3, "i1": 1, "j1": 2,
             "rl": 2, "rh": 3, "m": 3, "Y": [1.5, -0.5, 2.0, 0.25],
             "Zm": [[1, 5], [2, 6], [3, 7], [4, 8]]})");
-      bool rejected = false;
-      std::string msg;
-      try {
-        compile_model(slurp("tests/fixtures/oob.tmir.sexp"), d);
-      } catch (const std::invalid_argument& e) {
-        rejected = true;
-        msg = e.what();
-      } catch (const std::exception& e) {
-        msg = e.what();
-      }
-      check(rejected, "non-int data for int variable rejected: " + msg);
-      check(msg.find("int variable contained non-int values") !=
-                    std::string::npos &&
-                msg.find("name=idx") != std::string::npos,
-            "the rejection names the int variable: " + msg);
+    bool rejected = false;
+    std::string msg;
+    try {
+      compile_model(slurp("tests/fixtures/oob.tmir.sexp"), d);
+    } catch (const std::invalid_argument& e) {
+      rejected = true;
+      msg = e.what();
+    } catch (const std::exception& e) {
+      msg = e.what();
     }
+    check(rejected, "non-int data for int variable rejected: " + msg);
+    check(msg.find("int variable contained non-int values") !=
+                  std::string::npos &&
+              msg.find("name=idx") != std::string::npos,
+          "the rejection names the int variable: " + msg);
+  }
 
-    {
-      // Data whose JSON shape disagrees with its declaration. CmdStan's
-      // var_context validates every declared dimension before it reads a
-      // value and throws std::invalid_argument naming the variable and both
-      // shapes; stanli used to walk off the end of the short array instead,
-      // which surfaced as whatever std::vector::at happened to say. A host
-      // distinguishing bad data from a broken model reads the exception
-      // type, so the type is the contract.
-      DataMap d;
-      d.set_int("J", 8);
-      d.set_real_array("y", std::vector<double>(kY, kY + 7));
-      d.set_real_array("sigma", std::vector<double>(kSigma, kSigma + 8));
-      bool rejected = false;
-      std::string msg;
-      try {
-        compile_model(slurp("tests/fixtures/es.tmir.sexp"), d);
-      } catch (const std::invalid_argument& e) {
-        rejected = true;
-        msg = e.what();
-      } catch (const std::exception& e) {
-        msg = e.what();
-      }
-      check(rejected, "short data array rejected as invalid_argument: " + msg);
-      check(msg.find("mismatch in dimension") != std::string::npos &&
-                msg.find("name=y") != std::string::npos &&
-                msg.find("(8)") != std::string::npos &&
-                msg.find("(7)") != std::string::npos,
-            "the rejection names the variable and both shapes: " + msg);
-
-      // Too many values is the same disagreement; reading the declared
-      // prefix and dropping the rest would be silent data loss.
-      DataMap wide;
-      wide.set_int("J", 8);
-      wide.set_real_array("y", std::vector<double>(kY, kY + 8));
-      wide.set_real_array("sigma", std::vector<double>(9, 1.0));
-      bool wide_rejected = false;
-      try {
-        compile_model(slurp("tests/fixtures/es.tmir.sexp"), wide);
-      } catch (const std::invalid_argument&) {
-        wide_rejected = true;
-      } catch (const std::exception&) {
-      }
-      check(wide_rejected, "over-long data array is rejected too");
+  {
+    // Data whose JSON shape disagrees with its declaration. CmdStan's
+    // var_context validates every declared dimension before it reads a
+    // value and throws std::invalid_argument naming the variable and both
+    // shapes; stanli used to walk off the end of the short array instead,
+    // which surfaced as whatever std::vector::at happened to say. A host
+    // distinguishing bad data from a broken model reads the exception
+    // type, so the type is the contract.
+    DataMap d;
+    d.set_int("J", 8);
+    d.set_real_array("y", std::vector<double>(kY, kY + 7));
+    d.set_real_array("sigma", std::vector<double>(kSigma, kSigma + 8));
+    bool rejected = false;
+    std::string msg;
+    try {
+      compile_model(slurp("tests/fixtures/es.tmir.sexp"), d);
+    } catch (const std::invalid_argument& e) {
+      rejected = true;
+      msg = e.what();
+    } catch (const std::exception& e) {
+      msg = e.what();
     }
+    check(rejected, "short data array rejected as invalid_argument: " + msg);
+    check(msg.find("mismatch in dimension") != std::string::npos &&
+              msg.find("name=y") != std::string::npos &&
+              msg.find("(8)") != std::string::npos &&
+              msg.find("(7)") != std::string::npos,
+          "the rejection names the variable and both shapes: " + msg);
 
-    {
-      // `target += <container>`. Stan defines the increment for a container
-      // `e` as adding `sum(e)`; lowering used to push the container's slot
-      // straight into the target terms, where a scalar consumer read element
-      // zero and the rest of the container reached neither lp nor gradient.
-      // Every container shape a `target +=` can name is here, plus a
-      // container expression, because the truncation was in the consumer and
-      // so was blind to which shape produced the value.
-      DataMap d = DataMap::from_json(R"({"N": 3, "w": [1.25, 2.5, 0.75]})");
-      CompiledModel lm =
-          compile_model(slurp("tests/fixtures/tpecont.tmir.sexp"), d);
-      Executor lex(std::move(lm.graph));
-      lm.bind(lex);
-      // Unconstrained parameters throughout, so the target terms are the
-      // five increments and nothing else: no jacobian term joins the fold.
-      const double q[12] = {0.3, -1.2, 0.7,  2.1, -0.4, 1.6,
-                            0.9, 1.3,  -2.2, 0.5, 1.1,  -0.6};
-      for (int i = 0; i < 12; ++i) lex.params_data()[i] = q[i];
-      double g[12], lp = lex.gradient(g);
+    // Too many values is the same disagreement; reading the declared
+    // prefix and dropping the rest would be silent data loss.
+    DataMap wide;
+    wide.set_int("J", 8);
+    wide.set_real_array("y", std::vector<double>(kY, kY + 8));
+    wide.set_real_array("sigma", std::vector<double>(9, 1.0));
+    bool wide_rejected = false;
+    try {
+      compile_model(slurp("tests/fixtures/es.tmir.sexp"), wide);
+    } catch (const std::invalid_argument&) {
+      wide_rejected = true;
+    } catch (const std::exception&) {
+    }
+    check(wide_rejected, "over-long data array is rejected too");
+  }
+
+  {
+    // `target += <container>`. Stan defines the increment for a container
+    // `e` as adding `sum(e)`; lowering used to push the container's slot
+    // straight into the target terms, where a scalar consumer read element
+    // zero and the rest of the container reached neither lp nor gradient.
+    // Every container shape a `target +=` can name is here, plus a
+    // container expression, because the truncation was in the consumer and
+    // so was blind to which shape produced the value.
+    DataMap d = DataMap::from_json(R"({"N": 3, "w": [1.25, 2.5, 0.75]})");
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/tpecont.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    // Unconstrained parameters throughout, so the target terms are the
+    // five increments and nothing else: no jacobian term joins the fold.
+    const double q[12] = {0.3, -1.2, 0.7,  2.1, -0.4, 1.6,
+                          0.9, 1.3,  -2.2, 0.5, 1.1,  -0.6};
+    for (int i = 0; i < 12; ++i) lex.params_data()[i] = q[i];
+    double g[12], lp = lex.gradient(g);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> v(3);
+    Eigen::Matrix<var, 1, -1> r(3);
+    Eigen::Matrix<var, -1, -1> M(2, 2);
+    std::vector<var> a(2);
+    for (int i = 0; i < 3; ++i) v(i) = q[i];
+    for (int i = 0; i < 3; ++i) r(i) = q[3 + i];
+    // Matrices are column-major in the slot, as they are in Eigen, so the
+    // reference's redux walks the same elements in the same order.
+    for (int i = 0; i < 4; ++i) M(i % 2, i / 2) = q[6 + i];
+    for (int i = 0; i < 2; ++i) a[i] = q[10 + i];
+    var acc = stan::math::sum(v);
+    acc = acc + stan::math::sum(r);
+    acc = acc + stan::math::sum(M);
+    acc = acc + stan::math::sum(a);
+    acc = acc + stan::math::sum(stan::math::multiply(2.0, v));
+    acc.grad();
+    expect_eq("tpecont lp", lp, acc.val());
+    for (int i = 0; i < 3; ++i)
+      expect_eq("tpecont gv" + std::to_string(i), g[i], v(i).adj());
+    for (int i = 0; i < 3; ++i)
+      expect_eq("tpecont gr" + std::to_string(i), g[3 + i], r(i).adj());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("tpecont gM" + std::to_string(i), g[6 + i],
+                M(i % 2, i / 2).adj());
+    for (int i = 0; i < 2; ++i)
+      expect_eq("tpecont ga" + std::to_string(i), g[10 + i], a[i].adj());
+    stan::math::recover_memory();
+  }
+
+  {
+    // The same increment reached once per loop iteration: the loop unrolls
+    // into one target term per pass, each of them a container.
+    DataMap d = DataMap::from_json(R"({"N": 3})");
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/tpeloop.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[7] = {0.3, -1.2, 0.7, 2.1, -0.4, 1.6, 0.9};
+    for (int i = 0; i < 7; ++i) lex.params_data()[i] = q[i];
+    double g[7], lp = lex.gradient(g);
+
+    using stan::math::var;
+    // array[3] vector[2] is outer-major: f[n] is a contiguous pair.
+    std::vector<Eigen::Matrix<var, -1, 1>> f(3, Eigen::Matrix<var, -1, 1>(2));
+    for (int n = 0; n < 3; ++n)
+      for (int i = 0; i < 2; ++i) f[n](i) = q[2 * n + i];
+    var z = q[6];
+    var acc = stan::math::sum(f[0]);
+    for (int n = 1; n < 3; ++n) acc = acc + stan::math::sum(f[n]);
+    acc = acc + z * 0.5;
+    acc.grad();
+    expect_eq("tpeloop lp", lp, acc.val());
+    for (int n = 0; n < 3; ++n)
+      for (int i = 0; i < 2; ++i)
+        expect_eq("tpeloop gf" + std::to_string(2 * n + i), g[2 * n + i],
+                  f[n](i).adj());
+    expect_eq("tpeloop gz", g[6], z.adj());
+    stan::math::recover_memory();
+  }
+
+  {
+    // The increment inside a parameter-dependent branch, which lowering
+    // compiles into an island region: its register program has to sum the
+    // container too, and both arms are checked because only one of them
+    // runs per evaluation.
+    DataMap d;
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/tpeisland.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[4] = {0.3, -1.2, 0.7, 1.5};
+    for (int arm = 0; arm < 2; ++arm) {
+      const double zv = arm ? -1.5 : q[3];
+      for (int i = 0; i < 3; ++i) lex.params_data()[i] = q[i];
+      lex.params_data()[3] = zv;
+      double g[4], lp = lex.gradient(g);
 
       using stan::math::var;
       Eigen::Matrix<var, -1, 1> v(3);
-      Eigen::Matrix<var, 1, -1> r(3);
-      Eigen::Matrix<var, -1, -1> M(2, 2);
-      std::vector<var> a(2);
       for (int i = 0; i < 3; ++i) v(i) = q[i];
-      for (int i = 0; i < 3; ++i) r(i) = q[3 + i];
-      // Matrices are column-major in the slot, as they are in Eigen, so the
-      // reference's redux walks the same elements in the same order.
-      for (int i = 0; i < 4; ++i) M(i % 2, i / 2) = q[6 + i];
-      for (int i = 0; i < 2; ++i) a[i] = q[10 + i];
-      var acc = stan::math::sum(v);
-      acc = acc + stan::math::sum(r);
-      acc = acc + stan::math::sum(M);
-      acc = acc + stan::math::sum(a);
-      acc = acc + stan::math::sum(stan::math::multiply(2.0, v));
+      var acc = zv > 0.0 ? stan::math::sum(v) : stan::math::sum(-v);
       acc.grad();
-      expect_eq("tpecont lp", lp, acc.val());
+      const std::string tag = "tpeisland" + std::to_string(arm);
+      expect_eq(tag + " lp", lp, acc.val());
       for (int i = 0; i < 3; ++i)
-        expect_eq("tpecont gv" + std::to_string(i), g[i], v(i).adj());
-      for (int i = 0; i < 3; ++i)
-        expect_eq("tpecont gr" + std::to_string(i), g[3 + i], r(i).adj());
-      for (int i = 0; i < 4; ++i)
-        expect_eq("tpecont gM" + std::to_string(i), g[6 + i],
-                  M(i % 2, i / 2).adj());
-      for (int i = 0; i < 2; ++i)
-        expect_eq("tpecont ga" + std::to_string(i), g[10 + i], a[i].adj());
+        expect_eq(tag + " gv" + std::to_string(i), g[i], v(i).adj());
+      expect_eq(tag + " gz", g[3], 0.0);
       stan::math::recover_memory();
     }
-
-    {
-      // The same increment reached once per loop iteration: the loop unrolls
-      // into one target term per pass, each of them a container.
-      DataMap d = DataMap::from_json(R"({"N": 3})");
-      CompiledModel lm =
-          compile_model(slurp("tests/fixtures/tpeloop.tmir.sexp"), d);
-      Executor lex(std::move(lm.graph));
-      lm.bind(lex);
-      const double q[7] = {0.3, -1.2, 0.7, 2.1, -0.4, 1.6, 0.9};
-      for (int i = 0; i < 7; ++i) lex.params_data()[i] = q[i];
-      double g[7], lp = lex.gradient(g);
-
-      using stan::math::var;
-      // array[3] vector[2] is outer-major: f[n] is a contiguous pair.
-      std::vector<Eigen::Matrix<var, -1, 1>> f(3, Eigen::Matrix<var, -1, 1>(2));
-      for (int n = 0; n < 3; ++n)
-        for (int i = 0; i < 2; ++i) f[n](i) = q[2 * n + i];
-      var z = q[6];
-      var acc = stan::math::sum(f[0]);
-      for (int n = 1; n < 3; ++n) acc = acc + stan::math::sum(f[n]);
-      acc = acc + z * 0.5;
-      acc.grad();
-      expect_eq("tpeloop lp", lp, acc.val());
-      for (int n = 0; n < 3; ++n)
-        for (int i = 0; i < 2; ++i)
-          expect_eq("tpeloop gf" + std::to_string(2 * n + i), g[2 * n + i],
-                    f[n](i).adj());
-      expect_eq("tpeloop gz", g[6], z.adj());
-      stan::math::recover_memory();
-    }
-
-    {
-      // The increment inside a parameter-dependent branch, which lowering
-      // compiles into an island region: its register program has to sum the
-      // container too, and both arms are checked because only one of them
-      // runs per evaluation.
-      DataMap d;
-      CompiledModel lm =
-          compile_model(slurp("tests/fixtures/tpeisland.tmir.sexp"), d);
-      Executor lex(std::move(lm.graph));
-      lm.bind(lex);
-      const double q[4] = {0.3, -1.2, 0.7, 1.5};
-      for (int arm = 0; arm < 2; ++arm) {
-        const double zv = arm ? -1.5 : q[3];
-        for (int i = 0; i < 3; ++i) lex.params_data()[i] = q[i];
-        lex.params_data()[3] = zv;
-        double g[4], lp = lex.gradient(g);
-
-        using stan::math::var;
-        Eigen::Matrix<var, -1, 1> v(3);
-        for (int i = 0; i < 3; ++i) v(i) = q[i];
-        var acc = zv > 0.0 ? stan::math::sum(v) : stan::math::sum(-v);
-        acc.grad();
-        const std::string tag = "tpeisland" + std::to_string(arm);
-        expect_eq(tag + " lp", lp, acc.val());
-        for (int i = 0; i < 3; ++i)
-          expect_eq(tag + " gv" + std::to_string(i), g[i], v(i).adj());
-        expect_eq(tag + " gz", g[3], 0.0);
-        stan::math::recover_memory();
-      }
-    }
-
-    if (failures == 0) std::printf("test_lower OK\n");
-    return failures == 0 ? 0 : 1;
   }
+
+  if (failures == 0) std::printf("test_lower OK\n");
+  return failures == 0 ? 0 : 1;
+}
