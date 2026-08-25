@@ -1291,6 +1291,23 @@ struct Lowering {
             return constant(static_cast<double>(ii->second));
           const int s = env_slot(e.name);
           if (s >= 0) return scope.at(e.name);
+          // A declared local read before its first write: Materialize
+          // the same uninitialized container the indexed-assignment path would.
+          auto dl = decls.find(e.name);
+          if (dl != decls.end()) {
+            SlotInfo si = dl->second.si;
+            si.param_free = true;
+            Val value{add_slot(dl->second.len, false), dl->second.autodiff, si};
+            const double initial =
+                dl->second.int_array
+                    ? static_cast<double>(std::numeric_limits<int>::min())
+                    : std::numeric_limits<double>::quiet_NaN();
+            out.fills.emplace_back(
+                value.slot, std::vector<double>(dl->second.len, initial));
+            if (dl->second.int_array) set_uninitialized_int_array(value);
+            scope[e.name] = value;
+            return value;
+          }
           fail("unknown variable " + e.name);
         }
         return it->second;
@@ -3455,10 +3472,10 @@ struct Lowering {
       g.ops.back().variant = grouping == mir::ProdGrouping::Scalar ? 1u : 0u;
       return result;
     }
-    if (e.name == "rep_vector") {
+    if (e.name == "rep_vector" || e.name == "rep_row_vector") {
       Val a = lower_expr(e.args[0]);
       const long n = eval_int(e.args[1]);
-      return emit_value(OP_REP_VEC, {a}, n, view_of("UVector"));
+      return emit_value(OP_REP_VEC, {a}, n, view_of(e.type_));
     }
     if (e.name == "log_sum_exp" || e.name == "sum") {
       // One argument is the reduction; two is the elementwise form below.
