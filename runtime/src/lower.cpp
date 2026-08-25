@@ -1482,6 +1482,22 @@ struct Lowering {
           return emit_value(OP_SLICE_STRIDED, {base}, N,
                             array_view({N}, ViewKind::Flat), {(int)k, (int)S});
         }
+        // Row range of the same layout: A[i, lo:hi] is contiguous.
+        if (e.args.size() == 3 && is_array(base.si) && bdims &&
+            array_shape(base.si).leaf == ViewKind::Flat && bdims->size() == 2 &&
+            e.args[1].name == "IndexSingle" &&
+            e.args[2].name == "IndexBetween") {
+          const int64_t i = eval_int(e.args[1].args[0]);
+          const int64_t lo = eval_int(e.args[2].args[0]);
+          const int64_t hi = eval_int(e.args[2].args[1]);
+          const int64_t S = (*bdims)[1];
+          check_index(i, (*bdims)[0], "array index", e.raw);
+          check_range(lo, hi, S, "array range", e.raw);
+          const int64_t len = hi >= lo ? hi - lo + 1 : 0;
+          return emit_value(OP_SLICE, {base}, len,
+                            array_view({len}, ViewKind::Flat),
+                            {(int)(len ? (i - 1) * S + lo - 1 : 0)});
+        }
         // Row-range column read M[a:b, j] (contiguous within the column).
         if (e.args.size() == 3 && is_matrix(base.si) &&
             e.args[1].name == "IndexBetween" &&

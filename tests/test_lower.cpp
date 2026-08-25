@@ -576,6 +576,23 @@ int main() {
     expect_eq("ndlit lp", lp, wt * q[1] + s3 * q[2]);
   }
 
+  // A[i, lo:hi] on a 2-D int array: graph order is outer-major, so a wrong
+  // offset here reads a neighbouring row and stays silent.
+  {
+    const DataMap d = DataMap::from_json(slurp(
+        "tests/fixtures/arr2d_rowrange.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/arr2d_rowrange.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.1;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    const double sum = 1 + 2 + 5 + 6 + 7 + 9;
+    expect_eq("arr2d rowrange lp", lp, -0.5 * 0.1 * 0.1 + sum * 0.1);
+    expect_eq("arr2d rowrange grad", grad, -0.1 + sum);
+  }
+
   // An uninitialized UDF local still denotes a value before its first write.
   // A data-dependent count that comes out zero leaves the local zero-width,
   // so the guarded loop that fills it performs no indexed assignment and the
