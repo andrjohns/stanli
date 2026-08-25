@@ -3328,6 +3328,33 @@ int main() {
               theta.adj());
   }
 
+  // tcrossprod(A) is A * A'. It reuses the transpose and GEMM graph ops, so
+  // this pins both the shared input's accumulated adjoint and matrix layout.
+  {
+    DataMap d;
+    CompiledModel tm =
+        compile_model(slurp("tests/fixtures/tcross.tmir.sexp"), d);
+    Executor tex(std::move(tm.graph));
+    tm.bind(tex);
+    const double q[6] = {0.2, -0.4, 0.7, 0.1, -0.3, 0.8};
+    for (int i = 0; i < 6; ++i) tex.params_data()[i] = q[i];
+    double gradient[6] = {0, 0, 0, 0, 0, 0};
+    const double lp = tex.gradient(gradient);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> a(2, 3);
+    for (int i = 0; i < 6; ++i) a(i) = q[i];
+    Eigen::Matrix<var, -1, -1> gram = stan::math::tcrossprod(a);
+    var reference_lp =
+        stan::math::normal_lpdf<true>(stan::math::to_vector(a), 0, 1) +
+        stan::math::normal_lpdf<true>(stan::math::to_vector(gram), 0, 1);
+    reference_lp.grad();
+    expect_eq("tcrossprod: lp", lp, reference_lp.val());
+    for (int i = 0; i < 6; ++i)
+      expect_ulp("tcrossprod: g" + std::to_string(i), gradient[i],
+                 a(i).adj());
+  }
+
   // Vector fma from --O1 partial evaluation (`k .* t + c` becomes
   // fma(k, t, c)): OP_FMA is FUSED, so the reference is stan::math::fma,
   // and the data avoids powers of two -- with t = 2.0/-1.0/0.5 the
