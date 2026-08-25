@@ -1516,6 +1516,15 @@ class MirInterp {
       r.r = {s};
       return r;
     }
+    if (e.name == "diag_matrix" && e.args.size() == 1) {
+      Value diagonal = eval(e.args[0]);
+      const int64_t n = (int64_t)diagonal.r.size();
+      r.dims = {n, n};
+      r.r.assign((size_t)(n * n), T(0.0));
+      for (int64_t i = 0; i < n; ++i)
+        r.r[(size_t)(i * n + i)] = diagonal.r[(size_t)i];
+      return r;
+    }
     if (e.name == "cholesky_decompose" && e.args.size() == 1) {
       // Standard column-oriented Cholesky on the templated scalar.
       Value a = eval(e.args[0]);
