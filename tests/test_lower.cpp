@@ -2194,6 +2194,23 @@ int main() {
     expect_eq("parameter region uninitialized live-in grad", grad, 0.25);
   }
 
+  // stanc3 represents an early return from an optimized, inlined UDF as a
+  // Break from a sentinel loop. The return assignment before it must survive,
+  // and statements after the Break in that loop must not execute.
+  {
+    DataMap d;
+    d.set_real_array("x", {-1.0, 2.0, 3.0});
+    CompiledModel lm = compile_model(
+        slurp("tests/fixtures/udf_early_return_break.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.1;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    expect_eq("optimized UDF Break lp", lp, -0.5 * 0.1 * 0.1 + 2.0 * 0.1);
+    expect_eq("optimized UDF Break grad", grad, -0.1 + 2.0);
+  }
+
   // propto through a user-defined density. CmdStan compiles one as a
   // template on propto__ and hands the CALLER's value to the body, so a
   // body written with `_lupdf` normalizes when it was reached through
