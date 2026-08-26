@@ -2,7 +2,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id N) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable N) ()) UInt
@@ -34,7 +34,7 @@
      (Block
       (((pattern
          (Decl (decl_adtype AutoDiffable) (decl_id i) (decl_type (Sized SInt))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable i) ()) UInt
@@ -42,7 +42,7 @@
         (meta <opaque>))
        ((pattern
          (Decl (decl_adtype AutoDiffable) (decl_id acc) (decl_type (Sized SReal))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable acc) ()) UReal
@@ -65,19 +65,16 @@
              (((pattern
                 (Assignment ((LVariable acc) ()) UReal
                  ((pattern
-                   (FunApp (StanLib Plus__ FnPlain AoS)
-                    (((pattern (Var acc))
+                   (FunApp (StanLib fma FnPlain AoS)
+                    (((pattern
+                       (Promotion
+                        ((pattern (Var i))
+                         (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                        UReal DataOnly))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                     ((pattern (Var theta))
                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-                     ((pattern
-                       (FunApp (StanLib Times__ FnPlain AoS)
-                        (((pattern
-                           (Promotion
-                            ((pattern (Var i))
-                             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                            UReal DataOnly))
-                          (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
-                         ((pattern (Var theta))
-                          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                     ((pattern (Var acc))
                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
                (meta <opaque>))
@@ -115,7 +112,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -123,7 +120,7 @@
      (Block
       (((pattern
          (Decl (decl_adtype AutoDiffable) (decl_id i) (decl_type (Sized SInt))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable i) ()) UInt
@@ -131,7 +128,7 @@
         (meta <opaque>))
        ((pattern
          (Decl (decl_adtype AutoDiffable) (decl_id acc) (decl_type (Sized SReal))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable acc) ()) UReal
@@ -145,7 +142,7 @@
        ((pattern
          (While
           ((pattern
-            (FunApp (StanLib Leq__ FnPlain AoS)
+            (FunApp (StanLib Leq__ FnPlain SoA)
              (((pattern (Var i)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
               ((pattern (Var N)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
            (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
@@ -154,26 +151,23 @@
              (((pattern
                 (Assignment ((LVariable acc) ()) UReal
                  ((pattern
-                   (FunApp (StanLib Plus__ FnPlain AoS)
-                    (((pattern (Var acc))
+                   (FunApp (StanLib fma FnPlain SoA)
+                    (((pattern
+                       (Promotion
+                        ((pattern (Var i))
+                         (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                        UReal DataOnly))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                     ((pattern (Var theta))
                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-                     ((pattern
-                       (FunApp (StanLib Times__ FnPlain AoS)
-                        (((pattern
-                           (Promotion
-                            ((pattern (Var i))
-                             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                            UReal DataOnly))
-                          (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
-                         ((pattern (Var theta))
-                          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                     ((pattern (Var acc))
                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
                (meta <opaque>))
               ((pattern
                 (Assignment ((LVariable i) ()) UInt
                  ((pattern
-                   (FunApp (StanLib Plus__ FnPlain AoS)
+                   (FunApp (StanLib Plus__ FnPlain SoA)
                     (((pattern (Var i))
                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                      ((pattern (Lit Int 1))
@@ -185,7 +179,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib std_normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib std_normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var theta))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
@@ -242,7 +236,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id theta) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UReal
@@ -269,7 +263,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id theta) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UReal

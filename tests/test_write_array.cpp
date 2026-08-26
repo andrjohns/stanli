@@ -3372,8 +3372,48 @@ void test_gq_reduction_lowering_guards() {
       "DataOnly))))";
   std::string empty_sum = base;
   if (replace_reduction_after(empty_sum, sum_call, sum_arg, empty_slice,
-                              "empty int sum"))
-    expect_reduction_interp(empty_sum, "", "empty direct int sum fallback");
+                              "empty int sum")) {
+    // The empty slice folds to a compile-time zero and the model stays on
+    // the graph path; row parity with the interpreter is the guard.
+    CompiledModel em;
+    bool compiled = true;
+    try {
+      em = compile_model(empty_sum, reduction_data());
+    } catch (const std::exception& e) {
+      ++failures;
+      compiled = false;
+      std::printf("FAIL empty direct int sum: %s\n", e.what());
+    }
+    if (compiled && (!em.write_array || em.write_array->interp)) {
+      ++failures;
+      std::printf("FAIL empty direct int sum stayed interpreted\n");
+    } else if (compiled) {
+      Executor eex(std::move(em.write_array->graph));
+      em.write_array->bind(eex);
+      eex.params_data()[0] = 0.25;
+      for (int i = 0; i < 5; ++i) eex.params_data()[1 + i] = 0.5;
+      WaRng erng(2026), irng(2026);
+      eex.run_forward_only(EvalState{&erng});
+      std::vector<double> got;
+      for (const auto& column : em.write_array->columns) {
+        const double* values = eex.value_ptr(column.slot);
+        for (int64_t i = 0; i < column.len; ++i)
+          got.push_back(values[column.storage_index(i)]);
+      }
+      auto eprogram = std::make_shared<mir::Program>(
+          mir::read_program(sexp::parse(empty_sum)));
+      WaInterp einterp(eprogram, reduction_base(reduction_data()));
+      std::map<std::string, DataMap::Entry> eparams;
+      eparams["pad"].r = {0.25};
+      eparams["x"].r = std::vector<double>(5, 0.5);
+      eparams["x"].dims = {5};
+      const std::vector<double> want = einterp.eval(eparams, irng);
+      if (got != want) {
+        ++failures;
+        std::printf("FAIL empty direct int sum graph/interpreter row\n");
+      }
+    }
+  }
 
   // The generated fixture's reversed 10:0 write proves that arbitrary
   // reversed ranges are harmless empty updates.  Mutate its later 4:5 write
