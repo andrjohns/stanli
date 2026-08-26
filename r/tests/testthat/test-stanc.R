@@ -143,9 +143,10 @@ test_that("native discovery prefers the packaged portable compiler", {
     expect_identical(name, "stanc.exe")
     "C:/tools/stanc.exe"
   }
-  expect_identical(
-    stanli:::find_native_compiler("Windows", runtime, "", from_path),
-    list(path = portable, portable = TRUE))
+  found <- stanli:::find_native_compiler("Windows", runtime, "", from_path)
+  expect_true(found$portable)
+  expect_identical(normalizePath(found$path, winslash = "/", mustWork = TRUE),
+                   normalizePath(portable, winslash = "/", mustWork = TRUE))
 
   # Explicit configuration remains the bisect/override mechanism.
   expect_identical(
@@ -154,9 +155,10 @@ test_that("native discovery prefers the packaged portable compiler", {
     list(path = "C:/old/stanc.exe", portable = FALSE))
 
   unlink(portable)
-  expect_identical(
-    stanli:::find_native_compiler("Windows", runtime, "", from_path),
-    list(path = stanc, portable = FALSE))
+  found <- stanli:::find_native_compiler("Windows", runtime, "", from_path)
+  expect_false(found$portable)
+  expect_identical(normalizePath(found$path, winslash = "/", mustWork = TRUE),
+                   normalizePath(stanc, winslash = "/", mustWork = TRUE))
   unlink(stanc)
   expect_identical(
     stanli:::find_native_compiler("Windows", runtime, "", from_path),
