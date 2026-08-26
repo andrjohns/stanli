@@ -159,8 +159,27 @@ still waits for the full Windows wheel.
 
 ## Phase 3: CRAN and webR compiler
 
+Status: compatibility gate not yet open. Stanli has not completed a CRAN
+release, so the compiler carried by the package cannot switch formats yet. The
+v0.9.2 release tarball is the baseline candidate: it carries the legacy
+JavaScript producer and pins a runtime with both decoders. Submit that exact
+artifact first, record its CRAN acceptance, and make the producer switch in a
+later CRAN release.
+
 Switch the compiler carried inside the R package only after a released R
 runtime with the dual decoder has existed for at least one CRAN cycle.
+
+Readiness checks land before that switch without changing the shipped path:
+
+- The browser compiler artifact is provenance-checked, loaded directly into a
+  fresh V8 context, and its portable output is passed through the public
+  `stanli_model(mir=...)` API against the real Linux runtime. That check covers
+  UTF-8, deterministic bytes, warnings, malformed input, gradients, sampling,
+  and generated quantities.
+- The webR side-module job loads the same compiler artifact through webR's
+  host-JavaScript bridge and covers portable output plus malformed source.
+- The R package test asserts that its bundled compiler still emits the legacy
+  s-expression during the compatibility release.
 
 - Build the tracked compiler JS from the shared package.
 - Update V8 and webR to prefer portable output.
