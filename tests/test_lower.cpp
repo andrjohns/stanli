@@ -578,7 +578,8 @@ int main() {
 
   // A while loop whose condition is data unrolls the way a for loop does.
   {
-    const DataMap d = DataMap::from_json(slurp("tests/fixtures/whileloop.json"));
+    const DataMap d =
+        DataMap::from_json(slurp("tests/fixtures/whileloop.json"));
     CompiledModel lm =
         compile_model(slurp("tests/fixtures/whileloop.tmir.sexp"), d);
     Executor lex(std::move(lm.graph));
@@ -614,8 +615,8 @@ int main() {
   // A[i, lo:hi] on a 2-D int array: graph order is outer-major, so a wrong
   // offset here reads a neighbouring row and stays silent.
   {
-    const DataMap d = DataMap::from_json(slurp(
-        "tests/fixtures/arr2d_rowrange.json"));
+    const DataMap d =
+        DataMap::from_json(slurp("tests/fixtures/arr2d_rowrange.json"));
     CompiledModel lm =
         compile_model(slurp("tests/fixtures/arr2d_rowrange.tmir.sexp"), d);
     Executor lex(std::move(lm.graph));
@@ -647,6 +648,25 @@ int main() {
     // No match means no `selected` term: std_normal on theta and nothing else.
     expect_eq("empty UDF local lp", lp, -0.5 * 0.1 * 0.1);
     expect_eq("empty UDF local grad", grad, -0.1);
+  }
+
+  // A data-only `if` on a UDF local that lives in the graph. DataOnly is an
+  // adlevel, not a promise that the interpreter can see the values, so the
+  // condition has to compile to a region program like any other unfoldable
+  // guard.
+  {
+    DataMap d = DataMap::from_json(R"({"m": [[1.0,-2.0],[-3.0,4.0]]})");
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/localmat_cond.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.1;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    // Positive entries doubled, the holes taken from the input unchanged:
+    // 2 + (-2) + (-3) + 8.
+    expect_eq("local matrix condition lp", lp, -0.5 * 0.1 * 0.1 + 5.0 * 0.1);
+    expect_eq("local matrix condition grad", grad, -0.1 + 5.0);
   }
 
   // Model-block UDFs on parameters, inlined: scalar chain, vector return,
@@ -3424,8 +3444,7 @@ int main() {
     reference_lp.grad();
     expect_eq("tcrossprod: lp", lp, reference_lp.val());
     for (int i = 0; i < 6; ++i)
-      expect_ulp("tcrossprod: g" + std::to_string(i), gradient[i],
-                 a(i).adj());
+      expect_ulp("tcrossprod: g" + std::to_string(i), gradient[i], a(i).adj());
   }
 
   // A scalar replicated as a row vector uses the vector replication opcode,

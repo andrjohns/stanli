@@ -614,6 +614,19 @@ struct ProgramCompiler {
         for (int i = 1; i < a.len; ++i) emit(Program::ADD, r, r, a.reg + i);
         return {r, 1};
       }
+      // Predicates, spelled on the comparison opcodes rather than opcodes of
+      // their own: both read through value_of, so neither carries an adjoint
+      // edge, which is what a 0/1 answer wants. x != x holds for NaN alone.
+      if (e.name == "is_nan" || e.name == "PNot__") {
+        const int rhs = e.name == "is_nan" ? -1 : konst(0.0);
+        const Program::Code c = e.name == "is_nan" ? Program::NE : Program::EQ;
+        const int r = alloc(a.len);
+        for (int i = 0; i < a.len; ++i)
+          emit(c, r + i, a.reg + i, rhs < 0 ? a.reg + i : rhs);
+        Range out = a;
+        out.reg = r;
+        return typed(out, e.type_);
+      }
       Program::Code c;
       if (e.name == "PMinus__")
         c = Program::NEG;
