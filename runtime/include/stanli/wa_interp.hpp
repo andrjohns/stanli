@@ -24,7 +24,7 @@
 #include <stanli/mir.hpp>
 #include <stanli/mir_interp.hpp>
 
-#include <boost/random/additive_combine.hpp>
+#include <stan/services/util/create_rng.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -42,12 +42,15 @@ namespace stanli {
 // thread, which is also what BridgeStan's bs_rng asks of its callers.
 class WaRng {
  public:
-  explicit WaRng(unsigned seed) : gen_(seed) {}
-  void seed(unsigned s) { gen_.seed(s); }
-  boost::ecuyer1988& gen() { return gen_; }
+  explicit WaRng(unsigned seed, unsigned chain = 0)
+      : gen_(stan::services::util::create_rng(seed, chain)) {}
+  void seed(unsigned s, unsigned chain = 0) {
+    gen_ = stan::services::util::create_rng(s, chain);
+  }
+  stan::rng_t& gen() { return gen_; }
 
  private:
-  boost::ecuyer1988 gen_;
+  stan::rng_t gen_;
 };
 
 // The scalar-argument graph-native RNG tranche. One enum and one draw helper
@@ -114,6 +117,8 @@ class WaInterp {
   bool rng_fun(MirInterp<double>& in, const mir::Expr& e, DataMap::Entry* out,
                WaRng& rng);
   bool ode_fun(MirInterp<double>& in, const mir::Expr& e, DataMap::Entry* out);
+  bool algebra_fun(MirInterp<double>& in, const mir::Expr& e,
+                   DataMap::Entry* out);
 
   std::shared_ptr<const mir::Program> prog_;
   std::map<std::string, const mir::FunDef*> funs_;

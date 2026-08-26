@@ -17,8 +17,8 @@ import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
-from verify_refs import (REFS_PATH, default_check_bin,  # noqa: E402
-                         load_refs)
+from verify_refs import (REFS_PATH, default_check_bin, load_refs,  # noqa: E402
+                         parse_status)
 
 CHECK = default_check_bin()
 
@@ -81,16 +81,18 @@ def main():
                 out = subprocess.run(
                     [str(CHECK), str(stan), str(dj), "--point", point],
                     capture_output=True,
-                    text=True, timeout=120, cwd=REPO).stdout.strip()
-                if out.startswith("OK"):
+                    text=True, timeout=120, cwd=REPO).stdout
+                status_fields = parse_status(out)
+                if status_fields[:1] == ["OK"]:
                     break
         except subprocess.TimeoutExpired:
             out = "EVAL_FAIL timeout"
-        if out.startswith("OK"):
+            status_fields = ["EVAL_FAIL", "timeout"]
+        if status_fields[:1] == ["OK"]:
             results[model] = ("OK", "")
         else:
-            first = out.split("\n")[0]
-            status, _, msg = first.partition(" ")
+            status = status_fields[0] if status_fields else "CRASH"
+            msg = " ".join(status_fields[1:]) if status_fields else out.strip()
             results[model] = (status, msg)
             # Classify by the interesting token.
             key = msg
@@ -154,15 +156,14 @@ def main():
                 wa_refs[m] = len(pt["wa"]["values"])
     if wa_refs:
         md += ["", "## write_array references", "",
-               "For models whose generated quantities are deterministic "
-               "(no `_rng`), the oracle also records CmdStan's write_array "
-               "at the same point: every CSV column (constrained "
-               "parameters, transformed parameters, generated quantities). "
-               "tools/verify_refs.py replays them in CI with the column "
-               "names matched exactly and the values sharing the model's "
-               "gate. For models with RNG draws, `tools/verify_refs.py "
-               "--wa-report` reports structural coverage instead, since "
-               "their values are a property of the RNG stream.", "",
+               "The oracle also records CmdStan's write_array at the same "
+               "point: every CSV column (constrained parameters, transformed "
+               "parameters, generated quantities). Both direct-write-array "
+               "drivers use Stan's RNG with the same seed and chain 0, so "
+               "generated-quantity draws are compared too. "
+               "tools/verify_refs.py replays the rows in CI "
+               "with column names matched exactly and values sharing the "
+               "model's gate.", "",
                "| model | write_array values compared |",
                "| --- | ---: |"]
         for m in sorted(wa_refs):
