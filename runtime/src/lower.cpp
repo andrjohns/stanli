@@ -481,6 +481,39 @@ struct Lowering {
            raw);
   }
 
+  // Every index the lowering sees is a bind-time constant, so what CmdStan
+  // bounds-checks at runtime is checked here instead.
+  std::vector<int64_t> index_positions(const mir::Expr& ix, int64_t extent,
+                                       const char* what,
+                                       const std::string& raw) {
+    std::vector<int64_t> out;
+    if (ix.name == "IndexAll") {
+      for (int64_t i = 0; i < extent; ++i) out.push_back(i);
+      return out;
+    }
+    if (ix.name == "IndexSingle") {
+      const int64_t i = eval_int(ix.args[0]);
+      check_index(i, extent, what, raw);
+      return {i - 1};
+    }
+    if (ix.name == "IndexBetween") {
+      const int64_t lo = eval_int(ix.args[0]), hi = eval_int(ix.args[1]);
+      check_range(lo, hi, extent, what, raw);
+      for (int64_t i = lo; i <= hi; ++i) out.push_back(i - 1);
+      return out;
+    }
+    if (ix.name == "IndexMulti") {
+      DataMap::Entry iv = eval_pure(ix.args[0], "an index list");
+      if (!iv.is_int) fail(std::string(what) + " needs int data", raw);
+      for (int i : iv.i) {
+        check_index(i, extent, what, raw);
+        out.push_back(i - 1);
+      }
+      return out;
+    }
+    fail(std::string("unsupported ") + what + " " + ix.name, raw);
+  }
+
   int const_slot(double v) {
     auto it = const_cache.find(v);
     if (it != const_cache.end()) return it->second;
@@ -4499,6 +4532,32 @@ struct Lowering {
             Val nv = emit_value(OP_SET_SLICE, {prev_v, rhs_v},
                                 g.slots[prev].len, out_si, {(int)start});
             propagate_int_update(nv, prev_v, rhs_v, start, 1);
+            scope[s.lhs] = nv;
+            td.env().erase(s.lhs);
+            return;
+          }
+          // Columns outermost, as CmdStan's assign walks them: a repeated
+          // index has to resolve last-wins in the same order.
+          if (!all_single && s.lhs_idx.size() == 2 && is_matrix(prev_v.si)) {
+            const std::vector<int64_t> ri = index_positions(
+                s.lhs_idx[0], prev_v.si.rows, "block assignment row", s.raw);
+            const std::vector<int64_t> ci = index_positions(
+                s.lhs_idx[1], prev_v.si.cols, "block assignment column", s.raw);
+            if ((int64_t)(ri.size() * ci.size()) != g.slots[rhs].len)
+              fail("block assignment size mismatch for " + s.lhs, s.raw);
+            Val nv = prev_v;
+            for (size_t j = 0; j < ci.size(); ++j)
+              for (size_t i = 0; i < ri.size(); ++i) {
+                const Val el =
+                    emit_value(OP_INDEX, {rhs_v}, 1, view_of("UReal"),
+                               {(int)(j * ri.size() + i)});
+                const Val next =
+                    emit_value(OP_SET_INDEX, {nv, el}, g.slots[prev].len,
+                               out_si, {(int)(ci[j] * prev_v.si.rows + ri[i])});
+                propagate_int_update(next, nv, el,
+                                     ci[j] * prev_v.si.rows + ri[i], 1);
+                nv = next;
+              }
             scope[s.lhs] = nv;
             td.env().erase(s.lhs);
             return;

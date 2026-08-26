@@ -669,6 +669,24 @@ int main() {
     expect_eq("local matrix condition grad", grad, -0.1 + 5.0);
   }
 
+  // Matrix block assignment through index lists. ridx repeats index 2, so
+  // the cell it names twice must hold the value written last.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/matblockassign.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/matblockassign.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.1;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    // Surviving cells: b[3,1], b[2,1], b[3,2], b[2,2], 7 and 8, times theta.
+    const double total = 5.0 + 3.0 + 6.0 + 4.0 + 7.0 + 8.0;
+    expect_ulp("matrix block assignment lp", lp,
+               -0.5 * 0.1 * 0.1 + total * 0.1);
+    expect_eq("matrix block assignment grad", grad, -0.1 + total);
+  }
+
   // Model-block UDFs on parameters, inlined: scalar chain, vector return,
   // statement body with local accumulator + loop.
   {
