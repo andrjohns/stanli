@@ -648,6 +648,22 @@ int main() {
     // No match means no `selected` term: std_normal on theta and nothing else.
     expect_eq("empty UDF local lp", lp, -0.5 * 0.1 * 0.1);
     expect_eq("empty UDF local grad", grad, -0.1);
+
+    // The three-argument helper uses a conditional while assembling its
+    // local int array.  stanc3 marks the inlined return temporary
+    // AutoDiffable even though its values are data-known; a nonempty result
+    // pins both the sum-sized declaration and the copied indices.
+    d.set_int_array("input", {9, 5, 9});
+    CompiledModel lm_matches =
+        compile_model(slurp("tests/fixtures/udf_empty_local.tmir.sexp"), d);
+    Executor ex_matches(std::move(lm_matches.graph));
+    lm_matches.bind(ex_matches);
+    ex_matches.params_data()[0] = 0.1;
+    grad = 0;
+    const double lp_matches = ex_matches.gradient(&grad);
+    expect_eq("nonempty UDF local lp", lp_matches,
+              -0.5 * 0.1 * 0.1 + (1 + 3) * 0.1);
+    expect_eq("nonempty UDF local grad", grad, -0.1 + 1 + 3);
   }
 
   // A data-only `if` on a UDF local that lives in the graph. DataOnly is an

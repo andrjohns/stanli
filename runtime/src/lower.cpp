@@ -1041,6 +1041,25 @@ struct Lowering {
     }
   }
 
+  // Keep the interpreter's mirror of a data-known indexed assignment in
+  // step with the graph value.  This matters for stanc3-inlined UDF returns:
+  // a later declaration may use sum(local_int_array) as its extent even
+  // though the array was assembled one element at a time.  If any operand is
+  // genuinely unavailable at bind time, discard the mirror and let the graph
+  // path retain the value as before.
+  void sync_data_indexed_assignment(const mir::Stmt& s) {
+    if (!td.find(s.lhs)) return;
+    try {
+      td.exec(s);
+    } catch (const CompileError&) {
+      td.env().erase(s.lhs);
+    } catch (const std::domain_error&) {
+      td.env().erase(s.lhs);
+    } catch (const std::invalid_argument&) {
+      td.env().erase(s.lhs);
+    }
+  }
+
   // CmdStan's var_context validates every declared dimension against the
   // supplied values before it reads one, and throws std::invalid_argument
   // naming the variable and both shapes. Without the same check the short
@@ -4389,7 +4408,20 @@ struct Lowering {
           decls[s.decl_id] = sh;
           if (s.has_init)
             sync_data_local(s.decl_id, s.init, scope.at(s.decl_id));
-          else
+          else if (sh.int_array) {
+            // Allocate the interpreter mirror as well as recording the graph
+            // declaration. Later data-only element writes can then build the
+            // concrete array needed by a sum() extent in an inlined UDF.
+            try {
+              td.exec(s);
+            } catch (const CompileError&) {
+              td.env().erase(s.decl_id);
+            } catch (const std::domain_error&) {
+              td.env().erase(s.decl_id);
+            } catch (const std::invalid_argument&) {
+              td.env().erase(s.decl_id);
+            }
+          } else
             td.env().erase(s.decl_id);
         }
         return;
@@ -4457,7 +4489,7 @@ struct Lowering {
                                 {(int)i, (int)prev_v.si.rows});
             propagate_int_update(nv, prev_v, rhs_v, i, prev_v.si.rows);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_data_indexed_assignment(s);
             return;
           }
           // Between write w[a:b] = rhs (contiguous on 1-D values).
@@ -4482,7 +4514,7 @@ struct Lowering {
                                 g.slots[prev].len, out_si, {(int)start});
             propagate_int_update(nv, prev_v, rhs_v, start, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_data_indexed_assignment(s);
             return;
           }
           // Scatter write x[idx] = rhs. The indices are data, so spell it as
@@ -4506,7 +4538,7 @@ struct Lowering {
               nv = next;
             }
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_data_indexed_assignment(s);
             return;
           }
           // Column write M[:, j] = rhs (contiguous in col-major storage).
@@ -4522,7 +4554,7 @@ struct Lowering {
                            out_si, {(int)(j * prev_v.si.rows)});
             propagate_int_update(nv, prev_v, rhs_v, j * prev_v.si.rows, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_data_indexed_assignment(s);
             return;
           }
           // Row-range column write M[a:b, j] = rhs (contiguous within the
@@ -4543,7 +4575,7 @@ struct Lowering {
                                 g.slots[prev].len, out_si, {(int)start});
             propagate_int_update(nv, prev_v, rhs_v, start, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_data_indexed_assignment(s);
             return;
           }
           // Columns outermost, as CmdStan's assign walks them: a repeated
@@ -4569,7 +4601,7 @@ struct Lowering {
                 nv = next;
               }
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_data_indexed_assignment(s);
             return;
           }
           if (all_single && dd && s.lhs_idx.size() <= dd->size() &&
@@ -4596,7 +4628,7 @@ struct Lowering {
                                         {(int)a.off}));
             propagate_int_update(nv, prev_v, rhs_v, a.off, a.stride);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_data_indexed_assignment(s);
             return;
           }
           int64_t flat = 0;
@@ -4616,7 +4648,7 @@ struct Lowering {
                               out_si, {(int)flat});
           propagate_int_update(nv, prev_v, rhs_v, flat, 1);
           scope[s.lhs] = nv;
-          td.env().erase(s.lhs);
+          sync_data_indexed_assignment(s);
           return;
         }
         {
