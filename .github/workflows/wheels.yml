@@ -204,6 +204,7 @@ jobs:
           OPAMYES: '1'
 
       - name: Validate the embedded stanc3 object
+        shell: bash
         run: |
           source tools/stanc_embed/provenance.sh
           stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
