@@ -2177,6 +2177,23 @@ int main() {
     check(threw, "propto ~ in a parameter region refused with the fix");
   }
 
+  // A local read before its first assignment has its declared shape and is
+  // filled with NaNs. A parameter-dependent region must receive that value as
+  // a live-in even though ordinary lowering has not materialized its slot yet.
+  {
+    DataMap d;
+    CompiledModel lm = compile_model(
+        slurp("tests/fixtures/paramcond_uninitialized_livein.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = -0.25;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    expect_eq("parameter region uninitialized live-in lp", lp,
+              -0.5 * 0.25 * 0.25);
+    expect_eq("parameter region uninitialized live-in grad", grad, 0.25);
+  }
+
   // propto through a user-defined density. CmdStan compiles one as a
   // template on propto__ and hands the CALLER's value to the body, so a
   // body written with `_lupdf` normalizes when it was reached through

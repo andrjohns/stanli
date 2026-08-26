@@ -1325,6 +1325,29 @@ struct Lowering {
     return s;
   }
 
+  // Stan gives a shaped local read before its first assignment a real value:
+  // NaN for real containers and INT_MIN for integer containers. Ordinary
+  // expression lowering and parameter-dependent regions must materialize the
+  // same slot, so keep that declaration fallback in one place.
+  int materialize_declared_local(const std::string& name) {
+    auto existing = scope.find(name);
+    if (existing != scope.end()) return existing->second.slot;
+    auto dl = decls.find(name);
+    if (dl == decls.end()) return -1;
+    SlotInfo si = dl->second.si;
+    si.param_free = true;
+    Val value{add_slot(dl->second.len, false), dl->second.autodiff, si};
+    const double initial =
+        dl->second.int_array
+            ? static_cast<double>(std::numeric_limits<int>::min())
+            : std::numeric_limits<double>::quiet_NaN();
+    out.fills.emplace_back(value.slot,
+                           std::vector<double>(dl->second.len, initial));
+    if (dl->second.int_array) set_uninitialized_int_array(value);
+    scope[name] = value;
+    return value.slot;
+  }
+
   // ---- expressions ----------------------------------------------------------
   Val lower_expr(const mir::Expr& e) {
     Val value = lower_expr_impl(e);
@@ -1354,21 +1377,7 @@ struct Lowering {
           if (s >= 0) return scope.at(e.name);
           // A declared local read before its first write: Materialize
           // the same uninitialized container the indexed-assignment path would.
-          auto dl = decls.find(e.name);
-          if (dl != decls.end()) {
-            SlotInfo si = dl->second.si;
-            si.param_free = true;
-            Val value{add_slot(dl->second.len, false), dl->second.autodiff, si};
-            const double initial =
-                dl->second.int_array
-                    ? static_cast<double>(std::numeric_limits<int>::min())
-                    : std::numeric_limits<double>::quiet_NaN();
-            out.fills.emplace_back(
-                value.slot, std::vector<double>(dl->second.len, initial));
-            if (dl->second.int_array) set_uninitialized_int_array(value);
-            scope[e.name] = value;
-            return value;
-          }
+          if (materialize_declared_local(e.name) >= 0) return scope.at(e.name);
           fail("unknown variable " + e.name);
         }
         return it->second;
@@ -1761,7 +1770,8 @@ struct Lowering {
     for (const auto& [name, value] : decls) outer_names.insert(name);
     c.bind_extern = [&](const std::string& name, Range* r) {
       auto sc = scope.find(name);
-      const int slot = sc != scope.end() ? sc->second.slot : env_slot(name);
+      int slot = sc != scope.end() ? sc->second.slot : env_slot(name);
+      if (slot < 0) slot = materialize_declared_local(name);
       if (slot < 0) return false;
       const int64_t len = g.slots[slot].len;
       r->reg = c.alloc((int)len);
