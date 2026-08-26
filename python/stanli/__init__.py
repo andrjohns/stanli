@@ -1,8 +1,8 @@
 """stanli: the Stan Language Interpreter.
 
 Compiles a .stan model with stanc3 (linked into the bundled shared library,
-or a bundled stanc binary as a subprocess where it is not), lowers it to an
-op graph in-process, and samples with NUTS. No C++ toolchain, no model
+or a bundled compiler executable as a subprocess where it is not), lowers it
+to an op graph in-process, and samples with NUTS. No C++ toolchain, no model
 compilation on this machine.
 """
 import ctypes
@@ -176,14 +176,52 @@ def _dptr(a):
     return a.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
 
 
+def _compiler_command(model_path: pathlib.Path):
+    """The packaged compiler argv, preferring stanli's portable producer."""
+    suffix = ".exe" if sys.platform == "win32" else ""
+    portable = _BIN / ("stanli-compile" + suffix)
+    if portable.is_file():
+        return [str(portable), str(model_path)]
+
+    # One-cycle rollback path: pristine stanc3 emits the legacy s-expression
+    # that the runtime continues to accept. Only absence selects it. A broken
+    # portable compiler must fail loudly rather than being hidden by a retry.
+    stanc = _BIN / ("stanc" + suffix)
+    if stanc.is_file():
+        return [str(stanc), "--O1", "--debug-optimized-mir", str(model_path)]
+    raise RuntimeError(
+        "the bundled Stan compiler is missing "
+        f"(expected {portable.name} or {stanc.name} in {_BIN})")
+
+
 def _stanc_mir(model_path: pathlib.Path) -> str:
-    stanc = _BIN / ("stanc.exe" if sys.platform == "win32" else "stanc")
-    r = subprocess.run([str(stanc), "--O1", "--debug-optimized-mir",
-                        str(model_path)],
-                       capture_output=True, text=True)
+    argv = _compiler_command(model_path)
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"could not run the bundled Stan compiler: {exc}") \
+            from exc
     if r.returncode != 0 or not r.stdout:
         raise RuntimeError(f"stanc failed:\n{r.stderr}")
     return r.stdout
+
+
+def _subprocess_mir(stan_code: str) -> str:
+    """Compile source in an isolated directory and remove every side effect."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="stanli-compile-") as tmpdir:
+        source = pathlib.Path(tmpdir) / "model.stan"
+        # Binary UTF-8 avoids the locale-dependent encoding and CRLF rewriting
+        # of text-mode files on Windows. Stock stanc also writes model.hpp next
+        # to this file; TemporaryDirectory removes that rollback-path artifact.
+        source.write_bytes(stan_code.encode("utf-8"))
+        return _stanc_mir(source)
+
+
+def _read_utf8_file(path) -> str:
+    """Read source bytes as UTF-8 without universal-newline rewriting."""
+    return pathlib.Path(path).read_bytes().decode("utf-8")
 
 
 def stan_to_mir(stan_code: str) -> str:
@@ -191,15 +229,13 @@ def stan_to_mir(stan_code: str) -> str:
 
     The first half of compiling a model, on its own. Useful when the MIR
     is what you want to keep -- to cache it, ship it, or hand it to
-    ``Model(mir=...)`` in another process. Embedded builds return stanli's
-    versioned portable format; the bundled-compiler fallback returns the
-    legacy stanc3 s-expression, which the runtime also accepts.
+    ``Model(mir=...)`` in another process. Embedded builds and the preferred
+    bundled compiler return stanli's versioned portable format. The one-cycle
+    stock-compiler fallback returns a legacy stanc3 s-expression, which the
+    runtime also accepts.
     """
     if not _lib.stanli_has_embedded_stanc():
-        import tempfile
-        tmp = pathlib.Path(tempfile.mkdtemp()) / "model.stan"
-        tmp.write_text(stan_code)
-        return _stanc_mir(tmp)
+        return _subprocess_mir(stan_code)
     err = ctypes.create_string_buffer(8192)
     p = _lib.stanli_stan_to_mir(stan_code.encode(), err, len(err))
     if not p:
@@ -225,7 +261,7 @@ def _resolve_program(stan_file, stan_code, mir, name):
         if stan_code is None:
             if stan_file is None:
                 raise ValueError("provide stan_file, stan_code, or mir")
-            stan_code = pathlib.Path(stan_file).read_text()
+            stan_code = _read_utf8_file(stan_file)
         mir = stan_to_mir(stan_code)
     if name is None:
         name = pathlib.Path(stan_file).stem if stan_file else "stanli_model"
@@ -552,18 +588,16 @@ class Model:
         if stan_code is None:
             if stan_file is None:
                 raise ValueError("provide stan_file, stan_code, or mir")
-            stan_code = pathlib.Path(stan_file).read_text()
+            stan_code = _read_utf8_file(stan_file)
 
         if _lib.stanli_has_embedded_stanc():
             # Fully in-process: embedded stanc3 compiles the model.
             self._m = _lib.stanli_model_new_from_stan(
                 stan_code.encode(), data_json.encode(), err, len(err))
         else:
-            # Fallback: bundled stanc binary as a subprocess.
-            import tempfile
-            tmp = pathlib.Path(tempfile.mkdtemp()) / "model.stan"
-            tmp.write_text(stan_code)
-            self._m = _lib.stanli_model_new(_stanc_mir(tmp).encode(),
+            # Windows and other non-embedded builds use the bundled compiler
+            # executable as a short-lived subprocess.
+            self._m = _lib.stanli_model_new(_subprocess_mir(stan_code).encode(),
                                             data_json.encode(), err, len(err))
         self._finish_init(err)
 

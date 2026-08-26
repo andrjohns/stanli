@@ -99,8 +99,9 @@ autodiff tape, so a reverse sweep is a backwards loop over an array,
 and steady-state gradient evaluation allocates nothing.
 
 Two things are not reimplemented, which is what makes the results
-trustworthy: the compiler is the real stanc3, linked in-process, and
-the math is unmodified stan-math, the same code CmdStan runs.
+trustworthy: the compiler is the real stanc3 plus the stanli OCaml pipeline,
+embedded in the runtime on macOS and Linux and packaged as an executable on
+Windows, and the math is unmodified stan-math, the same code CmdStan runs.
 
 ## Correctness
 
@@ -197,9 +198,14 @@ reachable by name too.
 Wheels for macOS (arm64 and x86_64), Linux (x86_64 and aarch64,
 manylinux_2_28) and Windows (x86_64). The Windows wheel is built under
 mingw-w64, because stan-math does not build under MSVC (the same reason
-RStan ships through RTools), and bundles `stanc.exe` as a subprocess
-instead of embedding the compiler; the API works the same way either
-way.
+RStan ships through RTools). Windows wheels built from this revision run
+`stanli-compile.exe` as a short-lived subprocess and keep pristine `stanc.exe`
+beside it for one rollback cycle; there is no OCaml compiler DLL. Python
+prefers `stanli-compile.exe` whenever
+it is present and selects `stanc.exe` only when it is absent. Launch errors,
+compiler errors, and empty output are reported; an invalid portable result is
+rejected when decoded. None causes an automatic retry through stock stanc. The
+public API works the same way as the embedded compiler path.
 
 The installed library is 29.7 MB: over half of it is the density
 kernels, about a quarter the embedded stanc3, and the interpreter and

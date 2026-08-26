@@ -32,6 +32,15 @@ to_json <- function(x) {
          "]")
 }
 
+read_utf8_file <- function(path) {
+  size <- file.info(path)$size
+  if (is.na(size))
+    stop("could not read UTF-8 file: ", path, call. = FALSE)
+  value <- rawToChar(readBin(path, "raw", n = size))
+  Encoding(value) <- "UTF-8"
+  value
+}
+
 #' Compile a Stan model
 #'
 #' @param file Path to a `.stan` file.
@@ -45,12 +54,12 @@ stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL) {
   load_runtime()
   if (is.null(code) && is.null(mir)) {
     if (is.null(file)) stop("provide file, code or mir", call. = FALSE)
-    code <- paste(readLines(file, warn = FALSE), collapse = "\n")
+    code <- read_utf8_file(file)
   }
   data_json <- if (is.null(data)) {
     "{}"
   } else if (is.character(data) && length(data) == 1 && file.exists(data)) {
-    paste(readLines(data, warn = FALSE), collapse = "\n")
+    read_utf8_file(data)
   } else if (is.character(data) && length(data) == 1) {
     data
   } else {

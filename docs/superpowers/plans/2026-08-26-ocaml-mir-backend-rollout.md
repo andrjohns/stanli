@@ -56,7 +56,7 @@ PR #208 completed the first tranche:
 
 ## Phase 1: shared producer and browser/npm
 
-Status: in progress.
+Status: complete. All gates below run in CI.
 
 - Move the encoder and O1 policy into one stanli-owned OCaml package under
   `compiler/`.
@@ -110,18 +110,52 @@ avoid increasing the JSON multiplier further.
 
 ## Phase 2: Windows portable producer
 
-- Cross-build the existing CLI entry point as `stanli-compile.exe` using
-  stanc3's Linux-to-Windows recipe.
-- Ship it beside exact-source `stanc.exe` for one release cycle.
-- Python and native R prefer the stanli executable and fall back to stock
-  stanc when it is absent.
-- Compare Windows output byte for byte with native and JS output, including
-  final-newline behavior and the folded-float model.
-- Gate the installed Windows wheel on source compilation, errors, lowering,
-  gradients, sampling, and generated quantities.
+Status: implemented. The compiler-only gate runs on pull requests; the full
+Windows C++ build runs after merge, nightly, and on release tags.
 
-No OCaml DLL is needed. The compiler remains a short-lived subprocess on
-Windows, isolating compiler state and avoiding an OCaml C ABI.
+- Cross-build pristine `stanc.exe` before applying the stanli overlay, then
+  cross-build the shared CLI entry point as `stanli-compile.exe` with stanc3's
+  Linux-to-Windows recipe.
+- Ship both beside `stanli.dll` for one release cycle. The portable producer is
+  preferred; pristine stanc is the rollback selected only when it is absent.
+- Python searches its packaged `_bin` directory for `stanli-compile.exe`, then
+  `stanc.exe`. Native R first honors the explicit `STANLI_STANC` stock override,
+  then checks beside the runtime for the portable producer and stock stanc,
+  then checks `PATH` for stock stanc, and finally uses its JavaScript path.
+- Treat a selected compiler's launch error, nonzero exit, or empty output as
+  an error. If the runtime decoder later rejects its document, surface that
+  error too; do not hide either failure by retrying stock.
+- Keep the Windows compiler in short-lived subprocesses. No OCaml compiler DLL
+  is introduced.
+
+Pull-request gates:
+
+- Validate the exact stanc3 revision, the portable producer's source/toolchain
+  stamp, LF checkout bytes for every stamped input, and that both artifacts are
+  x86-64 PE executables.
+- Execute pristine stanc on the checked overflow fixture to prove it was copied
+  before the overlay changed the fold policy.
+- Execute `stanli-compile.exe` on Windows and compare its output byte for byte
+  with the same JavaScript producer already compared with native OCaml. The
+  shared seven-model suite covers nested UDFs, the mother model, folded
+  binary64, checked int32 overflow, Unicode, includes, and final-newline
+  behavior. The surrounding JavaScript gate covers diagnostics, warnings,
+  stock API compatibility, and repeat determinism.
+- Run both executables through native R from paths containing spaces and
+  Unicode, with CRLF source staged as exact UTF-8 bytes, and distinguish the
+  portable and legacy envelopes.
+
+Post-merge full-platform gates:
+
+- Build the Windows C++ runtime and run CTest.
+- Require the wheel and R runtime tarball to contain `stanli.dll`,
+  `stanli-compile.exe`, and pristine `stanc.exe`.
+- Install the wheel into python.org CPython and exercise source compilation,
+  errors, lowering, gradients, sampling, and generated quantities.
+
+This split keeps the bounded compiler contract merge-blocking while the
+multi-hour stan-math build remains a post-merge platform check. Publishing
+still waits for the full Windows wheel.
 
 ## Phase 3: CRAN and webR compiler
 

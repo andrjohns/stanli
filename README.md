@@ -73,7 +73,7 @@ run by a small interpreter. There is no JIT and no C++ codegen;
 
 ```
 model.stan + data.json
-  |  stanc3 (official OCaml compiler, linked into the library)
+  |  stanc3 + the stanli pipeline (embedded, or an executable on Windows)
   v
 optimized typed MIR (--O1)
   |  stanli OCaml encoder
@@ -93,9 +93,9 @@ NUTS (stan::mcmc::adapt_diag_e_nuts) -> draws
    resulting typed MIR into the versioned portable format. Thin entry points
    in [`compiler/native/`](compiler/native/) embed that pipeline in the shared
    library, while [`compiler/js/`](compiler/js/) builds the browser/npm
-   compiler. The runtime retains the legacy s-expression reader for compiler
-   paths that have not moved yet. Full language fidelity without a
-   reimplemented parser.
+   compiler and the CLI cross-built for Windows as `stanli-compile.exe`. The
+   runtime retains the legacy s-expression reader for cached MIR and rollback
+   compiler paths. Full language fidelity without a reimplemented parser.
 
 2. **Lowering** (`runtime/src/lower.cpp`). Transformed data is evaluated
    eagerly, loops with data-known bounds are unrolled, and the model
@@ -144,8 +144,9 @@ NUTS (stan::mcmc::adapt_diag_e_nuts) -> draws
 
 8. **Distribution.** Everything sits behind a C ABI
    (`runtime/include/stanli/capi.h`) in one shared library. Each binding
-   is a thin wrapper over it; a platform wheel is one .whl containing
-   one dylib.
+   is a thin wrapper over it. The macOS and Linux wheels embed the compiler in
+   that library. The Windows wheel carries `stanli.dll`, the preferred
+   `stanli-compile.exe`, and pristine `stanc.exe` for one rollback cycle.
 
 ## Binary size
 
@@ -219,9 +220,10 @@ print(fit.diagnose())     # the convergence checks, in words
 
 Four chains by default, run in parallel. Threading does not change the
 answer: each chain owns its executor and its RNG stream, so the draws
-are byte-identical to a sequential run. Shipped builds without the embedded
-stanc3 object fall back to running a source-pinned stanc binary as a
-subprocess.
+are byte-identical to a sequential run. macOS and Linux release wheels compile
+Stan in process. Windows runs the packaged `stanli-compile.exe`; pristine
+`stanc.exe` is selected only when that preferred executable is absent, and a
+compiler failure is reported without retrying the rollback path.
 
 ## R
 
@@ -257,10 +259,14 @@ summary(fit)          # mean, MCSE, sd, quantiles, bulk/tail ESS, R-hat
 
 The runtime is downloaded on first use because CRAN cannot build or
 carry it; `stanli_install()` is explicit and pins the release the
-package was built against. The Stan compiler is stanc3 compiled to
-JavaScript, run through V8 (rstan's approach) when the runtime does not
-embed it. Because binding and runtime are separately versioned, the C
-ABI carries a layout version (`stanli_abi_version()`) and the bridge
+package was built against. An embedded compiler wins when the runtime has one.
+On native hosts without one, `STANLI_STANC` is the explicit stock-compiler
+override; otherwise R prefers `stanli-compile` beside the runtime, then stock
+`stanc` beside the runtime or on `PATH`, and finally the bundled JavaScript
+compiler through V8. The v0.9.2 compatibility runtime has stock `stanc.exe`;
+Windows runtime builds from this revision add `stanli-compile.exe` beside it
+for the rollback cycle. Because binding and runtime are separately versioned,
+the C ABI carries a layout version (`stanli_abi_version()`) and the bridge
 refuses a runtime that disagrees; reading the options struct at wrong
 offsets would not crash, it would sample from the wrong seed.
 
@@ -311,11 +317,14 @@ ctest --test-dir build
 
 `.github/workflows/wheels.yml` builds all five wheels (macOS arm64 and
 x86_64, manylinux_2_28 x86_64 and aarch64, Windows x86_64). Pull requests
-run the manylinux x86_64 build; all five run after merge, nightly, and on
-release tags. The four Unix wheels link the cached embedded compiler;
-Windows bundles a compiler executable built from the same exact source
-revision. Every wheel runs the test suite, checks its platform contract,
-and samples eight schools from a clean installed environment.
+run the manylinux x86_64 build plus a compiler-only Windows gate that
+cross-builds and executes both compiler artifacts and byte-compares the
+portable producer with the JavaScript producer. All five full C++ platform
+builds run after merge, nightly, and on release tags. The four Unix wheels
+link the cached embedded compiler; Windows packages `stanli-compile.exe` and
+the pristine `stanc.exe` rollback beside `stanli.dll`. Every wheel runs the
+test suite, checks its platform contract, and samples eight schools from a
+clean installed environment.
 
 To cut a release: bump the version in `python/stanli/__init__.py`,
 `js/package.json`, `r/DESCRIPTION`, and `r/R/install.R` (they move in
