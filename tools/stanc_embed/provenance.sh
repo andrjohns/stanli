@@ -37,7 +37,8 @@ _stanc_embed_sha256_file() {
 _stanc_embed_switch_exists() {
   local opam_switch=${1:?opam switch}
   command -v opam >/dev/null 2>&1 &&
-    opam switch list --short 2>/dev/null | grep -Fqx "$opam_switch"
+    opam switch list --color=never --short 2>/dev/null |
+      grep -Fqx "$opam_switch"
 }
 
 _stanc_embed_ocaml_version() {
@@ -53,8 +54,8 @@ _stanc_embed_ocaml_target() {
 _stanc_embed_package_version() {
   local opam_switch=${1:?opam switch}
   local package=${2:?opam package}
-  opam list --switch="$opam_switch" --installed --short --columns=version \
-    "$package" 2>/dev/null
+  opam list --color=never --switch="$opam_switch" --installed --short \
+    --columns=version "$package" 2>/dev/null
 }
 
 _stanc_embed_stamp_value() {
@@ -274,7 +275,7 @@ stanli_windows_cli_expected_stamp() {
     _stanc_embed_package_version "$opam_switch" ocaml-windows64)
   ocaml_meta_version=$(
     _stanc_embed_package_version "$opam_switch" ocaml-windows)
-  ocaml_target=$(opam var --switch="$opam_switch" \
+  ocaml_target=$(opam var --color=never --switch="$opam_switch" \
     conf-gcc-windows64:host 2>/dev/null || true)
   dune_version=$(_stanc_embed_package_version "$opam_switch" dune)
 
@@ -336,7 +337,7 @@ stanli_windows_cli_artifact_matches() {
   # cross toolchain. The Windows packager intentionally has no opam switch, so
   # it validates every source-derived and configured field instead.
   if [[ -z "$opam_switch" ]] && command -v opam >/dev/null 2>&1; then
-    opam_switch=$(opam switch show --safe 2>/dev/null || true)
+    opam_switch=$(opam switch show --color=never --safe 2>/dev/null || true)
   fi
   if [[ -n "$opam_switch" ]] && _stanc_embed_switch_exists "$opam_switch" &&
      [[ -n "$(_stanc_embed_package_version "$opam_switch" ocaml-windows)" ]]; then
