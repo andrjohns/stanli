@@ -1526,8 +1526,7 @@ class MirInterp {
         for (int64_t k = 0; k < cols; ++k) {
           const T& rhs = a.r.at((size_t)(k * rows + j));
           for (int64_t i = 0; i < rows; ++i)
-            r.r[(size_t)(j * rows + i)] +=
-                a.r.at((size_t)(k * rows + i)) * rhs;
+            r.r[(size_t)(j * rows + i)] += a.r.at((size_t)(k * rows + i)) * rhs;
         }
       return r;
     }
