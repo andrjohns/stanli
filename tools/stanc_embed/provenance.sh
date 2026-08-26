@@ -264,20 +264,51 @@ stanli_windows_cli_expected_stamp() {
   local src_repo=${1:?stanc3 source repository}
   local src_sha=${2:?stanc3 source revision}
   local opam_switch=${3:-$(opam switch show --safe)}
-  local ocaml_version ocaml_package_version ocaml_target gcc_target dune_version
-  ocaml_version=$(opam exec --switch="$opam_switch" -- \
-    ocamlfind -toolchain windows ocamlc -version 2>/dev/null)
-  ocaml_package_version=$(
+  local configured_version ocaml_version ocaml_meta_version ocaml_target
+  local dune_version metadata_ok=1
+  configured_version=$(stanc_embed_read_setup OCAML_VERSION)
+  # ocaml-windows64 is the compiler package. Its opam recipe passes the
+  # conf-gcc-windows64 host value directly to OCaml's --target option; those
+  # two package fields are therefore the provenance inputs Dune selected.
+  ocaml_version=$(
+    _stanc_embed_package_version "$opam_switch" ocaml-windows64)
+  ocaml_meta_version=$(
     _stanc_embed_package_version "$opam_switch" ocaml-windows)
-  ocaml_target=$(opam exec --switch="$opam_switch" -- \
-    ocamlfind -toolchain windows ocamlc -config-var target 2>/dev/null)
-  gcc_target=$(opam var --switch="$opam_switch" conf-gcc-windows:host \
-    2>/dev/null)
+  ocaml_target=$(opam var --switch="$opam_switch" \
+    conf-gcc-windows64:host 2>/dev/null || true)
   dune_version=$(_stanc_embed_package_version "$opam_switch" dune)
-  if [[ -z "$ocaml_version" || "$ocaml_version" != "$ocaml_package_version" ||
-        -z "$ocaml_target" || "$ocaml_target" != "$gcc_target" ||
-        -z "$dune_version" ]]; then
-    echo "could not identify the Windows OCaml cross toolchain" >&2
+
+  printf '%s\n' \
+    "Windows compiler metadata: ocaml-windows64=${ocaml_version:-<missing>}" \
+    "Windows compiler metadata: ocaml-windows=${ocaml_meta_version:-<missing>}" \
+    "Windows compiler metadata: conf-gcc-windows64:host=${ocaml_target:-<missing>}" \
+    "Windows compiler metadata: dune=${dune_version:-<missing>}" >&2
+  if [[ -z "$ocaml_version" ]]; then
+    echo "Windows compiler metadata: ocaml-windows64 is not installed" >&2
+    metadata_ok=0
+  elif [[ "$ocaml_version" != "$configured_version" ]]; then
+    echo "Windows compiler metadata: ocaml-windows64 must be $configured_version" >&2
+    metadata_ok=0
+  fi
+  if [[ -z "$ocaml_meta_version" ]]; then
+    echo "Windows compiler metadata: ocaml-windows is not installed" >&2
+    metadata_ok=0
+  elif [[ "$ocaml_meta_version" != "$ocaml_version" ]]; then
+    echo "Windows compiler metadata: OCaml package versions differ" >&2
+    metadata_ok=0
+  fi
+  if [[ -z "$ocaml_target" ]]; then
+    echo "Windows compiler metadata: 64-bit target is unavailable" >&2
+    metadata_ok=0
+  elif [[ "$ocaml_target" != x86_64-w64-mingw32 ]]; then
+    echo "Windows compiler metadata: unexpected 64-bit target" >&2
+    metadata_ok=0
+  fi
+  if [[ -z "$dune_version" ]]; then
+    echo "Windows compiler metadata: dune is not installed" >&2
+    metadata_ok=0
+  fi
+  if [[ "$metadata_ok" != 1 ]]; then
     return 1
   fi
   printf '%s\n' \

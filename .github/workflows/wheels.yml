@@ -607,6 +607,7 @@ jobs:
                         tools/dev_setup.sh)
           test "$setup_repo" = "$STANC3_SRC_REPO"
           test "$setup_pin" = "$STANC3_SRC_SHA"
+          bash tests/test_windows_provenance.sh
           git clone "$STANC3_SRC_REPO" deps/stanc3-src
           git -C deps/stanc3-src checkout -q --detach "$STANC3_SRC_SHA"
           test "$(git -C deps/stanc3-src rev-parse HEAD)" = "$STANC3_SRC_SHA"
