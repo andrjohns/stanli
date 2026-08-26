@@ -552,6 +552,18 @@ struct Lowering {
     int_initialized_prefix[v.slot] = 0;
   }
 
+  // The fill is exactly the slot's runtime content; CmdStan seeds int
+  // locals with INT_MIN the same way.
+  void observe_fill(const Val& v, bool int_array, double initial, int64_t len) {
+    DataMap::Entry en;
+    en.r.assign((size_t)len, initial);
+    if (int_array) {
+      en.is_int = true;
+      en.i.assign((size_t)len, std::numeric_limits<int>::min());
+    }
+    observe(v, std::move(en));
+  }
+
   // Target models build int arrays in ascending contiguous writes.  Track the
   // initialized prefix in O(1) per immutable slot: overwrites inside it are
   // safe, an adjacent write extends it, and any gap/stride fails closed.  The
@@ -559,6 +571,30 @@ struct Lowering {
   // later overflow proof.
   void propagate_int_update(const Val& out_v, const Val& base, const Val& rhs,
                             int64_t start, int64_t stride) {
+    // A write of an observed value into an observed base stays observed:
+    // splice the element into a copy of the base's entry.
+    if (const DataMap::Entry* be = observation(base)) {
+      const DataMap::Entry* re = observation(rhs);
+      const int64_t rl = g.slots[rhs.slot].len;
+      if ((rl == 0 || re) &&
+          g.slots[out_v.slot].len == g.slots[base.slot].len) {
+        DataMap::Entry en = *be;
+        bool ok = true;
+        for (int64_t k = 0; k < rl; ++k) {
+          const int64_t at = start + k * stride;
+          if (at < 0 || at >= (int64_t)en.r.size()) {
+            ok = false;
+            break;
+          }
+          const double v = k < (int64_t)re->r.size()
+                               ? re->r[(size_t)k]
+                               : static_cast<double>(re->i.at((size_t)k));
+          en.r[(size_t)at] = v;
+          if (!en.i.empty()) en.i[(size_t)at] = (int)v;
+        }
+        if (ok) observe(out_v, std::move(en));
+      }
+    }
     const auto base_prefix = int_initialized_prefix.find(base.slot);
     const auto rhs_prefix = int_initialized_prefix.find(rhs.slot);
     const int64_t rhs_len = g.slots[rhs.slot].len;
@@ -661,6 +697,11 @@ struct Lowering {
           fail("malformed promoted size expression", e.raw);
         return eval_int(e.args[0]);
       case mir::Expr::FunApp:
+        if (e.name == "sum" && e.args.size() == 1) {
+          long acc = 0;
+          for (int v : const_ints(e.args[0])) acc += v;
+          return acc;
+        }
         if (e.name == "Plus__")
           return eval_int(e.args[0]) + eval_int(e.args[1]);
         if (e.name == "Minus__")
@@ -1338,6 +1379,7 @@ struct Lowering {
             out.fills.emplace_back(
                 value.slot, std::vector<double>(dl->second.len, initial));
             if (dl->second.int_array) set_uninitialized_int_array(value);
+            observe_fill(value, dl->second.int_array, initial, dl->second.len);
             scope[e.name] = value;
             return value;
           }
@@ -4423,6 +4465,7 @@ struct Lowering {
             out.fills.emplace_back(
                 prev_v.slot, std::vector<double>(dl->second.len, initial));
             if (dl->second.int_array) set_uninitialized_int_array(prev_v);
+            observe_fill(prev_v, dl->second.int_array, initial, dl->second.len);
           }
           const int prev = prev_v.slot;
           bool all_single = true;

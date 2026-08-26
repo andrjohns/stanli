@@ -281,7 +281,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -394,18 +394,300 @@
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
        ((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_fillholes_return_sym6__)
+          (decl_type
+           (Sized
+            (SMatrix AoS
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+          (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str matout))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "rows(matin)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib rows FnPlain AoS)
+                  (((pattern (Var m))
+                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str matout))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "cols(matin)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib cols FnPlain AoS)
+                  (((pattern (Var m))
+                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_fillholes_matout_sym7__)
+              (decl_type
+               (Sized
+                (SMatrix AoS
+                 ((pattern
+                   (FunApp (StanLib rows FnPlain AoS)
+                    (((pattern (Var m))
+                      (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                 ((pattern
+                   (FunApp (StanLib cols FnPlain AoS)
+                    (((pattern (Var m))
+                      (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (For (loopvar inline_fillholes_ri_sym9__)
+              (lower
+               ((pattern (Lit Int 1))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (upper
+               ((pattern
+                 (FunApp (StanLib rows FnPlain AoS)
+                  (((pattern (Var m))
+                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (body
+               ((pattern
+                 (Block
+                  (((pattern
+                     (For (loopvar inline_fillholes_ci_sym8__)
+                      (lower
+                       ((pattern (Lit Int 1))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                      (upper
+                       ((pattern
+                         (FunApp (StanLib cols FnPlain AoS)
+                          (((pattern (Var m))
+                            (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                      (body
+                       ((pattern
+                         (Block
+                          (((pattern
+                             (IfElse
+                              ((pattern
+                                (FunApp (StanLib Greater__ FnPlain AoS)
+                                 (((pattern
+                                    (Indexed
+                                     ((pattern (Var m))
+                                      (meta
+                                       ((type_ UMatrix) (loc <opaque>)
+                                        (adlevel DataOnly))))
+                                     ((Single
+                                       ((pattern (Var inline_fillholes_ri_sym9__))
+                                        (meta
+                                         ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                                      (Single
+                                       ((pattern (Var inline_fillholes_ci_sym8__))
+                                        (meta
+                                         ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                                   (meta
+                                    ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                                  ((pattern (Lit Int 0))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                              ((pattern
+                                (Block
+                                 (((pattern
+                                    (Assignment
+                                     ((LVariable inline_fillholes_matout_sym7__)
+                                      ((Single
+                                        ((pattern (Var inline_fillholes_ri_sym9__))
+                                         (meta
+                                          ((type_ UInt) (loc <opaque>)
+                                           (adlevel DataOnly)))))
+                                       (Single
+                                        ((pattern (Var inline_fillholes_ci_sym8__))
+                                         (meta
+                                          ((type_ UInt) (loc <opaque>)
+                                           (adlevel DataOnly)))))))
+                                     UMatrix
+                                     ((pattern
+                                       (FunApp (StanLib Times__ FnPlain AoS)
+                                        (((pattern (Lit Real 2.0))
+                                          (meta
+                                           ((type_ UReal) (loc <opaque>)
+                                            (adlevel DataOnly))))
+                                         ((pattern
+                                           (Indexed
+                                            ((pattern (Var m))
+                                             (meta
+                                              ((type_ UMatrix) (loc <opaque>)
+                                               (adlevel DataOnly))))
+                                            ((Single
+                                              ((pattern (Var inline_fillholes_ri_sym9__))
+                                               (meta
+                                                ((type_ UInt) (loc <opaque>)
+                                                 (adlevel DataOnly)))))
+                                             (Single
+                                              ((pattern (Var inline_fillholes_ci_sym8__))
+                                               (meta
+                                                ((type_ UInt) (loc <opaque>)
+                                                 (adlevel DataOnly))))))))
+                                          (meta
+                                           ((type_ UReal) (loc <opaque>)
+                                            (adlevel DataOnly)))))))
+                                      (meta
+                                       ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))))
+                                   (meta <opaque>)))))
+                               (meta <opaque>))
+                              ()))
+                            (meta <opaque>)))))
+                        (meta <opaque>)))))
+                    (meta <opaque>)))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (For (loopvar inline_fillholes_ri_sym9__)
+              (lower
+               ((pattern (Lit Int 1))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (upper
+               ((pattern
+                 (FunApp (StanLib rows FnPlain AoS)
+                  (((pattern (Var m))
+                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (body
+               ((pattern
+                 (Block
+                  (((pattern
+                     (For (loopvar inline_fillholes_ci_sym8__)
+                      (lower
+                       ((pattern (Lit Int 1))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                      (upper
+                       ((pattern
+                         (FunApp (StanLib cols FnPlain AoS)
+                          (((pattern (Var m))
+                            (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                      (body
+                       ((pattern
+                         (Block
+                          (((pattern
+                             (IfElse
+                              ((pattern
+                                (EAnd
+                                 ((pattern
+                                   (FunApp (StanLib is_nan FnPlain AoS)
+                                    (((pattern
+                                       (Indexed
+                                        ((pattern (Var inline_fillholes_matout_sym7__))
+                                         (meta
+                                          ((type_ UMatrix) (loc <opaque>)
+                                           (adlevel AutoDiffable))))
+                                        ((Single
+                                          ((pattern (Var inline_fillholes_ri_sym9__))
+                                           (meta
+                                            ((type_ UInt) (loc <opaque>)
+                                             (adlevel DataOnly)))))
+                                         (Single
+                                          ((pattern (Var inline_fillholes_ci_sym8__))
+                                           (meta
+                                            ((type_ UInt) (loc <opaque>)
+                                             (adlevel DataOnly))))))))
+                                      (meta
+                                       ((type_ UReal) (loc <opaque>)
+                                        (adlevel AutoDiffable)))))))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                 ((pattern
+                                   (FunApp (StanLib PNot__ FnPlain AoS)
+                                    (((pattern
+                                       (FunApp (StanLib is_nan FnPlain AoS)
+                                        (((pattern
+                                           (Indexed
+                                            ((pattern (Var m))
+                                             (meta
+                                              ((type_ UMatrix) (loc <opaque>)
+                                               (adlevel DataOnly))))
+                                            ((Single
+                                              ((pattern (Var inline_fillholes_ri_sym9__))
+                                               (meta
+                                                ((type_ UInt) (loc <opaque>)
+                                                 (adlevel DataOnly)))))
+                                             (Single
+                                              ((pattern (Var inline_fillholes_ci_sym8__))
+                                               (meta
+                                                ((type_ UInt) (loc <opaque>)
+                                                 (adlevel DataOnly))))))))
+                                          (meta
+                                           ((type_ UReal) (loc <opaque>)
+                                            (adlevel DataOnly)))))))
+                                      (meta
+                                       ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                              ((pattern
+                                (Block
+                                 (((pattern
+                                    (Assignment
+                                     ((LVariable inline_fillholes_matout_sym7__)
+                                      ((Single
+                                        ((pattern (Var inline_fillholes_ri_sym9__))
+                                         (meta
+                                          ((type_ UInt) (loc <opaque>)
+                                           (adlevel DataOnly)))))
+                                       (Single
+                                        ((pattern (Var inline_fillholes_ci_sym8__))
+                                         (meta
+                                          ((type_ UInt) (loc <opaque>)
+                                           (adlevel DataOnly)))))))
+                                     UMatrix
+                                     ((pattern
+                                       (Indexed
+                                        ((pattern (Var m))
+                                         (meta
+                                          ((type_ UMatrix) (loc <opaque>)
+                                           (adlevel DataOnly))))
+                                        ((Single
+                                          ((pattern (Var inline_fillholes_ri_sym9__))
+                                           (meta
+                                            ((type_ UInt) (loc <opaque>)
+                                             (adlevel DataOnly)))))
+                                         (Single
+                                          ((pattern (Var inline_fillholes_ci_sym8__))
+                                           (meta
+                                            ((type_ UInt) (loc <opaque>)
+                                             (adlevel DataOnly))))))))
+                                      (meta
+                                       ((type_ UReal) (loc <opaque>)
+                                        (adlevel AutoDiffable))))))
+                                   (meta <opaque>)))))
+                               (meta <opaque>))
+                              ()))
+                            (meta <opaque>)))))
+                        (meta <opaque>)))))
+                    (meta <opaque>)))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_fillholes_return_sym6__) ()) UMatrix
+              ((pattern (Var inline_fillholes_matout_sym7__))
+               (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
          (TargetPE
           ((pattern
             (FunApp (StanLib Times__ FnPlain AoS)
              (((pattern
                 (FunApp (StanLib sum FnPlain AoS)
-                 (((pattern
-                    (FunApp (UserDefined fillholes FnPlain)
-                     (((pattern (Var m))
-                       (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly))))
-                      ((pattern (Lit Real 2.0))
-                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
-                   (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                 (((pattern (Var inline_fillholes_return_sym6__))
+                   (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
               ((pattern (Var theta))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
@@ -420,7 +702,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -429,24 +711,306 @@
       (((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib std_normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib std_normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var theta))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
        ((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_fillholes_return_sym1__)
+          (decl_type
+           (Sized
+            (SMatrix AoS
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+          (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str matout))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "rows(matin)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib rows FnPlain SoA)
+                  (((pattern (Var m))
+                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str matout))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "cols(matin)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib cols FnPlain SoA)
+                  (((pattern (Var m))
+                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_fillholes_matout_sym2__)
+              (decl_type
+               (Sized
+                (SMatrix AoS
+                 ((pattern
+                   (FunApp (StanLib rows FnPlain SoA)
+                    (((pattern (Var m))
+                      (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                 ((pattern
+                   (FunApp (StanLib cols FnPlain SoA)
+                    (((pattern (Var m))
+                      (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (For (loopvar inline_fillholes_ri_sym4__)
+              (lower
+               ((pattern (Lit Int 1))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (upper
+               ((pattern
+                 (FunApp (StanLib rows FnPlain SoA)
+                  (((pattern (Var m))
+                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (body
+               ((pattern
+                 (Block
+                  (((pattern
+                     (For (loopvar inline_fillholes_ci_sym3__)
+                      (lower
+                       ((pattern (Lit Int 1))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                      (upper
+                       ((pattern
+                         (FunApp (StanLib cols FnPlain SoA)
+                          (((pattern (Var m))
+                            (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                      (body
+                       ((pattern
+                         (Block
+                          (((pattern
+                             (IfElse
+                              ((pattern
+                                (FunApp (StanLib Greater__ FnPlain SoA)
+                                 (((pattern
+                                    (Indexed
+                                     ((pattern (Var m))
+                                      (meta
+                                       ((type_ UMatrix) (loc <opaque>)
+                                        (adlevel DataOnly))))
+                                     ((Single
+                                       ((pattern (Var inline_fillholes_ri_sym4__))
+                                        (meta
+                                         ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                                      (Single
+                                       ((pattern (Var inline_fillholes_ci_sym3__))
+                                        (meta
+                                         ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                                   (meta
+                                    ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                                  ((pattern (Lit Int 0))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                              ((pattern
+                                (Block
+                                 (((pattern
+                                    (Assignment
+                                     ((LVariable inline_fillholes_matout_sym2__)
+                                      ((Single
+                                        ((pattern (Var inline_fillholes_ri_sym4__))
+                                         (meta
+                                          ((type_ UInt) (loc <opaque>)
+                                           (adlevel DataOnly)))))
+                                       (Single
+                                        ((pattern (Var inline_fillholes_ci_sym3__))
+                                         (meta
+                                          ((type_ UInt) (loc <opaque>)
+                                           (adlevel DataOnly)))))))
+                                     UMatrix
+                                     ((pattern
+                                       (FunApp (StanLib Times__ FnPlain AoS)
+                                        (((pattern (Lit Real 2.0))
+                                          (meta
+                                           ((type_ UReal) (loc <opaque>)
+                                            (adlevel DataOnly))))
+                                         ((pattern
+                                           (Indexed
+                                            ((pattern (Var m))
+                                             (meta
+                                              ((type_ UMatrix) (loc <opaque>)
+                                               (adlevel DataOnly))))
+                                            ((Single
+                                              ((pattern (Var inline_fillholes_ri_sym4__))
+                                               (meta
+                                                ((type_ UInt) (loc <opaque>)
+                                                 (adlevel DataOnly)))))
+                                             (Single
+                                              ((pattern (Var inline_fillholes_ci_sym3__))
+                                               (meta
+                                                ((type_ UInt) (loc <opaque>)
+                                                 (adlevel DataOnly))))))))
+                                          (meta
+                                           ((type_ UReal) (loc <opaque>)
+                                            (adlevel DataOnly)))))))
+                                      (meta
+                                       ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))))
+                                   (meta <opaque>)))))
+                               (meta <opaque>))
+                              ()))
+                            (meta <opaque>)))))
+                        (meta <opaque>)))))
+                    (meta <opaque>)))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (For (loopvar inline_fillholes_ri_sym4__)
+              (lower
+               ((pattern (Lit Int 1))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (upper
+               ((pattern
+                 (FunApp (StanLib rows FnPlain SoA)
+                  (((pattern (Var m))
+                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (body
+               ((pattern
+                 (Block
+                  (((pattern
+                     (For (loopvar inline_fillholes_ci_sym3__)
+                      (lower
+                       ((pattern (Lit Int 1))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                      (upper
+                       ((pattern
+                         (FunApp (StanLib cols FnPlain SoA)
+                          (((pattern (Var m))
+                            (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                      (body
+                       ((pattern
+                         (Block
+                          (((pattern
+                             (IfElse
+                              ((pattern
+                                (EAnd
+                                 ((pattern
+                                   (FunApp (StanLib is_nan FnPlain SoA)
+                                    (((pattern
+                                       (Indexed
+                                        ((pattern (Var inline_fillholes_matout_sym2__))
+                                         (meta
+                                          ((type_ UMatrix) (loc <opaque>)
+                                           (adlevel AutoDiffable))))
+                                        ((Single
+                                          ((pattern (Var inline_fillholes_ri_sym4__))
+                                           (meta
+                                            ((type_ UInt) (loc <opaque>)
+                                             (adlevel DataOnly)))))
+                                         (Single
+                                          ((pattern (Var inline_fillholes_ci_sym3__))
+                                           (meta
+                                            ((type_ UInt) (loc <opaque>)
+                                             (adlevel DataOnly))))))))
+                                      (meta
+                                       ((type_ UReal) (loc <opaque>)
+                                        (adlevel AutoDiffable)))))))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                 ((pattern
+                                   (FunApp (StanLib PNot__ FnPlain SoA)
+                                    (((pattern
+                                       (FunApp (StanLib is_nan FnPlain SoA)
+                                        (((pattern
+                                           (Indexed
+                                            ((pattern (Var m))
+                                             (meta
+                                              ((type_ UMatrix) (loc <opaque>)
+                                               (adlevel DataOnly))))
+                                            ((Single
+                                              ((pattern (Var inline_fillholes_ri_sym4__))
+                                               (meta
+                                                ((type_ UInt) (loc <opaque>)
+                                                 (adlevel DataOnly)))))
+                                             (Single
+                                              ((pattern (Var inline_fillholes_ci_sym3__))
+                                               (meta
+                                                ((type_ UInt) (loc <opaque>)
+                                                 (adlevel DataOnly))))))))
+                                          (meta
+                                           ((type_ UReal) (loc <opaque>)
+                                            (adlevel DataOnly)))))))
+                                      (meta
+                                       ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                              ((pattern
+                                (Block
+                                 (((pattern
+                                    (Assignment
+                                     ((LVariable inline_fillholes_matout_sym2__)
+                                      ((Single
+                                        ((pattern (Var inline_fillholes_ri_sym4__))
+                                         (meta
+                                          ((type_ UInt) (loc <opaque>)
+                                           (adlevel DataOnly)))))
+                                       (Single
+                                        ((pattern (Var inline_fillholes_ci_sym3__))
+                                         (meta
+                                          ((type_ UInt) (loc <opaque>)
+                                           (adlevel DataOnly)))))))
+                                     UMatrix
+                                     ((pattern
+                                       (Indexed
+                                        ((pattern (Var m))
+                                         (meta
+                                          ((type_ UMatrix) (loc <opaque>)
+                                           (adlevel DataOnly))))
+                                        ((Single
+                                          ((pattern (Var inline_fillholes_ri_sym4__))
+                                           (meta
+                                            ((type_ UInt) (loc <opaque>)
+                                             (adlevel DataOnly)))))
+                                         (Single
+                                          ((pattern (Var inline_fillholes_ci_sym3__))
+                                           (meta
+                                            ((type_ UInt) (loc <opaque>)
+                                             (adlevel DataOnly))))))))
+                                      (meta
+                                       ((type_ UReal) (loc <opaque>)
+                                        (adlevel AutoDiffable))))))
+                                   (meta <opaque>)))))
+                               (meta <opaque>))
+                              ()))
+                            (meta <opaque>)))))
+                        (meta <opaque>)))))
+                    (meta <opaque>)))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_fillholes_return_sym1__) ()) UMatrix
+              ((pattern (Var inline_fillholes_matout_sym2__))
+               (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Times__ FnPlain AoS)
+            (FunApp (StanLib Times__ FnPlain SoA)
              (((pattern
                 (FunApp (StanLib sum FnPlain AoS)
-                 (((pattern
-                    (FunApp (UserDefined fillholes FnPlain)
-                     (((pattern (Var m))
-                       (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly))))
-                      ((pattern (Lit Real 2.0))
-                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
-                   (meta ((type_ UMatrix) (loc <opaque>) (adlevel DataOnly)))))))
+                 (((pattern (Var inline_fillholes_return_sym1__))
+                   (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
               ((pattern (Var theta))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
@@ -499,7 +1063,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id theta) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UReal
@@ -526,7 +1090,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id theta) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UReal

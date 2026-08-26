@@ -138,7 +138,7 @@
            (meta <opaque>))
           ((pattern
             (Decl (decl_adtype AutoDiffable) (decl_id counter) (decl_type (Sized SInt))
-             (initialize Default)))
+             (initialize Uninit)))
            (meta <opaque>))
           ((pattern
             (Assignment ((LVariable counter) ()) UInt
@@ -217,7 +217,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id N) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable N) ()) UInt
@@ -282,6 +282,239 @@
    ((pattern
      (Block
       (((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_return_sym27__)
+          (decl_type
+           (Sized
+            (SArray SInt
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+          (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str check))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "size(b)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib size FnPlain AoS)
+                  (((pattern (Var input))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_check_sym28__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern
+                   (FunApp (StanLib size FnPlain AoS)
+                    (((pattern (Var input))
+                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_whichequals_inline_vecequals_return_sym5___sym29__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern (Lit Int 0))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Block
+              (((pattern
+                 (NRFunApp (CompilerInternal FnValidateSize)
+                  (((pattern (Lit Str check))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                   ((pattern (Lit Str "size(a)"))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                   ((pattern
+                     (FunApp (StanLib size FnPlain AoS)
+                      (((pattern (Var input))
+                        (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta <opaque>))
+               ((pattern
+                 (Decl (decl_adtype AutoDiffable)
+                  (decl_id inline_whichequals_inline_vecequals_check_sym6___sym30__)
+                  (decl_type
+                   (Sized
+                    (SArray SInt
+                     ((pattern
+                       (FunApp (StanLib size FnPlain AoS)
+                        (((pattern (Var input))
+                          (meta
+                           ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                  (initialize Default)))
+                (meta <opaque>))
+               ((pattern
+                 (For (loopvar inline_whichequals_inline_vecequals_i_sym7___sym31__)
+                  (lower
+                   ((pattern (Lit Int 1))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (upper
+                   ((pattern
+                     (FunApp (StanLib size FnPlain AoS)
+                      (((pattern
+                         (Var inline_whichequals_inline_vecequals_check_sym6___sym30__))
+                        (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (body
+                   ((pattern
+                     (Block
+                      (((pattern
+                         (Assignment
+                          ((LVariable
+                            inline_whichequals_inline_vecequals_check_sym6___sym30__)
+                           ((Single
+                             ((pattern
+                               (Var inline_whichequals_inline_vecequals_i_sym7___sym31__))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                          (UArray UInt)
+                          ((pattern
+                            (FunApp (StanLib Equals__ FnPlain AoS)
+                             (((pattern
+                                (Indexed
+                                 ((pattern (Var input))
+                                  (meta
+                                   ((type_ (UArray UInt)) (loc <opaque>)
+                                    (adlevel DataOnly))))
+                                 ((Single
+                                   ((pattern
+                                     (Var
+                                      inline_whichequals_inline_vecequals_i_sym7___sym31__))
+                                    (meta
+                                     ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                              ((pattern (Lit Int 9))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                        (meta <opaque>)))))
+                    (meta <opaque>)))))
+                (meta <opaque>))
+               ((pattern
+                 (Assignment
+                  ((LVariable inline_whichequals_inline_vecequals_return_sym5___sym29__)
+                   ())
+                  (UArray UInt)
+                  ((pattern
+                    (Var inline_whichequals_inline_vecequals_check_sym6___sym30__))
+                   (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str which))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "sum(check)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib sum FnPlain AoS)
+                  (((pattern
+                     (Var inline_whichequals_inline_vecequals_return_sym5___sym29__))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_which_sym32__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern
+                   (FunApp (StanLib sum FnPlain AoS)
+                    (((pattern
+                       (Var inline_whichequals_inline_vecequals_return_sym5___sym29__))
+                      (meta
+                       ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_whichequals_counter_sym33__) (decl_type (Sized SInt))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_whichequals_counter_sym33__) ()) UInt
+              ((pattern (Lit Int 1))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>))
+           ((pattern
+             (For (loopvar inline_whichequals_i_sym34__)
+              (lower
+               ((pattern (Lit Int 1))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (upper
+               ((pattern
+                 (FunApp (StanLib size FnPlain AoS)
+                  (((pattern (Var input))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (body
+               ((pattern
+                 (Block
+                  (((pattern
+                     (IfElse
+                      ((pattern
+                        (FunApp (StanLib Equals__ FnPlain AoS)
+                         (((pattern
+                            (Indexed
+                             ((pattern
+                               (Var
+                                inline_whichequals_inline_vecequals_return_sym5___sym29__))
+                              (meta
+                               ((type_ (UArray UInt)) (loc <opaque>)
+                                (adlevel AutoDiffable))))
+                             ((Single
+                               ((pattern (Var inline_whichequals_i_sym34__))
+                                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                          ((pattern (Lit Int 1))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                      ((pattern
+                        (Block
+                         (((pattern
+                            (Assignment
+                             ((LVariable inline_whichequals_which_sym32__)
+                              ((Single
+                                ((pattern (Var inline_whichequals_counter_sym33__))
+                                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                             (UArray UInt)
+                             ((pattern (Var inline_whichequals_i_sym34__))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                           (meta <opaque>))
+                          ((pattern
+                            (Assignment
+                             ((LVariable inline_whichequals_counter_sym33__) ()) UInt
+                             ((pattern
+                               (FunApp (StanLib Plus__ FnPlain AoS)
+                                (((pattern (Var inline_whichequals_counter_sym33__))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                 ((pattern (Lit Int 1))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                           (meta <opaque>)))))
+                       (meta <opaque>))
+                      ()))
+                    (meta <opaque>)))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_whichequals_return_sym27__) ()) 
+              (UArray UInt)
+              ((pattern (Var inline_whichequals_which_sym32__))
+               (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
          (NRFunApp (CompilerInternal FnValidateSize)
           (((pattern (Lit Str selected))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
@@ -289,13 +522,8 @@
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
            ((pattern
              (FunApp (StanLib size FnPlain AoS)
-              (((pattern
-                 (FunApp (UserDefined whichequals FnPlain)
-                  (((pattern (Var input))
-                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
-                   ((pattern (Lit Int 9))
-                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+              (((pattern (Var inline_whichequals_return_sym27__))
+                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
         (meta <opaque>))
        ((pattern
@@ -316,14 +544,237 @@
           (initialize Default)))
         (meta <opaque>))
        ((pattern
-         (Assignment ((LVariable selected) ()) (UArray UInt)
-          ((pattern
-            (FunApp (UserDefined whichequals FnPlain)
-             (((pattern (Var input))
-               (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
-              ((pattern (Lit Int 9))
-               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-           (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_return_sym36__)
+          (decl_type
+           (Sized
+            (SArray SInt
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+          (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str check))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "size(b)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib size FnPlain AoS)
+                  (((pattern (Var input))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_check_sym37__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern
+                   (FunApp (StanLib size FnPlain AoS)
+                    (((pattern (Var input))
+                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_whichequals_inline_vecequals_return_sym5___sym38__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern (Lit Int 0))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Block
+              (((pattern
+                 (NRFunApp (CompilerInternal FnValidateSize)
+                  (((pattern (Lit Str check))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                   ((pattern (Lit Str "size(a)"))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                   ((pattern
+                     (FunApp (StanLib size FnPlain AoS)
+                      (((pattern (Var input))
+                        (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta <opaque>))
+               ((pattern
+                 (Decl (decl_adtype AutoDiffable)
+                  (decl_id inline_whichequals_inline_vecequals_check_sym6___sym39__)
+                  (decl_type
+                   (Sized
+                    (SArray SInt
+                     ((pattern
+                       (FunApp (StanLib size FnPlain AoS)
+                        (((pattern (Var input))
+                          (meta
+                           ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                  (initialize Default)))
+                (meta <opaque>))
+               ((pattern
+                 (For (loopvar inline_whichequals_inline_vecequals_i_sym7___sym40__)
+                  (lower
+                   ((pattern (Lit Int 1))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (upper
+                   ((pattern
+                     (FunApp (StanLib size FnPlain AoS)
+                      (((pattern
+                         (Var inline_whichequals_inline_vecequals_check_sym6___sym39__))
+                        (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (body
+                   ((pattern
+                     (Block
+                      (((pattern
+                         (Assignment
+                          ((LVariable
+                            inline_whichequals_inline_vecequals_check_sym6___sym39__)
+                           ((Single
+                             ((pattern
+                               (Var inline_whichequals_inline_vecequals_i_sym7___sym40__))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                          (UArray UInt)
+                          ((pattern
+                            (FunApp (StanLib Equals__ FnPlain AoS)
+                             (((pattern
+                                (Indexed
+                                 ((pattern (Var input))
+                                  (meta
+                                   ((type_ (UArray UInt)) (loc <opaque>)
+                                    (adlevel DataOnly))))
+                                 ((Single
+                                   ((pattern
+                                     (Var
+                                      inline_whichequals_inline_vecequals_i_sym7___sym40__))
+                                    (meta
+                                     ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                              ((pattern (Lit Int 9))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                        (meta <opaque>)))))
+                    (meta <opaque>)))))
+                (meta <opaque>))
+               ((pattern
+                 (Assignment
+                  ((LVariable inline_whichequals_inline_vecequals_return_sym5___sym38__)
+                   ())
+                  (UArray UInt)
+                  ((pattern
+                    (Var inline_whichequals_inline_vecequals_check_sym6___sym39__))
+                   (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str which))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "sum(check)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib sum FnPlain AoS)
+                  (((pattern
+                     (Var inline_whichequals_inline_vecequals_return_sym5___sym38__))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_which_sym41__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern
+                   (FunApp (StanLib sum FnPlain AoS)
+                    (((pattern
+                       (Var inline_whichequals_inline_vecequals_return_sym5___sym38__))
+                      (meta
+                       ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_whichequals_counter_sym42__) (decl_type (Sized SInt))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_whichequals_counter_sym42__) ()) UInt
+              ((pattern (Lit Int 1))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>))
+           ((pattern
+             (For (loopvar inline_whichequals_i_sym43__)
+              (lower
+               ((pattern (Lit Int 1))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (upper
+               ((pattern
+                 (FunApp (StanLib size FnPlain AoS)
+                  (((pattern (Var input))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (body
+               ((pattern
+                 (Block
+                  (((pattern
+                     (IfElse
+                      ((pattern
+                        (FunApp (StanLib Equals__ FnPlain AoS)
+                         (((pattern
+                            (Indexed
+                             ((pattern
+                               (Var
+                                inline_whichequals_inline_vecequals_return_sym5___sym38__))
+                              (meta
+                               ((type_ (UArray UInt)) (loc <opaque>)
+                                (adlevel AutoDiffable))))
+                             ((Single
+                               ((pattern (Var inline_whichequals_i_sym43__))
+                                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                          ((pattern (Lit Int 1))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                      ((pattern
+                        (Block
+                         (((pattern
+                            (Assignment
+                             ((LVariable inline_whichequals_which_sym41__)
+                              ((Single
+                                ((pattern (Var inline_whichequals_counter_sym42__))
+                                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                             (UArray UInt)
+                             ((pattern (Var inline_whichequals_i_sym43__))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                           (meta <opaque>))
+                          ((pattern
+                            (Assignment
+                             ((LVariable inline_whichequals_counter_sym42__) ()) UInt
+                             ((pattern
+                               (FunApp (StanLib Plus__ FnPlain AoS)
+                                (((pattern (Var inline_whichequals_counter_sym42__))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                 ((pattern (Lit Int 1))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                           (meta <opaque>)))))
+                       (meta <opaque>))
+                      ()))
+                    (meta <opaque>)))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_whichequals_return_sym36__) ()) 
+              (UArray UInt)
+              ((pattern (Var inline_whichequals_which_sym41__))
+               (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>)))))
         (meta <opaque>))
        ((pattern
          (TargetPE
@@ -353,8 +804,8 @@
           (upper
            ((pattern
              (FunApp (StanLib size FnPlain AoS)
-              (((pattern (Var selected))
-                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+              (((pattern (Var inline_whichequals_return_sym36__))
+                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (body
            ((pattern
@@ -367,9 +818,10 @@
                         (Promotion
                          ((pattern
                            (Indexed
-                            ((pattern (Var selected))
+                            ((pattern (Var inline_whichequals_return_sym36__))
                              (meta
-                              ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
+                              ((type_ (UArray UInt)) (loc <opaque>)
+                               (adlevel AutoDiffable))))
                             ((Single
                               ((pattern (Var i))
                                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
@@ -391,27 +843,255 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
    ((pattern
      (Block
       (((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_return_sym9__)
+          (decl_type
+           (Sized
+            (SArray SInt
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+          (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str check))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "size(b)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib size FnPlain SoA)
+                  (((pattern (Var input))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_check_sym10__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern
+                   (FunApp (StanLib size FnPlain SoA)
+                    (((pattern (Var input))
+                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_whichequals_inline_vecequals_return_sym5___sym11__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern (Lit Int 0))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Block
+              (((pattern
+                 (NRFunApp (CompilerInternal FnValidateSize)
+                  (((pattern (Lit Str check))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                   ((pattern (Lit Str "size(a)"))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                   ((pattern
+                     (FunApp (StanLib size FnPlain SoA)
+                      (((pattern (Var input))
+                        (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta <opaque>))
+               ((pattern
+                 (Decl (decl_adtype AutoDiffable)
+                  (decl_id inline_whichequals_inline_vecequals_check_sym6___sym12__)
+                  (decl_type
+                   (Sized
+                    (SArray SInt
+                     ((pattern
+                       (FunApp (StanLib size FnPlain SoA)
+                        (((pattern (Var input))
+                          (meta
+                           ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                  (initialize Default)))
+                (meta <opaque>))
+               ((pattern
+                 (For (loopvar inline_whichequals_inline_vecequals_i_sym7___sym13__)
+                  (lower
+                   ((pattern (Lit Int 1))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (upper
+                   ((pattern
+                     (FunApp (StanLib size FnPlain SoA)
+                      (((pattern
+                         (Var inline_whichequals_inline_vecequals_check_sym6___sym12__))
+                        (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (body
+                   ((pattern
+                     (Block
+                      (((pattern
+                         (Assignment
+                          ((LVariable
+                            inline_whichequals_inline_vecequals_check_sym6___sym12__)
+                           ((Single
+                             ((pattern
+                               (Var inline_whichequals_inline_vecequals_i_sym7___sym13__))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                          (UArray UInt)
+                          ((pattern
+                            (FunApp (StanLib Equals__ FnPlain SoA)
+                             (((pattern
+                                (Indexed
+                                 ((pattern (Var input))
+                                  (meta
+                                   ((type_ (UArray UInt)) (loc <opaque>)
+                                    (adlevel DataOnly))))
+                                 ((Single
+                                   ((pattern
+                                     (Var
+                                      inline_whichequals_inline_vecequals_i_sym7___sym13__))
+                                    (meta
+                                     ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                              ((pattern (Lit Int 9))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                        (meta <opaque>)))))
+                    (meta <opaque>)))))
+                (meta <opaque>))
+               ((pattern
+                 (Assignment
+                  ((LVariable inline_whichequals_inline_vecequals_return_sym5___sym11__)
+                   ())
+                  (UArray UInt)
+                  ((pattern
+                    (Var inline_whichequals_inline_vecequals_check_sym6___sym12__))
+                   (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str which))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "sum(check)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib sum FnPlain SoA)
+                  (((pattern
+                     (Var inline_whichequals_inline_vecequals_return_sym5___sym11__))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_which_sym14__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern
+                   (FunApp (StanLib sum FnPlain SoA)
+                    (((pattern
+                       (Var inline_whichequals_inline_vecequals_return_sym5___sym11__))
+                      (meta
+                       ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_whichequals_counter_sym15__) (decl_type (Sized SInt))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_whichequals_counter_sym15__) ()) UInt
+              ((pattern (Lit Int 1))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>))
+           ((pattern
+             (For (loopvar inline_whichequals_i_sym16__)
+              (lower
+               ((pattern (Lit Int 1))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (upper
+               ((pattern
+                 (FunApp (StanLib size FnPlain SoA)
+                  (((pattern (Var input))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (body
+               ((pattern
+                 (Block
+                  (((pattern
+                     (IfElse
+                      ((pattern
+                        (FunApp (StanLib Equals__ FnPlain SoA)
+                         (((pattern
+                            (Indexed
+                             ((pattern
+                               (Var
+                                inline_whichequals_inline_vecequals_return_sym5___sym11__))
+                              (meta
+                               ((type_ (UArray UInt)) (loc <opaque>)
+                                (adlevel AutoDiffable))))
+                             ((Single
+                               ((pattern (Var inline_whichequals_i_sym16__))
+                                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                          ((pattern (Lit Int 1))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                      ((pattern
+                        (Block
+                         (((pattern
+                            (Assignment
+                             ((LVariable inline_whichequals_which_sym14__)
+                              ((Single
+                                ((pattern (Var inline_whichequals_counter_sym15__))
+                                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                             (UArray UInt)
+                             ((pattern (Var inline_whichequals_i_sym16__))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                           (meta <opaque>))
+                          ((pattern
+                            (Assignment
+                             ((LVariable inline_whichequals_counter_sym15__) ()) UInt
+                             ((pattern
+                               (FunApp (StanLib Plus__ FnPlain SoA)
+                                (((pattern (Var inline_whichequals_counter_sym15__))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                 ((pattern (Lit Int 1))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                           (meta <opaque>)))))
+                       (meta <opaque>))
+                      ()))
+                    (meta <opaque>)))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_whichequals_return_sym9__) ()) 
+              (UArray UInt)
+              ((pattern (Var inline_whichequals_which_sym14__))
+               (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
          (NRFunApp (CompilerInternal FnValidateSize)
           (((pattern (Lit Str selected))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
            ((pattern (Lit Str "size(whichequals(input, 9))"))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
            ((pattern
-             (FunApp (StanLib size FnPlain AoS)
-              (((pattern
-                 (FunApp (UserDefined whichequals FnPlain)
-                  (((pattern (Var input))
-                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
-                   ((pattern (Lit Int 9))
-                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+             (FunApp (StanLib size FnPlain SoA)
+              (((pattern (Var inline_whichequals_return_sym9__))
+                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
         (meta <opaque>))
        ((pattern
@@ -420,7 +1100,7 @@
            (Sized
             (SArray SInt
              ((pattern
-               (FunApp (StanLib size FnPlain AoS)
+               (FunApp (StanLib size FnPlain SoA)
                 (((pattern
                    (FunApp (UserDefined whichequals FnPlain)
                     (((pattern (Var input))
@@ -432,19 +1112,242 @@
           (initialize Default)))
         (meta <opaque>))
        ((pattern
-         (Assignment ((LVariable selected) ()) (UArray UInt)
-          ((pattern
-            (FunApp (UserDefined whichequals FnPlain)
-             (((pattern (Var input))
-               (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
-              ((pattern (Lit Int 9))
-               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-           (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_return_sym18__)
+          (decl_type
+           (Sized
+            (SArray SInt
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+          (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str check))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "size(b)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib size FnPlain SoA)
+                  (((pattern (Var input))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_check_sym19__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern
+                   (FunApp (StanLib size FnPlain SoA)
+                    (((pattern (Var input))
+                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_whichequals_inline_vecequals_return_sym5___sym20__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern (Lit Int 0))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Block
+              (((pattern
+                 (NRFunApp (CompilerInternal FnValidateSize)
+                  (((pattern (Lit Str check))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                   ((pattern (Lit Str "size(a)"))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                   ((pattern
+                     (FunApp (StanLib size FnPlain SoA)
+                      (((pattern (Var input))
+                        (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta <opaque>))
+               ((pattern
+                 (Decl (decl_adtype AutoDiffable)
+                  (decl_id inline_whichequals_inline_vecequals_check_sym6___sym21__)
+                  (decl_type
+                   (Sized
+                    (SArray SInt
+                     ((pattern
+                       (FunApp (StanLib size FnPlain SoA)
+                        (((pattern (Var input))
+                          (meta
+                           ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                  (initialize Default)))
+                (meta <opaque>))
+               ((pattern
+                 (For (loopvar inline_whichequals_inline_vecequals_i_sym7___sym22__)
+                  (lower
+                   ((pattern (Lit Int 1))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (upper
+                   ((pattern
+                     (FunApp (StanLib size FnPlain SoA)
+                      (((pattern
+                         (Var inline_whichequals_inline_vecequals_check_sym6___sym21__))
+                        (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (body
+                   ((pattern
+                     (Block
+                      (((pattern
+                         (Assignment
+                          ((LVariable
+                            inline_whichequals_inline_vecequals_check_sym6___sym21__)
+                           ((Single
+                             ((pattern
+                               (Var inline_whichequals_inline_vecequals_i_sym7___sym22__))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                          (UArray UInt)
+                          ((pattern
+                            (FunApp (StanLib Equals__ FnPlain SoA)
+                             (((pattern
+                                (Indexed
+                                 ((pattern (Var input))
+                                  (meta
+                                   ((type_ (UArray UInt)) (loc <opaque>)
+                                    (adlevel DataOnly))))
+                                 ((Single
+                                   ((pattern
+                                     (Var
+                                      inline_whichequals_inline_vecequals_i_sym7___sym22__))
+                                    (meta
+                                     ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                              ((pattern (Lit Int 9))
+                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                        (meta <opaque>)))))
+                    (meta <opaque>)))))
+                (meta <opaque>))
+               ((pattern
+                 (Assignment
+                  ((LVariable inline_whichequals_inline_vecequals_return_sym5___sym20__)
+                   ())
+                  (UArray UInt)
+                  ((pattern
+                    (Var inline_whichequals_inline_vecequals_check_sym6___sym21__))
+                   (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (NRFunApp (CompilerInternal FnValidateSize)
+              (((pattern (Lit Str which))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern (Lit Str "sum(check)"))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               ((pattern
+                 (FunApp (StanLib sum FnPlain SoA)
+                  (((pattern
+                     (Var inline_whichequals_inline_vecequals_return_sym5___sym20__))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_whichequals_which_sym23__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern
+                   (FunApp (StanLib sum FnPlain SoA)
+                    (((pattern
+                       (Var inline_whichequals_inline_vecequals_return_sym5___sym20__))
+                      (meta
+                       ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_whichequals_counter_sym24__) (decl_type (Sized SInt))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_whichequals_counter_sym24__) ()) UInt
+              ((pattern (Lit Int 1))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>))
+           ((pattern
+             (For (loopvar inline_whichequals_i_sym25__)
+              (lower
+               ((pattern (Lit Int 1))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (upper
+               ((pattern
+                 (FunApp (StanLib size FnPlain SoA)
+                  (((pattern (Var input))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+              (body
+               ((pattern
+                 (Block
+                  (((pattern
+                     (IfElse
+                      ((pattern
+                        (FunApp (StanLib Equals__ FnPlain SoA)
+                         (((pattern
+                            (Indexed
+                             ((pattern
+                               (Var
+                                inline_whichequals_inline_vecequals_return_sym5___sym20__))
+                              (meta
+                               ((type_ (UArray UInt)) (loc <opaque>)
+                                (adlevel AutoDiffable))))
+                             ((Single
+                               ((pattern (Var inline_whichequals_i_sym25__))
+                                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                          ((pattern (Lit Int 1))
+                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                      ((pattern
+                        (Block
+                         (((pattern
+                            (Assignment
+                             ((LVariable inline_whichequals_which_sym23__)
+                              ((Single
+                                ((pattern (Var inline_whichequals_counter_sym24__))
+                                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                             (UArray UInt)
+                             ((pattern (Var inline_whichequals_i_sym25__))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                           (meta <opaque>))
+                          ((pattern
+                            (Assignment
+                             ((LVariable inline_whichequals_counter_sym24__) ()) UInt
+                             ((pattern
+                               (FunApp (StanLib Plus__ FnPlain SoA)
+                                (((pattern (Var inline_whichequals_counter_sym24__))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                 ((pattern (Lit Int 1))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+                           (meta <opaque>)))))
+                       (meta <opaque>))
+                      ()))
+                    (meta <opaque>)))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_whichequals_return_sym18__) ()) 
+              (UArray UInt)
+              ((pattern (Var inline_whichequals_which_sym23__))
+               (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>)))))
         (meta <opaque>))
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var theta))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -468,9 +1371,9 @@
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (upper
            ((pattern
-             (FunApp (StanLib size FnPlain AoS)
-              (((pattern (Var selected))
-                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+             (FunApp (StanLib size FnPlain SoA)
+              (((pattern (Var inline_whichequals_return_sym18__))
+                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel AutoDiffable)))))))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (body
            ((pattern
@@ -478,14 +1381,15 @@
               (((pattern
                  (TargetPE
                   ((pattern
-                    (FunApp (StanLib Times__ FnPlain AoS)
+                    (FunApp (StanLib Times__ FnPlain SoA)
                      (((pattern
                         (Promotion
                          ((pattern
                            (Indexed
-                            ((pattern (Var selected))
+                            ((pattern (Var inline_whichequals_return_sym18__))
                              (meta
-                              ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
+                              ((type_ (UArray UInt)) (loc <opaque>)
+                               (adlevel AutoDiffable))))
                             ((Single
                               ((pattern (Var i))
                                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
@@ -545,7 +1449,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id theta) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UReal
@@ -572,7 +1476,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id theta) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UReal
