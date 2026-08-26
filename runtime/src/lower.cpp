@@ -4452,6 +4452,30 @@ struct Lowering {
             td.env().erase(s.lhs);
             return;
           }
+          // Scatter write x[idx] = rhs. The indices are data, so spell it as
+          // one element write each; repeats then resolve last-wins as CmdStan.
+          if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexMulti" &&
+              !is_matrix(prev_v.si)) {
+            DataMap::Entry iv =
+                eval_pure(s.lhs_idx[0].args[0], "a scatter index");
+            if (!iv.is_int) fail("scatter index must be int data", s.raw);
+            if ((int64_t)iv.i.size() != g.slots[rhs].len)
+              fail("scatter assignment size mismatch for " + s.lhs);
+            Val nv = prev_v;
+            for (size_t k = 0; k < iv.i.size(); ++k) {
+              check_index(iv.i[k], g.slots[prev].len, "scatter index", s.raw);
+              const Val el = emit_value(OP_INDEX, {rhs_v}, 1, view_of("UReal"),
+                                        {(int)k});
+              const Val next =
+                  emit_value(OP_SET_INDEX, {nv, el}, g.slots[prev].len, out_si,
+                             {(int)(iv.i[k] - 1)});
+              propagate_int_update(next, nv, el, iv.i[k] - 1, 1);
+              nv = next;
+            }
+            scope[s.lhs] = nv;
+            td.env().erase(s.lhs);
+            return;
+          }
           // Column write M[:, j] = rhs (contiguous in col-major storage).
           if (s.lhs_idx.size() == 2 && s.lhs_idx[0].name == "IndexAll" &&
               s.lhs_idx[1].name == "IndexSingle" && is_matrix(prev_v.si)) {

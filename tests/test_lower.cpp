@@ -576,6 +576,26 @@ int main() {
     expect_eq("ndlit lp", lp, wt * q[1] + s3 * q[2]);
   }
 
+  // x[idx] = rhs with a repeated index: the last write to a position wins,
+  // so a scatter must be ordered element writes, not one fused store.
+  {
+    const DataMap d =
+        DataMap::from_json(slurp("tests/fixtures/scatter_assign.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/scatter_assign.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[3] = {0.1, 0.0, -0.1};
+    for (int i = 0; i < 3; ++i) lex.params_data()[i] = q[i];
+    double grad[3] = {0, 0, 0};
+    const double lp = lex.gradient(grad);
+    // idx = {4, 1, 4}: x[1] = q[1], x[4] = q[2], and q[0] reaches nothing.
+    expect_eq("scatter lp", lp, -0.5 * (0.01 + 0.01) + 0.01);
+    expect_eq("scatter grad dead", grad[0], -q[0]);
+    expect_eq("scatter grad x1", grad[1], -q[1] + 2 * q[1]);
+    expect_eq("scatter grad x4", grad[2], -q[2] + 2 * q[2]);
+  }
+
   // A[i, lo:hi] on a 2-D int array: graph order is outer-major, so a wrong
   // offset here reads a neighbouring row and stays silent.
   {
