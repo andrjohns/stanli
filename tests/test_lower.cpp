@@ -576,6 +576,21 @@ int main() {
     expect_eq("ndlit lp", lp, wt * q[1] + s3 * q[2]);
   }
 
+  // A while loop whose condition is data unrolls the way a for loop does.
+  {
+    const DataMap d = DataMap::from_json(slurp("tests/fixtures/whileloop.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/whileloop.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.1;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    const double sum = 1 + 2 + 3 + 4;  // N = 4 iterations
+    expect_eq("while lp", lp, -0.5 * 0.1 * 0.1 + sum * 0.1);
+    expect_eq("while grad", grad, -0.1 + sum);
+  }
+
   // x[idx] = rhs with a repeated index: the last write to a position wins,
   // so a scatter must be ordered element writes, not one fused store.
   {
