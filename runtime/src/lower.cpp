@@ -4820,6 +4820,17 @@ struct Lowering {
         int_env.erase(s.loopvar);
         return;
       }
+      case mir::Stmt::While: {
+        // Unrolled like For. The bound only turns a nonterminating unroll
+        // into an error instead of an out-of-memory kill.
+        for (int64_t guard = 0;; ++guard) {
+          auto c = try_eval_pure(s.cond);
+          if (!c) fail("while condition is not data", s.raw);
+          if (c->r.at(0) == 0.0) return;
+          if (guard > 1000000) fail("while loop did not terminate", s.raw);
+          for (const auto& k : s.body) lower_stmt(k);
+        }
+      }
       case mir::Stmt::IfElse: {
         // The guards are data-only and fold away below (both flags are
         // pinned on), so this is the only chance to note that a CSV
