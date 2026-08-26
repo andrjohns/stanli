@@ -82,17 +82,24 @@ and sample happily from the wrong seed. So the C ABI carries a layout
 version (`stanli_abi_version()`) and loading refuses on a mismatch with
 a message saying which side to update.
 
-**The Stan compiler** is stanc3 compiled to JavaScript and run through
-the V8 package, the same approach rstan uses to ship a compiler on
-CRAN: one 2.8 MB file, no toolchain, no per-platform binaries. When the
-runtime embeds stanc3 (every release build but Windows), that path is
-used instead and V8 never loads; a native `stanc` in `STANLI_STANC` or
-beside the runtime also wins, because it is faster than either. The
-Windows runtime tarball carries `stanc.exe` next to the DLL for exactly
-that reason. The bundled JavaScript compiler records its exact stanc3
-repository, revision, and content hash. CI verifies that provenance and
-compiles valid and invalid models through the file on Linux, macOS, and
-Windows.
+**The Stan compiler** uses the embedded stanc3 and stanli OCaml pipeline in the
+macOS and Linux release runtimes. On native hosts without an embedded compiler,
+`STANLI_STANC` remains the first choice as an explicit stock-compiler override
+for bisects. Otherwise R prefers
+`stanli-compile` beside the runtime, then stock `stanc` beside the runtime or
+on `PATH`, and finally stanc3 compiled to JavaScript through V8. The portable
+producer is never taken from `PATH`, because it must match the runtime's
+schema. Launch errors, nonzero exits, and empty output are reported; invalid
+portable output is rejected when decoded. None causes an automatic retry
+through stock stanc.
+
+The v0.9.2 compatibility runtime carries pristine `stanc.exe`; the selection
+logic falls through to it automatically. Windows runtime tarballs built from
+this revision add `stanli-compile.exe` beside that rollback compiler for one
+release cycle. Both are short-lived subprocesses; there is no OCaml compiler
+DLL. The bundled JavaScript compiler records its exact stanc3 repository,
+revision, and content hash. CI verifies that provenance and compiles valid and
+invalid models through the file on Linux, macOS, and Windows.
 
 ## What is not here yet
 

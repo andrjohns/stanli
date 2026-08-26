@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Shared provenance helpers for the native and browser stanc artifacts.
+# Shared provenance helpers for the native, browser, and Windows stanc
+# artifacts.
 # This file is sourced by build scripts; it is not intended to be run.
 
 _stanli_embed_repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -226,6 +227,108 @@ stanli_stancjs_artifact_matches() {
     [[ -n "$(_stanc_embed_stamp_value "$stamp" js_of_ocaml_version)" ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" producer_inputs_sha256)" == \
        "$(stanli_stancjs_inputs_sha256)" ]] &&
+    [[ "$(_stanc_embed_stamp_value "$stamp" dune_profile)" == release ]] &&
+    [[ "$(_stanc_embed_stamp_value "$stamp" dune_subst)" == 1 ]]
+}
+
+# The Windows executable uses the same portable-MIR package as the native and
+# JavaScript producers, but only the small command-line entry point from the JS
+# directory. Keep this narrower than [stanli_stancjs_inputs_sha256]: changing
+# the browser wrapper must not change the provenance of an executable that
+# does not link it.
+stanli_windows_cli_inputs() {
+  (
+    cd "$_stanli_embed_repo_root"
+    {
+      find compiler/ocaml -maxdepth 1 -type f -print
+      printf '%s\n' \
+        .gitattributes \
+        compiler/js/dune \
+        compiler/js/stanli_compiler_cli.ml \
+        tools/stanc_embed/install_overlay.sh \
+        tools/stanc_embed/provenance.sh
+    } | LC_ALL=C sort
+  )
+}
+
+stanli_windows_cli_inputs_sha256() {
+  (
+    cd "$_stanli_embed_repo_root"
+    while IFS= read -r input; do
+      printf '%s\n%s\n' "$input" "$(_stanc_embed_sha256_file "$input")"
+    done < <(stanli_windows_cli_inputs)
+  ) | _stanc_embed_sha256_stream
+}
+
+stanli_windows_cli_expected_stamp() {
+  local src_repo=${1:?stanc3 source repository}
+  local src_sha=${2:?stanc3 source revision}
+  local opam_switch=${3:-$(opam switch show --safe)}
+  local ocaml_version ocaml_package_version ocaml_target gcc_target dune_version
+  ocaml_version=$(opam exec --switch="$opam_switch" -- \
+    ocamlfind -toolchain windows ocamlc -version 2>/dev/null)
+  ocaml_package_version=$(
+    _stanc_embed_package_version "$opam_switch" ocaml-windows)
+  ocaml_target=$(opam exec --switch="$opam_switch" -- \
+    ocamlfind -toolchain windows ocamlc -config-var target 2>/dev/null)
+  gcc_target=$(opam var --switch="$opam_switch" conf-gcc-windows:host \
+    2>/dev/null)
+  dune_version=$(_stanc_embed_package_version "$opam_switch" dune)
+  if [[ -z "$ocaml_version" || "$ocaml_version" != "$ocaml_package_version" ||
+        -z "$ocaml_target" || "$ocaml_target" != "$gcc_target" ||
+        -z "$dune_version" ]]; then
+    echo "could not identify the Windows OCaml cross toolchain" >&2
+    return 1
+  fi
+  printf '%s\n' \
+    'format=stanli-portable-windows-cli-v1' \
+    "stanc3_src_repo=$src_repo" \
+    "stanc3_src_sha=$src_sha" \
+    "ocaml_version=$ocaml_version" \
+    "ocaml_target=$ocaml_target" \
+    "dune_version=$dune_version" \
+    "producer_inputs_sha256=$(stanli_windows_cli_inputs_sha256)" \
+    'dune_context=windows' \
+    'dune_profile=release' \
+    'dune_subst=1'
+}
+
+stanli_windows_cli_artifact_matches() {
+  local artifact=${1:?portable Windows compiler artifact}
+  local src_repo=${2:?stanc3 source repository}
+  local src_sha=${3:?stanc3 source revision}
+  local opam_switch=${4:-}
+  local stamp="${artifact}.stamp"
+  [[ -f "$artifact" && -f "$stamp" ]] || return 1
+
+  # On the Linux producer, compare the complete record against the installed
+  # cross toolchain. The Windows packager intentionally has no opam switch, so
+  # it validates every source-derived and configured field instead.
+  if [[ -z "$opam_switch" ]] && command -v opam >/dev/null 2>&1; then
+    opam_switch=$(opam switch show --safe 2>/dev/null || true)
+  fi
+  if [[ -n "$opam_switch" ]] && _stanc_embed_switch_exists "$opam_switch" &&
+     [[ -n "$(_stanc_embed_package_version "$opam_switch" ocaml-windows)" ]]; then
+    [[ "$(cat "$stamp")" == \
+       "$(stanli_windows_cli_expected_stamp \
+          "$src_repo" "$src_sha" "$opam_switch")" ]]
+    return
+  fi
+
+  [[ "$(_stanc_embed_stamp_value "$stamp" format)" == \
+       'stanli-portable-windows-cli-v1' ]] &&
+    [[ "$(_stanc_embed_stamp_value "$stamp" stanc3_src_repo)" == \
+       "$src_repo" ]] &&
+    [[ "$(_stanc_embed_stamp_value "$stamp" stanc3_src_sha)" == \
+       "$src_sha" ]] &&
+    [[ "$(_stanc_embed_stamp_value "$stamp" ocaml_version)" == \
+       "$(stanc_embed_read_setup OCAML_VERSION)" ]] &&
+    [[ "$(_stanc_embed_stamp_value "$stamp" ocaml_target)" == \
+       'x86_64-w64-mingw32' ]] &&
+    [[ -n "$(_stanc_embed_stamp_value "$stamp" dune_version)" ]] &&
+    [[ "$(_stanc_embed_stamp_value "$stamp" producer_inputs_sha256)" == \
+       "$(stanli_windows_cli_inputs_sha256)" ]] &&
+    [[ "$(_stanc_embed_stamp_value "$stamp" dune_context)" == windows ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" dune_profile)" == release ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" dune_subst)" == 1 ]]
 }

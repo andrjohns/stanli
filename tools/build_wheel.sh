@@ -9,8 +9,13 @@ cd "$(dirname "$0")/.."
 source tools/stanc_embed/provenance.sh
 
 STANC3_SRC_SHA=$(stanc_embed_read_setup STANC3_SRC_SHA)
+STANC3_SRC_REPO=$(stanc_embed_read_setup STANC3_SRC_REPO)
 if [[ ! "$STANC3_SRC_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   echo "could not read an exact STANC3_SRC_SHA from tools/dev_setup.sh" >&2
+  exit 1
+fi
+if [ -z "$STANC3_SRC_REPO" ]; then
+  echo "could not read STANC3_SRC_REPO from tools/dev_setup.sh" >&2
   exit 1
 fi
 EMBED_OBJECT=deps/stanc3/stanc_embed.o
@@ -48,7 +53,9 @@ rm -f /tmp/binary-size.$$
 strip -x "python/stanli/_bin/$(basename "$LIB")" 2>/dev/null || true
 cp THIRD_PARTY_LICENSES.md LICENSE python/stanli/
 
-# Without the embedded compiler the package needs the stanc binary instead.
+# Without the embedded compiler the package needs subprocess compilers. Windows
+# ships stanli's portable-MIR producer and keeps pristine stock stanc beside it
+# for one rollback cycle; other non-embedded development builds keep stock stanc.
 if [ ! -f "$EMBED_OBJECT" ]; then
   if [ ! -f deps/stanc3/stanc ] || [ ! -f deps/stanc3/stanc.src ] ||
      [ "$(cat deps/stanc3/stanc.src 2>/dev/null || true)" != "$STANC3_SRC_SHA" ]; then
@@ -57,7 +64,17 @@ if [ ! -f "$EMBED_OBJECT" ]; then
     exit 1
   fi
   case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) cp deps/stanc3/stanc python/stanli/_bin/stanc.exe ;;
+    MINGW*|MSYS*|CYGWIN*)
+      PORTABLE_COMPILER=deps/stanc3/stanli-compile
+      if ! stanli_windows_cli_artifact_matches "$PORTABLE_COMPILER" \
+          "$STANC3_SRC_REPO" "$STANC3_SRC_SHA"; then
+        echo "$PORTABLE_COMPILER has absent or mismatched provenance" >&2
+        echo "use the windows-compilers artifact from this workflow run" >&2
+        exit 1
+      fi
+      cp deps/stanc3/stanc python/stanli/_bin/stanc.exe
+      cp "$PORTABLE_COMPILER" python/stanli/_bin/stanli-compile.exe
+      ;;
     *) cp deps/stanc3/stanc python/stanli/_bin/stanc
        chmod +x python/stanli/_bin/stanc ;;
   esac

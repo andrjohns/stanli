@@ -47,7 +47,7 @@ known exceptions.
 | check | question | acceptance rule | schedule |
 | --- | --- | --- | --- |
 | unit tests for numerical operations | Does one numerical operation or graph transformation agree with stan-math? | Bitwise by default; a documented 2 ULP limit for selected paths | every pull request |
-| compiler producer parity | Do native OCaml and js_of_ocaml emit identical portable bytes while the stock `stanc()` path remains usable? | Byte-for-byte identity on seven models; API, error, warning, include, fallback, and final-newline checks | every pull request |
+| compiler producer parity | Do native OCaml, js_of_ocaml, and the Windows executable emit identical portable bytes while the stock rollback paths remain usable? | Byte-for-byte identity on seven successful models; JS API/error/warning/rollback checks; Windows provenance, executable-format, and final-newline checks | every pull request |
 | corpus comparison | Are 119 posteriordb models and 11 compiler-derived fixtures consistent with recorded CmdStan behavior at three fixed inputs? | Scaled error of 1e-9 for most points; documented limits for three `kronecker_gp` points; rejection parity | every pull request |
 | cross-path matrix | Do stanli's execution paths agree with one another? | Bitwise, except entries named in the ledger | every pull request, within CTest |
 | transformation A/B | Do selected graph optimizations preserve model results? | Optimizations enabled and disabled agree at the default point within 1e-11 | manually after optimization changes |
@@ -254,6 +254,18 @@ focused worker harness proves the preferred custom
 import and the missing-artifact fallback import. The tested JavaScript
 artifacts are the ones consumed by the Pages and npm jobs. Size and
 preparation-cost outputs are uploaded as measurements rather than thresholds.
+
+The same gate covers the Windows producer on every pull request. The
+`stanc-windows` job cross-builds pristine `stanc.exe` before applying the
+stanli overlay, then cross-builds `stanli-compile.exe` and records its source
+and core-toolchain stamp. The `windows-compiler` job executes both PE
+artifacts on Windows, proves the stock overflow behavior remains pristine, and
+runs the seven-model byte comparison above between `stanli-compile.exe` and
+the JavaScript producer. The surrounding JavaScript suite separately checks
+errors, warnings, and its stock API. A real R subprocess check then runs both
+executables from paths containing spaces and Unicode, stages CRLF source as
+UTF-8 bytes, and checks portable versus legacy envelopes. This bounded gate
+builds no stan-math runtime or Windows wheel.
 
 ## Comparing stanli execution paths
 
@@ -524,6 +536,8 @@ The pull-request workflows require the following checks, as defined in
 [`.github/workflows/lint.yml`](.github/workflows/lint.yml):
 
 - one platform build, `manylinux_2_28_x86_64`;
+- the compiler-only Windows cross-build and executable parity gate described
+  above;
 - the full ctest suite, which includes the cross-path matrix and the
   pass-safety fuzz;
 - the CmdStan corpus comparison at all three points;
@@ -546,11 +560,15 @@ The pull-request workflows require the following checks, as defined in
   dependencies and third-party code. The formatter version is pinned because
   output can differ across major versions.
 
-Pull requests run the Linux x86_64 wheel job. The other three wheel platforms
-(macOS arm64, macOS x86_64, and manylinux aarch64), the Windows build, the
-ASan job, the WebAssembly build with its eight-schools sampling test under
-Node, and the webR side-module load test run on every push to `main`, nightly,
-and on release tags. These checks report platform-specific issues after a
+Pull requests run the Linux x86_64 wheel job and the Windows compiler-only
+gate. The other three wheel platforms (macOS arm64, macOS x86_64, and
+manylinux aarch64), the full Windows C++ matrix, the ASan job, the WebAssembly
+build with its eight-schools sampling test under Node, and the webR side-module
+load test run on every push to `main`, nightly, and on release tags. The full
+Windows job builds the runtime and CTest suite, packages `stanli.dll`,
+`stanli-compile.exe`, and pristine `stanc.exe`, then runs the installed-wheel
+Python tests through source compilation, errors, lowering, gradients, sampling,
+and generated quantities. These full platform checks report issues after a
 pull request has merged rather than blocking that merge.
 
 The nightly conformance sweep and its ratchet, the signature watch, and the

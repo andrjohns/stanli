@@ -7,8 +7,12 @@ Run against an installed wheel (CI does) or a local build:
 """
 import concurrent.futures
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
+from unittest import mock
 
 import numpy as np
 
@@ -281,6 +285,10 @@ def test_stan_to_mir_round_trips():
     code = "parameters { real x; } model { x ~ normal(0, 1); }"
     mir = stanli.stan_to_mir(code)
     assert "log_prob" in mir, "MIR text does not look like transformed MIR"
+    suffix = ".exe" if sys.platform == "win32" else ""
+    if (stanli._BIN / ("stanli-compile" + suffix)).is_file():
+        assert mir.startswith('{"stanli_ir":1,"program":'), mir[:80]
+        assert not mir.endswith(("\n", "\r")), "portable MIR has final newline"
 
     from_source = stanli.Model(stan_code=code)
     from_mir = stanli.Model(mir=mir)
@@ -309,6 +317,135 @@ def test_stan_to_mir_reports_syntax_errors():
     except RuntimeError:
         return
     raise AssertionError("expected RuntimeError for a syntax error")
+
+
+def test_subprocess_compiler_preference_and_rollback_contract():
+    # The Windows wheel carries both executables for one release cycle. The
+    # portable producer wins by presence; a non-zero result from it is a real
+    # failure and must never be hidden by silently retrying pristine stanc.
+    suffix = ".exe" if sys.platform == "win32" else ""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        compiler_dir = pathlib.Path(tmpdir)
+        portable = compiler_dir / ("stanli-compile" + suffix)
+        stock = compiler_dir / ("stanc" + suffix)
+        source = compiler_dir / "source with spaces.stan"
+        portable.touch()
+        stock.touch()
+        source.write_text("model {}", encoding="utf-8")
+        calls = []
+
+        def successful_run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(
+                argv, 0, '{"stanli_ir":1,"program":{}}',
+                "a successful frontend warning")
+
+        with mock.patch.object(stanli, "_BIN", compiler_dir), \
+                mock.patch.object(stanli.subprocess, "run", successful_run):
+            got = stanli._stanc_mir(source)
+        assert got == '{"stanli_ir":1,"program":{}}'
+        assert calls[0][0] == [str(portable), str(source)]
+        assert calls[0][1]["encoding"] == "utf-8"
+        assert calls[0][1]["capture_output"] is True
+
+        calls.clear()
+
+        def failing_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, "partial", "bad Stan")
+
+        with mock.patch.object(stanli, "_BIN", compiler_dir), \
+                mock.patch.object(stanli.subprocess, "run", failing_run):
+            try:
+                stanli._stanc_mir(source)
+            except RuntimeError as exc:
+                assert "bad Stan" in str(exc)
+            else:
+                raise AssertionError("preferred compiler failure was ignored")
+        assert calls == [[str(portable), str(source)]], calls
+
+        portable.unlink()
+        calls.clear()
+        with mock.patch.object(stanli, "_BIN", compiler_dir), \
+                mock.patch.object(stanli.subprocess, "run", successful_run):
+            stanli._stanc_mir(source)
+        assert calls[0][0] == [str(stock), "--O1",
+                               "--debug-optimized-mir", str(source)]
+
+        stock.unlink()
+        with mock.patch.object(stanli, "_BIN", compiler_dir):
+            try:
+                stanli._compiler_command(source)
+            except RuntimeError as exc:
+                assert "stanli-compile" in str(exc) and "stanc" in str(exc)
+            else:
+                raise AssertionError("missing bundled compilers were accepted")
+
+
+def test_subprocess_source_is_exact_utf8_and_fully_cleaned_up():
+    code = ("parameters { real theta; }\r\n"
+            "model { // θ\r\n theta ~ normal(0, 1); }\r\n")
+    seen = {}
+
+    def fake_compile(source):
+        seen["source"] = source
+        seen["bytes"] = source.read_bytes()
+        # Pristine stanc writes this beside its input even when only its debug
+        # MIR was requested. The whole private directory must be reclaimed.
+        source.with_suffix(".hpp").write_text("generated", encoding="utf-8")
+        return "(fake MIR)"
+
+    with mock.patch.object(stanli, "_stanc_mir", fake_compile):
+        assert stanli._subprocess_mir(code) == "(fake MIR)"
+    assert seen["bytes"] == code.encode("utf-8")
+    assert not seen["source"].parent.exists()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_file = pathlib.Path(tmpdir) / "source π.stan"
+        source_file.write_bytes(code.encode("utf-8"))
+        assert stanli._read_utf8_file(source_file) == code
+
+
+def test_windows_wheel_compilers_and_stock_rollback_execute():
+    if sys.platform != "win32":
+        return
+
+    packaged_portable = stanli._BIN / "stanli-compile.exe"
+    packaged_stock = stanli._BIN / "stanc.exe"
+    assert packaged_portable.is_file(), "Windows wheel lacks stanli-compile.exe"
+    assert packaged_stock.is_file(), "Windows wheel lacks stanc.exe"
+
+    unicode_text = "π ☃ é 👋"
+    code = ("transformed data {\r\n"
+            f'  print("{unicode_text}");\r\n'
+            "}\r\n"
+            "parameters { real x; }\r\n"
+            "model { x ~ normal(0, 1); }\r\n")
+    with tempfile.TemporaryDirectory(
+            prefix="stanli compiler rollback π ") as tmp:
+        compiler_dir = pathlib.Path(tmp)
+        portable = compiler_dir / packaged_portable.name
+        stock = compiler_dir / packaged_stock.name
+        shutil.copy2(packaged_portable, portable)
+        shutil.copy2(packaged_stock, stock)
+
+        with mock.patch.object(stanli, "_BIN", compiler_dir):
+            portable_mir = stanli._subprocess_mir(code)
+            assert portable_mir.startswith('{"stanli_ir":1,"program":')
+            assert not portable_mir.endswith(("\n", "\r"))
+            assert unicode_text in portable_mir
+
+            # Removing only the temporary preferred producer must select the
+            # packaged rollback compiler. Its legacy MIR still has to lower
+            # into the same executable runtime graph.
+            portable.unlink()
+            legacy_mir = stanli._subprocess_mir(code)
+
+        assert legacy_mir.lstrip().startswith("(")
+        model = stanli.Model(mir=legacy_mir)
+        lp, grad = model.log_prob_grad(np.array([0.25]))
+        assert np.isfinite(lp)
+        assert np.isfinite(grad).all()
 
 
 def test_embedded_stanc_from_concurrent_python_threads():
