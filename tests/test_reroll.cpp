@@ -8,6 +8,8 @@
 #include <stanli/optable.hpp>
 #include <stanli/reroll.hpp>
 
+#include "../runtime/src/reroll_profile.hpp"
+
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif
@@ -83,8 +85,17 @@ static void test_radon_shape() {
 
   std::vector<int> tt = terms;
   Fills f2 = fills;
-  RerollStats st = reroll(g, f2, tt, {});
+  const detail::ProfiledRerollStats profiled =
+      detail::reroll_profiled(g, f2, tt, {});
+  const RerollStats st = profiled.work;
   expect("radon regions==1", st.regions == 1);
+  expect("radon term-density disposition",
+         profiled.dispositions.term_density == 1);
+  expect("radon no other dispositions",
+         profiled.dispositions.packed_rows == 0 &&
+             profiled.dispositions.element_density == 0 &&
+             profiled.dispositions.term_widen == 0 &&
+             profiled.dispositions.element_store == 0);
   // 1 REP_VEC survives; 8 INDEX + 8 NORMAL collapse to 1 NORMAL.
   expect("radon ops==2", g.ops.size() == 2);
   expect("radon one term", tt.size() == 1);
@@ -213,8 +224,13 @@ static void test_gauss_mix_shape() {
 
   std::vector<int> tt = terms;
   Fills f2 = fills;
-  RerollStats st = reroll(g, f2, tt, {});
+  const detail::ProfiledRerollStats profiled =
+      detail::reroll_profiled(g, f2, tt, {});
+  const RerollStats st = profiled.work;
   expect("gmix regions==1", st.regions == 1);
+  expect("gmix element-density dispositions",
+         profiled.dispositions.element_density == 2);
+  expect("gmix term-widen disposition", profiled.dispositions.term_widen == 1);
   // 2 elementwise NORMAL + 1 widened LOG_MIX + 1 SUM_VEC.
   expect("gmix ops==4", g.ops.size() == 4);
   expect("gmix one term", tt.size() == 1);
@@ -852,8 +868,12 @@ static void test_lda_shape_gradients() {
 
       std::vector<int> tt = b.terms;
       Fills f2 = b.fills;
-      RerollStats st = reroll(b.g, f2, tt, {});
+      const detail::ProfiledRerollStats profiled =
+          detail::reroll_profiled(b.g, f2, tt, {});
+      const RerollStats st = profiled.work;
       expect((label + " becomes one region").c_str(), st.regions == 1);
+      expect((label + " records packed-row disposition").c_str(),
+             profiled.dispositions.packed_rows == 1);
       expect((label + " has seven fused ops plus inputs").c_str(),
              b.g.ops.size() == 9);
       expect((label + " has one packed reduction").c_str(),
@@ -1074,9 +1094,13 @@ static void test_write_fusion() {
 
     std::vector<int> tt = b.terms;
     Fills f2 = b.fills;
-    RerollStats st = reroll(b.g, f2, tt, {});
+    const detail::ProfiledRerollStats profiled =
+        detail::reroll_profiled(b.g, f2, tt, {});
+    const RerollStats st = profiled.work;
     const std::string tag = start ? "window" : "whole";
     expect((tag + " regions==1").c_str(), st.regions == 1);
+    expect((tag + " records element-store disposition").c_str(),
+           profiled.dispositions.element_store == 1);
     expect((tag + " one gather").c_str(), count(b.g, OP_GATHER) == 1);
     expect((tag + " no element writes left").c_str(),
            count(b.g, OP_SET_INDEX_INPLACE) == 0);

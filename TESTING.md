@@ -60,6 +60,45 @@ known exceptions.
 | WebAssembly replay | Does the browser runtime reproduce the recorded corpus? | Same numerical gates; 118 of 119 compiling posteriordb models fit in wasm32 | manually |
 | documentation and formatting | Do generated claims match their artifacts, and is C/C++ formatting current? | Exact generated-file and formatter checks | every pull request |
 
+## MIR loop-vectorization measurement
+
+[`harnesses/vectorize_ab.py`](harnesses/vectorize_ab.py) measures the upstream
+`vectorize_loops` candidate without selecting it in a shipping compiler. The
+test-only OCaml probe compiles each source once with the pass off and once with
+it on; every later check consumes those exact portable MIR files through
+`stanli_check --mir`.
+
+The complete run covers all 130 recorded models plus any posteriordb census
+model without a recorded CmdStan row:
+
+```sh
+python3 harnesses/vectorize_ab.py deps/posteriordb \
+  --compiler deps/stanc3/stanli-vectorize-probe \
+  --check build-rel/stanli_check --bench build-rel/bench_grad \
+  --dump build-rel/dump_ops --output-dir build-rel/vectorize-ab
+```
+
+CI runs the bounded seven-model selection shown by the "Bounded MIR
+vectorization A/B" workflow step. It includes three models whose MIR must
+change and four controls. The hard gates cover command/status consistency,
+result and write-array categories, error parity, per-element finite/NaN/
+infinity classes, shapes and names, and both pass modes against the existing
+CmdStan references. Finite bit differences that remain within those gates are
+listed separately with bit patterns and ULP distances.
+
+The output directory contains `manifest.json`, `corpus.jsonl`,
+`graphs.jsonl`, `bench.tsv`, `summary.json`, and `summary.md`. The manifest
+records source pins, producer provenance, tool hashes, platform, toolchain,
+environment policy, and corpus scope. Compiler wall time, graph and
+preparation counts, separate log-density/write-array reroll dispositions, and
+auto-calibrated ABBA gradient timings are descriptive measurements; their
+ratios do not decide pass/fail. Missing or malformed measurement output does
+fail the run because it would make the report incomplete. The report labels
+CmdStan-referenced and A/B-only models separately; the latter have off/on
+category, error, shape, name, and value parity but no fabricated reference
+gate. [`tools/corpus.py`](tools/corpus.py) remains the source-only census
+report.
+
 ## Comparison with CmdStan on complete models
 
 [`tools/verify_refs.py`](tools/verify_refs.py) replays every referenced

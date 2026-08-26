@@ -29,3 +29,12 @@
  (name stanli_pipeline_tests)
  (modules stanli_pipeline_tests)
  (libraries stanli_native_compiler middle))
+
+; Measurement-only source-pass probe. It is copied beside the compiler build
+; for corpus experiments but is not linked into, installed with, or selected
+; by any shipping producer.
+
+(executable
+ (name stanli_vectorize_probe)
+ (modules stanli_vectorize_probe)
+ (libraries stanli_native_compiler fmt common frontend))

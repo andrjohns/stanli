@@ -43,24 +43,44 @@ fi
 (cd "$SRC" && dune build --profile release src/stanc_embed/stanc_embed.exe.o \
    2>&1 | tail -5 ||
  dune build --profile release src/stanc_embed 2>&1 | tail -5)
+(cd "$SRC" &&
+ dune build --profile release src/stanc_embed/stanli_vectorize_probe.exe)
 OBJ=$(find "$SRC/_build" -path '*/src/stanc_embed/stanc_embed*.o' | head -1)
 [ -n "$OBJ" ] && [ -f "$OBJ" ] || {
   echo "dune did not produce the embedded stanc object" >&2
   exit 1
 }
+PROBE=$(find "$SRC/_build" \
+  -path '*/src/stanc_embed/stanli_vectorize_probe.exe' | head -1)
+[ -n "$PROBE" ] && [ -f "$PROBE" ] || {
+  echo "dune did not produce the vectorization measurement probe" >&2
+  exit 1
+}
 
-# Publish the object and its adjacent provenance record together. The record
-# is recomputed from the source pin and every local producer input, so callers
-# can reject a cache entry left behind by an earlier encoder or build recipe.
+# Publish each artifact with an adjacent provenance record. The record is
+# recomputed from the source pin and every local producer input, so callers can
+# reject a cache entry left behind by an earlier encoder or build recipe. Each
+# stamp moves last and therefore commits the artifact beside it.
 OUT=deps/stanc3/stanc_embed.o
+PROBE_OUT=deps/stanc3/stanli-vectorize-probe
 TMP_OBJECT="${OUT}.tmp.$$"
 TMP_STAMP="${OUT}.stamp.tmp.$$"
-cleanup() { rm -f "$TMP_OBJECT" "$TMP_STAMP"; }
+TMP_PROBE="${PROBE_OUT}.tmp.$$"
+TMP_PROBE_STAMP="${PROBE_OUT}.stamp.tmp.$$"
+cleanup() {
+  rm -f "$TMP_OBJECT" "$TMP_STAMP" "$TMP_PROBE" "$TMP_PROBE_STAMP"
+}
 trap cleanup EXIT
 cp -f "$OBJ" "$TMP_OBJECT"
 chmod u+w "$TMP_OBJECT"
+cp -f "$PROBE" "$TMP_PROBE"
+chmod 755 "$TMP_PROBE"
 stanc_embed_expected_stamp "$STANC3_SRC_SHA" "$SWITCH" > "$TMP_STAMP"
+cp -f "$TMP_STAMP" "$TMP_PROBE_STAMP"
 mv -f "$TMP_OBJECT" "$OUT"
 mv -f "$TMP_STAMP" "${OUT}.stamp"
+mv -f "$TMP_PROBE" "$PROBE_OUT"
+mv -f "$TMP_PROBE_STAMP" "${PROBE_OUT}.stamp"
 trap - EXIT
 echo "embedded stanc object: $OUT ($(du -h "$OUT" | cut -f1))"
+echo "vectorization measurement probe: $PROBE_OUT"

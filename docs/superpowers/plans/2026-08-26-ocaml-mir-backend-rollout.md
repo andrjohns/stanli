@@ -197,6 +197,17 @@ The pinned stanc3 contains the pass, but O1 leaves it disabled. Enable O1 plus
 only `vectorize_loops` in the shared stanli pipeline. Do not enable the entire
 experimental suite.
 
+Status: measurement infrastructure only. A test-only native OCaml probe can
+emit pass-off/pass-on portable MIR, and the bounded CI report checks semantic
+and reference parity while publishing graph, preparation, reroll, compiler,
+and interleaved gradient evidence. The production pass selection remains off
+in every native, Windows, browser, Python, and R producer. The no-model harness
+command covers all 130 committed reference models and labels any additional
+posteriordb census model as A/B-only; CI uses seven named models, and the timing
+ratios are descriptive rather than acceptance thresholds. See
+[`TESTING.md`](../../../TESTING.md#mir-loop-vectorization-measurement) for the
+operator command and artifact contract.
+
 Keep C++ reroll enabled initially and measure with the OCaml pass both on and
 off:
 
