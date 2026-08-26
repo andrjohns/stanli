@@ -19,9 +19,7 @@ if [ "$ACTUAL_SRC_SHA" != "$STANC3_SRC_SHA" ]; then
   exit 1
 fi
 mkdir -p deps/stanc3
-mkdir -p "$SRC/src/stanc_embed"
-cp tools/stanc_embed/*.ml tools/stanc_embed/*.mli tools/stanc_embed/dune \
-  "$SRC/src/stanc_embed/"
+tools/stanc_embed/install_overlay.sh native "$SRC"
 eval "$(opam env --switch="$SWITCH")"
 
 # OCaml's complete-object mode calls `ld -r` directly. The manylinux toolchain
@@ -60,7 +58,7 @@ cleanup() { rm -f "$TMP_OBJECT" "$TMP_STAMP"; }
 trap cleanup EXIT
 cp -f "$OBJ" "$TMP_OBJECT"
 chmod u+w "$TMP_OBJECT"
-stanc_embed_expected_stamp "$STANC3_SRC_SHA" > "$TMP_STAMP"
+stanc_embed_expected_stamp "$STANC3_SRC_SHA" "$SWITCH" > "$TMP_STAMP"
 mv -f "$TMP_OBJECT" "$OUT"
 mv -f "$TMP_STAMP" "${OUT}.stamp"
 trap - EXIT

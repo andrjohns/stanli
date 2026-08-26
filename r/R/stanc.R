@@ -57,7 +57,8 @@ mir_from_js <- function(code, name = "stanli_model") {
              : (globalThis.stanc || (globalThis.module &&
                 globalThis.module.exports && globalThis.module.exports.stanc));
        if (typeof f !== 'function') return JSON.stringify({e: 'no stanc()'});
-       var r = f(stanli_name, stanli_src, ['debug-transformed-mir']);
+       var r = f(stanli_name, stanli_src,
+                 ['O1', 'debug-optimized-mir']);
        if (r.errors) return JSON.stringify({e: String(r.errors)});
        return JSON.stringify({r: r.result});
      })()")
@@ -83,13 +84,13 @@ find_stanc <- function() {
   ""
 }
 
-mir_from_binary <- function(stanc, code) {
+mir_from_binary <- function(stanc, code, run_stanc = system2) {
   f <- tempfile(fileext = ".stan")
   on.exit(unlink(f), add = TRUE)
   writeLines(code, f)
   out <- suppressWarnings(
-    system2(stanc, c("--debug-transformed-mir", shQuote(f)),
-            stdout = TRUE, stderr = TRUE))
+    run_stanc(stanc, c("--O1", "--debug-optimized-mir", shQuote(f)),
+              stdout = TRUE, stderr = TRUE))
   status <- attr(out, "status")
   if (!is.null(status) && status != 0)
     stop("stanc failed:\n", paste(out, collapse = "\n"), call. = FALSE)
@@ -130,7 +131,8 @@ mir_from_webr <- function(eval_js, code, name = "stanli_model") {
   writeLines(code, src)
   status <- eval_js(sprintf("(() => {
     const src = Module.FS.readFile('%s', {encoding: 'utf8'});
-    const r = globalThis.stanc('%s', src, ['debug-transformed-mir']);
+    const r = globalThis.stanc(
+      '%s', src, ['O1', 'debug-optimized-mir']);
     if (r.errors) return 'ERR: ' + String(r.errors);
     Module.FS.writeFile('%s', r.result);
     return 'ok';

@@ -87,12 +87,15 @@ op graph + preallocated value/adjoint arenas
 NUTS (stan::mcmc::adapt_diag_e_nuts) -> draws
 ```
 
-1. **stanc3, in process.** The official Stan compiler (OCaml) is built
-   as a self-contained object and linked into the shared library. It
-   parses, typechecks, and optimizes the model. A stanli-owned OCaml module
-   encodes that typed MIR directly into the versioned portable format; the
-   runtime retains the legacy s-expression reader for compiler paths that
-   have not moved yet. Full language fidelity without a reimplemented parser.
+1. **stanc3 plus the stanli compiler pipeline (OCaml).** The official
+   compiler parses, typechecks, and optimizes the model. The shared
+   [`compiler/ocaml/`](compiler/ocaml/) package selects O1 and encodes the
+   resulting typed MIR into the versioned portable format. Thin entry points
+   in [`compiler/native/`](compiler/native/) embed that pipeline in the shared
+   library, while [`compiler/js/`](compiler/js/) builds the browser/npm
+   compiler. The runtime retains the legacy s-expression reader for compiler
+   paths that have not moved yet. Full language fidelity without a
+   reimplemented parser.
 
 2. **Lowering** (`runtime/src/lower.cpp`). Transformed data is evaluated
    eagerly, loops with data-known bounds are unrolled, and the model
@@ -185,12 +188,18 @@ of about 8x slower model compilation.
 ### The browser build
 
 A different binary: no embedded stanc3, because the compiler ships
-separately as JavaScript (2.84 MB, 0.40 MB gzipped; a page that ships
-precompiled MIR never fetches it). `stanli.wasm` is 5.79 MB raw and
-1.52 MB gzipped, and densities are 55% of the compressed payload
-(measured by stubbing every density kernel and relinking). Loading the
-uncommon densities on demand was built and removed; the measurements and
-the emscripten limitation that blocks it are in
+separately as JavaScript. `stanli-compiler.js` contains stanc3 plus the shared
+stanli OCaml pipeline and emits portable MIR; it is 2,990,736 bytes raw and
+425,026 bytes gzipped in the current measured build. For one rollback cycle
+the package also carries stock `stancjs.bc.js` (2,971,677 bytes raw, 418,847
+bytes gzipped), which emits O1 legacy MIR and is loaded only if the portable
+compiler is unavailable. A page that ships precompiled MIR fetches neither
+compiler.
+
+`stanli.wasm` is 5.79 MB raw and 1.52 MB gzipped, and densities are 55% of the
+compressed runtime payload (measured by stubbing every density kernel and
+relinking). Loading the uncommon densities on demand was built and removed;
+the measurements and the emscripten limitation that blocks it are in
 [docs/density-pack.md](docs/density-pack.md).
 
 ## Python
@@ -260,12 +269,13 @@ offsets would not crash, it would sample from the wrong seed.
 The same runtime compiles to WebAssembly and runs full Stan in a browser
 tab with no server:
 **[seantalts.github.io/stanli](https://seantalts.github.io/stanli/)**.
-stanc3's js_of_ocaml build compiles the model to MIR in JS; stanli.wasm
-lowers it and samples. Eight schools goes from source to 1,000 draws in
-about 120 ms in-tab. 118 of the 119 compiling corpus models replay
-against the CmdStan references from inside WASM (`tools/wasm_check.sh`;
-the exception is `nn_rbm1bJ100`, whose compile does not fit in wasm32's
-4 GB).
+The js_of_ocaml build in `compiler/js/` uses the same O1 policy and portable
+encoder as native compilation; `stanli.wasm` lowers its output and samples.
+Stock stancjs remains beside it for one rollback cycle, emitting O1 legacy MIR
+that the same runtime can decode. Eight schools goes from source to 1,000
+draws in about 120 ms in-tab. 118 of the 119 compiling corpus models replay
+against the CmdStan references from inside WASM (`tools/wasm_check.sh`; the
+exception is `nn_rbm1bJ100`, whose compile does not fit in wasm32's 4 GB).
 
 ```
 ./tools/build_web.sh              # emsdk + opam builds, assembled in web/

@@ -1,7 +1,7 @@
-// stanli: full Stan in the browser. stanc3 (compiled to JS) turns Stan
-// source into MIR, and a WASM build of the stanli runtime lowers it to an
-// op graph and runs NUTS. Everything happens client side, off the main
-// thread, in workers this module owns.
+// stanli: full Stan in the browser. The custom stanc3 build (compiled to JS)
+// turns Stan source into portable MIR, and a WASM build of the stanli runtime
+// lowers it to an op graph and runs NUTS. Everything happens client side, off
+// the main thread, in workers this module owns.
 //
 //   import { compile, sample } from "@seantalts/stanli";
 //   const { mir } = await compile({ code });
@@ -10,9 +10,10 @@
 //
 // Workers pool up to the hardware's concurrency, so independent calls --
 // one chain each -- run simultaneously. Compiling once and passing `mir`
-// keeps the 2.8 MB compiler in a single worker (or out of the page
+// keeps the 3.0 MB preferred compiler in a single worker (or out of the page
 // entirely, if the model was precompiled at build time with
-// stanc --debug-transformed-mir).
+// stanc --O1 --debug-optimized-mir). The package carries stock stancjs for one
+// rollback cycle, but the worker loads it only if the portable compiler fails.
 
 const pool = [];
 const waiters = [];
@@ -88,7 +89,7 @@ export function preload(opts) {
   return Promise.all(jobs);
 }
 
-/** Compile Stan source to transformed MIR (one worker loads stanc3).
+/** Compile Stan source to portable MIR (one worker loads stanc3).
  * @returns {Promise<{mir: string, ms: {stanc: number}}>} */
 export function compile(opts) {
   return request({ cmd: "compile", code: opts.code }, opts);
@@ -99,23 +100,36 @@ export function compile(opts) {
  * @param {Object} opts
  * @param {string} [opts.code]     Stan source (compiled in the worker by
  *   stanc3, which loads lazily on first use).
- * @param {string} [opts.mir]      Precompiled transformed MIR (from
- *   `compile()` here, or `stanc --debug-transformed-mir` at build time).
- *   When given, the 2.8 MB compiler never loads: the runtime alone is
- *   ~1.3 MB gzipped.
+ * @param {string} [opts.mir]      Precompiled MIR (from `compile()` here, or
+ *   `stanc --O1 --debug-optimized-mir` at build time). When given, neither
+ *   browser compiler loads: the runtime alone is ~1.5 MB gzipped.
  * @param {Object|string} [opts.data]  Data as an object or JSON text.
  * @param {number} [opts.seed=1]       Chain seed (sampler and GQ RNG).
  * @param {number} [opts.warmup=1000]
  * @param {number} [opts.samples=1000]
- * @param {number} [opts.delta=0.8]    Adaptation target acceptance.
+ * @param {number} [opts.delta=0.8]    Adaptation target acceptance (NUTS).
+ * @param {string} [opts.sampler="nuts"]  "nuts", "walnuts" (within-orbit
+ *   adaptive step-length NUTS, arXiv:2506.18746), or "pathfinder"
+ *   (a normal approximation fitted along an L-BFGS path). Pathfinder
+ *   ignores warmup and delta, treats `samples` as its draw count, and
+ *   returns an extra `pathfinder` block.
+ * @param {number} [opts.maxError]     WALNUTS only: largest drift in the
+ *   joint log density allowed across one macro step before the step is
+ *   halved within the trajectory. Omit for the runtime default (0.5).
  * @param {function(string)} [opts.onProgress]  Stage announcements.
  * @param {function(Object)} [opts.onLive]  Streaming draws while NUTS
  *   runs: {liveMeta: {names, warmup, samples}} once per call, then
  *   {live: {phase: "warmup"|"sampling", i, nCon?, rows?}} where rows is
  *   a transferred ArrayBuffer of constrained draws, nCon wide.
+ *   Pathfinder streams {live: {phase: "path", iter, lp}} instead, one
+ *   message per L-BFGS iterate.
  * @returns {Promise<{names: string[], samples: number,
  *                    columns: Object<string, Float64Array>,
  *                    exactLp: boolean,
+ *                    pathfinder?: {path: {iter, lp}[], khat: number,
+ *                                  selectedIter: number,
+ *                                  selectedElbo: number,
+ *                                  elapsedMs: number},
  *                    ms: {stanc: number, lower: number, sample: number,
  *                         total: number}}>}
  *   One column per CSV column CmdStan would write: constrained
@@ -134,13 +148,16 @@ export function sample(opts) {
     warmup: opts.warmup == null ? 1000 : opts.warmup,
     samples: opts.samples == null ? 1000 : opts.samples,
     delta: opts.delta == null ? 0.8 : opts.delta,
+    sampler: opts.sampler === "walnuts" || opts.sampler === "pathfinder"
+        ? opts.sampler : "nuts",
+    maxError: opts.maxError == null ? 0 : opts.maxError,
   }, opts).then((done) => {
-    const { names, samples, ms, exactLp } = done;
+    const { names, samples, ms, exactLp, pathfinder } = done;
     const flat = new Float64Array(done.columns);
     const columns = {};
     names.forEach((name, i) => {
       columns[name] = flat.subarray(i * samples, (i + 1) * samples);
     });
-    return { names, samples, columns, ms, exactLp };
+    return { names, samples, columns, ms, exactLp, pathfinder };
   });
 }

@@ -67,9 +67,9 @@ repeatedly below.
 
 ```
 model.stan + data.json
-  |  stanc3, linked in-process (stanc_embed)
+  |  stanc3 parse/typecheck/O1 (upstream OCaml)
   v  optimized typed MIR (--O1)
-portable_mir.ml
+compiler/ocaml/stanli_pipeline.ml + portable_mir.ml
   |  canonical portable MIR v1 JSON
   v
 decode_program (portable JSON or legacy s-expression)
@@ -91,17 +91,29 @@ reverse sweep   = gradient
 
 Step by step:
 
-1. **stanc3 compiles the model.** The official Stan compiler (an OCaml
-   program) is linked into the stanli library and runs in-process
-   ([`tools/stanc_embed/`](../tools/stanc_embed/)). Your model is
-   parsed, typechecked, and optimized by exactly the code CmdStan uses.
-   But instead of asking it to generate C++, stanli receives the optimized
-   typed MIR value and encodes the runtime's consumed slice with
-   [`portable_mir.ml`](../tools/stanc_embed/portable_mir.ml).
+1. **stanc3 and the stanli OCaml pipeline compile the model.** The official
+   compiler parses, typechecks, and optimizes with the same code CmdStan uses.
+   [`stanli_pipeline.ml`](../compiler/ocaml/stanli_pipeline.ml) owns stanli's
+   O1 policy, receives the optimized typed MIR value, and passes it to
+   [`portable_mir.ml`](../compiler/ocaml/portable_mir.ml), which encodes the
+   runtime's consumed slice. [`compiler/native/`](../compiler/native/) is the
+   callback linked into native libraries; [`compiler/js/`](../compiler/js/)
+   exports the same pipeline through js_of_ocaml.
+
+   The exact-pin overlay also applies
+   [`stanc3-int32-fold.patch`](../compiler/ocaml/stanc3-int32-fold.patch).
+   Upstream's partial evaluator otherwise folds with the host OCaml `int`
+   width (63 bits natively and 32 bits under js_of_ocaml), even though Stan
+   integer literals and the portable contract are int32. The correction
+   computes folds in `Int64`: representable int32 results still fold, while an
+   overflowing expression remains in MIR for runtime evaluation. The producer
+   parity gate covers that no-fold path so the correction cannot silently
+   disappear.
 
 2. **[`mir_decode.cpp`](../runtime/src/mir_decode.cpp) selects a decoder.**
-   Native embedded compilation emits the stanli-owned portable JSON format;
-   browser and standalone compiler paths may still emit the legacy stanc3
+   Native embedded compilation and the preferred browser compiler emit the
+   stanli-owned portable JSON format. Stock browser fallback, R, and other
+   compiler paths that have not moved yet emit the legacy stanc3
    s-expression. Both decode into the same plain C++ structs (`mir::Stmt`,
    `mir::Expr`) and share name resolution and validation. Anything they do
    not recognize is a loud error, never a guess.
@@ -145,7 +157,8 @@ ones through every stage, op list and register programs included.
 | Path | Owns |
 |---|---|
 | [`runtime/include/stanli/`](../runtime/include/stanli/) | Public headers. [`graph.hpp`](../runtime/include/stanli/graph.hpp) defines the IR: `Slot` and `Op` over flat arenas. |
-| [`compiler/portable_ir/SCHEMA.md`](../compiler/portable_ir/SCHEMA.md), [`tools/stanc_embed/portable_mir.ml`](../tools/stanc_embed/portable_mir.ml) | The stanli-owned portable MIR contract and its typed-OCaml encoder. |
+| [`compiler/portable_ir/SCHEMA.md`](../compiler/portable_ir/SCHEMA.md), [`compiler/ocaml/`](../compiler/ocaml/) | The stanli-owned portable MIR contract, shared O1 policy, and typed-OCaml encoder. |
+| [`compiler/native/`](../compiler/native/), [`compiler/js/`](../compiler/js/) | Thin native callback and js_of_ocaml/CLI entry points around the shared OCaml pipeline. |
 | [`runtime/src/lower.cpp`](../runtime/src/lower.cpp) | Lowering: transformed MIR in, op graph out. |
 | [`runtime/src/mir_decode.cpp`](../runtime/src/mir_decode.cpp), [`portable_mir_reader.cpp`](../runtime/src/portable_mir_reader.cpp), [`mir_reader.cpp`](../runtime/src/mir_reader.cpp) | Dispatches portable JSON or legacy s-expressions into one MIR representation and runs their shared finalization. |
 | [`runtime/src/inplace.cpp`](../runtime/src/inplace.cpp), [`constfold.cpp`](../runtime/src/constfold.cpp), [`reroll.cpp`](../runtime/src/reroll.cpp), [`island.cpp`](../runtime/src/island.cpp) | The graph passes, in pipeline order. |
@@ -157,8 +170,8 @@ ones through every stage, op list and register programs included.
 | [`runtime/src/adjoint.cpp`](../runtime/src/adjoint.cpp) | `gen_adjoint`: differentiates a register program into a second register program, so an island's backward is a second cheap pass rather than a replay under stan-math's `var`. Owns the checkpoint analysis (save a register before a later write destroys a value a derivative rule needs). `STANLI_NO_NATIVE_ADJ=1` restores the replay, which is the oracle it is tested against ([`test_adjoint.cpp`](../tests/test_adjoint.cpp)). |
 | [`runtime/src/nuts.cpp`](../runtime/src/nuts.cpp) | The sampler: Stan's own `adapt_diag_e_nuts`, configured to match CmdStan exactly. |
 | [`runtime/src/capi.cpp`](../runtime/src/capi.cpp), [`capi.h`](../runtime/include/stanli/capi.h) | The C ABI. [`python/stanli/__init__.py`](../python/stanli/__init__.py) is a thin ctypes wrapper over it. |
-| [`runtime/src/stanc_embed_c.cpp`](../runtime/src/stanc_embed_c.cpp), [`tools/stanc_embed/`](../tools/stanc_embed/) | The in-process stanc3. |
-| [`js/`](../js/), [`web/`](../web/) | The npm package (a one-call `sample()` over a worker) and the demo page. [`tools/build_web.sh`](../tools/build_web.sh) builds the page from the package, so the two cannot drift. |
+| [`runtime/src/stanc_embed_c.cpp`](../runtime/src/stanc_embed_c.cpp), [`tools/stanc_embed/`](../tools/stanc_embed/) | The native OCaml-runtime bridge and exact-source overlay/build tooling. |
+| [`js/`](../js/), [`web/`](../web/) | The npm package (a one-call `sample()` over a worker) and the demo page. The worker prefers the portable compiler and keeps stock stancjs as a one-cycle legacy fallback. [`tools/build_web.sh`](../tools/build_web.sh) builds the page from the package, so the two cannot drift. |
 | [`tools/`](../tools/) | Small programs and scripts; the important ones are listed below. |
 | [`harnesses/`](../harnesses/) | Corpus sweeps that need a local posteriordb: [`wa_coverage.py`](../harnesses/wa_coverage.py), [`ab_corpus.py`](../harnesses/ab_corpus.py), [`fn_sweep.py`](../harnesses/fn_sweep.py), benchmarks. |
 | [`tests/`](../tests/) | One `test_*.cpp` per subsystem, plus [`fixtures/`](../tests/fixtures/) with `.stan` sources and pinned MIR (regenerate with [`tools/gen_fixtures.sh`](../tools/gen_fixtures.sh)). |
