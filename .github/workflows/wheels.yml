@@ -89,25 +89,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 11 MB object, ~30 minutes to build. Keyed on the stanc3 commit,
-      # the OCaml version, and the embed shim itself, so editing the shim
-      # or its link flags rebuilds instead of reusing a stale object. A
-      # hit skips the entire opam path below. The matching standalone compiler
-      # supports the producer-parity check; the caml/ headers ride along
-      # because a cache hit means no opam switch exists to provide them.
-      - name: Restore the embedded stanc3 object
-        id: stanc-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps/stanc3/stanc_embed.o
-            deps/stanc3/stanc_embed.o.stamp
-            deps/stanc3/stanc
-            deps/stanc3/stanc.src
-            deps/ocaml-include
-          key: >-
-            stanc-embed-v2-${{ matrix.plat }}-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-${{ hashFiles('compiler/native/**', 'compiler/ocaml/**', 'tools/stanc_embed/**') }}
-
       # The compiled objects from the last run on main. stan-math heavy
       # translation units dominate the wall clock, and most pushes touch a
       # handful of files, so a warm ccache turns an hour of compiling into
@@ -166,28 +147,19 @@ jobs:
           python3 -m pip install "readme_renderer[md]"
 
 
-      # Everything fetch.sh pulls is pinned by a git SHA, so the whole
-      # directory is a pure function of the script.
+      # Everything fetch.sh pulls is pinned by a git SHA, so these two source
+      # trees are a pure function of the script. Compiler products under
+      # deps/stanc3 have a separate owner and must never ride in this archive:
+      # an older archive can otherwise overwrite a correctly keyed embedded
+      # object when the cache actions restore in the wrong order.
       - name: Restore the vendored dependencies
         id: deps-cache
         uses: actions/cache@v4
         with:
-          # stanc_embed.o is excluded: it belongs to the stanc-embed cache
-          # above, and a copy riding in here restores over a fresh object
-          # (and once satisfied dev_setup's presence check with a STALE
-          # one, shipping a wheel whose embedded compiler lagged the
-          # shim). Standalone compiler products built later can also join
-          # this cache, so its key includes their source revision. The
-          # -embed2 suffix retires entries created before that was true.
           path: |
             deps/math
             deps/stan
-            deps/stanc3
-            !deps/stanc3/stanc_embed.o
-            !deps/stanc3/stanc_embed.o.stamp
-            !deps/stanc3/stanc
-            !deps/stanc3/stanc.src
-          key: deps-${{ matrix.plat }}-embed2-${{ env.STANC3_SRC_SHA }}-${{ hashFiles('deps/fetch.sh') }}
+          key: deps-${{ matrix.plat }}-sources3-${{ hashFiles('deps/fetch.sh') }}
 
       - name: Vendored dependencies
         run: |
@@ -198,6 +170,23 @@ jobs:
           test "$setup_repo" = "$STANC3_SRC_REPO"
           test "$setup_pin" = "$STANC3_SRC_SHA"
           ./deps/fetch.sh
+
+      # Restore this after every broader dependency archive. The order is a
+      # second line of defense in addition to giving deps/stanc3 exactly one
+      # cache owner. A hit skips the expensive opam/source build below; the
+      # caml headers accompany it because no opam switch then exists.
+      - name: Restore the embedded stanc3 object
+        id: stanc-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/stanc3/stanc_embed.o
+            deps/stanc3/stanc_embed.o.stamp
+            deps/stanc3/stanc
+            deps/stanc3/stanc.src
+            deps/ocaml-include
+          key: >-
+            stanc-embed-v2-${{ matrix.plat }}-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-${{ hashFiles('compiler/native/**', 'compiler/ocaml/**', 'tools/stanc_embed/**') }}
 
       - name: Build the embedded stanc3 object
         if: steps.stanc-cache.outputs.cache-hit != 'true'
@@ -213,6 +202,22 @@ jobs:
                 deps/ocaml-include/
         env:
           OPAMYES: '1'
+
+      - name: Validate the embedded stanc3 object
+        run: |
+          source tools/stanc_embed/provenance.sh
+          stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
+            "$STANC3_SRC_SHA" stanc3-55
+          for symbol in caml_c_thread_register caml_c_thread_unregister; do
+            nm -g deps/stanc3/stanc_embed.o | awk -v wanted="$symbol" '
+              ($NF == wanted || $NF == "_" wanted) &&
+                  $(NF - 1) ~ /^[Tt]$/ { found = 1 }
+              END { exit found ? 0 : 1 }
+            ' || {
+              echo "embedded compiler lacks ${symbol}" >&2
+              exit 1
+            }
+          done
 
       - name: Configure and build
         run: |
