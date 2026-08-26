@@ -507,7 +507,7 @@ jobs:
           name: runtime-${{ matrix.runtime }}
           path: runtime-dist/*.tar.gz
 
-  # The R package's 23 tests, against a real runtime. They skip without
+  # The R package tests, against a real runtime. They skip without
   # one, so this is the only place they actually run: everywhere else
   # (r.yml, CRAN's farm) has the package but no library, and a green
   # check there says nothing about whether sampling works. Not in the
@@ -516,7 +516,7 @@ jobs:
   # its glibc 2.28 floor makes safe.
   r-tests:
     name: R package against the runtime
-    needs: build
+    needs: [build, browser-compiler]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -525,6 +525,19 @@ jobs:
         with:
           name: runtime-linux-x86_64
           path: runtime
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: browser-compilers
+          path: browser-compilers
+
+      - name: Validate the candidate compiler provenance
+        run: |
+          source tools/stanc_embed/provenance.sh
+          stanli_stancjs_artifact_matches \
+            browser-compilers/stanli-compiler.js \
+            "$STANC3_SRC_REPO" "$STANC3_SRC_SHA" stancjs
+          cat browser-compilers/stanli-compiler.js.stamp
 
       - name: Unpack the runtime
         run: |
@@ -537,13 +550,14 @@ jobs:
         with:
           use-public-rspm: true
 
-      # V8 is not needed: the Linux runtime embeds stanc3, so model
-      # source goes straight to the library and the JavaScript compiler
-      # never loads. r.yml is where that path is exercised.
+      # V8 and jsonlite exercise the portable compiler candidate explicitly.
+      # The package's normal source path still goes straight to the embedded
+      # compiler; this does not change which compiler the package ships.
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           working-directory: r
-          extra-packages: any::testthat, any::posterior
+          extra-packages: >-
+            any::testthat, any::posterior, any::V8, any::jsonlite
           dependencies: '"hard"'
 
       # Through R CMD check rather than testthat directly, so the tests
@@ -566,6 +580,16 @@ jobs:
             echo "the sampling tests skipped: the runtime was not seen"
             exit 1
           fi
+
+      - name: Portable compiler candidate through V8 and the runtime
+        working-directory: r
+        run: |
+          candidate_library="$PWD/../r-candidate-library"
+          mkdir -p "$candidate_library"
+          R CMD INSTALL --library="$candidate_library" stanli_*.tar.gz
+          R_LIBS_USER="$candidate_library${R_LIBS_USER:+:$R_LIBS_USER}" \
+            Rscript ../tests/test_r_portable_candidate.R \
+              ../browser-compilers/stanli-compiler.js
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -1033,9 +1057,14 @@ jobs:
   wasm-webr:
     name: webR runtime
     if: github.event_name != 'pull_request'
+    needs: browser-compiler
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: browser-compilers
+          path: browser-compilers
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: 4.0.8
@@ -1060,7 +1089,8 @@ jobs:
       - name: Load it into webR
         run: |
           npm install webr@0.6.0
-          node tests/test_webr.mjs build-wasm-side/libstanli.so
+          node tests/test_webr.mjs build-wasm-side/libstanli.so \
+            browser-compilers/stanli-compiler.js
       - name: Runtime tarball
         run: |
           mkdir -p runtime-dist

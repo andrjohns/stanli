@@ -22,6 +22,11 @@ test_that("the bundled JavaScript compiler produces MIR", {
   expect_match(mir, "\\bmu\\b")
   expect_match(mir, "\\bsigma\\b")
   expect_match(mir, "normal")
+  # The compatibility release must keep carrying the legacy producer. The
+  # portable candidate is exercised separately against this package's dual
+  # decoder; changing this envelope would prematurely open the CRAN gate.
+  expect_match(mir, "^\\(\\(functions_block")
+  expect_false(grepl('{"stanli_ir":', mir, fixed = TRUE))
 })
 
 test_that("the bundled JavaScript compiler applies O1", {
