@@ -9,12 +9,30 @@ importScripts("stanli.js");
 
 const ready = createStanli();
 
-// stanc3 (2.8 MB of compiled OCaml) loads only when a request arrives
-// with Stan source. Apps that ship a fixed model precompile it to MIR
-// at build time and never pay for the compiler.
+// The stanli compiler (stanc3 plus the portable-MIR encoder) loads only when
+// a request arrives with Stan source. Keep stock stancjs beside it for one
+// compatibility cycle; it emits legacy MIR that the runtime still accepts.
+// Apps that ship a fixed model precompile it to MIR at build time and never
+// pay for either compiler.
 function ensureStanc() {
-  if (typeof globalThis.stanc !== "function")
+  if (typeof globalThis.stanli_compile === "function" ||
+      typeof globalThis.stanc === "function") return;
+  try {
+    importScripts("stanli-compiler.js");
+  } catch (_) {
+    // An older deployment can have the worker before the new compiler
+    // artifact. Its stock compiler remains a complete fallback.
+  }
+  if (typeof globalThis.stanli_compile !== "function")
     importScripts("stancjs.bc.js");
+}
+
+function compileMir(code) {
+  ensureStanc();
+  if (typeof globalThis.stanli_compile === "function")
+    return globalThis.stanli_compile("embedded_model", code);
+  return globalThis.stanc(
+      "browser_model", code, ["O1", "debug-optimized-mir"]);
 }
 
 
@@ -54,12 +72,13 @@ onmessage = async (e) => {
   try {
     if (req.cmd === "preload") {
       // Warm the worker before anyone needs it: instantiate the wasm
-      // runtime and, when asked, parse the 2.8 MB compiler. Sent by the
+      // runtime and, when asked, parse the 3.0 MB compiler. Sent by the
       // page at idle so the first Run pays neither load.
       if (req.stanc) ensureStanc();
       await ready;
       postMessage({ done: { warmed: true,
-                            stanc: typeof globalThis.stanc === "function",
+                            stanc: typeof globalThis.stanli_compile === "function" ||
+                                   typeof globalThis.stanc === "function",
                             ms: { preload: performance.now() - t0 } } });
       return;
     }
@@ -68,7 +87,7 @@ onmessage = async (e) => {
       // and never load the compiler.
       say("compiling Stan -> MIR (stanc3)");
       ensureStanc();
-      const sc = stanc("browser_model", req.code, ["O1", "debug-optimized-mir"]);
+      const sc = compileMir(req.code);
       if (sc.errors) throw new Error(Array.from(sc.errors).join("\n"));
       postMessage({ done: { mir: String(sc.result),
                             ms: { stanc: performance.now() - t0 } } });
@@ -79,7 +98,7 @@ onmessage = async (e) => {
     if (!mir) {
       say("compiling Stan -> MIR (stanc3)");
       ensureStanc();
-      const sc = stanc("browser_model", req.code, ["O1", "debug-optimized-mir"]);
+      const sc = compileMir(req.code);
       if (sc.errors) throw new Error(Array.from(sc.errors).join("\n"));
       mir = String(sc.result);
     }

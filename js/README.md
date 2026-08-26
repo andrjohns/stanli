@@ -1,11 +1,12 @@
 # stanli
 
 Full [Stan](https://mc-stan.org) in the browser. stanc3 (the real Stan
-compiler, compiled to JavaScript) turns Stan source into its
-intermediate representation; a WebAssembly build of the stanli runtime
-lowers it to an op graph over precompiled stan-math kernels and samples
-with NUTS. No server, no C++ toolchain, everything in the tab. Live
-demo: <https://seantalts.github.io/stanli/>.
+compiler, compiled to JavaScript) parses, typechecks, and optimizes the
+model; the shared stanli OCaml pipeline encodes its typed MIR into portable
+MIR. A WebAssembly build of the stanli runtime lowers that to an op graph over
+precompiled stan-math kernels and samples with NUTS. No server, no C++
+toolchain, everything in the tab. Live demo:
+<https://seantalts.github.io/stanli/>.
 
 ```js
 import { sample } from "@seantalts/stanli";
@@ -30,13 +31,26 @@ parameters, and generated quantities (RNG draws stream from `seed`).
 The heavy work runs in a worker the package owns, so the page never
 blocks; calls queue and run one at a time.
 
-The payload is ~9 MB installed, ~1.9 MB over the wire with gzip: the
-WASM runtime plus the stanc3 compiler. The compiler loads lazily, only
-when a call passes Stan source. `preload()` starts both loads in the
-background; call it at page idle so the first `sample()` skips the
-fetch and parse. An app that ships a fixed model can precompile it at
-build time (`stanc --O1 --debug-optimized-mir model.stan`) and pass `mir`
-instead of `code`; the runtime alone is ~1.5 MB gzipped.
+The preferred compiler, `stanli-compiler.js`, is 2,990,736 bytes raw and
+425,026 bytes gzipped in the current measured build. For one rollback cycle
+the package also contains stock `stancjs.bc.js` (2,971,677 bytes raw, 418,847
+bytes gzipped). The worker loads the stock compiler only if the portable
+compiler is unavailable; its O1 legacy MIR remains accepted by the runtime.
+Carrying both temporarily doubles the compiler portion of the installed and
+downloaded package.
+
+The compiler loads lazily, only when a call passes Stan source. `preload()`
+starts the compiler and WASM loads in the background; call it at page idle so
+the first `sample()` skips the fetch and parse. An app that ships a fixed model
+can precompile it at build time (`stanc --O1 --debug-optimized-mir model.stan`)
+and pass `mir` instead of `code`; neither browser compiler loads, and the WASM
+runtime alone is ~1.5 MB gzipped.
+
+On Eight Schools, portable MIR is 111,760 bytes (2,365 gzipped), compared with
+33,320 bytes (2,000 gzipped) for legacy MIR. On the same Apple arm64 release
+build, median decoder parsing was 2.799 ms versus 0.290 ms, and complete
+preparation was 3.31 ms versus 0.59 ms. These are one-time preparation
+measurements; source compilation still dominates that path.
 
 118 of 119 posteriordb corpus models verify against CmdStan's log
 density, gradients, and write_array values from inside this WASM build;

@@ -1,7 +1,7 @@
-// stanli: full Stan in the browser. stanc3 (compiled to JS) turns Stan
-// source into MIR, and a WASM build of the stanli runtime lowers it to an
-// op graph and runs NUTS. Everything happens client side, off the main
-// thread, in workers this module owns.
+// stanli: full Stan in the browser. The custom stanc3 build (compiled to JS)
+// turns Stan source into portable MIR, and a WASM build of the stanli runtime
+// lowers it to an op graph and runs NUTS. Everything happens client side, off
+// the main thread, in workers this module owns.
 //
 //   import { compile, sample } from "@seantalts/stanli";
 //   const { mir } = await compile({ code });
@@ -10,9 +10,10 @@
 //
 // Workers pool up to the hardware's concurrency, so independent calls --
 // one chain each -- run simultaneously. Compiling once and passing `mir`
-// keeps the 2.8 MB compiler in a single worker (or out of the page
+// keeps the 3.0 MB preferred compiler in a single worker (or out of the page
 // entirely, if the model was precompiled at build time with
-// stanc --O1 --debug-optimized-mir).
+// stanc --O1 --debug-optimized-mir). The package carries stock stancjs for one
+// rollback cycle, but the worker loads it only if the portable compiler fails.
 
 const pool = [];
 const waiters = [];
@@ -88,7 +89,7 @@ export function preload(opts) {
   return Promise.all(jobs);
 }
 
-/** Compile Stan source to transformed MIR (one worker loads stanc3).
+/** Compile Stan source to portable MIR (one worker loads stanc3).
  * @returns {Promise<{mir: string, ms: {stanc: number}}>} */
 export function compile(opts) {
   return request({ cmd: "compile", code: opts.code }, opts);
@@ -99,10 +100,9 @@ export function compile(opts) {
  * @param {Object} opts
  * @param {string} [opts.code]     Stan source (compiled in the worker by
  *   stanc3, which loads lazily on first use).
- * @param {string} [opts.mir]      Precompiled MIR (from `compile()`
- *   here, or `stanc --O1 --debug-optimized-mir` at build time).
- *   When given, the 2.8 MB compiler never loads: the runtime alone is
- *   ~1.3 MB gzipped.
+ * @param {string} [opts.mir]      Precompiled MIR (from `compile()` here, or
+ *   `stanc --O1 --debug-optimized-mir` at build time). When given, neither
+ *   browser compiler loads: the runtime alone is ~1.5 MB gzipped.
  * @param {Object|string} [opts.data]  Data as an object or JSON text.
  * @param {number} [opts.seed=1]       Chain seed (sampler and GQ RNG).
  * @param {number} [opts.warmup=1000]

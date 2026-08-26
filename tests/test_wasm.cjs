@@ -2,7 +2,7 @@
 // schools from its pinned MIR fixture, evaluate a gradient, sample, and
 // check the posterior mean of mu. Mirrors the wheel smoke test.
 //
-//   node tests/test_wasm.cjs [path/to/stanli.js] [path/to/stancjs.bc.js]
+//   node tests/test_wasm.cjs [stanli.js] [stanli-compiler.js] [stancjs.bc.js]
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -10,7 +10,8 @@ const path = require("path");
 const modPath = path.resolve(
     process.argv[2] || path.join(__dirname, "..", "build-wasm", "stanli.js"));
 const createStanli = require(modPath);
-const stancjsPath = process.argv[3] && path.resolve(process.argv[3]);
+const compilerPath = process.argv[3] && path.resolve(process.argv[3]);
+const fallbackPath = process.argv[4] && path.resolve(process.argv[4]);
 
 function fail(msg) {
   console.error("FAIL " + msg);
@@ -20,18 +21,39 @@ function fail(msg) {
 createStanli().then((M) => {
   const fixtures = path.join(__dirname, "fixtures");
   let mir;
-  if (stancjsPath) {
-    const exported = require(stancjsPath);
+  let portableCompile = null;
+  if (compilerPath) {
+    const exported = require(compilerPath);
+    const portable =
+        (exported && exported.stanli_compile) || globalThis.stanli_compile;
     const stanc = (exported && exported.stanc) || globalThis.stanc;
-    if (typeof stanc !== "function") fail("stancjs did not export stanc()");
-    const version = stanc("version-test", "", ["version"]);
-    if (version.errors || /%%(?:NAME|VERSION)%%/.test(String(version.result)))
-      fail("stancjs has unsubstituted version metadata");
     const code = fs.readFileSync(path.join(fixtures, "es.stan"), "utf8");
-    const compiled = stanc("es_model", code, ["O1", "debug-optimized-mir"]);
+    let compiled;
+    if (typeof portable === "function") {
+      portableCompile = portable;
+      compiled = portable("embedded_model", code);
+      if (!compiled.errors &&
+          !String(compiled.result).startsWith('{"stanli_ir":1,"program":'))
+        fail("portable stancjs returned legacy or malformed MIR");
+    } else if (typeof stanc === "function") {
+      compiled = stanc("es_model", code, ["O1", "debug-optimized-mir"]);
+    } else {
+      fail("browser compiler did not export stanli_compile() or stanc()");
+    }
     if (compiled.errors)
-      fail("stancjs: " + Array.from(compiled.errors).join("\n"));
+      fail("browser compiler: " + Array.from(compiled.errors).join("\n"));
     mir = String(compiled.result);
+
+    if (fallbackPath) {
+      const fallbackExported = require(fallbackPath);
+      const fallback =
+          (fallbackExported && fallbackExported.stanc) || globalThis.stanc;
+      if (typeof fallback !== "function")
+        fail("fallback stancjs did not export stanc()");
+      const version = fallback("version-test", "", ["version"]);
+      if (version.errors || /%%(?:NAME|VERSION)%%/.test(String(version.result)))
+        fail("fallback stancjs has unsubstituted version metadata");
+    }
   } else {
     mir = fs.readFileSync(path.join(fixtures, "es.tmir.sexp"), "utf8");
   }
@@ -131,6 +153,52 @@ createStanli().then((M) => {
   M._free(sumPtr);
 
   M._stanli_model_free(model);
+
+  // A source-to-WASM generated-quantities smoke for the portable producer.
+  // Eight schools exercises gradients and samplers but has no GQ block, so
+  // compile the existing RNG fixture and run the write_array entry as well.
+  if (portableCompile) {
+    const gqCode = fs.readFileSync(path.join(fixtures, "gqrng.stan"), "utf8");
+    const gqCompiled = portableCompile("gqrng", gqCode);
+    if (gqCompiled.errors)
+      fail("gqrng compiler: " + Array.from(gqCompiled.errors).join("\n"));
+    const gqMirPtr = M.stringToNewUTF8(String(gqCompiled.result));
+    const gqDataPtr = M.stringToNewUTF8(
+        fs.readFileSync(path.join(fixtures, "gqrng.json"), "utf8"));
+    const gqModel = M._stanli_model_new(
+        gqMirPtr, gqDataPtr, errPtr, errLen);
+    M._free(gqMirPtr);
+    M._free(gqDataPtr);
+    if (!gqModel) fail("gqrng model_new: " + M.UTF8ToString(errPtr));
+
+    const gqN = Number(M._stanli_n_unconstrained(gqModel));
+    const gqColumns = Number(M._stanli_wa_n_columns(gqModel));
+    if (gqN !== 1 || gqColumns !== 5)
+      fail("gqrng shape " + gqN + " parameters, " + gqColumns + " columns");
+    const gqNames = [];
+    for (let i = 0; i < gqColumns; ++i)
+      gqNames.push(M.UTF8ToString(
+          M._stanli_wa_column_name(gqModel, BigInt(i))));
+    if (gqNames.join(",") !== "sigma,yrep,crep,branchy,p")
+      fail("gqrng columns " + gqNames.join(","));
+
+    const gqQPtr = M._malloc(8 * gqN);
+    const gqRowPtr = M._malloc(8 * gqColumns);
+    M.HEAPF64[gqQPtr / 8] = 0.53;
+    M._stanli_wa_seed_chain(gqModel, 11, 1);
+    if (M._stanli_wa_row(gqModel, gqQPtr, gqRowPtr) !== 0)
+      fail("gqrng write_array failed");
+    const gqRow = Array.from(
+        M.HEAPF64.subarray(gqRowPtr / 8, gqRowPtr / 8 + gqColumns));
+    if (!gqRow.every(Number.isFinite) ||
+        !Number.isInteger(gqRow[2]) || gqRow[2] < 0 || gqRow[2] > 3 ||
+        gqRow[3] !== 1 || gqRow[4] !== 6)
+      fail("gqrng invalid row " + JSON.stringify(gqRow));
+    M._free(gqQPtr);
+    M._free(gqRowPtr);
+    M._stanli_model_free(gqModel);
+  }
+
   console.log("test_wasm OK  lp(0) = " + lp.toFixed(6) + "  mean(mu) = " +
               mu.toFixed(3) + "  walnuts mean(mu) = " + muW.toFixed(3) +
               "  pathfinder mean(mu) = " + muP.toFixed(3) +

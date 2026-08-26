@@ -30,9 +30,11 @@ build-wasm/
 web/stanli.js
 web/stanli.wasm
 web/stancjs.bc.js
+web/stanli-compiler.js
 js/stanli.js
 js/stanli.wasm
 js/stancjs.bc.js
+js/stanli-compiler.js
 web/worker.js
 web/stanli.mjs
 # The corpus the demo page offers: 8 MB of posteriordb models and data,

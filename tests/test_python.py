@@ -5,8 +5,10 @@ Run against an installed wheel (CI does) or a local build:
 
     tools/build_wheel.sh && PYTHONPATH=python python3 tests/test_python.py
 """
+import concurrent.futures
 import pathlib
 import sys
+import threading
 
 import numpy as np
 
@@ -307,6 +309,45 @@ def test_stan_to_mir_reports_syntax_errors():
     except RuntimeError:
         return
     raise AssertionError("expected RuntimeError for a syntax error")
+
+
+def test_embedded_stanc_from_concurrent_python_threads():
+    # ctypes releases the GIL around C calls.  Initialize the embedded OCaml
+    # runtime here, then make several foreign Python threads enter it at once.
+    # Each worker compiles twice so it also exercises unregistering and
+    # re-registering the same C thread with OCaml's main domain.
+    if not stanli._lib.stanli_has_embedded_stanc():
+        return
+
+    code = "parameters { real x; } model { x ~ normal(0, 1); }"
+    expected = stanli.stan_to_mir(code)
+    assert expected.startswith('{"stanli_ir":1,"program":')
+
+    n_workers = 4
+    ready = threading.Barrier(n_workers)
+
+    def compile_twice(worker):
+        ready.wait()
+        first = stanli.stan_to_mir(code)
+        second = stanli.stan_to_mir(code)
+        error = None
+        if worker == 0:
+            try:
+                stanli.stan_to_mir("parameters { real x } model { }")
+            except RuntimeError as exc:
+                error = str(exc)
+            else:
+                raise AssertionError("foreign-thread syntax error succeeded")
+        return first, second, error
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=n_workers) as executor:
+        results = list(executor.map(compile_twice, range(n_workers)))
+
+    for worker, (first, second, error) in enumerate(results):
+        assert first == expected
+        assert second == expected
+        assert bool(error) == (worker == 0)
 
 
 def test_build_id_is_stable_and_specific():

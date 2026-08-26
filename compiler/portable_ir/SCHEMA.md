@@ -5,12 +5,13 @@ MIR slice consumed by the C++ runtime.  Version 1 is a deterministic UTF-8 JSON
 re-tagging of the fields in `stanli::mir`; it is not a serialization of every
 stanc3 MIR field and it is not an API commitment from stanc3.
 
-The first producer is expected to consume stanc3's `Program.Typed.t`.  Its
-output must have the same meaning and field values as the structural portion of
-`runtime/src/mir_reader.cpp`, before that reader resolves overloaded user
-functions and validates bindings. The portable and legacy readers route
-through that shared C++ finalizer exactly once after structural decoding;
-portable v1 additionally enables its redundant variable-metadata checks.
+The canonical producer in `compiler/ocaml/portable_mir.ml` consumes stanc3's
+`Program.Typed.t`. Its output has the same meaning and field values as the
+structural portion of `runtime/src/mir_reader.cpp`, before that reader resolves
+overloaded user functions and validates bindings. The portable and legacy
+readers route through that shared C++ finalizer exactly once after structural
+decoding; portable v1 additionally enables its redundant variable-metadata
+checks.
 
 Version 1 deliberately does not normalize expressions, reconstruct source
 syntax, sort declarations, or replace syntactic conventions with higher-level

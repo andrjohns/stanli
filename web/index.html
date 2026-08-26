@@ -179,7 +179,7 @@ import { compile, preload, sample } from "./stanli.mjs";
 const $ = (id) => document.getElementById(id);
 
 // ---- background warm-up ----------------------------------------------------
-// Fetch and parse the heavy artifacts (2.8 MB compiler, wasm runtime)
+// Fetch and parse the heavy artifacts (3.0 MB compiler, wasm runtime)
 // while the user is still reading the page, so the first Run starts at
 // full speed. requestIdleCallback keeps it off the first paint; the
 // promise is awaited nowhere -- if the user beats it to the button, the
