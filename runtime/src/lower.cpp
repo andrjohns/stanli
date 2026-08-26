@@ -4454,8 +4454,8 @@ struct Lowering {
             Val nv = prev_v;
             for (size_t k = 0; k < iv.i.size(); ++k) {
               check_index(iv.i[k], g.slots[prev].len, "scatter index", s.raw);
-              const Val el = emit_value(OP_INDEX, {rhs_v}, 1, view_of("UReal"),
-                                        {(int)k});
+              const Val el =
+                  emit_value(OP_INDEX, {rhs_v}, 1, view_of("UReal"), {(int)k});
               const Val next =
                   emit_value(OP_SET_INDEX, {nv, el}, g.slots[prev].len, out_si,
                              {(int)(iv.i[k] - 1)});
@@ -4857,13 +4857,12 @@ struct Lowering {
           if (!c && s.body.size() > 1) lower_stmt(s.body[1]);
           return;
         }
-        if (s.cond.data_only && in_write_array) {
-          lower_param_ifelse(s);
-          return;
-        }
-        if (s.cond.data_only)
-          fail("data-only condition is unavailable in the lexical frame",
-               s.raw);
+        // Data-only or not, an unfoldable condition compiles to an island.
+        // Data-only says the MIR adlevel is DataOnly, not that the values are
+        // in the interpreter's frame: a UDF local built by indexed assignment
+        // lives in the graph, and only the region compiler can read it there.
+        // The island's live-outs come back parameter-dependent, which costs
+        // adjoints such a branch does not need but is never wrong.
         lower_param_ifelse(s);
         return;
       }
