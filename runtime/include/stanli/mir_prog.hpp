@@ -824,6 +824,32 @@ struct ProgramCompiler {
       out.len = n;
       return typed(out, e.type_);
     }
+    if ((e.name == "diag_pre_multiply" || e.name == "diag_post_multiply") &&
+        e.args.size() == 2) {
+      // These are diagonal matrix products, but forming the diagonal and
+      // running a dense GEMM would multiply and add explicit zeros. Emit the
+      // equivalent row or column scaling directly in column-major order.
+      const bool pre = e.name == "diag_pre_multiply";
+      const Range v = expr(e.args[pre ? 0 : 1]);
+      const Range m = expr(e.args[pre ? 1 : 0]);
+      if (m.kind != ViewKind::Matrix)
+        bail(e.name + " requires a matrix argument");
+      if (v.kind != ViewKind::Vector && v.kind != ViewKind::RowVector)
+        bail(e.name + " requires a vector argument");
+      const int64_t expected = pre ? m.rows : m.cols;
+      if (v.len != expected)
+        bail(e.name + " vector length does not match the matrix");
+      const int r = alloc(m.len);
+      for (int64_t j = 0; j < m.cols; ++j)
+        for (int64_t i = 0; i < m.rows; ++i) {
+          const int64_t k = j * m.rows + i;
+          emit(Program::MUL, r + (int)k, m.reg + (int)k,
+               v.reg + (int)(pre ? i : j));
+        }
+      Range out = m;
+      out.reg = r;
+      return typed(out, e.type_);
+    }
     if (e.args.size() == 2) {
       // An int-typed binary is integer arithmetic, and `divide` truncates
       // where the real DIV below does not: `divide(7, 2)` is 3, not 3.5.

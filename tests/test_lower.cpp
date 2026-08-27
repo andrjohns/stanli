@@ -2452,6 +2452,56 @@ int main() {
                 grad[(size_t)i], 0.0);
   }
 
+  // Diagonal pre/post multiplication in a runtime region scales matrix rows
+  // and columns without materializing the diagonal matrix. Check the flat
+  // column-major addresses as well as every derivative.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_diag_multiply.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    check(ex.n_params() == 12,
+          "parameter-condition diagonal multiply parameter count");
+    const double values[12] = {0.2, 0.5,  -0.3, 0.7, 1.1,  -0.4,
+                               1.3, -0.8, 0.6,  1.5, -0.2, 0.4};
+    for (int i = 0; i < 12; ++i) ex.params_data()[i] = values[i];
+    std::vector<double> grad(12);
+    double want = 0.0;
+    for (int j = 0; j < 3; ++j)
+      for (int i = 0; i < 2; ++i)
+        want += values[2 * j + i] * (values[6 + i] + values[8 + j]);
+    expect_ulp("parameter-condition diagonal multiply lp",
+               ex.gradient(grad.data()), want);
+    for (int j = 0; j < 3; ++j)
+      for (int i = 0; i < 2; ++i)
+        expect_eq("parameter-condition diagonal multiply matrix grad " +
+                      std::to_string(2 * j + i),
+                  grad[(size_t)(2 * j + i)], values[6 + i] + values[8 + j]);
+    for (int i = 0; i < 2; ++i) {
+      double sum = 0.0;
+      for (int j = 0; j < 3; ++j) sum += values[2 * j + i];
+      expect_eq(
+          "parameter-condition diagonal pre vector grad " + std::to_string(i),
+          grad[(size_t)(6 + i)], sum);
+    }
+    for (int j = 0; j < 3; ++j)
+      expect_eq(
+          "parameter-condition diagonal post vector grad " + std::to_string(j),
+          grad[(size_t)(8 + j)], values[2 * j] + values[2 * j + 1]);
+    expect_eq("parameter-condition diagonal multiply theta grad", grad[11],
+              0.0);
+
+    ex.params_data()[11] = -0.4;
+    expect_eq("parameter-condition diagonal multiply else lp",
+              ex.gradient(grad.data()), -0.4);
+    for (int i = 0; i < 11; ++i)
+      expect_eq("parameter-condition diagonal multiply else grad " +
+                    std::to_string(i),
+                grad[(size_t)i], 0.0);
+    expect_eq("parameter-condition diagonal multiply else theta grad", grad[11],
+              1.0);
+  }
+
   // diagonal, which no path supported before: the region copies the
   // elements rows + 1 apart, the graph spells the same extraction as a
   // strided slice, and this model uses both -- the region for the sum of
