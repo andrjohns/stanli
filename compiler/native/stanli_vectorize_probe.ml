@@ -67,7 +67,9 @@ let () =
       Fmt.epr "%a@." (Frontend.Errors.pp ?printed_filename:None ~code) error;
       exit 1
   | Ok mir -> (
-      match Common.ICE.with_exn_message (fun () -> Portable_mir.encode mir) with
+      match
+        Common.ICE.with_exn_message (fun () -> Portable_mir.encode mir)
+      with
       | Error message ->
           prerr_endline message;
           exit 1

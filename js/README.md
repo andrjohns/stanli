@@ -46,11 +46,12 @@ can precompile it at build time (`stanc --O1 --debug-optimized-mir model.stan`)
 and pass `mir` instead of `code`; neither browser compiler loads, and the WASM
 runtime alone is ~1.5 MB gzipped.
 
-On Eight Schools, portable MIR is 111,760 bytes (2,365 gzipped), compared with
-33,320 bytes (2,000 gzipped) for legacy MIR. On the same Apple arm64 release
-build, median decoder parsing was 2.799 ms versus 0.290 ms, and complete
-preparation was 3.31 ms versus 0.59 ms. These are one-time preparation
-measurements; source compilation still dominates that path.
+On Eight Schools, compact portable MIR is 6,932 bytes (1,793 gzipped), compared
+with 33,320 bytes (2,000 gzipped) for legacy MIR. Across 51 fresh processes on
+the same Apple arm64 release build, median decoder parsing was 0.074 ms versus
+0.293 ms, and complete preparation was 0.278 ms versus 0.682 ms. These are
+one-time preparation measurements; source compilation still dominates that
+path.
 
 118 of 119 posteriordb corpus models verify against CmdStan's log
 density, gradients, and write_array values from inside this WASM build;

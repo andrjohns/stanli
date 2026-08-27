@@ -84,7 +84,7 @@ stanc_embed_expected_stamp() {
   local src_sha=${1:-$(stanc_embed_read_setup STANC3_SRC_SHA)}
   local opam_switch=${2:-$(stanc_embed_read_setup OPAM_SWITCH)}
   printf '%s\n' \
-    'format=stanli-stanc-embed-v2' \
+    'format=stanli-stanc-embed-v3' \
     "stanc3_src_sha=$src_sha" \
     "producer_inputs_sha256=$(stanc_embed_inputs_sha256)" \
     "ocaml_version=$(_stanc_embed_ocaml_version "$opam_switch")" \
@@ -108,7 +108,7 @@ stanc_embed_artifact_matches() {
   # case validate every source-derived field and the configured OCaml version,
   # while requiring the producing target and Dune version to be recorded.
   [[ "$(_stanc_embed_stamp_value "$stamp" format)" == \
-       'stanli-stanc-embed-v2' ]] &&
+       'stanli-stanc-embed-v3' ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" stanc3_src_sha)" == "$src_sha" ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" producer_inputs_sha256)" == \
        "$(stanc_embed_inputs_sha256)" ]] &&
@@ -186,7 +186,7 @@ stanli_stancjs_expected_stamp() {
   local jsoo_version
   jsoo_version=$(_stanc_embed_package_version "$opam_switch" js_of_ocaml)
   printf '%s\n' \
-    'format=stanli-portable-stancjs-v2' \
+    'format=stanli-portable-stancjs-v3' \
     "stanc3_src_repo=$src_repo" \
     "stanc3_src_sha=$src_sha" \
     "opam_switch=$opam_switch" \
@@ -214,7 +214,7 @@ stanli_stancjs_artifact_matches() {
   fi
 
   [[ "$(_stanc_embed_stamp_value "$stamp" format)" == \
-       'stanli-portable-stancjs-v2' ]] &&
+       'stanli-portable-stancjs-v3' ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" stanc3_src_repo)" == \
        "$src_repo" ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" stanc3_src_sha)" == \
@@ -313,7 +313,7 @@ stanli_windows_cli_expected_stamp() {
     return 1
   fi
   printf '%s\n' \
-    'format=stanli-portable-windows-cli-v1' \
+    'format=stanli-portable-windows-cli-v2' \
     "stanc3_src_repo=$src_repo" \
     "stanc3_src_sha=$src_sha" \
     "ocaml_version=$ocaml_version" \
@@ -348,7 +348,7 @@ stanli_windows_cli_artifact_matches() {
   fi
 
   [[ "$(_stanc_embed_stamp_value "$stamp" format)" == \
-       'stanli-portable-windows-cli-v1' ]] &&
+       'stanli-portable-windows-cli-v2' ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" stanc3_src_repo)" == \
        "$src_repo" ]] &&
     [[ "$(_stanc_embed_stamp_value "$stamp" stanc3_src_sha)" == \

@@ -34,4 +34,4 @@ val compile_portable :
   -> model_name:string
   -> string
   -> string compilation
-(** Compile Stan source and encode canonical portable MIR v1. *)
+(** Compile Stan source and encode canonical compact portable MIR v2. *)

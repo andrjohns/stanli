@@ -276,7 +276,7 @@ set(STANLI_RUNTIME_SOURCES
   runtime/src/pathfinder.cpp
   runtime/src/mir_reader.cpp
   runtime/src/mir_decode.cpp
-  runtime/src/portable_mir_reader.cpp
+  runtime/src/portable_mir_v2_reader.cpp
   runtime/src/lower.cpp
   runtime/src/wa_interp.cpp
   runtime/src/message_sink.cpp
@@ -506,6 +506,8 @@ add_test(NAME test_check_precompiled_mir_conflict
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_mir_conflict.cmake)
 add_executable(bench_grad tools/bench_grad.cpp tests/tbb_stub.cpp)
 target_link_libraries(bench_grad PRIVATE stanli)
+add_executable(bench_mir_decode tools/bench_mir_decode.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_mir_decode PRIVATE stanli)
 add_test(NAME test_prep_only
          COMMAND bench_grad tests/fixtures/ar1.tmir.sexp
                  tests/fixtures/ar1.json --prep

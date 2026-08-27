@@ -1,6 +1,6 @@
 // Compatibility and rejection tests for the portable-MIR decoder. The JSON
-// writer in this file is deliberately test-only: the production writer lives
-// in OCaml beside stanc3's typed MIR.
+// objects in this file are test-only deep-comparison values; the wire encoder
+// below mirrors the production OCaml layout for malformed-input coverage.
 #include <stanli/compile.hpp>
 #include <stanli/mir_decode.hpp>
 
@@ -10,9 +10,12 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -35,6 +38,273 @@ std::string slurp(const std::string& path) {
   std::ostringstream contents;
   contents << input.rdbuf();
   return contents.str();
+}
+
+void append_u8(std::string& bytes, uint8_t value) {
+  bytes.push_back(static_cast<char>(value));
+}
+
+void append_u32(std::string& bytes, uint32_t value) {
+  for (unsigned shift = 0; shift < 32; shift += 8)
+    append_u8(bytes, static_cast<uint8_t>(value >> shift));
+}
+
+void append_u64(std::string& bytes, uint64_t value) {
+  for (unsigned shift = 0; shift < 64; shift += 8)
+    append_u8(bytes, static_cast<uint8_t>(value >> shift));
+}
+
+void append_string(std::string& bytes, std::string_view value) {
+  append_u32(bytes, static_cast<uint32_t>(value.size()));
+  bytes.append(value);
+}
+
+std::string encode_base64(std::string_view bytes) {
+  constexpr std::string_view alphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string result;
+  result.reserve(((bytes.size() + 2) / 3) * 4);
+  for (size_t offset = 0; offset < bytes.size(); offset += 3) {
+    const uint32_t a = static_cast<unsigned char>(bytes[offset]);
+    const bool have_b = offset + 1 < bytes.size();
+    const bool have_c = offset + 2 < bytes.size();
+    const uint32_t b =
+        have_b ? static_cast<unsigned char>(bytes[offset + 1]) : 0;
+    const uint32_t c =
+        have_c ? static_cast<unsigned char>(bytes[offset + 2]) : 0;
+    result.push_back(alphabet[a >> 2]);
+    result.push_back(alphabet[((a & 0x03) << 4) | (b >> 4)]);
+    result.push_back(have_b ? alphabet[((b & 0x0f) << 2) | (c >> 6)] : '=');
+    result.push_back(have_c ? alphabet[c & 0x3f] : '=');
+  }
+  return result;
+}
+
+std::string v2_wire(std::string_view payload) {
+  return "STANLI2:" + encode_base64(payload);
+}
+
+void append_bool(std::string& bytes, bool value) {
+  append_u8(bytes, value ? 1 : 0);
+}
+
+template <typename T, typename Write>
+void append_list(std::string& bytes, const std::vector<T>& values,
+                 Write write) {
+  append_u32(bytes, static_cast<uint32_t>(values.size()));
+  for (const T& value : values) write(bytes, value);
+}
+
+void append_view(std::string& bytes, const mir::UnsizedView& value) {
+  append_u8(bytes, value.depth);
+  append_u8(bytes, static_cast<uint8_t>(value.leaf));
+}
+
+void append_expr(std::string& bytes, const mir::Expr& value);
+void append_stmt(std::string& bytes, const mir::Stmt& value);
+
+void append_expr_list(std::string& bytes,
+                      const std::vector<mir::Expr>& values) {
+  append_list(bytes, values, [](std::string& out, const mir::Expr& expression) {
+    append_expr(out, expression);
+  });
+}
+
+void append_expr(std::string& bytes, const mir::Expr& value) {
+  append_u8(bytes, static_cast<uint8_t>(value.kind));
+  switch (value.kind) {
+    case mir::Expr::Var:
+      append_string(bytes, value.name);
+      break;
+    case mir::Expr::LitInt:
+      append_u32(bytes,
+                 static_cast<uint32_t>(static_cast<int32_t>(value.lit_i)));
+      break;
+    case mir::Expr::LitReal: {
+      uint64_t bits = 0;
+      std::memcpy(&bits, &value.lit, sizeof(bits));
+      append_u64(bytes, bits);
+      break;
+    }
+    case mir::Expr::LitStr:
+      append_string(bytes, value.lit_s);
+      break;
+    case mir::Expr::FunApp:
+      append_u8(bytes, static_cast<uint8_t>(value.fn_lib));
+      append_string(bytes, value.name);
+      append_bool(bytes, value.fn_propto);
+      append_expr_list(bytes, value.args);
+      break;
+    case mir::Expr::Promotion:
+    case mir::Expr::Indexed:
+    case mir::Expr::TernaryIf:
+    case mir::Expr::EOr:
+    case mir::Expr::EAnd:
+      append_expr_list(bytes, value.args);
+      break;
+    case mir::Expr::Unsupported:
+      break;
+  }
+  append_string(bytes, value.type_);
+  append_view(bytes, value.unsized);
+  append_bool(bytes, value.data_only);
+  append_bool(bytes, value.promoted);
+  append_string(bytes, value.raw);
+}
+
+void append_transform(std::string& bytes, const mir::Transform& value) {
+  append_u8(bytes, static_cast<uint8_t>(value.kind));
+  append_expr_list(bytes, value.args);
+  append_string(bytes, value.raw);
+}
+
+void append_optional_transform(std::string& bytes,
+                               const std::optional<mir::Transform>& value) {
+  append_bool(bytes, value.has_value());
+  if (value) append_transform(bytes, *value);
+}
+
+void append_sized(std::string& bytes, const mir::SizedType& value) {
+  append_string(bytes, value.base);
+  append_expr_list(bytes, value.dims);
+  append_string(bytes, value.elem_base);
+  append_string(bytes, value.raw);
+}
+
+void append_stmt_list(std::string& bytes,
+                      const std::vector<mir::Stmt>& values) {
+  append_list(bytes, values, [](std::string& out, const mir::Stmt& statement) {
+    append_stmt(out, statement);
+  });
+}
+
+void append_stmt(std::string& bytes, const mir::Stmt& value) {
+  append_u8(bytes, static_cast<uint8_t>(value.kind));
+  switch (value.kind) {
+    case mir::Stmt::Decl:
+      append_string(bytes, value.decl_id);
+      append_sized(bytes, value.decl_type);
+      append_bool(bytes, value.decl_data_only);
+      append_bool(bytes, value.has_init);
+      if (value.has_init) append_expr(bytes, value.init);
+      append_optional_transform(bytes, value.read_transform);
+      append_expr_list(bytes, value.read_dims);
+      append_string(bytes, value.raw);
+      break;
+    case mir::Stmt::Assignment:
+      append_string(bytes, value.lhs);
+      append_expr_list(bytes, value.lhs_idx);
+      append_expr(bytes, value.rhs);
+      append_string(bytes, value.raw);
+      break;
+    case mir::Stmt::TargetPE:
+      append_expr(bytes, value.target);
+      append_string(bytes, value.raw);
+      break;
+    case mir::Stmt::Block:
+    case mir::Stmt::SList:
+      append_stmt_list(bytes, value.body);
+      append_string(bytes, value.raw);
+      break;
+    case mir::Stmt::For:
+      append_string(bytes, value.loopvar);
+      append_expr(bytes, value.lower);
+      append_expr(bytes, value.upper);
+      append_stmt_list(bytes, value.body);
+      append_string(bytes, value.raw);
+      break;
+    case mir::Stmt::IfElse:
+    case mir::Stmt::While:
+      append_expr(bytes, value.cond);
+      append_stmt_list(bytes, value.body);
+      append_string(bytes, value.raw);
+      break;
+    case mir::Stmt::NRFunApp:
+      append_string(bytes, value.fn_name);
+      append_expr_list(bytes, value.fn_args);
+      append_optional_transform(bytes, value.check_transform);
+      append_string(bytes, value.check_var_name);
+      append_string(bytes, value.raw);
+      break;
+    case mir::Stmt::Return:
+      append_bool(bytes, value.has_init);
+      if (value.has_init) append_expr(bytes, value.rhs);
+      append_string(bytes, value.raw);
+      break;
+    case mir::Stmt::Break:
+    case mir::Stmt::Continue:
+      break;
+    case mir::Stmt::Skip:
+    case mir::Stmt::Unsupported:
+      append_string(bytes, value.raw);
+      break;
+  }
+}
+
+void append_strings(std::string& bytes,
+                    const std::vector<std::string>& values) {
+  append_list(bytes, values, [](std::string& out, const std::string& value) {
+    append_string(out, value);
+  });
+}
+
+void append_fun(std::string& bytes, const mir::FunDef& value) {
+  append_string(bytes, value.name);
+  append_strings(bytes, value.arg_names);
+  append_strings(bytes, value.arg_types);
+  append_list(bytes, value.arg_views,
+              [](std::string& out, const mir::UnsizedView& view) {
+                append_view(out, view);
+              });
+  append_u32(bytes, static_cast<uint32_t>(value.arg_data_only.size()));
+  for (bool data_only : value.arg_data_only) append_bool(bytes, data_only);
+  append_stmt_list(bytes, value.body);
+}
+
+std::string write_v2(const mir::Program& value) {
+  std::string payload;
+  append_u32(payload, static_cast<uint32_t>(value.input_vars.size()));
+  for (const auto& input : value.input_vars) {
+    append_string(payload, input.first);
+    append_sized(payload, input.second);
+  }
+  append_stmt_list(payload, value.prepare_data);
+  append_stmt_list(payload, value.log_prob);
+  append_stmt_list(payload, value.generate_quantities);
+  append_list(payload, value.fun_defs,
+              [](std::string& out, const mir::FunDef& definition) {
+                append_fun(out, definition);
+              });
+  append_strings(payload, value.output_vars);
+  return v2_wire(payload);
+}
+
+std::string empty_v2_payload() {
+  std::string payload;
+  for (int i = 0; i < 6; ++i) append_u32(payload, 0);
+  return payload;
+}
+
+std::string real_target_v2_payload(uint64_t bits, uint8_t data_only = 1,
+                                   uint8_t leaf = 2) {
+  std::string payload;
+  append_u32(payload, 0);  // input_vars
+  append_u32(payload, 0);  // prepare_data
+  append_u32(payload, 1);  // log_prob
+  append_u8(payload, 2);   // TargetPE
+  append_u8(payload, 2);   // LitReal
+  append_u64(payload, bits);
+  append_string(payload, "UReal");
+  append_u8(payload, 0);  // unsized array depth
+  append_u8(payload, leaf);
+  append_u8(payload, data_only);
+  append_u8(payload, 0);  // promoted
+  append_string(payload, "");
+  append_string(payload, "");  // statement raw
+  append_u32(payload, 0);      // generate_quantities
+  append_u32(payload, 0);      // fun_defs
+  append_u32(payload, 0);      // output_vars
+  return payload;
 }
 
 template <typename T, typename Write>
@@ -288,10 +558,6 @@ json write_program_object(const mir::Program& value) {
           {"output_vars", write_strings(value.output_vars)}};
 }
 
-json write_envelope(const mir::Program& value) {
-  return {{"stanli_ir", 1}, {"program", write_program_object(value)}};
-}
-
 bool expect_error(const std::string& text, const std::string& needle,
                   const std::string& what) {
   try {
@@ -426,22 +692,73 @@ void clear_raw(mir::Program& value) {
     for (mir::Stmt& statement : function.body) clear_raw(statement);
 }
 
+bool report_first_difference(const json& actual, const json& expected,
+                             const std::string& path) {
+  if (actual.type() != expected.type()) {
+    std::printf("DIFF %s type actual=%s expected=%s\n", path.c_str(),
+                actual.type_name(), expected.type_name());
+    return true;
+  }
+  if (actual.is_object()) {
+    if (actual.size() != expected.size()) {
+      std::printf("DIFF %s object size actual=%zu expected=%zu\n", path.c_str(),
+                  actual.size(), expected.size());
+      return true;
+    }
+    for (auto it = expected.begin(); it != expected.end(); ++it) {
+      if (!actual.contains(it.key())) {
+        std::printf("DIFF %s missing key %s\n", path.c_str(), it.key().c_str());
+        return true;
+      }
+      if (report_first_difference(actual.at(it.key()), it.value(),
+                                  path + "." + it.key()))
+        return true;
+    }
+    return false;
+  }
+  if (actual.is_array()) {
+    if (actual.size() != expected.size()) {
+      std::printf("DIFF %s array size actual=%zu expected=%zu\n", path.c_str(),
+                  actual.size(), expected.size());
+      if (actual.size() <= 8 && expected.size() <= 8)
+        std::printf("  actual=%s\n  expected=%s\n", actual.dump().c_str(),
+                    expected.dump().c_str());
+      return true;
+    }
+    for (size_t i = 0; i < actual.size(); ++i)
+      if (report_first_difference(actual[i], expected[i],
+                                  path + "[" + std::to_string(i) + "]"))
+        return true;
+    return false;
+  }
+  if (actual != expected) {
+    std::printf("DIFF %s actual=%s expected=%s\n", path.c_str(),
+                actual.dump().c_str(), expected.dump().c_str());
+    return true;
+  }
+  return false;
+}
+
 void check_program_equivalence(const std::string& legacy_path,
                                const std::string& portable_path) {
   mir::Program legacy = read_fixture(legacy_path);
   mir::Program portable = read_fixture(portable_path);
-  // Portable v1 keeps complete opaque diagnostic payloads; the legacy reader
+  // Portable MIR keeps complete opaque diagnostic payloads; the legacy reader
   // truncates some of them. They do not participate in execution, so compare
   // every structural/semantic field after removing only those payloads.
   clear_raw(legacy);
   clear_raw(portable);
-  check(write_program_object(portable) == write_program_object(legacy),
-        portable_path + " decoded fields match " + legacy_path);
+  const json portable_object = write_program_object(portable);
+  const json legacy_object = write_program_object(legacy);
+  const bool equal = portable_object == legacy_object;
+  if (!equal)
+    report_first_difference(portable_object, legacy_object, "$program");
+  check(equal, portable_path + " decoded fields match " + legacy_path);
 }
 
 void check_round_trip(const std::string& path) {
   const mir::Program legacy = read_fixture(path);
-  const mir::Program portable = decode_program(write_envelope(legacy).dump());
+  const mir::Program portable = decode_program(write_v2(legacy));
   check(write_program_object(portable) == write_program_object(legacy),
         path + " portable fields match legacy fields");
 }
@@ -451,9 +768,8 @@ void check_lowering_equivalence(const char* legacy_fixture,
   const std::string legacy_text =
       slurp(legacy_fixture ? legacy_fixture : "tests/fixtures/es.tmir.sexp");
   const mir::Program legacy_program = decode_program(legacy_text);
-  const std::string portable_text = portable_fixture
-                                        ? slurp(portable_fixture)
-                                        : write_envelope(legacy_program).dump();
+  const std::string portable_text =
+      portable_fixture ? slurp(portable_fixture) : write_v2(legacy_program);
   check(!portable_text.empty(), "portable lowering fixture exists");
   if (legacy_fixture && portable_fixture)
     check_program_equivalence(legacy_fixture, portable_fixture);
@@ -508,8 +824,7 @@ void check_overload_finalization() {
       has_overloads |=
           unresolved.fun_defs[i].name == unresolved.fun_defs[j].name;
   check(has_overloads, "overload fixture contains pre-resolution collisions");
-  const mir::Program decoded =
-      decode_program(write_envelope(unresolved).dump());
+  const mir::Program decoded = decode_program(write_v2(unresolved));
   check(write_program_object(decoded) == write_program_object(resolved),
         "portable decoder applies legacy overload finalization once");
 }
@@ -529,7 +844,7 @@ void check_exact_float_bits() {
       0xfff0000000000000ULL, 0x7ff8000000000042ULL, 0x0000000000000001ULL};
   for (uint64_t bits : patterns) {
     std::memcpy(&program.log_prob[0].target.lit, &bits, sizeof(bits));
-    const mir::Program decoded = decode_program(write_envelope(program).dump());
+    const mir::Program decoded = decode_program(write_v2(program));
     uint64_t got = 0;
     std::memcpy(&got, &decoded.log_prob[0].target.lit, sizeof(got));
     check(got == bits,
@@ -542,13 +857,13 @@ void check_structural_rejections() {
   indexed.kind = mir::Expr::Indexed;
   indexed.type_ = "UReal";
   indexed.unsized.leaf = mir::UnsizedLeaf::Real;
-  expect_compile_error(write_envelope(target_program(indexed)).dump(),
+  expect_compile_error(write_v2(target_program(indexed)),
                        "Indexed expression arity",
                        "empty Indexed rejected at compile boundary");
 
   indexed.args.push_back(literal());
   const mir::Program base_only =
-      decode_program(write_envelope(target_program(indexed)).dump());
+      decode_program(write_v2(target_program(indexed)));
   check(base_only.log_prob[0].target.args.size() == 1,
         "base-only Indexed wrapper");
 
@@ -556,37 +871,36 @@ void check_structural_rejections() {
   bad_index.kind = mir::Expr::FunApp;
   bad_index.name = "IndexSingle";
   indexed.args.push_back(bad_index);
-  expect_error(write_envelope(target_program(indexed)).dump(),
-               "IndexSingle call", "IndexSingle without operand");
+  expect_error(write_v2(target_program(indexed)), "IndexSingle call",
+               "IndexSingle without operand");
 
   bad_index.name = "IndexBetween";
   bad_index.args.push_back(literal());
   indexed.args[1] = bad_index;
-  expect_error(write_envelope(target_program(indexed)).dump(),
-               "IndexBetween call", "IndexBetween with one endpoint");
+  expect_error(write_v2(target_program(indexed)), "IndexBetween call",
+               "IndexBetween with one endpoint");
 
   bad_index.name = "IndexUpfrom";
   bad_index.args.clear();
   indexed.args[1] = bad_index;
-  expect_error(write_envelope(target_program(indexed)).dump(),
-               "IndexUpfrom call", "IndexUpfrom without lower bound");
+  expect_error(write_v2(target_program(indexed)), "IndexUpfrom call",
+               "IndexUpfrom without lower bound");
   bad_index.args.push_back(literal());
   indexed.args[1] = bad_index;
-  const mir::Program upfrom =
-      decode_program(write_envelope(target_program(indexed)).dump());
+  const mir::Program upfrom = decode_program(write_v2(target_program(indexed)));
   check(upfrom.log_prob[0].target.args[1].name == "IndexUpfrom",
         "IndexUpfrom portable shape");
 
   bad_index.name = "FutureIndex";
   indexed.args[1] = bad_index;
-  expect_error(write_envelope(target_program(indexed)).dump(),
-               "index descriptor", "unknown synthetic index");
+  expect_error(write_v2(target_program(indexed)), "index descriptor",
+               "unknown synthetic index");
 
   bad_index.name = "IndexSingle";
   bad_index.fn_lib = mir::Expr::Lib::UserDefined;
   indexed.args[1] = bad_index;
-  expect_error(write_envelope(target_program(indexed)).dump(),
-               "index descriptor", "noncanonical synthetic index library");
+  expect_error(write_v2(target_program(indexed)), "index descriptor",
+               "noncanonical synthetic index library");
 
   for (const auto& test : std::vector<std::pair<mir::Expr::Kind, const char*>>{
            {mir::Expr::Promotion, "Promotion expression arity"},
@@ -597,7 +911,7 @@ void check_structural_rejections() {
     expression.kind = test.first;
     expression.type_ = "UReal";
     expression.unsized.leaf = mir::UnsizedLeaf::Real;
-    expect_error(write_envelope(target_program(expression)).dump(), test.second,
+    expect_error(write_v2(target_program(expression)), test.second,
                  test.second);
   }
 
@@ -607,19 +921,19 @@ void check_structural_rejections() {
   bad_call.type_ = "UReal";
   bad_call.unsized.leaf = mir::UnsizedLeaf::Real;
   bad_call.args.push_back(literal());
-  expect_compile_error(write_envelope(target_program(bad_call)).dump(),
-                       "Plus__ call", "known function arity");
+  expect_compile_error(write_v2(target_program(bad_call)), "Plus__ call",
+                       "known function arity");
   for (const char* name : {"pow", "std_normal_qf", "trigamma", "is_nan",
                            "tcrossprod", "map_rect", "algebra_solver"}) {
     bad_call.name = name;
     bad_call.args.clear();
-    expect_error(write_envelope(target_program(bad_call)).dump(),
+    expect_error(write_v2(target_program(bad_call)),
                  std::string(name) + " call",
                  std::string(name) + " malformed arity");
   }
   bad_call.name = "pow";
   bad_call.fn_lib = mir::Expr::Lib::Internal;
-  expect_error(write_envelope(target_program(bad_call)).dump(), "pow call",
+  expect_error(write_v2(target_program(bad_call)), "pow call",
                "internal function cannot bypass name-dispatched arity");
 
   mir::Expr wiener;
@@ -628,8 +942,7 @@ void check_structural_rejections() {
   wiener.type_ = "UReal";
   wiener.unsized.leaf = mir::UnsizedLeaf::Real;
   wiener.args.assign(7, literal());
-  const std::string extended_wiener =
-      write_envelope(target_program(wiener)).dump();
+  const std::string extended_wiener = write_v2(target_program(wiener));
   const mir::Program decoded_wiener = decode_program(extended_wiener);
   check(decoded_wiener.log_prob.size() == 1 &&
             decoded_wiener.log_prob[0].target.args.size() == 7,
@@ -637,13 +950,12 @@ void check_structural_rejections() {
   expect_compile_error(extended_wiener, "unsupported function wiener_lpdf",
                        "seven-argument wiener reaches execution boundary");
   wiener.args.resize(6);
-  expect_error(write_envelope(target_program(wiener)).dump(),
-               "expected 5 or 7 argument(s)",
+  expect_error(write_v2(target_program(wiener)), "expected 5 or 7 argument(s)",
                "six-argument wiener rejected structurally");
 
   mir::Expr bad_metadata = literal();
   bad_metadata.unsized.leaf = mir::UnsizedLeaf::Int;
-  expect_error(write_envelope(target_program(bad_metadata)).dump(),
+  expect_error(write_v2(target_program(bad_metadata)),
                "expression type metadata", "expression type/view mismatch");
 
   mir::Program bad_binding;
@@ -656,7 +968,7 @@ void check_structural_rejections() {
   x.unsized.leaf = mir::UnsizedLeaf::Int;
   bad_binding = target_program(x);
   bad_binding.input_vars.emplace_back("x", real_type);
-  expect_error(write_envelope(bad_binding).dump(),
+  expect_error(write_v2(bad_binding),
                "variable type disagrees with its binding",
                "variable binding type mismatch");
 
@@ -668,7 +980,7 @@ void check_structural_rejections() {
   function.arg_views.push_back(mir::UnsizedView{0, mir::UnsizedLeaf::Real});
   function.arg_data_only.push_back(true);
   bad_function.fun_defs.push_back(std::move(function));
-  expect_error(write_envelope(bad_function).dump(),
+  expect_error(write_v2(bad_function),
                "function argument type disagrees with its view",
                "function argument type/view mismatch");
 
@@ -687,7 +999,7 @@ void check_structural_rejections() {
   add_function("f", "UReal", mir::UnsizedLeaf::Real);
   add_function("f", "UInt", mir::UnsizedLeaf::Int);
   add_function("f(int)", "UInt", mir::UnsizedLeaf::Int);
-  expect_error(write_envelope(colliding_functions).dump(),
+  expect_error(write_v2(colliding_functions),
                "duplicate function name after overload resolution",
                "overload suffix collision");
 
@@ -699,19 +1011,16 @@ void check_structural_rejections() {
     program.log_prob.push_back(std::move(statement));
     return program;
   };
-  expect_error(write_envelope(bad_body(mir::Stmt::For, 0)).dump(),
+  expect_error(write_v2(bad_body(mir::Stmt::For, 0)),
                "For statement body arity", "empty For body");
-  expect_error(write_envelope(bad_body(mir::Stmt::For, 2)).dump(),
+  expect_error(write_v2(bad_body(mir::Stmt::For, 2)),
                "For statement body arity", "multiple For bodies");
-  expect_error(write_envelope(bad_body(mir::Stmt::While, 0)).dump(),
+  expect_error(write_v2(bad_body(mir::Stmt::While, 0)),
                "While statement body arity", "empty While body");
-  expect_error(write_envelope(bad_body(mir::Stmt::IfElse, 0)).dump(),
+  expect_error(write_v2(bad_body(mir::Stmt::IfElse, 0)),
                "IfElse statement body arity", "empty IfElse body");
-  expect_error(write_envelope(bad_body(mir::Stmt::IfElse, 3)).dump(),
+  expect_error(write_v2(bad_body(mir::Stmt::IfElse, 3)),
                "IfElse statement body arity", "three IfElse bodies");
-  expect_error(write_envelope(bad_body(mir::Stmt::TargetPE, 1)).dump(),
-               "malformed statement body", "body on leaf statement");
-
   mir::Program bad_transform;
   mir::Stmt declaration;
   declaration.kind = mir::Stmt::Decl;
@@ -719,7 +1028,7 @@ void check_structural_rejections() {
   declaration.read_transform = mir::Transform{};
   declaration.read_transform->kind = mir::Transform::Lower;
   bad_transform.log_prob.push_back(std::move(declaration));
-  expect_error(write_envelope(bad_transform).dump(), "transform arity",
+  expect_error(write_v2(bad_transform), "transform arity",
                "transform argument arity");
 
   mir::Program bad_sized;
@@ -727,99 +1036,202 @@ void check_structural_rejections() {
   matrix_type.base = "SMatrix";
   matrix_type.dims.push_back(literal());
   bad_sized.input_vars.emplace_back("M", std::move(matrix_type));
-  expect_error(write_envelope(bad_sized).dump(),
-               "SMatrix sized type dimensions", "sized matrix dimensions");
-}
-
-void check_rejections() {
-  const mir::Program empty;
-  const json valid = write_envelope(empty);
-
-  json changed = valid;
-  changed["stanli_ir"] = 2;
-  expect_error(changed.dump(), "unsupported version", "unknown version");
-
-  changed = valid;
-  changed["extra"] = true;
-  expect_error(changed.dump(), "unknown field", "unknown envelope field");
-
-  changed = valid;
-  changed.erase("program");
-  expect_error(changed.dump(), "missing required field", "missing program");
-
-  changed = valid;
-  changed["program"]["extra"] = true;
-  expect_error(changed.dump(), "unknown field", "unknown program field");
-
-  const std::string duplicate =
-      "{\"stanli_ir\":1,\"stanli_ir\":1,\"program\":" +
-      write_program_object(empty).dump() + "}";
-  expect_error(duplicate, "duplicate JSON key", "duplicate key");
-
-  const std::string nested_duplicate =
-      "{\"stanli_ir\":1,\"program\":{\"input_vars\":[],\"input_vars\":[],"
-      "\"prepare_data\":[],\"log_prob\":[],\"generate_quantities\":[],"
-      "\"fun_defs\":[],\"output_vars\":[]}}";
-  expect_error(nested_duplicate, "duplicate JSON key", "nested duplicate key");
-
-  expect_error(valid.dump() + " trailing", "invalid JSON",
-               "trailing portable content");
-  expect_error("{ definitely not an s-expression", "invalid JSON",
-               "malformed portable input does not fall back");
-  expect_error("[]", "unrecognized input format", "unknown input format");
-  expect_error(" \n\t", "empty input", "empty input");
-
-  mir::Program literal_program;
-  mir::Stmt stmt;
-  stmt.kind = mir::Stmt::TargetPE;
-  stmt.target.kind = mir::Expr::LitReal;
-  stmt.target.type_ = "UReal";
-  stmt.target.unsized.leaf = mir::UnsizedLeaf::Real;
-  stmt.target.data_only = true;
-  literal_program.log_prob.push_back(stmt);
-  changed = write_envelope(literal_program);
-  changed["program"]["log_prob"][0]["target"]["lit"] = "f64:000000000000000G";
-  expect_error(changed.dump(), "lowercase hexadecimal", "invalid f64 bits");
-
-  changed = write_envelope(literal_program);
-  changed["program"]["log_prob"][0]["target"]["lit_i"] = 0;
-  expect_error(changed.dump(), "expected string", "numeric Stan integer");
-
-  changed = write_envelope(literal_program);
-  changed["program"]["log_prob"][0]["target"]["lit_i"] = "2147483648";
-  expect_error(changed.dump(), "signed 32-bit", "oversized Stan integer");
-
-  changed = write_envelope(literal_program);
-  changed["program"]["log_prob"][0]["target"]["kind"] = "FutureExpr";
-  expect_error(changed.dump(), "unknown Expr::Kind", "unknown expression tag");
-
-  mir::Program bad_function;
-  mir::FunDef function;
-  function.name = "bad";
-  function.arg_names.push_back("x");
-  bad_function.fun_defs.push_back(function);
-  expect_error(write_envelope(bad_function).dump(),
+  expect_error(write_v2(bad_sized), "SMatrix sized type dimensions",
+               "sized matrix dimensions");
+  mir::Program incomplete_function;
+  mir::FunDef incomplete_definition;
+  incomplete_definition.name = "bad";
+  incomplete_definition.arg_names.push_back("x");
+  incomplete_function.fun_defs.push_back(std::move(incomplete_definition));
+  expect_error(write_v2(incomplete_function),
                "function argument field lengths disagree",
                "parallel function argument arrays");
+}
 
-  std::string too_deep = "{\"stanli_ir\":1,\"program\":";
-  too_deep.append(514, '[');
-  too_deep += "0";
-  too_deep.append(514, ']');
-  too_deep += "}";
-  expect_error(too_deep, "nesting exceeds", "JSON nesting limit");
+void check_v2_rejections() {
+  expect_error("STANLI3:", "unrecognized input format", "unknown v2 version");
+  expect_error("{\"stanli_ir\":1}", "unrecognized input format",
+               "retired portable v1 envelope");
+  expect_error(" STANLI2:", "unrecognized input format",
+               "v2 leading whitespace");
+  expect_error("[]", "unrecognized input format", "unknown input format");
+  expect_error(" \n\t", "empty input", "empty input");
+  const std::string empty_wire = v2_wire(empty_v2_payload());
+  const mir::Program empty = decode_program(empty_wire);
+  check(empty.input_vars.empty() && empty.prepare_data.empty() &&
+            empty.log_prob.empty() && empty.generate_quantities.empty() &&
+            empty.fun_defs.empty() && empty.output_vars.empty(),
+        "v2 empty program");
+  check(empty_wire.find('\0') == std::string::npos,
+        "v2 envelope is safe for C-string transports");
 
-  json too_many_members = json::object();
-  for (int i = 0; i < 65; ++i)
-    too_many_members["field_" + std::to_string(i)] = i;
-  expect_error(too_many_members.dump(), "object exceeds 64 members",
-               "JSON object-member limit");
+  mir::Program loop_control;
+  mir::Stmt break_statement;
+  break_statement.kind = mir::Stmt::Break;
+  mir::Stmt continue_statement;
+  continue_statement.kind = mir::Stmt::Continue;
+  loop_control.log_prob = {break_statement, continue_statement};
+  const mir::Program decoded_loop_control =
+      decode_program(write_v2(loop_control));
+  check(decoded_loop_control.log_prob.size() == 2 &&
+            decoded_loop_control.log_prob[0].kind == mir::Stmt::Break &&
+            decoded_loop_control.log_prob[1].kind == mir::Stmt::Continue,
+        "v2 preserves break and continue statement tags");
 
-  std::string oversized_string = "{\"";
-  oversized_string.append(size_t{16} * 1024 * 1024 + 1, 'x');
-  oversized_string += "\":0}";
-  expect_error(oversized_string, "string exceeds 16777216 bytes",
-               "JSON per-string limit");
+  const auto check_real_bits = [](uint64_t expected, const std::string& what) {
+    const mir::Program decoded =
+        decode_program(v2_wire(real_target_v2_payload(expected)));
+    uint64_t actual = 0;
+    std::memcpy(&actual, &decoded.log_prob.at(0).target.lit, sizeof(actual));
+    check(actual == expected, what);
+  };
+  check_real_bits(UINT64_C(0x8000000000000000), "v2 preserves negative zero");
+  check_real_bits(UINT64_C(0x7ff8000000000042),
+                  "v2 preserves binary64 NaN payload bits");
+
+  expect_error("STANLI2:AAA", "multiple of 4", "v2 incomplete base64 quartet");
+  expect_error("STANLI2:!!!!", "invalid base64 character",
+               "v2 invalid base64 character");
+  expect_error("STANLI2:AA==AAAA", "padding before final quartet",
+               "v2 early base64 padding");
+  expect_error("STANLI2:AB==", "non-canonical base64 tail",
+               "v2 non-canonical one-byte tail");
+  expect_error("STANLI2:AAB=", "non-canonical base64 tail",
+               "v2 non-canonical two-byte tail");
+
+  std::string truncated = empty_v2_payload();
+  truncated.pop_back();
+  expect_error(v2_wire(truncated), "truncated input", "v2 truncated payload");
+  std::string trailing = empty_v2_payload();
+  append_u8(trailing, 0);
+  expect_error(v2_wire(trailing), "trailing bytes", "v2 trailing payload");
+
+  std::string oversized_list;
+  append_u32(oversized_list, 1000001);
+  expect_error(v2_wire(oversized_list), "list exceeds 1000000 items",
+               "v2 per-list limit");
+  std::string impossible_list;
+  append_u32(impossible_list, 100);
+  expect_error(v2_wire(impossible_list), "list count exceeds remaining input",
+               "v2 impossible list count");
+  std::string oversized_list_storage;
+  append_u32(oversized_list_storage, 0);  // input_vars
+  const uint32_t statement_count =
+      static_cast<uint32_t>(268435456 / sizeof(mir::Stmt) + 1);
+  append_u32(oversized_list_storage, statement_count);  // prepare_data
+  oversized_list_storage.append(statement_count, '\0');
+  expect_error(v2_wire(oversized_list_storage),
+               "decoded list storage exceeds 268435456 bytes",
+               "v2 aggregate list storage limit");
+  std::string oversized_string;
+  append_u32(oversized_string, 1);         // one input
+  append_u32(oversized_string, 16777217);  // its name
+  expect_error(v2_wire(oversized_string), "string exceeds 16777216 bytes",
+               "v2 per-string limit");
+  const auto invalid_utf8_name = [](std::initializer_list<uint8_t> bytes) {
+    std::string payload;
+    append_u32(payload, 1);  // one input variable
+    append_u32(payload, static_cast<uint32_t>(bytes.size()));
+    for (uint8_t byte : bytes) append_u8(payload, byte);
+    return v2_wire(payload);
+  };
+  expect_error(invalid_utf8_name({0xff}), "invalid UTF-8 string",
+               "v2 invalid UTF-8 leading byte");
+  expect_error(invalid_utf8_name({0xc0, 0x80}), "invalid UTF-8 string",
+               "v2 overlong UTF-8");
+  expect_error(invalid_utf8_name({0xe0, 0x80, 0x80}), "invalid UTF-8 string",
+               "v2 overlong three-byte UTF-8");
+  expect_error(invalid_utf8_name({0xed, 0xa0, 0x80}), "invalid UTF-8 string",
+               "v2 UTF-8 surrogate");
+  expect_error(invalid_utf8_name({0xf4, 0x90, 0x80, 0x80}),
+               "invalid UTF-8 string", "v2 UTF-8 beyond scalar range");
+  expect_error(invalid_utf8_name({0xf0, 0x9f}), "invalid UTF-8 string",
+               "v2 truncated UTF-8");
+
+  std::string unknown_stmt;
+  append_u32(unknown_stmt, 0);
+  append_u32(unknown_stmt, 0);
+  append_u32(unknown_stmt, 1);
+  append_u8(unknown_stmt, 0xff);
+  expect_error(v2_wire(unknown_stmt), "unknown statement tag",
+               "v2 unknown statement tag");
+
+  std::string unknown_expr;
+  append_u32(unknown_expr, 0);
+  append_u32(unknown_expr, 0);
+  append_u32(unknown_expr, 1);
+  append_u8(unknown_expr, 2);  // TargetPE
+  append_u8(unknown_expr, 0xff);
+  expect_error(v2_wire(unknown_expr), "unknown expression tag",
+               "v2 unknown expression tag");
+
+  std::string unknown_library;
+  append_u32(unknown_library, 0);
+  append_u32(unknown_library, 0);
+  append_u32(unknown_library, 1);
+  append_u8(unknown_library, 2);  // TargetPE
+  append_u8(unknown_library, 4);  // FunApp
+  append_u8(unknown_library, 0xff);
+  expect_error(v2_wire(unknown_library), "unknown function-library tag",
+               "v2 unknown function-library tag");
+
+  const auto declaration_through_transform = [](uint8_t present,
+                                                uint8_t transform_tag) {
+    std::string payload;
+    append_u32(payload, 0);
+    append_u32(payload, 0);
+    append_u32(payload, 1);
+    append_u8(payload, 0);  // Decl
+    append_string(payload, "x");
+    append_string(payload, "SReal");
+    append_u32(payload, 0);  // dimensions
+    append_string(payload, "");
+    append_string(payload, "");
+    append_bool(payload, true);
+    append_bool(payload, false);
+    append_u8(payload, present);
+    if (present == 1) append_u8(payload, transform_tag);
+    return payload;
+  };
+  expect_error(v2_wire(declaration_through_transform(2, 0)),
+               "optional marker is not 0 or 1", "v2 invalid optional marker");
+  expect_error(v2_wire(declaration_through_transform(1, 0xff)),
+               "unknown transform tag", "v2 unknown transform tag");
+
+  expect_error(v2_wire(real_target_v2_payload(0, 2)), "boolean is not 0 or 1",
+               "v2 invalid boolean");
+  expect_error(v2_wire(real_target_v2_payload(0, 1, 0xff)),
+               "unknown unsized-view tag", "v2 unknown view tag");
+
+  const auto nested_program = [](int block_count) {
+    std::string nested = real_target_v2_payload(0);
+    // Strip the root framing, retain the one TargetPE statement, and wrap it
+    // in one-child blocks.
+    std::string statement = nested.substr(12, nested.size() - 24);
+    for (int i = 0; i < block_count; ++i) {
+      std::string block;
+      append_u8(block, 3);  // Block
+      append_u32(block, 1);
+      block += statement;
+      append_string(block, "");
+      statement = std::move(block);
+    }
+    std::string program;
+    append_u32(program, 0);
+    append_u32(program, 0);
+    append_u32(program, 1);
+    program += statement;
+    append_u32(program, 0);
+    append_u32(program, 0);
+    append_u32(program, 0);
+    return program;
+  };
+  const mir::Program legal_depth = decode_program(v2_wire(nested_program(200)));
+  check(legal_depth.log_prob.size() == 1 &&
+            legal_depth.log_prob.front().kind == mir::Stmt::Block,
+        "v2 accepts a deeply nested program within the reader-scope budget");
+  expect_error(v2_wire(nested_program(520)), "nesting exceeds 512",
+               "v2 nesting limit");
 }
 
 }  // namespace
@@ -834,20 +1246,27 @@ int main(int argc, char** argv) {
                  argv[0], argv[0]);
     return 2;
   }
+  if (program_only) {
+    check_program_equivalence(argv[2], argv[3]);
+    if (failures) {
+      std::printf("%d failure(s)\n", failures);
+      return 1;
+    }
+    std::puts("ok");
+    return 0;
+  }
   check_round_trip("tests/fixtures/es.tmir.sexp");
   check_round_trip("tests/fixtures/tdvocab.tmir.sexp");
   check_round_trip("tests/fixtures/wanames.tmir.sexp");
   check_round_trip("tests/fixtures/odefns.tmir.sexp");
   check_round_trip("tests/fixtures/view_udf_local_data_branch.tmir.sexp");
-  if (program_only)
-    check_program_equivalence(argv[2], argv[3]);
-  else
-    check_lowering_equivalence(argc == 3 ? argv[1] : nullptr,
-                               argc == 3 ? argv[2] : nullptr);
+  check_round_trip("tests/fixtures/paramcond_break.tmir.sexp");
+  check_lowering_equivalence(argc == 3 ? argv[1] : nullptr,
+                             argc == 3 ? argv[2] : nullptr);
   check_overload_finalization();
   check_exact_float_bits();
   check_structural_rejections();
-  check_rejections();
+  check_v2_rejections();
 
   if (failures) {
     std::printf("%d failure(s)\n", failures);

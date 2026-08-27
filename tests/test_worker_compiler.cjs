@@ -56,7 +56,7 @@ Promise.resolve(globalThis.onmessage({data: {cmd: "compile", code}}))
         throw new Error("worker did not return one compiled MIR document");
 
       const mir = completed[0].done.mir;
-      const portable = mir.startsWith('{"stanli_ir":1,"program":');
+      const portable = mir.startsWith("STANLI2:");
       if ((mode === "custom") !== portable)
         throw new Error(mode + " selected the wrong MIR producer");
 

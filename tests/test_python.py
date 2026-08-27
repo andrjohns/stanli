@@ -5,6 +5,7 @@ Run against an installed wheel (CI does) or a local build:
 
     tools/build_wheel.sh && PYTHONPATH=python python3 tests/test_python.py
 """
+import base64
 import concurrent.futures
 import pathlib
 import shutil
@@ -19,6 +20,11 @@ import numpy as np
 import stanli
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
+
+
+def _portable_payload(mir):
+    assert mir.startswith("STANLI2:"), mir[:80]
+    return base64.b64decode(mir[8:], validate=True)
 
 
 def test_sample_eight_schools():
@@ -284,10 +290,10 @@ def test_stan_to_mir_round_trips():
     # path uses: the model built from it must be the same model.
     code = "parameters { real x; } model { x ~ normal(0, 1); }"
     mir = stanli.stan_to_mir(code)
-    assert "log_prob" in mir, "MIR text does not look like transformed MIR"
+    assert mir.startswith("STANLI2:") or "log_prob" in mir
     suffix = ".exe" if sys.platform == "win32" else ""
     if (stanli._BIN / ("stanli-compile" + suffix)).is_file():
-        assert mir.startswith('{"stanli_ir":1,"program":'), mir[:80]
+        _portable_payload(mir)
         assert not mir.endswith(("\n", "\r")), "portable MIR has final newline"
 
     from_source = stanli.Model(stan_code=code)
@@ -308,7 +314,9 @@ def test_stan_to_mir_is_optimized():
     code = ("parameters { real<lower=0, upper=1> theta; } "
             "model { target += log(1 - theta); }")
     mir = stanli.stan_to_mir(code)
-    assert "log1m" in mir, "MIR is not optimized (expected log1m from --O1)"
+    optimized = (_portable_payload(mir) if mir.startswith("STANLI2:")
+                 else mir.encode("utf-8"))
+    assert b"log1m" in optimized, "MIR is not optimized (expected log1m from --O1)"
 
 
 def test_stan_to_mir_reports_syntax_errors():
@@ -337,13 +345,13 @@ def test_subprocess_compiler_preference_and_rollback_contract():
         def successful_run(argv, **kwargs):
             calls.append((argv, kwargs))
             return subprocess.CompletedProcess(
-                argv, 0, '{"stanli_ir":1,"program":{}}',
+                argv, 0, "STANLI2:ZmFrZQ==",
                 "a successful frontend warning")
 
         with mock.patch.object(stanli, "_BIN", compiler_dir), \
                 mock.patch.object(stanli.subprocess, "run", successful_run):
             got = stanli._stanc_mir(source)
-        assert got == '{"stanli_ir":1,"program":{}}'
+        assert got == "STANLI2:ZmFrZQ=="
         assert calls[0][0] == [str(portable), str(source)]
         assert calls[0][1]["encoding"] == "utf-8"
         assert calls[0][1]["capture_output"] is True
@@ -431,9 +439,9 @@ def test_windows_wheel_compilers_and_stock_rollback_execute():
 
         with mock.patch.object(stanli, "_BIN", compiler_dir):
             portable_mir = stanli._subprocess_mir(code)
-            assert portable_mir.startswith('{"stanli_ir":1,"program":')
+            payload = _portable_payload(portable_mir)
             assert not portable_mir.endswith(("\n", "\r"))
-            assert unicode_text in portable_mir
+            assert unicode_text.encode("utf-8") in payload
 
             # Removing only the temporary preferred producer must select the
             # packaged rollback compiler. Its legacy MIR still has to lower
@@ -458,7 +466,7 @@ def test_embedded_stanc_from_concurrent_python_threads():
 
     code = "parameters { real x; } model { x ~ normal(0, 1); }"
     expected = stanli.stan_to_mir(code)
-    assert expected.startswith('{"stanli_ir":1,"program":')
+    _portable_payload(expected)
 
     n_workers = 4
     ready = threading.Barrier(n_workers)

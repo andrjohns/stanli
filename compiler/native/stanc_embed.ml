@@ -1,4 +1,4 @@
-(* stanli embedding entry point: Stan code -> portable-MIR JSON (stanc3 --O1:
+(* stanli embedding entry point: Stan code -> compact portable MIR (stanc3 --O1:
    inlining, constant/copy propagation, dead code elimination, partial
    evaluation). Registered for C via Callback; built with -output-complete-obj
    so the OCaml runtime rides inside one object file linked into libstanli.

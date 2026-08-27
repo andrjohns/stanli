@@ -33,7 +33,7 @@ createStanli().then((M) => {
       portableCompile = portable;
       compiled = portable("embedded_model", code);
       if (!compiled.errors &&
-          !String(compiled.result).startsWith('{"stanli_ir":1,"program":'))
+          !String(compiled.result).startsWith("STANLI2:"))
         fail("portable stancjs returned legacy or malformed MIR");
     } else if (typeof stanc === "function") {
       compiled = stanc("es_model", code, ["O1", "debug-optimized-mir"]);

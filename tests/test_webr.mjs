@@ -94,9 +94,19 @@ if (compilerPath) {
       const r = f("webr_candidate", src);
       if (r.errors) return "FAIL valid source reported errors";
       const mir = String(r.result);
-      if (!mir.startsWith("{\\\"stanli_ir\\\":1,\\\"program\\\":"))
+      if (!mir.startsWith("STANLI2:"))
         return "FAIL missing portable envelope";
-      if (!mir.includes("π ☃ é 👋")) return "FAIL UTF-8 changed";
+      const payload = Uint8Array.from(atob(mir.slice(8)),
+                                      c => c.charCodeAt(0));
+      const needle = new TextEncoder().encode("π ☃ é 👋");
+      let found = false;
+      for (let i = 0; i + needle.length <= payload.length; ++i) {
+        let equal = true;
+        for (let j = 0; j < needle.length; ++j)
+          equal = equal && payload[i + j] === needle[j];
+        found = found || equal;
+      }
+      if (!found) return "FAIL UTF-8 changed";
       Module.FS.writeFile("/tmp/portable-candidate.mir", mir);
       return "ok";
     })()')
