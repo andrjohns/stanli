@@ -75,6 +75,8 @@ const models = [
   ["vectorized-loop", "tests/compiler/portable_vectorize_loop.stan"],
   ["full-span-assignment",
     "tests/compiler/portable_full_span_assignment.stan"],
+  ["same-lane-density-loop",
+    "tests/compiler/portable_same_lane_density_loop.stan"],
   ["mother", "tests/stanc3/mother.stan"],
   ["folded-float", "tests/compiler/portable_folded_float.stan"],
   ["int32-overflow", "tests/compiler/portable_int32_overflow.stan"],
