@@ -1,5 +1,4 @@
 val encode : Middle.Program.Typed.t -> string
-(** Encode the backend-transformed, optimized stanc3 MIR consumed by stanli.
-
-    The result is the canonical compact UTF-8 JSON representation of stanli's
-    portable MIR v1 envelope. *)
+(** Encode the backend-transformed, optimized stanc3 MIR consumed by stanli as
+    compact portable MIR v2. The canonical result is a C-string-safe ASCII
+    envelope containing a length-delimited binary payload. *)

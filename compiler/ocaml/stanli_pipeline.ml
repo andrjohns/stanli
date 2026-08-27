@@ -62,7 +62,9 @@ let compile_portable ?include_source ~model_name code =
     match compiled.result with
     | Error error -> Error error
     | Ok mir -> (
-      match Common.ICE.with_exn_message (fun () -> Portable_mir.encode mir) with
+      match
+        Common.ICE.with_exn_message (fun () -> Portable_mir.encode mir)
+      with
       | Error internal -> Error (Internal_error internal)
       | Ok encoded -> Ok encoded ) in
   {result; warnings= compiled.warnings}

@@ -22,11 +22,10 @@ test_that("the bundled JavaScript compiler produces MIR", {
   expect_match(mir, "\\bmu\\b")
   expect_match(mir, "\\bsigma\\b")
   expect_match(mir, "normal")
-  # The compatibility release must keep carrying the legacy producer. The
-  # portable candidate is exercised separately against this package's dual
-  # decoder; changing this envelope would prematurely open the CRAN gate.
+  # This checked-in compiler remains the legacy rollback producer until the
+  # compact v2 artifact replaces it in the dedicated R shipping tranche.
   expect_match(mir, "^\\(\\(functions_block")
-  expect_false(grepl('{"stanli_ir":', mir, fixed = TRUE))
+  expect_false(startsWith(mir, "STANLI2:"))
 })
 
 test_that("the bundled JavaScript compiler applies O1", {
@@ -57,7 +56,7 @@ test_that("the native portable compiler owns flags and keeps warnings separate",
     expect_identical(source_bytes,
                      charToRaw(enc2utf8("model { // θ\r\n}\r\n")))
     con <- file(stdout, open = "wb")
-    writeChar(enc2utf8('{"stanli_ir":1,"program":"theta θ"}'), con,
+    writeChar("STANLI2:dGhldGEgzrg=", con,
               eos = NULL, useBytes = TRUE)
     close(con)
     writeLines("a successful frontend warning", stderr, useBytes = TRUE)
@@ -68,7 +67,7 @@ test_that("the native portable compiler owns flags and keeps warnings separate",
                      "fake-stanli-compile", "model { // θ\r\n}\r\n",
                      portable = TRUE,
                      run_stanc = run_stanc),
-                   '{"stanli_ir":1,"program":"theta θ"}')
+                   "STANLI2:dGhldGEgzrg=")
   expect_identical(seen$compiler, "fake-stanli-compile")
   expect_length(seen$args, 1)
   expect_false(dir.exists(seen$work))
@@ -92,7 +91,7 @@ test_that("UTF-8 Stan files survive locale-independent compiler staging", {
     staged <- file.path(dirname(stdout), "model.stan")
     expect_identical(readBin(staged, "raw", n = file.info(staged)$size),
                      expected)
-    writeChar('{"stanli_ir":1,"program":{}}', stdout, eos = NULL,
+    writeChar("STANLI2:ZmFrZQ==", stdout, eos = NULL,
               useBytes = TRUE)
     file.create(stderr)
     0L
@@ -100,7 +99,7 @@ test_that("UTF-8 Stan files survive locale-independent compiler staging", {
   expect_identical(
     stanli:::mir_from_binary("fake-stanli-compile", code, portable = TRUE,
                               run_stanc = run_stanc),
-    '{"stanli_ir":1,"program":{}}')
+    "STANLI2:ZmFrZQ==")
 })
 
 test_that("the pristine stanc fallback requests O1 optimized MIR", {

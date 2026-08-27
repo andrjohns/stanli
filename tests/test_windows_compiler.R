@@ -51,17 +51,23 @@ main <- function() {
   Encoding(model) <- "UTF-8"
 
   portable <- mir_from_binary_test(portable_compiler, model, portable = TRUE)
-  if (!startsWith(portable, '{"stanli_ir":1,"program":'))
+  if (!startsWith(portable, "STANLI2:"))
     stop("the portable compiler did not emit the versioned envelope")
   if (endsWith(portable, "\n") || endsWith(portable, "\r"))
     stop("the portable compiler emitted a final newline")
-  if (!grepl(unicode, portable, fixed = TRUE))
+  payload <- jsonlite::base64_dec(substring(portable, 9L))
+  unicode_bytes <- charToRaw(enc2utf8(unicode))
+  positions <- seq_len(length(payload) - length(unicode_bytes) + 1L)
+  has_unicode <- any(vapply(positions, function(i) {
+    identical(payload[i:(i + length(unicode_bytes) - 1L)], unicode_bytes)
+  }, logical(1)))
+  if (!has_unicode)
     stop("the portable compiler did not preserve Unicode source bytes")
 
   legacy <- mir_from_binary_test(stock_compiler, model, portable = FALSE)
   if (!startsWith(legacy, "((functions_block"))
     stop("stock stanc did not emit legacy optimized MIR")
-  if (startsWith(legacy, '{"stanli_ir":'))
+  if (startsWith(legacy, "STANLI2:"))
     stop("the stock rollback compiler was replaced by the portable producer")
   # Legacy MIR renders non-ASCII string bytes as decimal backslash escapes.
   legacy_unicode <- paste0("\\", as.integer(charToRaw(unicode)), collapse = "")

@@ -45,6 +45,20 @@ compile_candidate <- function(name, code) {
   out
 }
 
+portable_payload <- function(mir) {
+  stopifnot(startsWith(mir, "STANLI2:"))
+  jsonlite::base64_dec(substring(mir, 9L))
+}
+
+raw_contains <- function(haystack, text) {
+  needle <- charToRaw(enc2utf8(text))
+  if (length(needle) == 0L) return(TRUE)
+  if (length(haystack) < length(needle)) return(FALSE)
+  any(vapply(seq_len(length(haystack) - length(needle) + 1L), function(i) {
+    identical(haystack[i:(i + length(needle) - 1L)], needle)
+  }, logical(1)))
+}
+
 unicode_source <- enc2utf8("\
 transformed data { print(\"pi: π, snowman: ☃, wave: 👋\"); }
 parameters { real mu; }
@@ -54,10 +68,10 @@ second <- compile_candidate("unicode_candidate", unicode_source)
 stopifnot(
   length(first$errors) == 0L,
   is.character(first$result), length(first$result) == 1L,
-  startsWith(first$result, '{"stanli_ir":1,"program":'),
+  startsWith(first$result, "STANLI2:"),
   !grepl("[\r\n]$", first$result),
   validUTF8(first$result),
-  grepl("π", first$result, fixed = TRUE),
+  raw_contains(portable_payload(first$result), "π"),
   identical(first$result, second$result),
   identical(first$warnings, second$warnings)
 )
@@ -86,8 +100,7 @@ generated quantities {
 }"
 runtime_compilation <- compile_candidate("runtime_candidate", runtime_source)
 stopifnot(length(runtime_compilation$errors) == 0L,
-          startsWith(runtime_compilation$result,
-                     '{"stanli_ir":1,"program":'))
+          startsWith(runtime_compilation$result, "STANLI2:"))
 
 # `mir` is the public compatibility seam. Supplying it forces this exact
 # candidate document through the dual decoder even though the Linux runtime

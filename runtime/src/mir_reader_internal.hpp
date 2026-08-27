@@ -13,13 +13,13 @@ namespace detail {
 // This mutates overloaded user-function names and their call sites.
 void finalize_program(Program& program, bool strict_variable_metadata = false);
 
-// Portable v1 is a closed-world format, so reject inconsistent kind-specific
-// shapes and redundant type metadata before the shared finalization. The
+// Compact portable MIR is a closed-world format, so reject inconsistent
+// kind-specific shapes and redundant type metadata before finalization. The
 // legacy reader deliberately remains permissive because its unsupported-form
 // fallbacks accept some unusual debug-MIR shapes.
 void validate_portable_program(const Program& program);
 
-Program read_portable_program(std::string_view text);
+Program read_portable_v2_program(std::string_view bytes);
 
 }  // namespace detail
 }  // namespace mir

@@ -21,6 +21,16 @@ function fail(message) {
   process.exit(1);
 }
 
+function portablePayload(encoded, name) {
+  if (!encoded.startsWith("STANLI2:"))
+    fail(name + ": missing compact portable-MIR envelope");
+  const text = encoded.slice(8);
+  const payload = Buffer.from(text, "base64");
+  if (payload.toString("base64") !== text)
+    fail(name + ": non-canonical base64 payload");
+  return payload;
+}
+
 const exported = require(compilerPath);
 const compile =
     (exported && exported.stanli_compile) || globalThis.stanli_compile;
@@ -45,7 +55,7 @@ if (typeof classic.stanli_compile !== "function" ||
 const classicResult = classic.stanli_compile(
     "embedded_model", "parameters { real x; } model { x ~ std_normal(); }");
 if (classicResult.errors ||
-    !String(classicResult.result).startsWith('{"stanli_ir":1,"program":'))
+    !String(classicResult.result).startsWith("STANLI2:"))
   fail("classic-script portable compilation failed");
 
 let fallback = null;
@@ -61,6 +71,7 @@ if (fallbackPath) {
 const models = [
   ["ordinary", "tests/fixtures/es.stan"],
   ["nested-udf", "tests/fixtures/view_udf_local_data_branch.stan"],
+  ["loop-control", "tests/fixtures/paramcond_break.stan"],
   ["mother", "tests/stanc3/mother.stan"],
   ["folded-float", "tests/compiler/portable_folded_float.stan"],
   ["int32-overflow", "tests/compiler/portable_int32_overflow.stan"],
@@ -82,18 +93,16 @@ for (const [name, relative, includes] of models) {
   const js = compile("embedded_model", code, includes);
   if (js.errors) fail(name + ": " + Array.from(js.errors).join("\n"));
   const encoded = String(js.result);
-  if (!encoded.startsWith('{"stanli_ir":1,"program":'))
-    fail(name + ": missing portable-MIR envelope");
+  const payload = portablePayload(encoded, name);
   if (encoded.endsWith("\n") || encoded.endsWith("\r"))
     fail(name + ": trailing newline");
   if (name === "folded-float" &&
-      !encoded.includes('"lit":"f64:3fd3333333333334"'))
+      !payload.includes(Buffer.from("343333333333d33f", "hex")))
     fail(name + ": O1 did not preserve the folded 0.1 + 0.2 bit pattern");
   if (name === "int32-overflow" &&
-      (!encoded.includes('"lit_i":"80000"') ||
-       encoded.includes('"lit_i":"2500000000"') ||
-       !encoded.includes('"name":"Times__"') ||
-       !encoded.includes('"name":"IntDivide__"')))
+      (!payload.includes(Buffer.from([0x80, 0x38, 0x01, 0x00])) ||
+       !payload.includes(Buffer.from("Times__", "utf8")) ||
+       !payload.includes(Buffer.from("IntDivide__", "utf8"))))
     fail(name + ": checked integer folding policy changed");
   const jsBytes = Buffer.from(encoded, "utf8");
   if (!jsBytes.equals(native)) {

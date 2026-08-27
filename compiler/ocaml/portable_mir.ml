@@ -502,32 +502,49 @@ let fun_of_t (definition : Stmt.Located.t Program.fun_def) =
       Option.value_map definition.fdbody ~default:[] ~f:(fun s -> [stmt_of_t s])
   }
 
-let add_json_string buffer string =
+(* Portable MIR v2 is a canonical ASCII envelope around a small fixed-layout
+   binary payload. The envelope keeps the existing native, subprocess, V8,
+   worker, and C-string transports byte-safe; the payload keeps decoding
+   allocation-light. Multibyte scalars are little-endian, strings and lists
+   carry uint32 byte/item counts, and sum types carry one-byte tags followed
+   only by fields active for that tag. *)
+
+let add_u8 buffer value =
+  if value < 0 || value > 0xff then invalid_arg "portable MIR v2: invalid u8";
+  Buffer.add_char buffer (Stdlib.Char.chr value)
+
+let add_u32 buffer value =
+  if value < 0 || Int64.of_int value > 0xffff_ffffL then
+    invalid_arg "portable MIR v2: invalid u32";
+  for shift = 0 to 3 do
+    add_u8 buffer ((value lsr (shift * 8)) land 0xff)
+  done
+
+let add_i32 buffer value =
+  let value = Int32.of_string value in
+  for shift = 0 to 3 do
+    add_u8 buffer
+      Int32.(to_int (logand (shift_right_logical value (shift * 8)) 0xffl))
+  done
+
+let add_i64_bits buffer value =
+  let value = Int64.bits_of_float value in
+  for shift = 0 to 7 do
+    add_u8 buffer
+      Int64.(to_int (logand (shift_right_logical value (shift * 8)) 0xffL))
+  done
+
+let validate_utf8 string =
   let length = String.length string in
   let continuation byte = byte land 0xc0 = 0x80 in
   let require condition =
-    if not condition then invalid_arg "portable MIR: string is not valid UTF-8"
-  in
-  Buffer.add_char buffer '"';
+    if not condition then invalid_arg "portable MIR v2: invalid UTF-8" in
   let rec loop i =
     if i < length then
       let byte = Char.code string.[i] in
-      if byte < 0x80 then (
-        (match byte with
-        | 0x08 -> Buffer.add_string buffer "\\b"
-        | 0x09 -> Buffer.add_string buffer "\\t"
-        | 0x0a -> Buffer.add_string buffer "\\n"
-        | 0x0c -> Buffer.add_string buffer "\\f"
-        | 0x0d -> Buffer.add_string buffer "\\r"
-        | 0x22 -> Buffer.add_string buffer "\\\""
-        | 0x5c -> Buffer.add_string buffer "\\\\"
-        | control when control < 0x20 ->
-            Buffer.add_string buffer (Printf.sprintf "\\u%04x" control)
-        | _ -> Buffer.add_char buffer string.[i]);
-        loop (i + 1))
+      if byte < 0x80 then loop (i + 1)
       else if byte >= 0xc2 && byte <= 0xdf then (
         require (i + 1 < length && continuation (Char.code string.[i + 1]));
-        Buffer.add_substring buffer string i 2;
         loop (i + 2))
       else if byte >= 0xe0 && byte <= 0xef then (
         require (i + 2 < length);
@@ -538,7 +555,6 @@ let add_json_string buffer string =
           (if byte = 0xe0 then second >= 0xa0 && second <= 0xbf
            else if byte = 0xed then second >= 0x80 && second <= 0x9f
            else continuation second);
-        Buffer.add_substring buffer string i 3;
         loop (i + 3))
       else if byte >= 0xf0 && byte <= 0xf4 then (
         require (i + 3 < length);
@@ -550,178 +566,249 @@ let add_json_string buffer string =
           (if byte = 0xf0 then second >= 0x90 && second <= 0xbf
            else if byte = 0xf4 then second >= 0x80 && second <= 0x8f
            else continuation second);
-        Buffer.add_substring buffer string i 4;
         loop (i + 4))
-      else invalid_arg "portable MIR: string is not valid UTF-8" in
+      else invalid_arg "portable MIR v2: invalid UTF-8" in
+  loop 0
+
+let add_v2_string buffer string =
+  validate_utf8 string;
+  add_u32 buffer (String.length string);
+  Buffer.add_string buffer string
+
+let add_v2_bool buffer value = add_u8 buffer (if value then 1 else 0)
+
+let add_v2_list add_item buffer items =
+  add_u32 buffer (List.length items);
+  List.iter items ~f:(add_item buffer)
+
+let v2_leaf_tag = function
+  | "Unknown" -> 0
+  | "Int" -> 1
+  | "Real" -> 2
+  | "Complex" -> 3
+  | "Vector" -> 4
+  | "RowVector" -> 5
+  | "Matrix" -> 6
+  | leaf -> invalid_arg ("portable MIR v2: unknown unsized leaf " ^ leaf)
+
+let add_v2_view buffer {depth; leaf} =
+  add_u8 buffer depth;
+  add_u8 buffer (v2_leaf_tag leaf)
+
+let add_v2_meta buffer expr =
+  add_v2_string buffer expr.e_type;
+  add_v2_view buffer expr.e_unsized;
+  add_v2_bool buffer expr.e_data_only;
+  add_v2_bool buffer expr.e_promoted;
+  add_v2_string buffer expr.e_raw
+
+let v2_lib_tag = function
+  | "StanLib" -> 0
+  | "Internal" -> 1
+  | "UserDefined" -> 2
+  | library -> invalid_arg ("portable MIR v2: unknown function library " ^ library)
+
+let rec add_v2_expr buffer expr =
+  (match expr.e_kind with
+  | "Var" ->
+      add_u8 buffer 0;
+      add_v2_string buffer expr.e_name
+  | "LitInt" ->
+      add_u8 buffer 1;
+      add_i32 buffer expr.e_lit_i
+  | "LitReal" ->
+      add_u8 buffer 2;
+      add_i64_bits buffer expr.e_lit
+  | "LitStr" ->
+      add_u8 buffer 3;
+      add_v2_string buffer expr.e_lit_s
+  | "FunApp" ->
+      add_u8 buffer 4;
+      add_u8 buffer (v2_lib_tag expr.e_fn_lib);
+      add_v2_string buffer expr.e_name;
+      add_v2_bool buffer expr.e_fn_propto;
+      add_v2_list add_v2_expr buffer expr.e_args
+  | "Promotion" ->
+      add_u8 buffer 5;
+      add_v2_list add_v2_expr buffer expr.e_args
+  | "Indexed" ->
+      add_u8 buffer 6;
+      add_v2_list add_v2_expr buffer expr.e_args
+  | "TernaryIf" ->
+      add_u8 buffer 7;
+      add_v2_list add_v2_expr buffer expr.e_args
+  | "EOr" ->
+      add_u8 buffer 8;
+      add_v2_list add_v2_expr buffer expr.e_args
+  | "EAnd" ->
+      add_u8 buffer 9;
+      add_v2_list add_v2_expr buffer expr.e_args
+  | "Unsupported" -> add_u8 buffer 10
+  | kind -> invalid_arg ("portable MIR v2: unknown expression kind " ^ kind));
+  add_v2_meta buffer expr
+
+let v2_transform_tag = function
+  | "Identity" -> 0
+  | "Lower" -> 1
+  | "Upper" -> 2
+  | "LowerUpper" -> 3
+  | "Offset" -> 4
+  | "Multiplier" -> 5
+  | "OffsetMultiplier" -> 6
+  | "Simplex" -> 7
+  | "Ordered" -> 8
+  | "PositiveOrdered" -> 9
+  | "CholeskyCorr" -> 10
+  | "UnitVector" -> 11
+  | "SumToZero" -> 12
+  | "Correlation" -> 13
+  | "Covariance" -> 14
+  | "CholeskyCov" -> 15
+  | "Unsupported" -> 16
+  | kind -> invalid_arg ("portable MIR v2: unknown transform kind " ^ kind)
+
+let add_v2_transform buffer transform =
+  add_u8 buffer (v2_transform_tag transform.t_kind);
+  add_v2_list add_v2_expr buffer transform.t_args;
+  add_v2_string buffer transform.t_raw
+
+let add_v2_optional add_value buffer = function
+  | None -> add_u8 buffer 0
+  | Some value ->
+      add_u8 buffer 1;
+      add_value buffer value
+
+let add_v2_sized buffer sized =
+  add_v2_string buffer sized.s_base;
+  add_v2_list add_v2_expr buffer sized.s_dims;
+  add_v2_string buffer sized.s_elem_base;
+  add_v2_string buffer sized.s_raw
+
+let rec add_v2_stmt buffer stmt =
+  match stmt.st_kind with
+  | "Decl" ->
+      add_u8 buffer 0;
+      add_v2_string buffer stmt.st_decl_id;
+      add_v2_sized buffer stmt.st_decl_type;
+      add_v2_bool buffer stmt.st_decl_data_only;
+      add_v2_bool buffer stmt.st_has_init;
+      if stmt.st_has_init then add_v2_expr buffer stmt.st_init;
+      add_v2_optional add_v2_transform buffer stmt.st_read_transform;
+      add_v2_list add_v2_expr buffer stmt.st_read_dims;
+      add_v2_string buffer stmt.st_raw
+  | "Assignment" ->
+      add_u8 buffer 1;
+      add_v2_string buffer stmt.st_lhs;
+      add_v2_list add_v2_expr buffer stmt.st_lhs_idx;
+      add_v2_expr buffer stmt.st_rhs;
+      add_v2_string buffer stmt.st_raw
+  | "TargetPE" ->
+      add_u8 buffer 2;
+      add_v2_expr buffer stmt.st_target;
+      add_v2_string buffer stmt.st_raw
+  | "Block" ->
+      add_u8 buffer 3;
+      add_v2_list add_v2_stmt buffer stmt.st_body;
+      add_v2_string buffer stmt.st_raw
+  | "SList" ->
+      add_u8 buffer 4;
+      add_v2_list add_v2_stmt buffer stmt.st_body;
+      add_v2_string buffer stmt.st_raw
+  | "For" ->
+      add_u8 buffer 5;
+      add_v2_string buffer stmt.st_loopvar;
+      add_v2_expr buffer stmt.st_lower;
+      add_v2_expr buffer stmt.st_upper;
+      add_v2_list add_v2_stmt buffer stmt.st_body;
+      add_v2_string buffer stmt.st_raw
+  | "IfElse" ->
+      add_u8 buffer 6;
+      add_v2_expr buffer stmt.st_cond;
+      add_v2_list add_v2_stmt buffer stmt.st_body;
+      add_v2_string buffer stmt.st_raw
+  | "While" ->
+      add_u8 buffer 7;
+      add_v2_expr buffer stmt.st_cond;
+      add_v2_list add_v2_stmt buffer stmt.st_body;
+      add_v2_string buffer stmt.st_raw
+  | "NRFunApp" ->
+      add_u8 buffer 8;
+      add_v2_string buffer stmt.st_fn_name;
+      add_v2_list add_v2_expr buffer stmt.st_fn_args;
+      add_v2_optional add_v2_transform buffer stmt.st_check_transform;
+      add_v2_string buffer stmt.st_check_var_name;
+      add_v2_string buffer stmt.st_raw
+  | "Return" ->
+      add_u8 buffer 9;
+      add_v2_bool buffer stmt.st_has_init;
+      if stmt.st_has_init then add_v2_expr buffer stmt.st_rhs;
+      add_v2_string buffer stmt.st_raw
+  | "Break" -> add_u8 buffer 10
+  | "Continue" -> add_u8 buffer 11
+  | "Skip" ->
+      add_u8 buffer 12;
+      add_v2_string buffer stmt.st_raw
+  | "Unsupported" ->
+      add_u8 buffer 13;
+      add_v2_string buffer stmt.st_raw
+  | kind -> invalid_arg ("portable MIR v2: unknown statement kind " ^ kind)
+
+let add_v2_fun buffer fn =
+  add_v2_string buffer fn.f_name;
+  add_v2_list add_v2_string buffer fn.f_arg_names;
+  add_v2_list add_v2_string buffer fn.f_arg_types;
+  add_v2_list add_v2_view buffer fn.f_arg_views;
+  add_v2_list add_v2_bool buffer fn.f_arg_data_only;
+  add_v2_list add_v2_stmt buffer fn.f_body
+
+let add_v2_input buffer (name, sized) =
+  add_v2_string buffer name;
+  add_v2_sized buffer sized
+
+let base64_alphabet =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+let encode_base64 input =
+  let length = String.length input in
+  if length > 201_326_586 then
+    invalid_arg "portable MIR v2: payload exceeds envelope limit";
+  let output = Buffer.create (((length + 2) / 3) * 4) in
+  let emit value = Buffer.add_char output base64_alphabet.[value] in
+  let rec loop offset =
+    if offset + 3 <= length then (
+      let a = Char.code input.[offset] in
+      let b = Char.code input.[offset + 1] in
+      let c = Char.code input.[offset + 2] in
+      emit (a lsr 2);
+      emit (((a land 0x03) lsl 4) lor (b lsr 4));
+      emit (((b land 0x0f) lsl 2) lor (c lsr 6));
+      emit (c land 0x3f);
+      loop (offset + 3))
+    else if offset < length then (
+      let a = Char.code input.[offset] in
+      emit (a lsr 2);
+      if offset + 1 < length then (
+        let b = Char.code input.[offset + 1] in
+        emit (((a land 0x03) lsl 4) lor (b lsr 4));
+        emit ((b land 0x0f) lsl 2);
+        Buffer.add_char output '=')
+      else (
+        emit ((a land 0x03) lsl 4);
+        Buffer.add_string output "==")) in
   loop 0;
-  Buffer.add_char buffer '"'
-
-let add_bool buffer value = Buffer.add_string buffer (Bool.to_string value)
-
-let add_f64 buffer value =
-  let bits = Int64.bits_of_float value in
-  let digits = "0123456789abcdef" in
-  Buffer.add_string buffer "\"f64:";
-  for shift = 15 downto 0 do
-    let nibble =
-      Int64.(to_int (logand (shift_right_logical bits (shift * 4)) 0xfL)) in
-    Buffer.add_char buffer digits.[nibble]
-  done;
-  Buffer.add_char buffer '"'
-
-let add_array add_item buffer items =
-  Buffer.add_char buffer '[';
-  List.iteri items ~f:(fun index item ->
-      if index > 0 then Buffer.add_char buffer ',';
-      add_item buffer item);
-  Buffer.add_char buffer ']'
-
-let add_unsized buffer {depth; leaf} =
-  Buffer.add_string buffer "{\"depth\":";
-  Buffer.add_string buffer (Int.to_string depth);
-  Buffer.add_string buffer ",\"leaf\":";
-  add_json_string buffer leaf;
-  Buffer.add_char buffer '}'
-
-let rec add_expr buffer expr =
-  Buffer.add_string buffer "{\"kind\":";
-  add_json_string buffer expr.e_kind;
-  Buffer.add_string buffer ",\"name\":";
-  add_json_string buffer expr.e_name;
-  Buffer.add_string buffer ",\"fn_lib\":";
-  add_json_string buffer expr.e_fn_lib;
-  Buffer.add_string buffer ",\"fn_propto\":";
-  add_bool buffer expr.e_fn_propto;
-  Buffer.add_string buffer ",\"lit_i\":";
-  add_json_string buffer expr.e_lit_i;
-  Buffer.add_string buffer ",\"lit\":";
-  add_f64 buffer expr.e_lit;
-  Buffer.add_string buffer ",\"lit_s\":";
-  add_json_string buffer expr.e_lit_s;
-  Buffer.add_string buffer ",\"args\":";
-  add_array add_expr buffer expr.e_args;
-  Buffer.add_string buffer ",\"type_\":";
-  add_json_string buffer expr.e_type;
-  Buffer.add_string buffer ",\"unsized\":";
-  add_unsized buffer expr.e_unsized;
-  Buffer.add_string buffer ",\"data_only\":";
-  add_bool buffer expr.e_data_only;
-  Buffer.add_string buffer ",\"promoted\":";
-  add_bool buffer expr.e_promoted;
-  Buffer.add_string buffer ",\"raw\":";
-  add_json_string buffer expr.e_raw;
-  Buffer.add_char buffer '}'
-
-let add_transform buffer transform =
-  Buffer.add_string buffer "{\"kind\":";
-  add_json_string buffer transform.t_kind;
-  Buffer.add_string buffer ",\"args\":";
-  add_array add_expr buffer transform.t_args;
-  Buffer.add_string buffer ",\"raw\":";
-  add_json_string buffer transform.t_raw;
-  Buffer.add_char buffer '}'
-
-let add_optional_transform buffer = function
-  | None -> Buffer.add_string buffer "null"
-  | Some transform -> add_transform buffer transform
-
-let add_sized buffer sized =
-  Buffer.add_string buffer "{\"base\":";
-  add_json_string buffer sized.s_base;
-  Buffer.add_string buffer ",\"dims\":";
-  add_array add_expr buffer sized.s_dims;
-  Buffer.add_string buffer ",\"elem_base\":";
-  add_json_string buffer sized.s_elem_base;
-  Buffer.add_string buffer ",\"raw\":";
-  add_json_string buffer sized.s_raw;
-  Buffer.add_char buffer '}'
-
-let rec add_stmt buffer stmt =
-  Buffer.add_string buffer "{\"kind\":";
-  add_json_string buffer stmt.st_kind;
-  Buffer.add_string buffer ",\"decl_id\":";
-  add_json_string buffer stmt.st_decl_id;
-  Buffer.add_string buffer ",\"decl_type\":";
-  add_sized buffer stmt.st_decl_type;
-  Buffer.add_string buffer ",\"decl_data_only\":";
-  add_bool buffer stmt.st_decl_data_only;
-  Buffer.add_string buffer ",\"has_init\":";
-  add_bool buffer stmt.st_has_init;
-  Buffer.add_string buffer ",\"init\":";
-  add_expr buffer stmt.st_init;
-  Buffer.add_string buffer ",\"read_transform\":";
-  add_optional_transform buffer stmt.st_read_transform;
-  Buffer.add_string buffer ",\"read_dims\":";
-  add_array add_expr buffer stmt.st_read_dims;
-  Buffer.add_string buffer ",\"lhs\":";
-  add_json_string buffer stmt.st_lhs;
-  Buffer.add_string buffer ",\"lhs_idx\":";
-  add_array add_expr buffer stmt.st_lhs_idx;
-  Buffer.add_string buffer ",\"rhs\":";
-  add_expr buffer stmt.st_rhs;
-  Buffer.add_string buffer ",\"target\":";
-  add_expr buffer stmt.st_target;
-  Buffer.add_string buffer ",\"fn_name\":";
-  add_json_string buffer stmt.st_fn_name;
-  Buffer.add_string buffer ",\"fn_args\":";
-  add_array add_expr buffer stmt.st_fn_args;
-  Buffer.add_string buffer ",\"check_transform\":";
-  add_optional_transform buffer stmt.st_check_transform;
-  Buffer.add_string buffer ",\"check_var_name\":";
-  add_json_string buffer stmt.st_check_var_name;
-  Buffer.add_string buffer ",\"loopvar\":";
-  add_json_string buffer stmt.st_loopvar;
-  Buffer.add_string buffer ",\"lower\":";
-  add_expr buffer stmt.st_lower;
-  Buffer.add_string buffer ",\"upper\":";
-  add_expr buffer stmt.st_upper;
-  Buffer.add_string buffer ",\"cond\":";
-  add_expr buffer stmt.st_cond;
-  Buffer.add_string buffer ",\"body\":";
-  add_array add_stmt buffer stmt.st_body;
-  Buffer.add_string buffer ",\"raw\":";
-  add_json_string buffer stmt.st_raw;
-  Buffer.add_char buffer '}'
-
-let add_fun buffer fn =
-  Buffer.add_string buffer "{\"name\":";
-  add_json_string buffer fn.f_name;
-  Buffer.add_string buffer ",\"arg_names\":";
-  add_array add_json_string buffer fn.f_arg_names;
-  Buffer.add_string buffer ",\"arg_types\":";
-  add_array add_json_string buffer fn.f_arg_types;
-  Buffer.add_string buffer ",\"arg_views\":";
-  add_array add_unsized buffer fn.f_arg_views;
-  Buffer.add_string buffer ",\"arg_data_only\":";
-  add_array add_bool buffer fn.f_arg_data_only;
-  Buffer.add_string buffer ",\"body\":";
-  add_array add_stmt buffer fn.f_body;
-  Buffer.add_char buffer '}'
-
-let add_input buffer (name, sized) =
-  Buffer.add_string buffer "{\"name\":";
-  add_json_string buffer name;
-  Buffer.add_string buffer ",\"type\":";
-  add_sized buffer sized;
-  Buffer.add_char buffer '}'
+  Buffer.contents output
 
 let encode (program : Program.Typed.t) =
   let inputs =
     List.map program.input_vars ~f:(fun (name, _, sized) ->
         (name, sized_of_t sized)) in
-  let buffer = Buffer.create 65536 in
-  Buffer.add_string buffer "{\"stanli_ir\":1,\"program\":{\"input_vars\":";
-  add_array add_input buffer inputs;
-  Buffer.add_string buffer ",\"prepare_data\":";
-  add_array add_stmt buffer (List.map ~f:stmt_of_t program.prepare_data);
-  Buffer.add_string buffer ",\"log_prob\":";
-  add_array add_stmt buffer (List.map ~f:stmt_of_t program.log_prob);
-  Buffer.add_string buffer ",\"generate_quantities\":";
-  add_array add_stmt buffer (List.map ~f:stmt_of_t program.generate_quantities);
-  Buffer.add_string buffer ",\"fun_defs\":";
-  add_array add_fun buffer (List.map ~f:fun_of_t program.functions_block);
-  Buffer.add_string buffer ",\"output_vars\":";
-  add_array add_json_string buffer
+  let buffer = Buffer.create 32768 in
+  add_v2_list add_v2_input buffer inputs;
+  add_v2_list add_v2_stmt buffer (List.map ~f:stmt_of_t program.prepare_data);
+  add_v2_list add_v2_stmt buffer (List.map ~f:stmt_of_t program.log_prob);
+  add_v2_list add_v2_stmt buffer
+    (List.map ~f:stmt_of_t program.generate_quantities);
+  add_v2_list add_v2_fun buffer (List.map ~f:fun_of_t program.functions_block);
+  add_v2_list add_v2_string buffer
     (List.map program.output_vars ~f:(fun (name, _, _) -> name));
-  Buffer.add_string buffer "}}";
-  Buffer.contents buffer
+  "STANLI2:" ^ encode_base64 (Buffer.contents buffer)

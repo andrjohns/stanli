@@ -70,9 +70,9 @@ model.stan + data.json
   |  stanc3 parse/typecheck/O1 (upstream OCaml)
   v  optimized typed MIR (--O1)
 compiler/ocaml/stanli_pipeline.ml + portable_mir.ml
-  |  canonical portable MIR v1 JSON
+  |  canonical compact portable MIR v2
   v
-decode_program (portable JSON or legacy s-expression)
+decode_program (compact portable MIR or legacy s-expression)
   |  decoded into mir::Stmt / mir::Expr structs
   v
 lower.cpp
@@ -113,7 +113,7 @@ Step by step:
 
 2. **[`mir_decode.cpp`](../runtime/src/mir_decode.cpp) selects a decoder.**
    Native embedded compilation, the preferred browser compiler, and Windows
-   `stanli-compile.exe` emit the stanli-owned portable JSON format. Pristine
+   `stanli-compile.exe` emit the stanli-owned compact portable format. Pristine
    browser and Windows rollback compilers, the R JavaScript compiler, and
    user-supplied stock stanc emit the legacy stanc3 s-expression. Both decode
    into the same plain C++ structs (`mir::Stmt`, `mir::Expr`) and share name
@@ -171,7 +171,7 @@ ones through every stage, op list and register programs included.
 | [`compiler/portable_ir/SCHEMA.md`](../compiler/portable_ir/SCHEMA.md), [`compiler/ocaml/`](../compiler/ocaml/) | The stanli-owned portable MIR contract, shared O1 policy, and typed-OCaml encoder. |
 | [`compiler/native/`](../compiler/native/), [`compiler/js/`](../compiler/js/) | Thin native callback, js_of_ocaml, and Windows CLI entry points around the shared OCaml pipeline. |
 | [`runtime/src/lower.cpp`](../runtime/src/lower.cpp) | Lowering: transformed MIR in, op graph out. |
-| [`runtime/src/mir_decode.cpp`](../runtime/src/mir_decode.cpp), [`portable_mir_reader.cpp`](../runtime/src/portable_mir_reader.cpp), [`mir_reader.cpp`](../runtime/src/mir_reader.cpp) | Dispatches portable JSON or legacy s-expressions into one MIR representation and runs their shared finalization. |
+| [`runtime/src/mir_decode.cpp`](../runtime/src/mir_decode.cpp), [`portable_mir_v2_reader.cpp`](../runtime/src/portable_mir_v2_reader.cpp), [`mir_reader.cpp`](../runtime/src/mir_reader.cpp) | Dispatches compact portable MIR or legacy s-expressions into one MIR representation and runs their shared finalization. |
 | [`runtime/src/inplace.cpp`](../runtime/src/inplace.cpp), [`constfold.cpp`](../runtime/src/constfold.cpp), [`reroll.cpp`](../runtime/src/reroll.cpp), [`island.cpp`](../runtime/src/island.cpp) | The graph passes, in pipeline order. |
 | [`runtime/src/executor.cpp`](../runtime/src/executor.cpp) | Runs the op list. `STANLI_PROFILE=1` prints per-opcode time accounting. |
 | [`runtime/kernels/`](../runtime/kernels/) | The kernels: [`densities.cpp`](../runtime/kernels/densities.cpp), [`elementwise.cpp`](../runtime/kernels/elementwise.cpp), [`constrain.cpp`](../runtime/kernels/constrain.cpp), and friends. [`matrix_fns.cpp`](../runtime/kernels/matrix_fns.cpp) and [`legacy_fns.cpp`](../runtime/kernels/legacy_fns.cpp) wrap stan-math functions that have no native kernel yet. |

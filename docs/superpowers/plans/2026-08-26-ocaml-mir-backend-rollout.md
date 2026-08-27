@@ -10,7 +10,7 @@ runtime in C++. It incorporates the Fable 5 Max review from 2026-08-26.
 Stan source
   -> stanc3 parse/typecheck/Stan-Math transform/O1       OCaml, stan-dev/stanc3
   -> selected passes + Portable MIR encoder              OCaml, stanli
-  -> Portable MIR v1 or legacy debug MIR decoder         C++, stanli
+  -> compact Portable MIR v2 or legacy debug MIR         C++, stanli
   -> data binding + transformed data + Graph lowering    C++, stanli
   -> Graph passes + executor + kernels + samplers        C++, stanli
 ```
@@ -31,7 +31,7 @@ users compiling with stock stanc3.
 1. The encoder is total over `Middle.Program.Typed.t`. Unsupported forms are
    represented explicitly and fail at the normal unsupported boundary; they
    are never dropped from the document.
-2. Portable MIR v1 is a faithful field-level re-tagging. No source idiom is
+2. Portable MIR v2 is a faithful active-field encoding. No source idiom is
    normalized until a separate change proves that normalization against the
    corpus.
 3. Native OCaml, js_of_ocaml, and Windows producers must emit byte-identical
@@ -47,9 +47,9 @@ PR #208 completed the first tranche:
 
 - upstream `stan2mir` merged and stanli pinned its merge commit;
 - exact-source compiler builds replaced the moving Windows artifact;
-- Portable MIR v1 and its canonical OCaml encoder landed;
+- the initial portable schema and canonical OCaml encoder landed;
 - the strict portable decoder and legacy decoder both produce `mir::Program`;
-- the embedded macOS/Linux producer emits portable JSON;
+- the embedded macOS/Linux producer emits the stanli-owned format;
 - semantic comparison covered 147 fixture programs and executable models;
 - malformed portable inputs are structurally validated before lowering;
 - native, Windows-stock, browser-stock, and R compiler provenance is checked.
@@ -66,8 +66,8 @@ Status: complete. All gates below run in CI.
 - Preserve the ordinary `stanc()` JavaScript API in that artifact.
 - Have the worker prefer `stanli_compile()` and retain stock `stancjs.bc.js`
   as the rollback path for one release cycle.
-- Leave the CRAN-bundled `r/inst/js/stanc.js` on the legacy format in this
-  phase.
+- Leave the R package's bundled `r/inst/js/stanc.js` on the legacy format in
+  this phase.
 - Make every R legacy path request O1 optimized MIR rather than transformed
   but unoptimized MIR.
 - Serialize embedded compiler calls and register foreign C/Python threads
@@ -90,23 +90,40 @@ Gates:
   Pathfinder, and generated-quantity paths.
 - Compiler cache keys include all shared OCaml and entry-point sources.
 
-Initial measurements on eight schools, Apple arm64 release builds:
+Current v2 measurements on Eight Schools across 51 fresh processes on an Apple
+arm64 release build:
 
 | Item | Legacy | Portable |
 |---|---:|---:|
-| MIR bytes | 33,320 | 111,760 |
-| MIR gzip bytes | 2,000 | 2,365 |
-| decoder parse time, median of 5 | 0.290 ms | 2.799 ms |
-| complete preparation, representative | 0.59 ms | 3.31 ms |
+| MIR bytes | 33,320 | 6,932 |
+| MIR gzip bytes | 2,000 | 1,793 |
+| decoder parse time, median | 0.293 ms | 0.074 ms |
+| complete preparation, median | 0.682 ms | 0.278 ms |
 
-The custom JS compiler is 2,990,736 bytes / 425,026 gzip, compared with
-2,971,677 bytes / 418,847 gzip for stock stancjs. Shipping both for the
-rollback cycle doubles the compiler portion of the browser payload; removing
-the stock producer after the rollback window recovers that temporary cost.
+An exact-source census of all 153 programs under `tests/fixtures` produced
+identical decoded C++ fields for every model; the separate `mother` producer
+case matched as well. Across the current fixture census compact v2 used
+823,104 raw bytes versus 4,652,169 for legacy MIR. Before the retired JSON
+encoder was removed, the preceding 146-program census measured 11,686,102
+JSON bytes, 807,032 compact-v2 bytes, and 4,453,653 legacy bytes. In a
+31-repetition direct-decoder run over that preceding census, the per-model
+v2/legacy time ratio was 0.192 at p50, 0.319 at p95, and 0.501 at the worst
+model; there were no decode or equivalence failures.
 
-These are observations, not pass/fail thresholds. Source compilation still
-dominates this one-time preparation path, but subsequent schema work should
-avoid increasing the JSON multiplier further.
+The current local compact-v2 JS compiler is 2,992,413 raw bytes after removing
+the pre-release v1 encoder, about 20 KB larger than the 2,971,695-byte exact-pin
+stock build.
+CI records raw and gzip sizes for both artifacts on each build. Shipping both
+for the rollback cycle doubles the compiler portion of the browser payload;
+removing the stock producer after the rollback window recovers that temporary
+cost.
+
+The manylinux pull-request gate requires compact v2 to use no more than half
+the legacy raw bytes and half the legacy median direct-decode time across 51
+repetitions on Eight Schools. Gzip and complete-preparation timings remain
+descriptive. Source compilation still dominates this one-time preparation
+path. The compact reader constructs the C++ MIR directly and no longer
+allocates a JSON DOM.
 
 ## Phase 2: Windows portable producer
 
@@ -137,10 +154,11 @@ Pull-request gates:
   before the overlay changed the fold policy.
 - Execute `stanli-compile.exe` on Windows and compare its output byte for byte
   with the same JavaScript producer already compared with native OCaml. The
-  shared seven-model suite covers nested UDFs, the mother model, folded
-  binary64, checked int32 overflow, Unicode, includes, and final-newline
-  behavior. The surrounding JavaScript gate covers diagnostics, warnings,
-  stock API compatibility, and repeat determinism.
+  shared eight-model suite covers ordinary models, nested UDFs, loop control,
+  the mother model, folded binary64, checked int32 overflow, Unicode, and
+  includes. It also checks final-newline behavior. The surrounding JavaScript
+  gate covers diagnostics, warnings, stock API compatibility, and repeat
+  determinism.
 - Run both executables through native R from paths containing spaces and
   Unicode, with CRLF source staged as exact UTF-8 bytes, and distinguish the
   portable and legacy envelopes.
@@ -157,39 +175,33 @@ This split keeps the bounded compiler contract merge-blocking while the
 multi-hour stan-math build remains a post-merge platform check. Publishing
 still waits for the full Windows wheel.
 
-## Phase 3: CRAN and webR compiler
+## Phase 3: R and webR compiler
 
-Status: compatibility gate not yet open. Stanli has not completed a CRAN
-release, so the compiler carried by the package cannot switch formats yet. The
-v0.9.2 release tarball is the baseline candidate: it carries the legacy
-JavaScript producer and pins a runtime with both decoders. Submit that exact
-artifact first, record its CRAN acceptance, and make the producer switch in a
-later CRAN release.
+No package registry is an architectural gate. The real constraint is direct
+cross-release compatibility because an R package can carry compiler JavaScript
+from one release while loading a runtime from another.
 
-Switch the compiler carried inside the R package only after a released R
-runtime with the dual decoder has existed for at least one CRAN cycle.
+Status: candidate readiness is complete; the shipping switch follows portable
+v2 integration. CI already loads the exact browser compiler in a fresh V8
+context, sends its output through the public `stanli_model(mir=...)` API, and
+exercises UTF-8, deterministic bytes, warnings, malformed input, gradients,
+sampling, and generated quantities. The webR side-module job runs the same
+candidate through the host-JavaScript bridge.
 
-Readiness checks land before that switch without changing the shipped path:
+Shipping work:
 
-- The browser compiler artifact is provenance-checked, loaded directly into a
-  fresh V8 context, and its portable output is passed through the public
-  `stanli_model(mir=...)` API against the real Linux runtime. That check covers
-  UTF-8, deterministic bytes, warnings, malformed input, gradients, sampling,
-  and generated quantities.
-- The webR side-module job loads the same compiler artifact through webR's
-  host-JavaScript bridge and covers portable output plus malformed source.
-- The R package test asserts that its bundled compiler still emits the legacy
-  s-expression during the compatibility release.
-
-- Build the tracked compiler JS from the shared package.
-- Update V8 and webR to prefer portable output.
-- Keep stock stanc and old-package compatibility through the legacy decoder.
+- Build the tracked R compiler JavaScript from the shared OCaml package.
+- Update the real V8 and webR helpers to select callable `stanli_compile()` by
+  export presence, using stock `stanc()` only when that export is absent.
+- Never retry stock after a selected portable compiler reports an error.
 - Byte-compare the tracked artifact with a fresh exact-source build.
+- Run the new compiler against both the current runtime and the previous
+  released dual-reader runtime.
+- Run the old package's legacy compiler against the new runtime.
 - Exercise V8, native subprocess, and webR source-compilation paths.
 
-This phase is last because the R package carries compiler JS while webR
-downloads its runtime separately; users can therefore combine package and
-runtime versions from different release dates.
+This compatibility matrix replaces the earlier assumed release-cycle gate and
+is both stricter and directly testable.
 
 ## Phase 4: upstream `vectorize_loops`
 
@@ -261,4 +273,4 @@ packing, and executor scheduling.
   channels emit portable MIR.
 - Retain the legacy decoder indefinitely.
 - Consider explicit schema fields that replace old MIR idioms one at a time;
-  each is a new gated schema evolution, not an implicit v1 normalization.
+  each is a new gated schema evolution, not an implicit v2 normalization.

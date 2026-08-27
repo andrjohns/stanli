@@ -47,7 +47,8 @@ known exceptions.
 | check | question | acceptance rule | schedule |
 | --- | --- | --- | --- |
 | unit tests for numerical operations | Does one numerical operation or graph transformation agree with stan-math? | Bitwise by default; a documented 2 ULP limit for selected paths | every pull request |
-| compiler producer parity | Do native OCaml, js_of_ocaml, and the Windows executable emit identical portable bytes while the stock rollback paths remain usable? | Byte-for-byte identity on seven successful models; JS API/error/warning/rollback checks; Windows provenance, executable-format, and final-newline checks | every pull request |
+| compiler producer parity | Do native OCaml, js_of_ocaml, and the Windows executable emit identical compact-v2 bytes while the stock rollback paths remain usable? | Byte-for-byte identity on seven successful models; JS API/error/warning/rollback checks; Windows provenance, executable-format, and final-newline checks | every pull request |
+| MIR wire cost | Is the compact-v2 decoder materially faster and the wire materially smaller than legacy MIR? | On Eight Schools, median decode time and raw bytes must each be at most half the legacy value | every pull request |
 | corpus comparison | Are 119 posteriordb models and 11 compiler-derived fixtures consistent with recorded CmdStan behavior at three fixed inputs? | Scaled error of 1e-9 for most points; documented limits for three `kronecker_gp` points; rejection parity | every pull request |
 | cross-path matrix | Do stanli's execution paths agree with one another? | Bitwise, except entries named in the ledger | every pull request, within CTest |
 | transformation A/B | Do selected graph optimizations preserve model results? | Optimizations enabled and disabled agree at the default point within 1e-11 | manually after optimization changes |
@@ -278,12 +279,13 @@ Unit tests check the kernels and cases they explicitly construct. They do not
 by themselves establish that model lowering selects the intended kernel or
 that another execution path implements the same operation.
 
-Portable MIR has a separate producer gate. The `browser-compiler` CI job
-builds the shared OCaml pipeline once as both a native executable and
-js_of_ocaml, then [`tests/test_portable_stancjs.cjs`](tests/test_portable_stancjs.cjs)
-requires byte-for-byte equality for an ordinary model, nested UDFs, the mother
-model, an O1-folded binary64 literal, checked int32 overflow/no-fold behavior,
-Unicode text, and an in-memory include.
+Portable MIR has separate producer and decoder gates. The `browser-compiler`
+CI job builds the shared OCaml pipeline once as both a native executable and
+js_of_ocaml, then
+[`tests/test_portable_stancjs.cjs`](tests/test_portable_stancjs.cjs) requires
+byte-for-byte compact-v2 equality for an ordinary model, nested UDFs, the
+mother model, an O1-folded binary64 literal, checked int32 overflow/no-fold
+behavior, Unicode text, and an in-memory include.
 It also checks repeat determinism, source-bearing error objects, warning
 parity, the normal `stanc()` JavaScript API against stock stancjs on ordinary
 inputs, and final-newline behavior. The overflow fixture is excluded from that
@@ -291,8 +293,12 @@ API comparison because the checked producer policy deliberately retains an
 expression where pristine stanc3's host-width-dependent folds disagree. A
 focused worker harness proves the preferred custom
 import and the missing-artifact fallback import. The tested JavaScript
-artifacts are the ones consumed by the Pages and npm jobs. Size and
-preparation-cost outputs are uploaded as measurements rather than thresholds.
+artifacts are the ones consumed by the Pages and npm jobs. The manylinux gate
+then decodes the same typed-producer output directly with `bench_mir_decode`.
+For Eight Schools, compact v2 must take no more than half the legacy decoder's
+median time across 51 repetitions and no more than half its raw bytes. Gzip and
+complete preparation timings remain descriptive measurements in the uploaded
+artifact.
 
 The same gate covers the Windows producer on every pull request. The
 `stanc-windows` job cross-builds pristine `stanc.exe` before applying the

@@ -78,7 +78,7 @@ model.stan + data.json
 optimized typed MIR (--O1)
   |  stanli OCaml encoder
   v
-portable MIR v1 (legacy s-expressions are also accepted)
+compact portable MIR v2 (legacy s-expressions are also accepted)
   |  decoder + lowering: runtime/src/lower.cpp
   v
 op graph + preallocated value/adjoint arenas
