@@ -100,16 +100,19 @@ arm64 release build:
 | decoder parse time, median | 0.293 ms | 0.074 ms |
 | complete preparation, median | 0.682 ms | 0.278 ms |
 
-An exact-source census of all 146 programs under `tests/fixtures` produced
+An exact-source census of all 153 programs under `tests/fixtures` produced
 identical decoded C++ fields for every model; the separate `mother` producer
-case matched as well. Across the fixture census compact v2 used 807,032 raw
-bytes versus 4,453,653 for legacy MIR and 11,686,102 for the retired JSON
-format. In a 31-repetition direct-decoder run, the per-model v2/legacy time
-ratio was 0.192 at p50, 0.319 at p95, and 0.501 at the worst model; there were
-no decode or equivalence failures.
+case matched as well. Across the current fixture census compact v2 used
+823,104 raw bytes versus 4,652,169 for legacy MIR. Before the retired JSON
+encoder was removed, the preceding 146-program census measured 11,686,102
+JSON bytes, 807,032 compact-v2 bytes, and 4,453,653 legacy bytes. In a
+31-repetition direct-decoder run over that preceding census, the per-model
+v2/legacy time ratio was 0.192 at p50, 0.319 at p95, and 0.501 at the worst
+model; there were no decode or equivalence failures.
 
-The current local compact-v2 JS compiler is 2,992,001 raw bytes after removing
-the pre-release v1 encoder, about 20 KB larger than the exact-pin stock build.
+The current local compact-v2 JS compiler is 2,992,413 raw bytes after removing
+the pre-release v1 encoder, about 20 KB larger than the 2,971,695-byte exact-pin
+stock build.
 CI records raw and gzip sizes for both artifacts on each build. Shipping both
 for the rollback cycle doubles the compiler portion of the browser payload;
 removing the stock producer after the rollback window recovers that temporary
@@ -151,10 +154,11 @@ Pull-request gates:
   before the overlay changed the fold policy.
 - Execute `stanli-compile.exe` on Windows and compare its output byte for byte
   with the same JavaScript producer already compared with native OCaml. The
-  shared seven-model suite covers nested UDFs, the mother model, folded
-  binary64, checked int32 overflow, Unicode, includes, and final-newline
-  behavior. The surrounding JavaScript gate covers diagnostics, warnings,
-  stock API compatibility, and repeat determinism.
+  shared eight-model suite covers ordinary models, nested UDFs, loop control,
+  the mother model, folded binary64, checked int32 overflow, Unicode, and
+  includes. It also checks final-newline behavior. The surrounding JavaScript
+  gate covers diagnostics, warnings, stock API compatibility, and repeat
+  determinism.
 - Run both executables through native R from paths containing spaces and
   Unicode, with CRLF source staged as exact UTF-8 bytes, and distinguish the
   portable and legacy envelopes.
