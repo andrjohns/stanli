@@ -8,6 +8,9 @@ let compile ?(passes = Stanli_pipeline.default_pass_selection) code =
   | {result= Ok mir; _} -> mir
   | {result= Error _; _} -> failwith "Stan source did not compile"
 
+let passes vectorize_loops =
+  {Stanli_pipeline.default_pass_selection with vectorize_loops}
+
 let compile_portable code =
   match
     Stanli_pipeline.compile_portable ~model_name:"pass_selection_test" code
@@ -19,6 +22,16 @@ let compile_upstream_o1 code =
   let flags =
     { Driver.Flags.default with
       optimization_level= Analysis_and_optimization.Optimize.O1 } in
+  match
+    Driver.Entry.stan2mir "pass_selection_test" (`Code code) flags (fun _ -> ())
+  with
+  | Ok mir -> mir
+  | Error _ -> failwith "Stan source did not compile"
+
+let compile_upstream_o0 code =
+  let flags =
+    { Driver.Flags.default with
+      optimization_level= Analysis_and_optimization.Optimize.O0 } in
   match
     Driver.Entry.stan2mir "pass_selection_test" (`Code code) flags (fun _ -> ())
   with
@@ -101,6 +114,121 @@ let side_effect_loop =
     }
   |}
 
+let dependent_assignment_density_loop =
+  {|
+    data {
+      int<lower=0> N;
+      vector[N] x;
+      vector[N] y;
+    }
+    parameters {
+      real alpha;
+      real beta;
+      real<lower=0> sigma;
+    }
+    model {
+      vector[N] mu;
+      for (n in 1:N) {
+        mu[n] = alpha + beta * x[n];
+        y[n] ~ normal(mu[n], sigma);
+      }
+    }
+  |}
+
+let cross_lane_assignment_density_loop =
+  {|
+    data {
+      int<lower=1> N;
+      vector[N] x;
+      vector[N] y;
+    }
+    parameters {
+      real alpha;
+      real beta;
+      real<lower=0> sigma;
+    }
+    model {
+      vector[N] mu;
+      for (n in 1:N) {
+        mu[n] = alpha + beta * x[n];
+        y[n] ~ normal(mu[n] + mu[1], sigma);
+      }
+    }
+  |}
+
+let effectful_assignment_density_loop =
+  {|
+    functions {
+      real bump_lp(real x) {
+        target += x;
+        return x;
+      }
+    }
+    data {
+      int<lower=0> N;
+      vector[N] x;
+      vector[N] y;
+    }
+    parameters {
+      real alpha;
+      real beta;
+      real<lower=0> sigma;
+    }
+    model {
+      vector[N] mu;
+      for (n in 1:N) {
+        mu[n] = alpha + beta * bump_lp(x[n]);
+        y[n] ~ normal(mu[n], sigma);
+      }
+    }
+  |}
+
+let effectful_density_loop =
+  {|
+    functions {
+      real bump_lp(real x) {
+        target += x;
+        return x;
+      }
+    }
+    data {
+      int<lower=0> N;
+      vector[N] x;
+      vector[N] y;
+    }
+    parameters {
+      real alpha;
+      real beta;
+      real<lower=0> sigma;
+    }
+    model {
+      vector[N] mu;
+      for (n in 1:N) {
+        mu[n] = alpha + beta * x[n];
+        y[n] ~ normal(mu[n], bump_lp(sigma));
+      }
+    }
+  |}
+
+let recurrent_assignment_density_loop =
+  {|
+    data {
+      int<lower=0> N;
+      vector[N] x;
+      vector[N] y;
+    }
+    parameters {
+      real<lower=0> sigma;
+    }
+    model {
+      vector[N] mu = rep_vector(0, N);
+      for (n in 1:N) {
+        mu[n] = mu[n] + x[n];
+        y[n] ~ normal(mu[n], sigma);
+      }
+    }
+  |}
+
 let o1_equivalence_models =
   [ ( "ordinary"
     , {|
@@ -150,21 +278,21 @@ let () =
   List.iter
     (fun (name, code) ->
       let pass_off_bytes =
-        encode (compile ~passes:{vectorize_loops= false} code) in
+        encode (compile ~passes:(passes false) code) in
       let upstream_o1_bytes = encode (compile_upstream_o1 code) in
       require
         (String.equal pass_off_bytes upstream_o1_bytes)
         ("pass-off output differs from upstream O1 for " ^ name);
       let pass_on_bytes =
-        encode (compile ~passes:{vectorize_loops= true} code) in
+        encode (compile ~passes:(passes true) code) in
       let production_bytes = compile_portable code in
       require
         (String.equal production_bytes pass_on_bytes)
         ("production output differs from O1 plus vectorize_loops for " ^ name))
     o1_equivalence_models;
 
-  let off = compile ~passes:{vectorize_loops= false} matching_loop in
-  let on = compile ~passes:{vectorize_loops= true} matching_loop in
+  let off = compile ~passes:(passes false) matching_loop in
+  let on = compile ~passes:(passes true) matching_loop in
   let production = compile matching_loop in
   require (count_log_prob_fors off > 0) "pass-off removed the matching loop";
   require (count_log_prob_fors on = 0) "pass-on did not vectorize the loop";
@@ -179,12 +307,42 @@ let () =
     "production selection did not produce a vector density statement";
 
   let side_effect_off =
-    compile ~passes:{vectorize_loops= false} side_effect_loop in
+    compile ~passes:(passes false) side_effect_loop in
   let side_effect_on =
-    compile ~passes:{vectorize_loops= true} side_effect_loop in
+    compile ~passes:(passes true) side_effect_loop in
   require
     (count_log_prob_fors side_effect_on > 0)
     "pass-on rewrote a side-effecting loop";
   require
     (String.equal (encode side_effect_off) (encode side_effect_on))
-    "pass-on changed a side-effecting loop"
+    "pass-on changed a side-effecting loop";
+
+  let distribute code =
+    let mir = compile_upstream_o0 code in
+    (mir, Stanli_mir_transforms.distribute_same_lane_density_loops mir) in
+  let dependent_before, dependent_after =
+    distribute dependent_assignment_density_loop in
+  require
+    (count_log_prob_fors dependent_before = 1)
+    "dependent test did not start with one loop";
+  require
+    (count_log_prob_fors dependent_after = 2)
+    "same-lane assignment and density did not split into two loops";
+  let distributed_pipeline =
+    compile
+      ~passes:
+        { (passes false) with distribute_same_lane_density_loops= true }
+      dependent_assignment_density_loop in
+  require
+    (count_log_prob_fors distributed_pipeline = 2)
+    "selected Stanli transform did not run before upstream O1";
+  List.iter
+    (fun (name, code) ->
+      let before, after = distribute code in
+      require
+        (String.equal (encode before) (encode after))
+        (name ^ " candidate was distributed"))
+    [ ("cross-lane", cross_lane_assignment_density_loop)
+    ; ("effectful assignment", effectful_assignment_density_loop)
+    ; ("effectful density", effectful_density_loop)
+    ; ("recurrent assignment", recurrent_assignment_density_loop) ]
