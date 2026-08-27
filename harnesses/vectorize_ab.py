@@ -133,18 +133,22 @@ def setup_value(key):
 
 
 def git_revision(path):
+    path = pathlib.Path(path).resolve()
     try:
         return subprocess.check_output(
-            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            ["git", "-c", f"safe.directory={path}", "-C", str(path),
+             "rev-parse", "HEAD"],
             text=True, stderr=subprocess.DEVNULL).strip()
     except (OSError, subprocess.SubprocessError):
         return None
 
 
 def git_tracked_dirty(path):
+    path = pathlib.Path(path).resolve()
     proc = subprocess.run(
-        ["git", "-C", str(path), "status", "--porcelain",
-         "--untracked-files=no"], capture_output=True, text=True)
+        ["git", "-c", f"safe.directory={path}", "-C", str(path),
+         "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True)
     return None if proc.returncode != 0 else bool(proc.stdout.strip())
 
 

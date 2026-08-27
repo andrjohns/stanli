@@ -15,6 +15,25 @@ import vectorize_ab  # noqa: E402
 
 
 class VectorizeAbTest(unittest.TestCase):
+    def test_git_identity_scopes_the_checkout_as_safe(self):
+        expected = str(vectorize_ab.REPO.resolve())
+        with mock.patch.object(
+                vectorize_ab.subprocess, "check_output",
+                return_value="0123456789abcdef\n") as check_output:
+            self.assertEqual(
+                vectorize_ab.git_revision(vectorize_ab.REPO),
+                "0123456789abcdef")
+        command = check_output.call_args.args[0]
+        self.assertIn(f"safe.directory={expected}", command)
+
+        clean = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(vectorize_ab.subprocess, "run",
+                               return_value=clean) as run:
+            self.assertFalse(vectorize_ab.git_tracked_dirty(
+                vectorize_ab.REPO))
+        command = run.call_args.args[0]
+        self.assertIn(f"safe.directory={expected}", command)
+
     def test_vector_comparison_is_nonfinite_safe(self):
         same = vectorize_ab.compare_vectors(
             ["1", "nan", "-inf"], ["1.0", "nan", "-inf"])
