@@ -7,7 +7,9 @@ type 'a compilation =
   ; warnings: Frontend.Warnings.t list }
 
 (** Source-level MIR passes that stanli may add to upstream's O1 policy. *)
-type pass_selection = {vectorize_loops: bool}
+type pass_selection =
+  { vectorize_loops: bool
+  ; distribute_same_lane_density_loops: bool }
 
 val default_pass_selection : pass_selection
 (** The shipping selection: upstream O1 plus loop vectorization. *)

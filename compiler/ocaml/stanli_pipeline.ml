@@ -6,9 +6,13 @@ type 'a compilation =
   { result: ('a, error) result
   ; warnings: Frontend.Warnings.t list }
 
-type pass_selection = {vectorize_loops: bool}
+type pass_selection =
+  { vectorize_loops: bool
+  ; distribute_same_lane_density_loops: bool }
 
-let default_pass_selection = {vectorize_loops= true}
+let default_pass_selection =
+  { vectorize_loops= true
+  ; distribute_same_lane_density_loops= false }
 
 let compile_mir_at_level
     ?(include_source = Driver.Flags.default.include_source) ~optimization_level
@@ -40,6 +44,10 @@ let compile_mir_with_passes ?include_source ~passes ~model_name code =
     match compiled.result with
     | Error error -> Error error
     | Ok mir -> (
+      let mir =
+        if passes.distribute_same_lane_density_loops then
+          Stanli_mir_transforms.distribute_same_lane_density_loops mir
+        else mir in
       let settings =
         { (Analysis_and_optimization.Optimize.level_optimizations O1) with
           vectorize_loops= passes.vectorize_loops } in

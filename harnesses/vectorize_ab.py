@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Measure production loop vectorization against its pass-off oracle.
+"""Measure a source MIR pass against its pass-off oracle.
 
 Each selected Stan source is compiled exactly twice by the test-only OCaml
-probe: upstream O1 with vectorize_loops off and the shipping selection with
-that one pass on. The saved portable MIR is then reused for every semantic
-point and for four graph cells (source pass off/on crossed with the C++ re-roll
-pass off/on).
+probe. The default candidate is upstream loop vectorization; Stanli-owned
+passes can use the same semantic and measurement gates. The saved portable MIR
+is then reused for every semantic point and for four graph cells (source pass
+off/on crossed with the C++ re-roll pass off/on).
 
 Hard failures are semantic: result categories, vector shapes, write_array
 names and shapes, nonfinite behavior, and the existing CmdStan reference
@@ -26,8 +26,8 @@ Bounded report:
 The no-model form covers the complete committed reference set, including
 the language fixtures under tests/stanc3, plus every model in posteriordb's
 one-data-per-model census. A model with no CmdStan reference is explicitly
-reported as A/B-only. Gradient timing stays bounded to the seven
-DEFAULT_MODELS in either form, including three pass-activation sentinels.
+reported as A/B-only. Gradient timing stays bounded to a small candidate-pass
+measurement set in either form.
 """
 
 import argparse
@@ -53,23 +53,49 @@ from verify_refs import (POINTS, corpus_input, corpus_models, gate_for,  # noqa:
                          load_refs, model_files, pair_dev, parse_status,
                          parse_wa, worst_pair)
 
-DEFAULT_MODELS = (
-    "normal_mixture",
-    "radon_pooled",
-    "soil_incubation",
-    "arK",
-    "low_dim_gauss_mix",
-    "hmm_example",
-    "eight_schools_noncentered",
+VECTORIZE_LOOPS = "vectorize-loops"
+DISTRIBUTE_SAME_LANE_DENSITY_LOOPS = \
+    "distribute-same-lane-density-loops"
+CANDIDATE_PASSES = (
+    VECTORIZE_LOOPS,
+    DISTRIBUTE_SAME_LANE_DENSITY_LOOPS,
 )
-
-EXPECTED_MIR_CHANGES = frozenset((
-    "covid19imperial_v2",
-    "covid19imperial_v3",
-    "normal_mixture",
-    "radon_pooled",
-    "soil_incubation",
-))
+EXPECTED_MIR_CHANGES = {
+    VECTORIZE_LOOPS: frozenset((
+        "covid19imperial_v2",
+        "covid19imperial_v3",
+        "normal_mixture",
+        "radon_pooled",
+        "soil_incubation",
+    )),
+    DISTRIBUTE_SAME_LANE_DENSITY_LOOPS: frozenset((
+        "radon_county_intercept",
+        "radon_partially_pooled_centered",
+        "radon_partially_pooled_noncentered",
+        "radon_variable_intercept_centered",
+        "radon_variable_intercept_noncentered",
+        "radon_variable_intercept_slope_centered",
+        "radon_variable_intercept_slope_noncentered",
+        "radon_variable_slope_centered",
+        "radon_variable_slope_noncentered",
+    )),
+}
+GRADIENT_MODELS = {
+    VECTORIZE_LOOPS: frozenset((
+        "normal_mixture",
+        "radon_pooled",
+        "soil_incubation",
+        "arK",
+        "low_dim_gauss_mix",
+        "hmm_example",
+        "eight_schools_noncentered",
+    )),
+    DISTRIBUTE_SAME_LANE_DENSITY_LOOPS: frozenset((
+        "radon_county_intercept",
+        "radon_partially_pooled_centered",
+        "radon_variable_intercept_slope_noncentered",
+    )),
+}
 
 RUNTIME_ENV_KEYS = (
     "STANLI_DEBUG_ALGEBRA",
@@ -475,13 +501,22 @@ def prep_row(rows, graph, stage):
         {})
 
 
-def compile_source(compiler, source, output, enabled, timeout):
-    command = [
-        compiler,
-        "--vectorize-loops", "on" if enabled else "off",
-        "--output", output,
-        source,
-    ]
+def compile_source(compiler, source, output, candidate_pass, enabled,
+                   timeout):
+    selected = "on" if enabled else "off"
+    if candidate_pass == VECTORIZE_LOOPS:
+        pass_arguments = [
+            "--vectorize-loops", selected,
+            "--distribute-same-lane-density-loops", "off",
+        ]
+    elif candidate_pass == DISTRIBUTE_SAME_LANE_DENSITY_LOOPS:
+        pass_arguments = [
+            "--vectorize-loops", "on",
+            "--distribute-same-lane-density-loops", selected,
+        ]
+    else:
+        raise ValueError(f"unknown candidate pass: {candidate_pass}")
+    command = [compiler, *pass_arguments, "--output", output, source]
     proc = run_command(command, timeout)
     produced = output.is_file()
     info = {
@@ -949,6 +984,8 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
     summary = {
         "schema": 2,
         "ok": not failures and not infrastructure_failures,
+        "candidate_pass": manifest.get("corpus_scope", {}).get(
+            "candidate_pass", VECTORIZE_LOOPS),
         "models": len(model_summaries),
         "referenced_models": sum(
             item.get("reference_kind") == "cmdstan-recorded"
@@ -968,8 +1005,9 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
     lines = [
-        "# MIR vectorization A/B measurement", "",
+        "# MIR source-pass A/B measurement", "",
         f"Outcome: **{'PASS' if summary['ok'] else 'FAIL'}**", "",
+        f"- Candidate pass: `{summary['candidate_pass']}`",
         f"- Models: {summary['models']}",
         f"- CmdStan-referenced models: {summary['referenced_models']}",
         f"- A/B-only models: {summary['ab_only_models']}",
@@ -1014,6 +1052,9 @@ def main():
     parser.add_argument(
         "--compiler", type=pathlib.Path,
         default=REPO / "deps" / "stanc3" / "stanli-vectorize-probe")
+    parser.add_argument(
+        "--candidate-pass", choices=CANDIDATE_PASSES,
+        default=VECTORIZE_LOOPS)
     parser.add_argument("--check", type=pathlib.Path,
                         default=REPO / "build-rel" / "stanli_check")
     parser.add_argument("--bench", type=pathlib.Path,
@@ -1108,7 +1149,10 @@ def main():
         )
     else:
         selection_kind = "complete-references-plus-posteriordb-model-census"
-    gradient_models = [model for model in selected if model in DEFAULT_MODELS]
+    gradient_models = [
+        model for model in selected
+        if model in GRADIENT_MODELS[args.candidate_pass]
+    ]
 
     revision = git_revision(REPO) or "unknown"
     manifest = {
@@ -1137,8 +1181,9 @@ def main():
             "full_posteriordb_model_census": not bool(args.models),
             "full_model_data_pair_sweep": False,
             "gradient_models": gradient_models,
+            "candidate_pass": args.candidate_pass,
             "expected_mir_change_sentinels": sorted(
-                EXPECTED_MIR_CHANGES),
+                EXPECTED_MIR_CHANGES[args.candidate_pass]),
             "note": "Recorded models use CmdStan gates; posteriordb models "
                     "without a reference use off/on parity only. One data "
                     "set is selected per posteriordb model.",
@@ -1227,8 +1272,8 @@ def main():
             compile_ok = True
             for mode in ("off", "on"):
                 proc, info = compile_source(
-                    tools["compiler"], source, mirs[mode], mode == "on",
-                    args.timeout)
+                    tools["compiler"], source, mirs[mode],
+                    args.candidate_pass, mode == "on", args.timeout)
                 compile_info[mode] = info
                 if proc["returncode"] != 0 or not info["produced"]:
                     compile_ok = False
@@ -1247,9 +1292,11 @@ def main():
 
             mir_changed = compile_info["off"]["sha256"] != \
                 compile_info["on"]["sha256"]
-            if model in EXPECTED_MIR_CHANGES and not mir_changed:
+            if (model in EXPECTED_MIR_CHANGES[args.candidate_pass]
+                    and not mir_changed):
                 infrastructure_failures.append(
-                    f"{model}: vectorization sentinel MIR did not change")
+                    f"{model}: {args.candidate_pass} sentinel MIR did not "
+                    "change")
             changed_values = 0
             model_points = 0
             for point in POINTS:
