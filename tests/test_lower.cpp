@@ -2419,6 +2419,39 @@ int main() {
               stan::math::inv_logit(-0.5));
   }
 
+  // A matrix row in a region. Two facts to pin: which elements the row is
+  // -- three apart, in column-major storage -- and the order the sum
+  // accumulates them, which has to be the ascending one stan-math uses on
+  // a strided block. The expectation is built in that order rather than
+  // written as a decimal.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_matrixrow.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const int64_t n = ex.n_params();
+    check(n == 13, "parameter-condition matrix row parameter count");
+    for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = 0.1 * (double)(i + 1);
+    ex.params_data()[12] = 0.5;
+    std::vector<double> grad((size_t)n);
+    double want = stan::math::square(ex.params_data()[1]);
+    for (int j = 1; j < 4; ++j)
+      want += stan::math::square(ex.params_data()[1 + 3 * j]);
+    expect_eq("parameter-condition matrix row lp", ex.gradient(grad.data()),
+              want);
+    for (int64_t i = 0; i < 12; ++i)
+      expect_eq("parameter-condition matrix row grad " + std::to_string(i),
+                grad[(size_t)i], i % 3 == 1 ? 2.0 * ex.params_data()[i] : 0.0);
+    expect_eq("parameter-condition matrix row theta grad", grad[12], 0.0);
+    // The other arm never reads the row.
+    ex.params_data()[12] = -0.5;
+    expect_eq("parameter-condition matrix row else lp",
+              ex.gradient(grad.data()), -0.5);
+    for (int64_t i = 0; i < 12; ++i)
+      expect_eq("parameter-condition matrix row else grad " + std::to_string(i),
+                grad[(size_t)i], 0.0);
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.

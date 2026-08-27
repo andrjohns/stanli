@@ -477,6 +477,13 @@ struct ProgramCompiler {
       case mir::Expr::Indexed: {
         const Range b = expr(e.args[0]);
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return b;
+        // A matrix row, `m[i]` or `m[i, ]`. Ahead of the all-single check
+        // below, which the explicit `IndexAll` would not pass.
+        if (b.kind == ViewKind::Matrix && e.args.size() >= 2 &&
+            e.args[1].name == "IndexSingle" &&
+            (e.args.size() == 2 ||
+             (e.args.size() == 3 && e.args[2].name == "IndexAll")))
+          return matrix_row(b, cint(e.args[1].args[0]));
         for (size_t k = 1; k < e.args.size(); ++k)
           if (e.args[k].name != "IndexSingle") bail("index form");
 
@@ -488,10 +495,9 @@ struct ProgramCompiler {
               bail("matrix index out of the declared range");
             return {b.reg + (int)((j - 1) * b.rows + i - 1), 1};
           }
-          // A direct matrix row is a strided Eigen view in generated C++.
-          // Materializing it here can change packet grouping in a following
-          // reduction, so this first runtime-control tranche accepts only
-          // explicit scalar matrix elements.
+          // A column, `m[, j]`, is a contiguous run this could return as a
+          // view; nothing reaches it yet, so it stays refused rather than
+          // untested.
           bail("matrix index form");
         }
 
@@ -608,6 +614,25 @@ struct ProgramCompiler {
     p.code[(size_t)jmp].dst = (int)p.code.size();
     Range out = av;
     out.reg = dst;
+    return out;
+  }
+
+  // One row of a matrix, copied into a run of its own. Column-major
+  // storage puts a row's elements `rows` apart, and a strided Eigen block
+  // has no packet access -- so stan-math reduces such a row in ascending
+  // scalar order, which is the order every reduction this compiler emits
+  // walks a run in. That is what makes the copy safe rather than merely
+  // convenient: `sum` accumulates ascending, `max` compares, and the rest
+  // are elementwise. A reduction with its own grouping (DOT, SOFTMAX,
+  // LSE_RANGE) is not one this compiler emits, and adding one would have
+  // to answer this question again.
+  Range matrix_row(const Range& m, long i) {
+    if (i < 1 || i > m.rows) bail("matrix index out of the declared range");
+    const int r = alloc((int)m.cols);
+    for (int64_t j = 0; j < m.cols; ++j)
+      emit(Program::MOV, r + (int)j, m.reg + (int)(j * m.rows + (i - 1)));
+    Range out{r, (int)m.cols};
+    out.kind = ViewKind::RowVector;
     return out;
   }
 
