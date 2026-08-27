@@ -39,6 +39,7 @@ fi
 # Release profile: dune's dev profile links the inline-test and expect-test
 # runners into every library, which ride into the shipped binary for no
 # reason. Worth 364 KB of the final shared library.
+(cd "$SRC" && dune runtest --profile release src/stanc_embed)
 (cd "$SRC" && dune build --profile release src/stanc_embed/stanc_embed.exe.o \
    2>&1 | tail -5 ||
  dune build --profile release src/stanc_embed 2>&1 | tail -5)

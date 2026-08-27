@@ -1,0 +1,175 @@
+open Middle
+
+let compile ?(passes = Stanli_pipeline.default_pass_selection) code =
+  match
+    Stanli_pipeline.compile_mir_with_passes ~passes
+      ~model_name:"pass_selection_test" code
+  with
+  | {result= Ok mir; _} -> mir
+  | {result= Error _; _} -> failwith "Stan source did not compile"
+
+let compile_portable code =
+  match
+    Stanli_pipeline.compile_portable ~model_name:"pass_selection_test" code
+  with
+  | {result= Ok encoded; _} -> encoded
+  | {result= Error _; _} -> failwith "Stan source did not compile"
+
+let compile_upstream_o1 code =
+  let flags =
+    { Driver.Flags.default with
+      optimization_level= Analysis_and_optimization.Optimize.O1 } in
+  match
+    Driver.Entry.stan2mir "pass_selection_test" (`Code code) flags (fun _ -> ())
+  with
+  | Ok mir -> mir
+  | Error _ -> failwith "Stan source did not compile"
+
+let encode mir = Portable_mir.encode mir
+
+let rec count_for_stmt (stmt : Stmt.Located.t) =
+  let current = match stmt.pattern with Stmt.Pattern.For _ -> 1 | _ -> 0 in
+  Stmt.Pattern.fold
+    (fun count (_ : Expr.Typed.t) -> count)
+    (fun count child -> count + count_for_stmt child)
+    current stmt.pattern
+
+let count_log_prob_fors mir =
+  List.fold_left
+    (fun count stmt -> count + count_for_stmt stmt)
+    0 mir.Program.log_prob
+
+let rec has_vector_density_stmt (stmt : Stmt.Located.t) =
+  let current =
+    match stmt.pattern with
+    | Stmt.Pattern.TargetPE
+        { Expr.pattern=
+            Expr.Pattern.FunApp
+              ( Fun_kind.StanLib (_, (Fun_kind.FnLpdf _ | FnLpmf _), _)
+              , {Expr.meta= {Expr.Typed.Meta.type_= UnsizedType.UVector; _}; _}
+                :: _ )
+        ; _ } ->
+        true
+    | _ -> false in
+  current
+  || Stmt.Pattern.fold
+       (fun found (_ : Expr.Typed.t) -> found)
+       (fun found child -> found || has_vector_density_stmt child)
+       false stmt.pattern
+
+let log_prob_has_vector_density mir =
+  List.exists has_vector_density_stmt mir.Program.log_prob
+
+let require condition message = if not condition then failwith message
+
+let matching_loop =
+  {|
+    data {
+      int<lower=0> N;
+      vector[N] y;
+    }
+    parameters {
+      real mu;
+      real<lower=0> sigma;
+    }
+    model {
+      for (n in 1:N) {
+        y[n] ~ normal(mu, sigma);
+      }
+    }
+  |}
+
+let side_effect_loop =
+  {|
+    functions {
+      real bump_lp(real x) {
+        target += x;
+        return x;
+      }
+    }
+    data {
+      int<lower=0> N;
+      vector[N] y;
+    }
+    parameters {
+      real<lower=0> sigma;
+    }
+    model {
+      for (n in 1:N) {
+        target += normal_lpdf(y[n] | bump_lp(sigma), sigma);
+      }
+    }
+  |}
+
+let o1_equivalence_models =
+  [ ( "ordinary"
+    , {|
+        data { int<lower=0> N; vector[N] y; }
+        parameters { real mu; real<lower=0> sigma; }
+        model { y ~ normal(mu, sigma); }
+      |} )
+  ; ( "nested UDF"
+    , {|
+        functions {
+          real inner(real x) { return square(x); }
+          real outer(real x) { return inner(x) + 1; }
+        }
+        parameters { real x; }
+        model { target += outer(x); }
+      |} )
+  ; ( "folded binary64"
+    , {|
+        parameters { real x; }
+        model { target += x + (0.1 + 0.2); }
+      |} )
+  ; ( "checked int32 overflow"
+    , {|
+        transformed data {
+          int x = 50000 * 50000;
+          int y = (50000 * 50000) / 50000;
+        }
+      |} )
+  ; ( "Unicode"
+    , {|
+        transformed data { print("pi π, snowman ☃, wave 👋"); }
+        parameters { real x; }
+        model { x ~ std_normal(); }
+      |} )
+  ; ( "generated quantities"
+    , {|
+        parameters { real x; }
+        model { x ~ std_normal(); }
+        generated quantities {
+          real twice_x = 2 * x;
+          real y = normal_rng(x, 1);
+        }
+      |} )
+  ; ("matching loop", matching_loop) ]
+
+let () =
+  List.iter
+    (fun (name, code) ->
+      let production_bytes = compile_portable code in
+      let upstream_o1_bytes = encode (compile_upstream_o1 code) in
+      require
+        (String.equal production_bytes upstream_o1_bytes)
+        ("pass-off output differs from upstream O1 for " ^ name))
+    o1_equivalence_models;
+
+  let off = compile matching_loop in
+  let on = compile ~passes:{vectorize_loops= true} matching_loop in
+  require (count_log_prob_fors off > 0) "pass-off removed the matching loop";
+  require (count_log_prob_fors on = 0) "pass-on did not vectorize the loop";
+  require
+    (log_prob_has_vector_density on)
+    "pass-on did not produce a vector density statement";
+
+  let side_effect_off = compile side_effect_loop in
+  let side_effect_on =
+    compile ~passes:{vectorize_loops= true} side_effect_loop in
+  require
+    (count_log_prob_fors side_effect_on > 0)
+    "pass-on rewrote a side-effecting loop";
+  require
+    (String.equal (encode side_effect_off) (encode side_effect_on))
+    "pass-on changed a side-effecting loop"
