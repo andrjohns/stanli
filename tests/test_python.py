@@ -305,6 +305,19 @@ def test_stan_to_mir_round_trips():
     assert (g_a == g_b).all(), f"gradient differs: {g_a} vs {g_b}"
 
 
+def test_full_span_assignment_from_source():
+    code = """
+    data { int<lower=0> N; vector[N] x; }
+    transformed data { vector[N] y; y[:] = x; }
+    parameters { real z; }
+    model { z ~ normal(sum(y), 1); }
+    """
+    model = stanli.Model(stan_code=code, data={"N": 3, "x": [1, 2, 3]})
+    lp, gradient = model.log_prob_grad(np.array([0.0]))
+    assert np.isfinite(lp)
+    assert gradient.tolist() == [6.0]
+
+
 def test_stan_to_mir_is_optimized():
     # The MIR handed to the runtime uses stanli's shared optimization policy,
     # not raw transformed MIR. Partial evaluation is the observable here: at

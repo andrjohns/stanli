@@ -8,6 +8,7 @@
 
 #include <stanli/mir.hpp>
 #include <stanli/mir_interp.hpp>
+#include <stanli/mir_prog.hpp>
 #include <stanli/ode_prog.hpp>
 
 #include <cmath>
@@ -114,6 +115,15 @@ Stmt assignment(std::string name, Expr rhs) {
   s.kind = Stmt::Assignment;
   s.lhs = std::move(name);
   s.rhs = std::move(rhs);
+  return s;
+}
+
+Stmt full_span_assignment(std::string name, Expr rhs) {
+  Stmt s = assignment(std::move(name), std::move(rhs));
+  Expr all;
+  all.kind = Expr::FunApp;
+  all.name = "IndexAll";
+  s.lhs_idx.push_back(std::move(all));
   return s;
 }
 
@@ -506,6 +516,101 @@ void test_uninitialized_real() {
            {std::move(entry)}, 1.0, {std::numeric_limits<double>::quiet_NaN()});
 }
 
+void test_full_span_ode_vector() {
+  // ODE RHS compilation is one production caller of ProgramCompiler. The
+  // destination is vector[1], and y supplies a vector view of exactly that
+  // width, so the indexed assignment must stay on the compiled path.
+  FunDef entry =
+      rhs_function("full_span_vector_rhs",
+                   {declaration("copy", "SVector", {lit_int(1)}),
+                    full_span_assignment("copy", var("y", "UVector")),
+                    return_value(var("copy", "UVector"))});
+  run_case("full-span ODE vector", "vector[1] copy[:] = y returns y",
+           {std::move(entry)}, 1.0, {0.25});
+}
+
+void test_full_span_program_views() {
+  // Statement islands also use ProgramCompiler and can bind complete array
+  // container views from surrounding graph slots. Build those bindings
+  // directly here so vector, row-vector, scalar-array, and array-container
+  // geometry all execute through the register machine.
+  const auto exercise = [&](const std::string& name, stanli::Range dst,
+                            stanli::Range rhs, std::vector<double> values) {
+    stanli::Program program;
+    std::map<std::string, const FunDef*> functions;
+    stanli::ProgramCompiler compiler{program, functions};
+    dst.reg = compiler.alloc(dst.len);
+    rhs.reg = compiler.alloc(rhs.len);
+    std::vector<double> initial(static_cast<size_t>(dst.len), -1.0);
+    compiler.emit_const(dst.reg, initial.data(), dst.len);
+    compiler.emit_const(rhs.reg, values.data(), rhs.len);
+    compiler.reals["dst"] = dst;
+    compiler.reals["rhs"] = rhs;
+    const std::string rhs_type =
+        rhs.kind == stanli::ViewKind::Vector      ? "UVector"
+        : rhs.kind == stanli::ViewKind::RowVector ? "URowVector"
+                                                  : "UArray";
+    compiler.stmt(full_span_assignment("dst", var("rhs", rhs_type)));
+    compiler.finish();
+    const stanli::Range out = compiler.reals.at("dst");
+    std::vector<double> registers(static_cast<size_t>(program.n_regs));
+    stanli::run_program(program, registers);
+    std::vector<double> got(registers.begin() + out.reg,
+                            registers.begin() + out.reg + out.len);
+    if (got != values) {
+      ++failures;
+      std::printf("FAIL %-24s Program full-span value mismatch\n",
+                  name.c_str());
+    }
+  };
+
+  stanli::Range vector;
+  vector.len = 3;
+  vector.kind = stanli::ViewKind::Vector;
+  exercise("full-span vector view", vector, vector, {1, 2, 3});
+
+  stanli::Range row;
+  row.len = 3;
+  row.kind = stanli::ViewKind::RowVector;
+  exercise("full-span row view", row, row, {4, 5, 6});
+
+  stanli::Range scalar_array;
+  scalar_array.len = 4;
+  scalar_array.kind = stanli::ViewKind::Array;
+  scalar_array.dims = {2, 2};
+  exercise("full-span scalar array", scalar_array, scalar_array,
+           {11, 12, 21, 22});
+
+  stanli::Range container_array;
+  container_array.len = 8;
+  container_array.kind = stanli::ViewKind::Array;
+  container_array.dims = {2, 2, 2};
+  exercise("full-span container array", container_array, container_array,
+           {1, 2, 3, 4, 5, 6, 7, 8});
+
+  stanli::Program mismatch_program;
+  std::map<std::string, const FunDef*> functions;
+  stanli::ProgramCompiler mismatch{mismatch_program, functions};
+  stanli::Range dst{mismatch.alloc(4), 4};
+  dst.kind = stanli::ViewKind::Array;
+  dst.dims = {2, 2};
+  stanli::Range rhs{mismatch.alloc(4), 4};
+  rhs.kind = stanli::ViewKind::Array;
+  rhs.dims = {4};
+  mismatch.reals["dst"] = dst;
+  mismatch.reals["rhs"] = rhs;
+  bool refused = false;
+  try {
+    mismatch.stmt(full_span_assignment("dst", var("rhs", "UArray")));
+  } catch (const stanli::Bail& error) {
+    refused = error.why.find("logical view mismatch") != std::string::npos;
+  }
+  if (!refused) {
+    ++failures;
+    std::printf("FAIL full-span Program accepted mismatched array geometry\n");
+  }
+}
+
 void test_matrix_row_indexing() {
   // A[1] is the complete first row.  For [[1,2],[3,4]], sum(A[1]) is 3;
   // indexing a flattened register is not the same operation.
@@ -639,6 +744,8 @@ int main() {
   test_short_circuit_or_requires_rhs();
   test_short_circuit_and_requires_rhs();
   test_uninitialized_real();
+  test_full_span_ode_vector();
+  test_full_span_program_views();
   test_matrix_row_indexing();
   test_mixed_integer_udf_arguments();
   test_nested_print_effect();

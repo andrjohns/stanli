@@ -3,13 +3,16 @@
 // below mirrors the production OCaml layout for malformed-input coverage.
 #include <stanli/compile.hpp>
 #include <stanli/mir_decode.hpp>
+#include <stanli/wa_interp.hpp>
 
 #include "../runtime/third_party/nlohmann_json.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <optional>
@@ -305,6 +308,31 @@ std::string real_target_v2_payload(uint64_t bits, uint8_t data_only = 1,
   append_u32(payload, 0);      // fun_defs
   append_u32(payload, 0);      // output_vars
   return payload;
+}
+
+size_t replace_assignment_with_all(std::string& text, const std::string& lhs,
+                                   const std::string& type) {
+  const std::string from = "(Assignment ((LVariable " + lhs + ") ()) " + type;
+  const std::string to = "(Assignment ((LVariable " + lhs + ") (All)) " + type;
+  size_t count = 0;
+  for (size_t at = 0; (at = text.find(from, at)) != std::string::npos;) {
+    text.replace(at, from.size(), to);
+    at += to.size();
+    ++count;
+  }
+  return count;
+}
+
+size_t count_full_span_assignments(const std::vector<mir::Stmt>& body,
+                                   const std::string& lhs) {
+  size_t count = 0;
+  for (const mir::Stmt& statement : body) {
+    count += statement.kind == mir::Stmt::Assignment && statement.lhs == lhs &&
+             statement.lhs_idx.size() == 1 &&
+             statement.lhs_idx[0].name == "IndexAll";
+    count += count_full_span_assignments(statement.body, lhs);
+  }
+  return count;
 }
 
 template <typename T, typename Write>
@@ -813,6 +841,262 @@ void check_lowering_equivalence(const char* legacy_fixture,
         "portable lowering gradient bitwise");
 }
 
+void check_full_span_assignment_lowering() {
+  const auto decoded_pair = [](const std::string& legacy_text,
+                               const std::string& what) {
+    const mir::Program legacy_program = decode_program(legacy_text);
+    const std::string portable_text = write_v2(legacy_program);
+    const mir::Program portable_program = decode_program(portable_text);
+    check(write_program_object(portable_program) ==
+              write_program_object(legacy_program),
+          what + " portable decode matches legacy decode");
+    return std::make_pair(portable_text, legacy_program);
+  };
+  const auto run_log = [](CompiledModel& model,
+                          const std::vector<double>& params,
+                          const std::string& what) {
+    Executor executor(std::move(model.graph));
+    model.bind(executor);
+    check(executor.n_params() == static_cast<int64_t>(params.size()),
+          what + " parameter width");
+    const size_t n =
+        std::min(params.size(), static_cast<size_t>(executor.n_params()));
+    std::copy_n(params.begin(), n, executor.params_data());
+    std::vector<double> gradient(static_cast<size_t>(executor.n_params()));
+    const double lp = executor.gradient(gradient.data());
+    return std::make_pair(lp, gradient);
+  };
+
+  // Arrays with vector and row-vector leaves exercise the complete logical
+  // view check in graph lowering, including the leaf orientation carried by
+  // the portable format.
+  {
+    std::string legacy =
+        slurp("tests/fixtures/view_array_container_extract.tmir.sexp");
+    check(replace_assignment_with_all(legacy, "vs", "(UArray UVector)") == 2,
+          "legacy array-vector assignments rewritten for fixture");
+    check(replace_assignment_with_all(legacy, "rs", "(UArray URowVector)") == 2,
+          "legacy array-row assignments rewritten for fixture");
+    const auto decoded =
+        decoded_pair(legacy, "full-span array-container fixture");
+    check(count_full_span_assignments(decoded.second.log_prob, "vs") == 1 &&
+              count_full_span_assignments(decoded.second.log_prob, "rs") == 1,
+          "legacy decoder preserves array-container IndexAll LHS");
+    CompiledModel legacy_model = compile_model(legacy, DataMap{});
+    CompiledModel portable_model = compile_model(decoded.first, DataMap{});
+    const auto legacy_result =
+        run_log(legacy_model, {0.25}, "legacy array-container full-span");
+    const auto portable_result =
+        run_log(portable_model, {0.25}, "portable array-container full-span");
+    check(legacy_result == portable_result,
+          "array-container full-span log_prob format parity");
+    check(legacy_result.first == 1630.25 &&
+              legacy_result.second == std::vector<double>({1.0}),
+          "array-container full-span log_prob value");
+  }
+
+  // Zero storage does not erase the declared array/vector geometry. A
+  // complete assignment of array[2] vector[0] therefore succeeds only when
+  // the logical views, rather than flat widths alone, agree.
+  {
+    std::string legacy =
+        slurp("tests/fixtures/viewa_explicit_zero_vectors.tmir.sexp");
+    check(
+        replace_assignment_with_all(legacy, "values", "(UArray UVector)") == 2,
+        "legacy zero-vector-array assignments rewritten for fixture");
+    const auto decoded =
+        decoded_pair(legacy, "full-span zero-vector-array fixture");
+    CompiledModel legacy_model = compile_model(legacy, DataMap{});
+    CompiledModel portable_model = compile_model(decoded.first, DataMap{});
+    const auto legacy_result =
+        run_log(legacy_model, {0.25}, "legacy zero-vector-array full-span");
+    const auto portable_result =
+        run_log(portable_model, {0.25}, "portable zero-vector-array full-span");
+    check(legacy_result == portable_result && legacy_result.first == 200.25 &&
+              legacy_result.second == std::vector<double>({1.0}),
+          "zero-vector-array full-span value and format parity");
+  }
+
+  // The row-vector form uses the same storage width as a vector but a
+  // distinct logical view, so it is a focused orientation check.
+  {
+    std::string legacy = slurp("tests/fixtures/rep_row_vector.tmir.sexp");
+    check(replace_assignment_with_all(legacy, "x", "URowVector") == 2,
+          "legacy row-vector assignments rewritten for fixture");
+    const auto decoded = decoded_pair(legacy, "full-span row-vector fixture");
+    check(count_full_span_assignments(decoded.second.log_prob, "x") == 1,
+          "legacy decoder preserves row-vector IndexAll LHS");
+    CompiledModel legacy_model = compile_model(legacy, DataMap{});
+    CompiledModel portable_model = compile_model(decoded.first, DataMap{});
+    const auto legacy_result =
+        run_log(legacy_model, {0.25}, "legacy row-vector full-span");
+    const auto portable_result =
+        run_log(portable_model, {0.25}, "portable row-vector full-span");
+    check(legacy_result == portable_result,
+          "row-vector full-span log_prob format parity");
+
+    mir::Program mismatch = decoded.second;
+    std::function<bool(std::vector<mir::Stmt>&)> shorten =
+        [&](std::vector<mir::Stmt>& body) {
+          for (mir::Stmt& statement : body) {
+            if (statement.kind == mir::Stmt::Assignment &&
+                statement.lhs == "x" && statement.lhs_idx.size() == 1 &&
+                statement.lhs_idx[0].name == "IndexAll" &&
+                statement.rhs.args.size() == 2) {
+              statement.rhs.args[1].lit_i = 3;
+              statement.rhs.args[1].lit = 3.0;
+              return true;
+            }
+            if (shorten(statement.body)) return true;
+          }
+          return false;
+        };
+    check(shorten(mismatch.log_prob),
+          "full-span mismatch fixture found its assignment");
+    expect_compile_error(write_v2(mismatch), "assignment width mismatch for x",
+                         "full-span row-vector width mismatch");
+
+    mir::Program wrong_view = decoded.second;
+    std::function<bool(std::vector<mir::Stmt>&)> reorient =
+        [&](std::vector<mir::Stmt>& body) {
+          for (mir::Stmt& statement : body) {
+            if (statement.kind == mir::Stmt::Assignment &&
+                statement.lhs == "x" && statement.lhs_idx.size() == 1 &&
+                statement.lhs_idx[0].name == "IndexAll") {
+              statement.rhs.name = "rep_vector";
+              statement.rhs.type_ = "UVector";
+              statement.rhs.unsized.leaf = mir::UnsizedLeaf::Vector;
+              return true;
+            }
+            if (reorient(statement.body)) return true;
+          }
+          return false;
+        };
+    check(reorient(wrong_view.log_prob),
+          "full-span view mismatch fixture found its assignment");
+    expect_compile_error(write_v2(wrong_view),
+                         "assignment logical view mismatch for x",
+                         "full-span vector orientation mismatch");
+  }
+
+  // A transformed-data scalar array reaches MirInterp during concrete data
+  // specialization, then the graph consumes the assigned values.
+  {
+    std::string legacy = slurp("tests/fixtures/rangeclamp.tmir.sexp");
+    check(replace_assignment_with_all(legacy, "xs", "(UArray UReal)") == 1,
+          "legacy scalar-array assignment rewritten for fixture");
+    const auto decoded = decoded_pair(legacy, "full-span scalar-array fixture");
+    check(count_full_span_assignments(decoded.second.prepare_data, "xs") == 1,
+          "legacy decoder preserves scalar-array IndexAll LHS");
+    DataMap data;
+    data.set_int("K", 3);
+    data.set_int("lo", 1);
+    data.set_int("hi", 4);
+    data.set_real_array("Y", {0, 0, 0, 0}, {4});
+    data.set_real_array("Zm", std::vector<double>(8, 0.0), {4, 2});
+    CompiledModel legacy_model = compile_model(legacy, data);
+    CompiledModel portable_model = compile_model(decoded.first, data);
+    const auto legacy_result =
+        run_log(legacy_model, {0.125}, "legacy scalar-array full-span");
+    const auto portable_result =
+        run_log(portable_model, {0.125}, "portable scalar-array full-span");
+    check(legacy_result == portable_result,
+          "scalar-array full-span specialization format parity");
+  }
+
+  // An integer array initialized through a complete assignment is consumed
+  // later as integer data. Compiling the downstream ldexp expressions proves
+  // the assignment retained both initialized-prefix and observed-value
+  // specialization instead of leaving a typeless real slot behind.
+  {
+    std::string legacy = slurp("tests/fixtures/binint.tmir.sexp");
+    check(replace_assignment_with_all(legacy, "expo",
+                                      "(UArray (UArray UInt))") == 1,
+          "legacy int-array assignment rewritten for fixture");
+    const auto decoded = decoded_pair(legacy, "full-span int-array fixture");
+    const DataMap data = DataMap::from_json_file("tests/fixtures/binint.json");
+    const CompiledModel legacy_model = compile_model(legacy, data);
+    const CompiledModel portable_model = compile_model(decoded.first, data);
+    check(legacy_model.n_unconstrained == portable_model.n_unconstrained &&
+              legacy_model.fills == portable_model.fills &&
+              legacy_model.graph.ops.size() == portable_model.graph.ops.size(),
+          "int-array full-span specialization format parity");
+  }
+
+  // Generated quantities execute a vector full-span assignment whose RHS
+  // uses a draw-dependent array index. Run both formats with identical RNG
+  // streams and compare every emitted column and the stream position.
+  {
+    std::string legacy = slurp("tests/fixtures/gq_runtime_control.tmir.sexp");
+    check(replace_assignment_with_all(legacy, "chosen", "UVector") == 1,
+          "legacy generated vector assignment rewritten for fixture");
+    const auto decoded =
+        decoded_pair(legacy, "full-span generated-vector fixture");
+    check(count_full_span_assignments(decoded.second.generate_quantities,
+                                      "chosen") == 1,
+          "legacy decoder preserves generated-vector IndexAll LHS");
+    CompiledModel legacy_model = compile_model(legacy, DataMap{});
+    CompiledModel portable_model = compile_model(decoded.first, DataMap{});
+    const std::vector<double> params = {
+        0.2,           -0.3,          0.1,  -0.2, 1.0,  2.0,  3.0,  4.0,
+        std::log(1.1), std::log(1.7), 0.25, -0.5, 0.75, -1.0, 1.25, -1.5};
+    const auto legacy_log =
+        run_log(legacy_model, params, "legacy generated-vector full-span");
+    const auto portable_log =
+        run_log(portable_model, params, "portable generated-vector full-span");
+    check(legacy_log == portable_log,
+          "generated-vector full-span log_prob format parity");
+
+    check(legacy_model.write_array && portable_model.write_array,
+          "full-span generated-vector write_array exists");
+    if (legacy_model.write_array && portable_model.write_array) {
+      check(!legacy_model.write_array->interp &&
+                legacy_model.write_array->truncated.empty() &&
+                !portable_model.write_array->interp &&
+                portable_model.write_array->truncated.empty(),
+            "full-span generated-vector write_array lowers completely");
+      check(CompiledModel::csv_names(legacy_model.write_array->columns) ==
+                CompiledModel::csv_names(portable_model.write_array->columns),
+            "full-span generated-vector output columns");
+      Executor legacy_write(std::move(legacy_model.write_array->graph));
+      Executor portable_write(std::move(portable_model.write_array->graph));
+      legacy_model.write_array->bind(legacy_write);
+      portable_model.write_array->bind(portable_write);
+      check(
+          legacy_write.n_params() == static_cast<int64_t>(params.size()) &&
+              portable_write.n_params() == static_cast<int64_t>(params.size()),
+          "full-span generated-vector write_array parameter width");
+      std::copy(params.begin(), params.end(), legacy_write.params_data());
+      std::copy(params.begin(), params.end(), portable_write.params_data());
+      WaRng legacy_rng(81), portable_rng(81);
+      legacy_write.run_forward_only(EvalState{&legacy_rng});
+      portable_write.run_forward_only(EvalState{&portable_rng});
+      const auto collect = [](const CompiledModel::WriteArray& write_array,
+                              Executor& executor) {
+        std::vector<double> row;
+        for (const auto& column : write_array.columns) {
+          const double* values = executor.value_ptr(column.slot);
+          for (int64_t i = 0; i < column.len; ++i)
+            row.push_back(values[column.storage_index(i)]);
+        }
+        return row;
+      };
+      const std::vector<double> legacy_row =
+          collect(*legacy_model.write_array, legacy_write);
+      const std::vector<double> portable_row =
+          collect(*portable_model.write_array, portable_write);
+      const bool same_row =
+          legacy_row.size() == portable_row.size() &&
+          std::memcmp(legacy_row.data(), portable_row.data(),
+                      legacy_row.size() * sizeof(double)) == 0;
+      check(same_row,
+            "full-span generated-vector write_array value format parity");
+      check(legacy_rng.gen()() == portable_rng.gen()(),
+            "full-span generated-vector RNG stream parity");
+    }
+  }
+}
+
 void check_overload_finalization() {
   const mir::Program resolved =
       read_fixture("tests/fixtures/overload.tmir.sexp");
@@ -890,6 +1174,11 @@ void check_structural_rejections() {
   const mir::Program upfrom = decode_program(write_v2(target_program(indexed)));
   check(upfrom.log_prob[0].target.args[1].name == "IndexUpfrom",
         "IndexUpfrom portable shape");
+
+  bad_index.name = "IndexAll";
+  indexed.args[1] = bad_index;
+  expect_error(write_v2(target_program(indexed)), "IndexAll call",
+               "IndexAll with an operand");
 
   bad_index.name = "FutureIndex";
   indexed.args[1] = bad_index;
@@ -1263,6 +1552,7 @@ int main(int argc, char** argv) {
   check_round_trip("tests/fixtures/paramcond_break.tmir.sexp");
   check_lowering_equivalence(argc == 3 ? argv[1] : nullptr,
                              argc == 3 ? argv[2] : nullptr);
+  check_full_span_assignment_lowering();
   check_overload_finalization();
   check_exact_float_bits();
   check_structural_rejections();
