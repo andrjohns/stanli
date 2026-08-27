@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+## 0.9.3
+
+### Portable MIR is compact and shared
+
+The native, browser, npm, and Windows compilers now run one stanli-owned OCaml
+pipeline over upstream typed MIR (#211, #213). Native OCaml, js_of_ocaml, and
+the Windows executable emit byte-identical canonical output for ordinary
+models, nested user functions, loop control, checked integer folding, exact
+floating-point payloads, Unicode, and includes. Browser and npm packages prefer
+the shared compiler while keeping pristine stancjs as a one-release rollback;
+Windows packages similarly prefer `stanli-compile.exe` and retain `stanc.exe`.
+A selected compiler failure is reported directly rather than hidden by retrying
+another producer.
+
+The first portable JSON envelope never shipped and has been replaced by compact
+Portable MIR v2 (#218). The reader builds the C++ MIR directly, enforces
+canonical base64 and bounded allocations, and retains the legacy S-expression
+reader. Across the 153-program fixture census, v2 uses 823,104 bytes versus
+4,652,169 for legacy MIR. Eight Schools decodes in a 0.074 ms fresh-process
+median versus 0.293 ms for legacy and occupies 6,932 bytes versus 33,320.
+
+### The R and webR bridge is ready for the shared compiler
+
+The real V8 and webR helpers recognize `stanli_compile()` by export presence,
+preserve exact UTF-8 bytes, and keep a selected producer's error final (#225).
+This release intentionally retains the legacy JavaScript compiler inside the R
+package while its runtime gains the compact-v2 reader. It is therefore the
+compatibility anchor for the next release: the next package's v2 compiler can
+run with this runtime, and this package's legacy compiler can run with the next
+runtime.
+
+### Selective upstream MIR passes can be measured independently
+
+The shared OCaml pipeline now has an explicit pass-selection boundary and a
+test-only probe for upstream `vectorize_loops` (#215, #217). The complete
+131-model measurement found no semantic failures; five MIR programs changed
+and two log-density values moved by one ULP. Production vectorization remains
+off, and the existing C++ reroll pass remains enabled.
+
+### More parameter-dependent programs lower
+
+Parameter-dependent regions now handle data-sized empty outputs, rows in size
+expressions, integer assignments and functions, logical and comparison
+operators, multidimensional integer-array reads, literal integer arrays,
+`rep_vector`, and data-dependent `break` and `continue` (#223). Declared but
+uninitialized locals and zero-width data input also lower correctly.
+
 ### The R runtime cache is keyed by release
 
 A runtime downloaded by an older version of the R package survived a
