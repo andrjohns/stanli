@@ -72,6 +72,7 @@ const models = [
   ["ordinary", "tests/fixtures/es.stan"],
   ["nested-udf", "tests/fixtures/view_udf_local_data_branch.stan"],
   ["loop-control", "tests/fixtures/paramcond_break.stan"],
+  ["vectorized-loop", "tests/compiler/portable_vectorize_loop.stan"],
   ["mother", "tests/stanc3/mother.stan"],
   ["folded-float", "tests/compiler/portable_folded_float.stan"],
   ["int32-overflow", "tests/compiler/portable_int32_overflow.stan"],

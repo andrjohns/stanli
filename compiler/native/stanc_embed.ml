@@ -1,8 +1,7 @@
-(* stanli embedding entry point: Stan code -> compact portable MIR (stanc3 --O1:
-   inlining, constant/copy propagation, dead code elimination, partial
-   evaluation). Registered for C via Callback; built with -output-complete-obj
-   so the OCaml runtime rides inside one object file linked into libstanli.
-   Return protocol: "OK<json>" or "ERR<message>". *)
+(* stanli embedding entry point: Stan code -> compact portable MIR (upstream O1
+   plus loop vectorization). Registered for C via Callback; built with
+   -output-complete-obj so the OCaml runtime rides inside one object file linked
+   into libstanli. Return protocol: "OK<portable>" or "ERR<message>". *)
 
 let compile_tmir (code : string) : string =
   let compilation =

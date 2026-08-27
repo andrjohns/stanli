@@ -10,7 +10,7 @@ type 'a compilation =
 type pass_selection = {vectorize_loops: bool}
 
 val default_pass_selection : pass_selection
-(** The pass-off selection used by every shipped producer entrypoint. *)
+(** The shipping selection: upstream O1 plus loop vectorization. *)
 
 val compile_mir :
      ?include_source:Frontend.Include_files.t

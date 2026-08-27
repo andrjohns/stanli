@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Measure upstream loop vectorization without selecting it for users.
+"""Measure production loop vectorization against its pass-off oracle.
 
 Each selected Stan source is compiled exactly twice by the test-only OCaml
-probe: upstream O1 with vectorize_loops off and with that one pass on. The
-saved portable MIR is then reused for every semantic point and for four graph
-cells (source pass off/on crossed with the C++ re-roll pass off/on).
+probe: upstream O1 with vectorize_loops off and the shipping selection with
+that one pass on. The saved portable MIR is then reused for every semantic
+point and for four graph cells (source pass off/on crossed with the C++ re-roll
+pass off/on).
 
 Hard failures are semantic: result categories, vector shapes, write_array
 names and shapes, nonfinite behavior, and the existing CmdStan reference
