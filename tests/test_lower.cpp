@@ -2185,6 +2185,30 @@ int main() {
               scale);
   }
 
+  // rows() in a necessity island reads the logical matrix geometry rather
+  // than being rejected as an unknown register-machine function.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_rows.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const int64_t n = ex.n_params();
+    check(n == 7, "parameter-condition rows parameter count");
+    for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = 0.0;
+    double grad[7] = {};
+    ex.params_data()[0] = 0.4;
+    const double positive_lp = ex.gradient(grad);
+    expect_eq("parameter-condition rows positive lp", positive_lp, 0.8);
+    expect_eq("parameter-condition rows positive theta grad", grad[0], 2.0);
+    for (int i = 1; i < 7; ++i)
+      expect_eq("parameter-condition rows matrix grad " + std::to_string(i),
+                grad[i], 0.0);
+    ex.params_data()[0] = -0.4;
+    const double negative_lp = ex.gradient(grad);
+    expect_eq("parameter-condition rows negative lp", negative_lp, -0.4);
+    expect_eq("parameter-condition rows negative theta grad", grad[0], 1.0);
+  }
+
   // The same region written with `~`: refused, by name, with the fix in
   // the message. Before the check existed this compiled and was wrong in
   // lp by exactly the dropped constant, with a correct gradient.

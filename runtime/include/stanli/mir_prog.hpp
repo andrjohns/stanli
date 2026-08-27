@@ -455,6 +455,19 @@ struct ProgramCompiler {
     }
     if (e.args.empty() && e.name == "negative_infinity")
       return {konst(-std::numeric_limits<double>::infinity()), 1};
+    if (e.args.size() == 1 && e.name == "rows") {
+      const Range a = expr(e.args[0]);
+      int64_t n = 0;
+      if (a.kind == ViewKind::Matrix)
+        n = a.rows;
+      else if (a.kind == ViewKind::Vector)
+        n = a.len;
+      else if (a.kind == ViewKind::RowVector)
+        n = 1;
+      else
+        bail("rows requires a matrix or vector logical view");
+      return {konst((double)n), 1};
+    }
     if (e.args.size() == 1 && e.name == "max") {
       const Range a = expr(e.args[0]);
       const int r = alloc(1);
