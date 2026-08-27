@@ -302,6 +302,33 @@ class MirInterp {
         Value* en = find(st.lhs);
         if (!en) fail("assignment to unknown " + st.lhs);
         Value v = eval(st.rhs);
+        // A lone All replaces the complete container. Retain the declared
+        // geometry and integer specialization owned by the destination:
+        // replacing the Value object wholesale would let malformed MIR
+        // resize or retag the declaration. The two-index matrix column form
+        // remains on its existing path below.
+        if (st.lhs_idx.size() == 1 && st.lhs_idx[0].name == "IndexAll") {
+          if (en->dims.empty())
+            fail("full-span assignment needs a container", st.raw);
+          if (v.r.size() != en->r.size())
+            fail("full-span assignment size mismatch", st.raw);
+          if (v.dims != en->dims)
+            fail("full-span assignment shape mismatch", st.raw);
+          const bool target_is_int = en->is_int;
+          en->r = std::move(v.r);
+          en->i.clear();
+          en->is_int = target_is_int;
+          if (target_is_int) {
+            en->i.reserve(en->r.size());
+            if (v.is_int && v.i.size() == en->r.size()) {
+              en->i = std::move(v.i);
+            } else {
+              for (const T& value : en->r)
+                en->i.push_back(static_cast<int>(val(value)));
+            }
+          }
+          return;
+        }
         // Fix one or more leading dimensions of an N-D array and replace
         // the complete remaining container. For array[3] matrix[2,4] x,
         // x[i,j] is a row_vector[4]. First-index-fast storage makes those

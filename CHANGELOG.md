@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Complete indexed assignments lower everywhere
+
+Assignments such as `x[:] = rhs` now preserve the destination's declared
+shape and integer representation in transformed data, graph lowering,
+parameter-dependent register programs, ODE functions, and generated
+quantities. This also prepares the runtime for assignment loops rewritten by
+the upstream `vectorize_loops` pass.
+
 ## 0.9.5
 
 ### Upstream MIR loop vectorization is enabled

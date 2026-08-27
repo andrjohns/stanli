@@ -775,6 +775,101 @@ int main(int argc, char** argv) {
       }
       return false;
     };
+
+    // A one-dimensional All on the LHS replaces the complete value while
+    // retaining the destination's geometry and integer payload. Exercise
+    // both vector orientations, scalar/container arrays, and the mismatch
+    // checks directly in the semantic fallback.
+    auto put_real = [&](const std::string& name, std::vector<double> values,
+                        std::vector<int64_t> dims) {
+      DataMap::Entry entry;
+      entry.r = std::move(values);
+      entry.dims = std::move(dims);
+      interp.env()[name] = std::move(entry);
+    };
+    auto full_write = [&](const std::string& lhs, const std::string& rhs,
+                          const std::string& type, mir::UnsizedView view) {
+      mir::Stmt assignment;
+      assignment.kind = mir::Stmt::Assignment;
+      assignment.lhs = lhs;
+      assignment.lhs_idx = {all()};
+      assignment.rhs.kind = mir::Expr::Var;
+      assignment.rhs.name = rhs;
+      assignment.rhs.type_ = type;
+      assignment.rhs.unsized = view;
+      assignment.rhs.data_only = true;
+      return assignment;
+    };
+
+    put_real("span_vector", {0, 0, 0}, {3});
+    put_real("span_vector_rhs", {1, 2, 3}, {3});
+    interp.run({full_write("span_vector", "span_vector_rhs", "UVector",
+                           {0, mir::UnsizedLeaf::Vector})});
+    check(
+        interp.env().at("span_vector").dims == std::vector<int64_t>({3}) &&
+            interp.env().at("span_vector").r == std::vector<double>({1, 2, 3}),
+        "full-span vector assignment");
+
+    put_real("span_row", {0, 0, 0}, {3});
+    put_real("span_row_rhs", {4, 5, 6}, {3});
+    interp.run({full_write("span_row", "span_row_rhs", "URowVector",
+                           {0, mir::UnsizedLeaf::RowVector})});
+    check(interp.env().at("span_row").dims == std::vector<int64_t>({3}) &&
+              interp.env().at("span_row").r == std::vector<double>({4, 5, 6}),
+          "full-span row-vector assignment");
+
+    DataMap::Entry span_ints;
+    span_ints.is_int = true;
+    span_ints.dims = {3};
+    span_ints.i = {0, 0, 0};
+    span_ints.r = {0, 0, 0};
+    interp.env()["span_ints"] = std::move(span_ints);
+    DataMap::Entry span_ints_rhs;
+    span_ints_rhs.is_int = true;
+    span_ints_rhs.dims = {3};
+    span_ints_rhs.i = {7, 8, 9};
+    span_ints_rhs.r = {7, 8, 9};
+    interp.env()["span_ints_rhs"] = std::move(span_ints_rhs);
+    interp.run({full_write("span_ints", "span_ints_rhs", "UArray",
+                           {1, mir::UnsizedLeaf::Int})});
+    const DataMap::Entry& full_ints = interp.env().at("span_ints");
+    check(full_ints.is_int && full_ints.dims == std::vector<int64_t>({3}) &&
+              full_ints.i == std::vector<int>({7, 8, 9}) &&
+              full_ints.r == std::vector<double>({7, 8, 9}),
+          "full-span int-array assignment retains both payloads");
+
+    put_real("span_nested", {0, 0, 0, 0}, {2, 2});
+    put_real("span_nested_rhs", {11, 12, 21, 22}, {2, 2});
+    interp.run({full_write("span_nested", "span_nested_rhs", "UArray",
+                           {1, mir::UnsizedLeaf::Vector})});
+    check(interp.env().at("span_nested").dims == std::vector<int64_t>({2, 2}) &&
+              interp.env().at("span_nested").r ==
+                  std::vector<double>({11, 12, 21, 22}),
+          "full-span array-container assignment");
+
+    put_real("span_short", {0, 0, 0}, {3});
+    put_real("span_short_rhs", {1, 2}, {2});
+    check(
+        assignment_refused(full_write("span_short", "span_short_rhs", "UVector",
+                                      {0, mir::UnsizedLeaf::Vector})),
+        "full-span assignment checks storage length");
+    put_real("span_shape", {0, 0, 0, 0}, {2, 2});
+    put_real("span_shape_rhs", {1, 2, 3, 4}, {4});
+    check(
+        assignment_refused(full_write("span_shape", "span_shape_rhs", "UArray",
+                                      {1, mir::UnsizedLeaf::Vector})),
+        "full-span assignment checks logical shape");
+
+    // Keep the pre-existing matrix column form on its own two-index path.
+    put_real("span_matrix", {1, 2, 3, 4}, {2, 2});
+    put_real("span_column", {9, 8}, {2});
+    mir::Stmt column_write = full_write("span_matrix", "span_column", "UVector",
+                                        {0, mir::UnsizedLeaf::Vector});
+    column_write.lhs_idx = {all(), single(2)};
+    interp.run({column_write});
+    check(interp.env().at("span_matrix").r == std::vector<double>({1, 2, 9, 8}),
+          "matrix column assignment remains distinct from full-span");
+
     mir::Stmt out_of_bounds = partial_write;
     out_of_bounds.lhs_idx = {single(4), single(1)};
     check(assignment_refused(out_of_bounds),

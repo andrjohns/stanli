@@ -4744,6 +4744,24 @@ struct Lowering {
           const Val rhs_v = lower_expr(s.rhs);
           const int rhs = rhs_v.slot;
           SlotInfo out_si = prev_v.si;
+          // A one-index All spans the complete logical value. Keep this as
+          // an indexed functional update rather than silently rewriting the
+          // MIR statement: the ordinary binding checks still enforce width
+          // and logical view, while the store path preserves integer-array
+          // initialization and observation metadata. Matrix `[:, j]` is a
+          // separate two-index form below and never enters this branch.
+          if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexAll") {
+            if (is_scalar(prev_v))
+              fail("full-span assignment needs a container for " + s.lhs,
+                   s.raw);
+            require_binding(rhs_v, g.slots[prev].len, prev_v.si, s.lhs, s.raw);
+            Val nv = emit_value(OP_SET_SLICE, {prev_v, rhs_v},
+                                g.slots[prev].len, out_si, {0});
+            propagate_int_update(nv, prev_v, rhs_v, 0, 1);
+            scope[s.lhs] = nv;
+            sync_data_local(s.lhs, s.rhs, nv);
+            return;
+          }
           // Whole matrix row write M[i] = row_vector: one value per column,
           // strided by the physical row count.
           if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexSingle" &&

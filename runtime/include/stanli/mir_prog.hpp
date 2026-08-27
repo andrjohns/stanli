@@ -1058,6 +1058,21 @@ struct ProgramCompiler {
             emit(Program::MOV, dst.reg + k, v.reg + k);
           return;
         }
+        // A single All is the complete destination view. This is reachable
+        // in ODE functions and parameter-dependent statement islands, so it
+        // must agree with both graph lowering and MirInterp rather than
+        // forcing an otherwise supported region onto the fallback path.
+        if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexAll") {
+          if (dst.kind == ViewKind::Flat)
+            bail("full-span assignment needs a container for " + s.lhs);
+          if (v.len != dst.len)
+            bail("full-span assignment width mismatch for " + s.lhs);
+          if (!same_view(v, dst))
+            bail("full-span assignment logical view mismatch for " + s.lhs);
+          for (int k = 0; k < v.len; ++k)
+            emit(Program::MOV, dst.reg + k, v.reg + k);
+          return;
+        }
         for (const auto& ix : s.lhs_idx)
           if (ix.name != "IndexSingle")
             bail("assignment index form for " + s.lhs);
