@@ -1,15 +1,13 @@
-# R CMD check for the R package, on the platforms CRAN checks on.
+# R CMD check for the R package on its supported desktop platforms.
 #
-# Deliberately without a runtime. CRAN's farm will not have one either --
-# the 16 MB library is downloaded on first use, not built from source --
-# so this job answers the question CRAN asks: does the package install,
-# document, and check cleanly on its own? The sampling tests skip here
-# and say so. They run for real in wheels.yml, against the .so that
-# build job just produced, and that job fails if they skip.
+# Deliberately without a runtime: the 16 MB library is downloaded only when
+# the user asks for it, not built with the package. This job checks that the
+# package installs, documents, and checks cleanly on its own. The sampling
+# tests skip here and say so. They run for real in wheels.yml, against the .so
+# that build job just produced, and that job fails if they skip.
 #
 # What does run here is the JavaScript compiler path: stanc3 through V8,
-# which is the piece that makes the package shippable to CRAN at all and
-# the piece with no runtime dependency.
+# which is the source-compilation path with no runtime dependency.
 name: R
 
 on:
@@ -41,7 +39,8 @@ concurrency:
 jobs:
   # Two constants that must agree and live in different languages in
   # different directories. The runtime and the R bridge are separately
-  # versioned artifacts -- one is downloaded, the other comes from CRAN --
+  # versioned artifacts -- one is downloaded, the other is installed with
+  # the R package --
   # so the bridge refuses to bind when the numbers disagree at runtime.
   # That guard is only as good as the number it compares against, and
   # bumping capi.h without bridge.c would make it accept a runtime it
@@ -90,8 +89,8 @@ jobs:
           # manual and a runner without pdflatex reports the absence as
           # an Rd problem ("LaTeX errors when creating PDF version"),
           # which is a WARNING and an ERROR for something the package
-          # did not do. CRAN builds that manual, so the answer is to
-          # have a pdflatex rather than to stop asking.
+          # did not do. Providing pdflatex keeps this a meaningful package
+          # check rather than an environment failure.
           - {os: ubuntu-latest,  r: 'release', args: '"--as-cran"', tex: true}
           - {os: ubuntu-latest,  r: 'devel',   args: '"--no-manual"'}
           - {os: macos-latest,   r: 'release', args: '"--no-manual"'}
@@ -121,7 +120,6 @@ jobs:
         with:
           working-directory: r
           args: ${{ matrix.args }}
-          # One NOTE is expected and permanent until the package is on
-          # CRAN ("New submission"); nothing else may appear.
+          # One NOTE ("New submission") is expected; nothing else may appear.
           error-on: '"warning"'
           upload-snapshots: true
