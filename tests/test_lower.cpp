@@ -2286,6 +2286,29 @@ int main() {
     check(threw, "integer assigned under a parameter condition refused");
   }
 
+  // The comparisons and the logical operators as compile-time integers:
+  // the `while` condition decides the trip count, and each integer local
+  // is a comparison. Before this the region compiler knew five integer
+  // functions -- the four arithmetic ones and unary minus -- so any of
+  // these refused the whole region by name.
+  {
+    DataMap d;
+    d.set_int("k", 2);
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/paramcond_intops.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    // The loop stops on `hits < 3` with hits = 3, so the coefficient is
+    // 3 + 1 + 1 + 1 + 0.
+    ex.params_data()[0] = 0.5;
+    expect_eq("parameter-condition int ops lp", ex.gradient(&grad), 3.0);
+    expect_eq("parameter-condition int ops grad", grad, 6.0);
+    ex.params_data()[0] = -0.5;
+    expect_eq("parameter-condition int ops else lp", ex.gradient(&grad), -0.5);
+    expect_eq("parameter-condition int ops else grad", grad, 1.0);
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.
