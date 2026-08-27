@@ -212,6 +212,8 @@ struct Stmt {
     While,
     NRFunApp,
     Return,
+    Break,
+    Continue,
     Skip,
     Unsupported
   } kind = Unsupported;

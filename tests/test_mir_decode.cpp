@@ -224,6 +224,10 @@ const char* write_stmt_kind(mir::Stmt::Kind value) {
       return "NRFunApp";
     case mir::Stmt::Return:
       return "Return";
+    case mir::Stmt::Break:
+      return "Break";
+    case mir::Stmt::Continue:
+      return "Continue";
     case mir::Stmt::Skip:
       return "Skip";
     case mir::Stmt::Unsupported:
