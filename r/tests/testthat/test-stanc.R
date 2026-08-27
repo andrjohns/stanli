@@ -1,7 +1,6 @@
-# The one path that works without a runtime, and so the only thing CRAN's
-# check farm will actually execute: stanc3 compiled to JavaScript, run
-# through V8. It is what makes the package shippable there at all, so it
-# is worth a test that does not skip on the machines that matter.
+# The fallback path works without a runtime: stanc3 compiled to JavaScript and
+# run through V8. Keep one compiler test independent of runtime availability so
+# every package-checking host exercises source compilation.
 
 test_that("the bundled JavaScript compiler produces MIR", {
   skip_if_not_installed("V8")

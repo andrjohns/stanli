@@ -553,13 +553,11 @@ jobs:
           name: wheel-${{ matrix.plat }}
           path: dist/*.whl
 
-      # The same _bin/ the wheel ships, packaged on its own for the R
-      # package, which downloads its runtime instead of bundling it (CRAN
-      # will not carry a 16 MB binary, and could not build one from
-      # source on their farm). Whatever build_wheel.sh put there rides
-      # along, so the Windows tarball carries both compiler executables next to
-      # the DLL the way that wheel does. Naming matches runtime_asset() in
-      # r/R/install.R -- os and architecture as R spells them, normalized.
+      # The same _bin/ the wheel ships, packaged separately for the small R
+      # bridge. Whatever build_wheel.sh put there rides along, so the Windows
+      # tarball carries both compiler executables next to the DLL the way that
+      # wheel does. Naming matches runtime_asset() in r/R/install.R -- os and
+      # architecture as R spells them, normalized.
       - name: Runtime tarball
         env:
           # BSD tar otherwise writes an AppleDouble ._ entry beside every
@@ -579,9 +577,9 @@ jobs:
           path: runtime-dist/*.tar.gz
 
   # The R package tests, against a real runtime. They skip without
-  # one, so this is the only place they actually run: everywhere else
-  # (r.yml, CRAN's farm) has the package but no library, and a green
-  # check there says nothing about whether sampling works. Not in the
+  # one, so this is the integration job where they actually run; r.yml has the
+  # package but no library, and a green check there says nothing about whether
+  # sampling works. Not in the
   # manylinux container -- that image has no R and installing one into
   # AlmaLinux costs more than running the .so on a normal runner, which
   # its glibc 2.28 floor makes safe.
@@ -631,9 +629,9 @@ jobs:
             any::testthat, any::posterior, any::V8, any::jsonlite
           dependencies: '"hard"'
 
-      # Through R CMD check rather than testthat directly, so the tests
-      # run the way CRAN runs them -- against the installed package, in a
-      # clean temporary directory -- instead of against the source tree.
+      # Through R CMD check rather than testthat directly, so the tests run
+      # against the installed package in a clean temporary directory instead
+      # of against the source tree.
       - name: Build and check
         working-directory: r
         env:
@@ -1464,15 +1462,14 @@ jobs:
           ls -la js/
           cd js && npm publish
 
-  # The R package's distribution channel. CRAN carries the R code and the
-  # 40 KB bridge; the 16 MB runtime it dlopens comes from here, which is
-  # the same split torch uses for libtorch, so this job is what makes
-  # stanli_install() resolve to anything at all.
+  # The R package's runtime distribution channel. The small R bridge is built
+  # by the package repository; the runtime it dlopens comes from here, the same
+  # split torch uses for libtorch. This job is what makes stanli_install()
+  # resolve to anything at all.
   #
-  # Tag-gated with the same reasoning as PyPI, and it runs the R source
-  # tarball up as an asset too: r-universe builds from the repository
-  # continuously, but a CRAN submission is a file a human uploads to a
-  # web form, and this is where that file comes from.
+  # Tag-gated with the same reasoning as PyPI, and it uploads the R source
+  # tarball too, so GitHub installs and the release record use the same package
+  # source R-universe follows.
   runtime-release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, windows, wasm-webr]

@@ -8,13 +8,11 @@
 # first use a compiler executable. The Windows runtime ships stanli-compile,
 # which emits portable MIR through the shared OCaml pipeline, beside pristine
 # stanc for one rollback cycle. Without either, the fallback is stanc3 compiled
-# to JavaScript and run through V8. That is the same
-# trick rstan uses to ship a Stan compiler on CRAN: js_of_ocaml turns the
-# OCaml into one 3.0 MB file with no toolchain and no platform binaries,
-# which is a thing CRAN can carry and a native `stanc` per platform is
-# not. CI checks that this generated file comes from the exact configured
-# stanc3 source revision, and the R tests compile both valid and invalid
-# models through it on every supported host.
+# to JavaScript and run through V8. js_of_ocaml turns the OCaml into one
+# 3.0 MB file with no toolchain or platform-specific binary, and the same
+# artifact can execute inside webR. CI checks that this generated file comes
+# from the exact configured stanc3 source revision, and the R tests compile
+# both valid and invalid models through it on every supported host.
 #
 # Under webR there is no V8 package and no process to run a binary in,
 # but the host already IS a JavaScript engine: the webr support
@@ -187,13 +185,11 @@ mir_from_binary <- function(compiler, code, portable = FALSE,
 # filesystem rather than through eval_js values: the MIR of a real model
 # is megabytes, a file path survives any marshalling limit, and neither
 # string ever needs escaping into a JavaScript literal.
-# The support package is reached by computed name, and deliberately not
-# declared in Suggests: CRAN has an unrelated package also named `webr`,
-# so a declaration resolves to the wrong one (its 17-dependency install
-# is what broke the macOS and Windows check runners), and webR's own
-# support package exists nowhere a checker could fetch it from. The
-# sysname guard keeps CRAN's webr from ever being touched on a native
-# machine that happens to have it installed.
+# The support package is reached by computed name and deliberately not declared
+# in Suggests: the ordinary R package also named `webr` is unrelated (its
+# 17-dependency install once broke the macOS and Windows check runners), while
+# webR's host support package is supplied by webR itself. The sysname guard
+# keeps the unrelated package from being touched on a native machine.
 webr_eval_js <- function() {
   if (!identical(Sys.info()[["sysname"]], "Emscripten")) return(NULL)
   pkg <- "webr"

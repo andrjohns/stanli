@@ -4,8 +4,8 @@ Compile and sample Stan models without a C++ toolchain.
 
 ## Install
 
-Not on CRAN yet. Until it is, install from R-universe or GitHub; the
-package lives in the `r/` subdirectory of the repository:
+Install from R-universe or GitHub; the package lives in the `r/` subdirectory
+of the repository:
 
 ```r
 # prebuilt binaries from R-universe (recommended)
@@ -71,10 +71,10 @@ asserts.
 
 Two pieces are not in the package, for two different reasons.
 
-**The runtime** is a ~29 MB shared library holding stan-math, every
-density kernel, and the interpreter. CRAN builds its own binaries from
-source and would have to compile all of that, so `stanli_install()`
-downloads the prebuilt library instead. Because the package and the
+**The runtime** is a ~29 MB shared library holding stan-math, every density
+kernel, and the interpreter. It is published separately so installing the R
+bridge never compiles all of that; `stanli_install()` downloads the prebuilt
+library instead. Because the package and the
 library are separately versioned, they can drift, and drift here would
 not crash: `stanli_sample_opts` is a struct this package declares a
 copy of, so mismatched layouts would read fields at the wrong offsets

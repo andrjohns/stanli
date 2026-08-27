@@ -24,12 +24,10 @@ different binding, so a model samples to the same draws from any of them.
 | **R** | `install.packages("stanli", repos = "https://seantalts.r-universe.dev")` then `stanli_install()` | [r/README.md](r/README.md) |
 | **Browser / Node** | `npm install @seantalts/stanli` | [js/README.md](js/README.md), [npm](https://www.npmjs.com/package/@seantalts/stanli) |
 
-The R package is not on CRAN yet; until it is,
-[R-universe](https://seantalts.r-universe.dev) serves prebuilt binaries,
+[R-universe](https://seantalts.r-universe.dev) serves prebuilt R binaries,
 and `remotes::install_github()` or a checkout installs from source (see
-[R](#r) below). It downloads its runtime on first use
-rather than bundling it, because CRAN will not carry a 29 MB binary and
-could not build one on their farm.
+[R](#r) below). The package downloads its matching runtime on first use,
+keeping installation small and avoiding a local stan-math build.
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md).
   Median gradient <!--gen:corpus_median-->2.91x<!--/gen--> across
@@ -230,10 +228,14 @@ compiler failure is reported without retrying the rollback path.
 The same runtime behind an R binding, with `posterior`-shaped draws.
 Full documentation in [r/README.md](r/README.md).
 
-Not on CRAN yet, so install from this repository. The package lives in
-the `r/` subdirectory:
+Install a prebuilt package from R-universe, or install the `r/` subdirectory
+from this repository:
 
 ```r
+# prebuilt binary
+install.packages("stanli", repos = "https://seantalts.r-universe.dev")
+
+# source from GitHub
 # install.packages("remotes")
 remotes::install_github("seantalts/stanli", subdir = "r")
 
@@ -257,8 +259,8 @@ fit <- sample_model(m, chains = 4, seed = 1)
 summary(fit)          # mean, MCSE, sd, quantiles, bulk/tail ESS, R-hat
 ```
 
-The runtime is downloaded on first use because CRAN cannot build or
-carry it; `stanli_install()` is explicit and pins the release the
+The runtime is a separate release artifact so installing the R bridge never
+rebuilds stan-math. `stanli_install()` is explicit and pins the release the
 package was built against. An embedded compiler wins when the runtime has one.
 On native hosts without one, `STANLI_STANC` is the explicit stock-compiler
 override; otherwise R prefers `stanli-compile` beside the runtime, then stock
@@ -374,25 +376,20 @@ bumping `STANLI_R_ABI_VERSION` in `r/src/bridge.c` too; `r.yml` fails if
 they disagree. Bump it when a C ABI struct changes layout or a function
 changes signature; adding a function does not need one.
 
-Two R distribution channels:
+Two R installation routes:
 
-- **GitHub and R-universe**, the current installation routes:
-  `remotes::install_github("seantalts/stanli", subdir = "r")` builds the
-  bridge from any commit, and `stanli_install()` then pulls the runtime
-  from the release the package pins. **R-universe** is registered and serves
-  prebuilt binaries from its selected repository ref, currently the `v0.9.2`
-  tag. Advancing that channel means updating the ref in
-  `seantalts/seantalts.r-universe.dev` and waiting for its platform builds.
-- **CRAN** cannot be automated by policy: a submission is a web-form
-  upload confirmed by email. `r.yml` runs `R CMD check --as-cran` on
-  every change under `r/`; a CRAN release is then bump `Version:` in
-  `r/DESCRIPTION` plus the runtime pin, tag, download the tarball from
-  the release, and upload it at
-  [cran.r-project.org/submit.html](https://cran.r-project.org/submit.html).
+- **R-universe** serves prebuilt binaries. Its registry uses `*release`, so a
+  new GitHub Release advances the package source automatically; the remaining
+  delay is R-universe's platform builds.
+- **GitHub** builds the bridge from any selected commit with
+  `remotes::install_github("seantalts/stanli", subdir = "r")`.
+
+Both routes call `stanli_install()` to fetch the runtime release pinned by the
+installed package.
 
 The R sampling tests run in `wheels.yml` against the Linux library that
-build produced (and fail if skipped); `r.yml` has no runtime, which is
-an honest simulation of CRAN's farm.
+build produced (and fail if skipped); `r.yml` separately checks the package
+without a runtime, so both the package-only and integrated paths stay covered.
 
 ## Verification policy
 
@@ -430,8 +427,7 @@ Engine-level items that predate it:
 1. Fusing adjacent elementwise chains into one pass over the arena, now
    that the re-roll pass covers the mixture shape and tape islands
    compile the leftover scalar residue.
-2. A CRAN shim package.
-3. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
+2. Vectorized kernels via stan-math's varmat (SoA) overloads. Today the
    kernels mirror CmdStan's default AoS arithmetic, which is scalar for
    transcendentals and reductions. The plan: switch kernels to mirror
    the varmat expressions function-by-function where the overload

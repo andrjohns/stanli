@@ -1,10 +1,8 @@
 # Finding and loading the runtime.
 #
-# The stanli runtime is a ~16 MB shared library. CRAN builds its own
-# binaries from source and would have to compile stan-math and every
-# density kernel to produce one, which is neither fast enough for their
-# check farm nor possible for the embedded OCaml compiler. So the library
-# is not part of the package: it is downloaded once into the user's cache
+# The stanli runtime is a shared library containing stan-math and every density
+# kernel. It is released separately so installing the small R bridge never
+# rebuilds that C++ stack. The library is downloaded once into the user's cache
 # directory, the way torch fetches libtorch.
 #
 # Nothing is downloaded without being asked. stanli_install() is
@@ -12,11 +10,10 @@
 # run it.
 
 # The release this package was built against. NOT the package version:
-# a CRAN-requested documentation fix bumps the package without cutting a
-# runtime release, and a default of "latest" would silently pair a
-# pinned binding with a runtime that has moved. The release workflow
-# asserts this equals the tag being cut, so bumping one without the
-# other fails there rather than at a user's install.
+# a package-only fix can bump the package without cutting a runtime release,
+# and a default of "latest" would silently pair a pinned binding with a runtime
+# that has moved. The release workflow asserts this equals the tag being cut,
+# so bumping one without the other fails there rather than at a user's install.
 stanli_runtime_release <- "v0.9.2"
 
 runtime_filename <- function() {
