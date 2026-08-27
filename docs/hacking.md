@@ -324,10 +324,11 @@ Three front ends produce these programs:
   recursion, say). This one is an optimization with a cost model:
   `STANLI_NO_ISLAND=1` turns it off, and `STANLI_ISLAND_ALWAYS=1`
   makes it skip the cost estimate.
-- `lower_param_ifelse` / `lower_param_ternary`
-  ([`lower.cpp`](../runtime/src/lower.cpp)) for parameter-dependent
-  control flow. Not an optimization: without it the model does not
-  compile.
+- `lower_runtime_ifelse` / `lower_runtime_ternary`
+  ([`lower.cpp`](../runtime/src/lower.cpp)) for control flow whose condition
+  is unavailable while the graph is built. This includes genuine parameter
+  branches and data-only predicates computed in graph-local storage. It is
+  not an optimization: without it those models do not compile.
 
 The machine's instruction set covers ordinary arithmetic, every scalar
 continuous density (the `DENSITY` instruction, backed by one table

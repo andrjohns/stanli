@@ -1550,6 +1550,10 @@ int main(int argc, char** argv) {
   check_round_trip("tests/fixtures/odefns.tmir.sexp");
   check_round_trip("tests/fixtures/view_udf_local_data_branch.tmir.sexp");
   check_round_trip("tests/fixtures/paramcond_break.tmir.sexp");
+  check_round_trip("tests/fixtures/shape_named_guard.tmir.sexp");
+  check_round_trip("tests/fixtures/shape_indexed_guard.tmir.sexp");
+  check_round_trip("tests/fixtures/shape_guard_lazy.tmir.sexp");
+  check_round_trip("tests/fixtures/shape_partial_guard.tmir.sexp");
   check_lowering_equivalence(argc == 3 ? argv[1] : nullptr,
                              argc == 3 ? argv[2] : nullptr);
   check_full_span_assignment_lowering();

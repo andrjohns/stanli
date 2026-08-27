@@ -751,7 +751,7 @@ void test_necessity_effects_refused() {
       fail("BridgeStan accepted necessity island containing " + effect);
       bs_model_destruct(m);
     } else if (err == nullptr ||
-               std::string(err).find("parameter-dependent region") ==
+               std::string(err).find("runtime-control region") ==
                    std::string::npos ||
                std::string(err).find(effect) == std::string::npos) {
       fail("BridgeStan necessity " + effect +
