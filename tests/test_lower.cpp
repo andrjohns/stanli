@@ -2361,6 +2361,41 @@ int main() {
     }
   }
 
+  // rep_vector inside a region: a run the compiler fills, at an extent it
+  // knows. The repeated parameter is the part worth checking -- the
+  // gradient is the broadcast's, every element adding into the one cell
+  // the value came from -- and the empty extent has to stay empty.
+  {
+    DataMap d;
+    d.set_int("n", 3);
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/paramcond_repvector.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    // 3 * theta from the repeated parameter, 3 * 0.5 from the constant.
+    ex.params_data()[0] = 0.5;
+    expect_eq("parameter-condition rep_vector lp", ex.gradient(&grad), 3.0);
+    expect_eq("parameter-condition rep_vector grad", grad, 3.0);
+    ex.params_data()[0] = -0.5;
+    expect_eq("parameter-condition rep_vector else lp", ex.gradient(&grad),
+              -0.5);
+    expect_eq("parameter-condition rep_vector else grad", grad, 1.0);
+  }
+  {
+    DataMap d;
+    d.set_int("n", 0);
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/paramcond_repvector.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    ex.params_data()[0] = 0.5;
+    expect_eq("parameter-condition rep_vector empty lp", ex.gradient(&grad),
+              0.0);
+    expect_eq("parameter-condition rep_vector empty grad", grad, 0.0);
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.

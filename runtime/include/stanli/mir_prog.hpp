@@ -669,6 +669,38 @@ struct ProgramCompiler {
     }
     if (e.args.empty() && e.name == "negative_infinity")
       return {konst(-std::numeric_limits<double>::infinity()), 1};
+    if (e.args.size() == 2 && e.name == "rep_vector") {
+      // The register file is a flat run of doubles, so a vector of one
+      // repeated value is a run the compiler fills -- the same fill a
+      // declaration's default uses. The length has to be a compile-time
+      // integer, which is what every extent inside a region is.
+      const long n = cint(e.args[1]);
+      if (n < 0) bail("rep_vector of a negative length");
+      Range out{0, (int)n};
+      out.kind = ViewKind::Vector;
+      if (n == 0) {
+        out.reg = alloc(0);
+        return out;
+      }
+      // A literal value is the whole run in one instruction; anything else
+      // is computed once and copied, which is what its adjoint wants too:
+      // each copy adds into the one source cell, summing the broadcast.
+      if (e.args[0].kind == mir::Expr::LitInt ||
+          e.args[0].kind == mir::Expr::LitReal) {
+        const double v = e.args[0].kind == mir::Expr::LitInt
+                             ? (double)e.args[0].lit_i
+                             : e.args[0].lit;
+        out.reg = alloc((int)n);
+        const std::vector<double> fill((size_t)n, v);
+        emit_const(out.reg, fill.data(), (int)n);
+        return out;
+      }
+      const Range v = expr(e.args[0]);
+      if (!is_scalar(v)) bail("rep_vector of a container");
+      out.reg = alloc((int)n);
+      for (long k = 0; k < n; ++k) emit(Program::MOV, out.reg + (int)k, v.reg);
+      return out;
+    }
     if (e.args.size() == 1 && e.name == "max") {
       const Range a = expr(e.args[0]);
       const int r = alloc(1);
