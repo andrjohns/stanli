@@ -600,13 +600,19 @@ jobs:
           name: browser-compilers
           path: browser-compilers
 
-      - name: Validate the candidate compiler provenance
+      - name: The bundled R compiler is the exact shared artifact
         run: |
           source tools/stanc_embed/provenance.sh
           stanli_stancjs_artifact_matches \
             browser-compilers/stanli-compiler.js \
             "$STANC3_SRC_REPO" "$STANC3_SRC_SHA" stancjs
-          cat browser-compilers/stanli-compiler.js.stamp
+          cmp browser-compilers/stanli-compiler.js r/inst/js/stanc.js
+          {
+            cat browser-compilers/stanli-compiler.js.stamp
+            sha=$(sha256sum browser-compilers/stanli-compiler.js | cut -d' ' -f1)
+            echo "artifact_sha256=$sha"
+          } > /tmp/r-stanc.js.src
+          diff -u /tmp/r-stanc.js.src r/inst/js/stanc.js.src
 
       - name: Unpack the runtime
         run: |
@@ -615,13 +621,25 @@ jobs:
           ls -la rt/
           echo "STANLI_RUNTIME=$PWD/rt/libstanli.so" >> "$GITHUB_ENV"
 
+      - name: Fetch the v0.9.3 compatibility pair
+        run: |
+          mkdir -p previous-release/runtime
+          base=https://github.com/seantalts/stanli/releases/download/v0.9.3
+          curl -fsSL "$base/stanli-runtime-linux-x86_64.tar.gz" \
+            -o previous-release/runtime.tar.gz
+          curl -fsSL "$base/stanli_0.9.3.tar.gz" \
+            -o previous-release/stanli_0.9.3.tar.gz
+          echo '81ea09718ba91d9aaf6be74750042c5c3fe90476a36d32ba814d987b52bbee43  previous-release/runtime.tar.gz' | sha256sum -c -
+          echo '1acbe821c58115678a69451c553a9b23c141d009f53c142492cee94599430495  previous-release/stanli_0.9.3.tar.gz' | sha256sum -c -
+          tar xzf previous-release/runtime.tar.gz \
+            -C previous-release/runtime
+          test -f previous-release/runtime/libstanli.so
+
       - uses: r-lib/actions/setup-r@v2
         with:
           use-public-rspm: true
 
-      # V8 and jsonlite exercise the portable compiler candidate explicitly.
-      # The package's normal source path still goes straight to the embedded
-      # compiler; this does not change which compiler the package ships.
+      # V8 and jsonlite exercise the compiler the R package actually ships.
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           working-directory: r
@@ -650,15 +668,33 @@ jobs:
             exit 1
           fi
 
-      - name: Portable compiler candidate through V8 and the runtime
+      - name: Bundled portable compiler through V8 and the current runtime
         working-directory: r
         run: |
-          candidate_library="$PWD/../r-candidate-library"
-          mkdir -p "$candidate_library"
-          R CMD INSTALL --library="$candidate_library" stanli_*.tar.gz
-          R_LIBS_USER="$candidate_library${R_LIBS_USER:+:$R_LIBS_USER}" \
-            Rscript ../tests/test_r_portable_candidate.R \
-              ../browser-compilers/stanli-compiler.js
+          current_library="$PWD/../r-current-library"
+          mkdir -p "$current_library"
+          R CMD INSTALL --library="$current_library" stanli_*.tar.gz
+          R_LIBS_USER="$current_library${R_LIBS_USER:+:$R_LIBS_USER}" \
+            Rscript ../tests/test_r_portable_compiler.R
+
+      - name: Both cross-release compiler and runtime directions
+        working-directory: r
+        run: |
+          current_library="$PWD/../r-current-library"
+          previous_library="$PWD/../r-v0.9.3-library"
+          previous_runtime="$PWD/../previous-release/runtime/libstanli.so"
+          current_runtime="$STANLI_RUNTIME"
+
+          STANLI_RUNTIME="$previous_runtime" \
+            R_LIBS_USER="$current_library${R_LIBS_USER:+:$R_LIBS_USER}" \
+            Rscript ../tests/test_r_portable_compiler.R
+
+          mkdir -p "$previous_library"
+          R CMD INSTALL --library="$previous_library" \
+            ../previous-release/stanli_0.9.3.tar.gz
+          STANLI_RUNTIME="$current_runtime" \
+            R_LIBS_USER="$previous_library${R_LIBS_USER:+:$R_LIBS_USER}" \
+            Rscript ../tests/test_r_legacy_compiler.R
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -1162,8 +1198,9 @@ jobs:
       - name: Load it into webR
         run: |
           npm install webr@0.6.0
+          cmp browser-compilers/stanli-compiler.js r/inst/js/stanc.js
           node tests/test_webr.mjs build-wasm-side/libstanli.so \
-            browser-compilers/stanli-compiler.js
+            r/inst/js/stanc.js
 
       # Not a gate: webR releases on its own schedule. The module loads
       # across Emscripten majors (measured both directions on 4.0.8 and

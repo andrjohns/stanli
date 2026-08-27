@@ -2,6 +2,20 @@
 # run through V8. Keep one compiler test independent of runtime availability so
 # every package-checking host exercises source compilation.
 
+portable_payload <- function(mir) {
+  expect_true(startsWith(mir, "STANLI2:"))
+  jsonlite::base64_dec(substring(mir, 9L))
+}
+
+raw_contains <- function(haystack, needle) {
+  if (is.character(needle)) needle <- charToRaw(enc2utf8(needle))
+  if (length(needle) == 0L) return(TRUE)
+  if (length(haystack) < length(needle)) return(FALSE)
+  any(vapply(seq_len(length(haystack) - length(needle) + 1L), function(i) {
+    identical(haystack[i:(i + length(needle) - 1L)], needle)
+  }, logical(1)))
+}
+
 test_that("the bundled JavaScript compiler produces MIR", {
   skip_if_not_installed("V8")
   skip_if_not_installed("jsonlite")
@@ -15,16 +29,13 @@ test_that("the bundled JavaScript compiler produces MIR", {
     model { y ~ normal(mu, sigma); }")
 
   expect_type(mir, "character")
-  # An s-expression naming the model's own symbols, not just any output:
-  # a compiler that silently emitted an empty program would still be a
-  # non-empty string.
-  expect_match(mir, "\\bmu\\b")
-  expect_match(mir, "\\bsigma\\b")
-  expect_match(mir, "normal")
-  # This checked-in compiler remains the legacy rollback producer until the
-  # compact v2 artifact replaces it in the dedicated R shipping tranche.
-  expect_match(mir, "^\\(\\(functions_block")
-  expect_false(startsWith(mir, "STANLI2:"))
+  payload <- portable_payload(mir)
+  # Decode the envelope before looking for the model's own symbols. This
+  # rejects a valid-looking prefix around an empty or unrelated document.
+  expect_gt(length(payload), 100L)
+  expect_true(raw_contains(payload, "mu"))
+  expect_true(raw_contains(payload, "sigma"))
+  expect_true(raw_contains(payload, "normal"))
 })
 
 test_that("the bundled JavaScript compiler applies O1", {
@@ -41,7 +52,9 @@ test_that("the bundled JavaScript compiler applies O1", {
       theta ~ std_normal();
     }")
 
-  expect_match(mir, "(Lit Real 0.30000000000000004)", fixed = TRUE)
+  payload <- portable_payload(mir)
+  folded <- writeBin(0.1 + 0.2, raw(), size = 8L, endian = "little")
+  expect_true(raw_contains(payload, folded))
 })
 
 test_that("the V8 helper prefers portable output and never retries its errors", {
@@ -361,12 +374,12 @@ test_that("a model that does not typecheck is an error, not empty MIR", {
             !file.exists(stanli:::stanc_js_path()),
           "stanc.js is not in this installation")
 
-  # `y` is undeclared. stanc reports this through `errors` rather than a
-  # thrown exception, so the wrapper has to look for it: without that
-  # check a broken model reaches the lowering pass as NULL.
+  # `y` is undeclared. The portable compiler reports this through `errors`
+  # rather than a thrown exception, so the wrapper has to look for it: without
+  # that check a broken model reaches the lowering pass as NULL.
   expect_error(
     stanli:::mir_from_js("parameters { real mu; } model { mu ~ normal(y, 1); }"),
-    "stanc")
+    "stanli_compile", fixed = TRUE)
 })
 
 test_that("runtime asset names match the five published targets", {

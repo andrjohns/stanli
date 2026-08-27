@@ -7,11 +7,11 @@
 // the load-and-resolve half, which needs nothing beyond the npm webr
 // package.
 //
-// When the optional compiler is supplied, load that exact artifact through
-// webR's host-JavaScript bridge and exercise its portable result as well.
+// When the bundled compiler is supplied, load that exact tracked artifact
+// through webR's host-JavaScript bridge and exercise its portable result too.
 //
 // Usage: node tests/test_webr.mjs build-wasm-side/libstanli.so \
-//          browser-compilers/stanli-compiler.js
+//          r/inst/js/stanc.js
 import { WebR } from 'webr';
 import fs from 'node:fs';
 
@@ -63,10 +63,10 @@ if (compilerPath) {
       '/tmp/portable-bad.stan',
       new TextEncoder().encode('parameters { real x } model {}'));
 
-  // Source the package's actual helper and point only this webR session at the
-  // candidate artifact. Source and MIR still cross through the shared
+  // Source the package's actual helper and point this webR session at the
+  // bundled artifact. Source and MIR still cross through the shared
   // filesystem, avoiding evalR() marshalling for a multi-megabyte document.
-  const candidate = await webR.evalR(String.raw`
+  const bundled = await webR.evalR(String.raw`
     eval_js <- get0("eval_js", envir = asNamespace("webr"))
     if (!is.function(eval_js)) stop("webR has no eval_js host bridge")
     source("/tmp/stanli-stanc.R", local = .GlobalEnv)
@@ -91,10 +91,10 @@ if (compilerPath) {
 
     statuses <- tryCatch({
       unicode_source <- read_compiler_output("/tmp/portable-unicode.stan")
-      mir <- mir_from_webr(eval_js, unicode_source, "webr_candidate")
-      write_utf8_file("/tmp/portable-candidate.mir", mir)
+      mir <- mir_from_webr(eval_js, unicode_source, "webr_bundled")
+      write_utf8_file("/tmp/portable-bundled.mir", mir)
       unicode_ok <- eval_js('(() => {
-        const mir = Module.FS.readFile("/tmp/portable-candidate.mir",
+        const mir = Module.FS.readFile("/tmp/portable-bundled.mir",
                                        {encoding: "utf8"});
         if (!mir.startsWith("STANLI2:"))
           return "FAIL missing portable envelope";
@@ -188,7 +188,7 @@ if (compilerPath) {
     }, finally = restore_process())
     statuses
   `);
-  const statuses = (await candidate.toJs()).values;
+  const statuses = (await bundled.toJs()).values;
   const failure = statuses.find((status) => status !== 'ok');
   if (failure) {
     console.error(failure);

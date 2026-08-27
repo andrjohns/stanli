@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.9.4
+
+### R and webR use the shared portable compiler
+
+The compiler bundled in the R package is now the same exact-source
+js_of_ocaml artifact used by the browser and npm package. V8 and webR select
+its `stanli_compile()` export and send compact Portable MIR v2 directly to the
+runtime; a selected producer error remains final rather than being retried
+through the compatibility `stanc()` export.
+
+The artifact is byte-compared with a fresh shared-compiler build and records
+the stanc3 revision, OCaml target, Dune and js_of_ocaml versions, every producer
+input hash, and its own SHA-256. The release matrix runs this package's compact
+compiler against both its current runtime and the released v0.9.3 dual-reader
+runtime, then runs the v0.9.3 package's legacy compiler against the current
+runtime. Native subprocess, V8, and webR source-compilation paths remain
+separate exercised gates.
+
 ## 0.9.3
 
 ### Portable MIR is compact and shared

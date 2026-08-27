@@ -1,27 +1,21 @@
-# Exercise the candidate R/webR compiler without changing the compiler bundled
-# in the R package. The candidate is the exact browser-compiler artifact from
-# this workflow. It is installed into the R package's real V8 helper, and that
-# helper's output is handed to the public MIR entry point of an installed
-# package backed by the real Linux runtime.
-#
-# Usage: Rscript tests/test_r_portable_candidate.R path/to/stanli-compiler.js
+# Exercise the compiler actually bundled in the installed R package. Its output
+# goes through the package's real V8 helper and public MIR entry point, backed
+# by whichever runtime STANLI_RUNTIME selects for this fresh R process.
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 1L)
-  stop("usage: test_r_portable_candidate.R <stanli-compiler.js>",
-       call. = FALSE)
+if (length(args) != 0L)
+  stop("usage: test_r_portable_compiler.R", call. = FALSE)
 
-compiler <- normalizePath(args[[1]], mustWork = TRUE)
 if (!requireNamespace("V8", quietly = TRUE) ||
     !requireNamespace("jsonlite", quietly = TRUE))
-  stop("the candidate check requires V8 and jsonlite", call. = FALSE)
+  stop("the compiler check requires V8 and jsonlite", call. = FALSE)
 
 suppressPackageStartupMessages(library(stanli))
+compiler <- normalizePath(stanli:::stanc_js_path(), mustWork = TRUE)
 
-# Put the exact candidate artifact in the context cached by mir_from_js(). The
-# package still carries its tracked legacy file; this test changes only its own
-# fresh R session. Wrap both exports so each helper call proves which producer
-# ran and records the portable warnings that the source-compilation API leaves
+# Put the installed package's exact artifact in the context cached by
+# mir_from_js(). Wrap both exports so each helper call proves which producer ran
+# and records the portable warnings that the source-compilation API leaves
 # internal on success.
 ctx <- V8::v8()
 ctx$source(compiler)
@@ -31,32 +25,32 @@ ctx$eval("(function () {
   if (typeof portable !== 'function')
     throw new Error('no stanli_compile() export');
   if (typeof classic !== 'function') throw new Error('no stanc() export');
-  globalThis.__stanli_candidate = {
+  globalThis.__stanli_bundled = {
     portable_calls: 0, classic_calls: 0, warnings: []
   };
   globalThis.stanli_compile = function() {
-    globalThis.__stanli_candidate.portable_calls += 1;
+    globalThis.__stanli_bundled.portable_calls += 1;
     var r = portable.apply(this, arguments);
-    globalThis.__stanli_candidate.warnings = r.warnings
+    globalThis.__stanli_bundled.warnings = r.warnings
       ? Array.prototype.map.call(r.warnings, String) : [];
     return r;
   };
   globalThis.stanc = function() {
-    globalThis.__stanli_candidate.classic_calls += 1;
+    globalThis.__stanli_bundled.classic_calls += 1;
     return classic.apply(this, arguments);
   };
 })()")
 
 compiler_state <- function() {
   jsonlite::fromJSON(
-    ctx$eval("JSON.stringify(globalThis.__stanli_candidate)"),
+    ctx$eval("JSON.stringify(globalThis.__stanli_bundled)"),
     simplifyVector = TRUE)
 }
 
 state <- getFromNamespace("stanc_js_ctx", "stanli")
 state$ctx <- ctx
 
-compile_candidate <- function(name, code) {
+compile_bundled <- function(name, code) {
   before <- compiler_state()
   error <- NULL
   result <- tryCatch(
@@ -68,7 +62,7 @@ compile_candidate <- function(name, code) {
   after <- compiler_state()
   if (!identical(after$portable_calls, before$portable_calls + 1L) ||
       !identical(after$classic_calls, before$classic_calls))
-    stop("the R helper did not use exactly one portable compiler call",
+    stop("the R helper did not use exactly one bundled portable compiler call",
          call. = FALSE)
   list(result = result,
        errors = if (is.null(error)) character() else error,
@@ -93,8 +87,8 @@ unicode_source <- enc2utf8("\
 transformed data { print(\"pi: π, snowman: ☃, wave: 👋\"); }
 parameters { real mu; }
 model { mu ~ std_normal(); }")
-first <- compile_candidate("unicode_candidate", unicode_source)
-second <- compile_candidate("unicode_candidate", unicode_source)
+first <- compile_bundled("unicode_bundled", unicode_source)
+second <- compile_bundled("unicode_bundled", unicode_source)
 stopifnot(
   length(first$errors) == 0L,
   is.character(first$result), length(first$result) == 1L,
@@ -109,12 +103,12 @@ stopifnot(
 warning_source <- "
 parameters { real x; }
 model { if (0 < x < 1) target += 0; }"
-warning_result <- compile_candidate("warning_candidate", warning_source)
+warning_result <- compile_bundled("warning_bundled", warning_source)
 stopifnot(length(warning_result$errors) == 0L,
           length(warning_result$warnings) > 0L)
 
-bad <- compile_candidate(
-  "malformed_candidate", "parameters { real x } model {}")
+bad <- compile_bundled(
+  "malformed_bundled", "parameters { real x } model {}")
 stopifnot(is.null(bad$result), length(bad$errors) > 0L,
           grepl("stanli_compile", bad$errors, fixed = TRUE),
           compiler_state()$classic_calls == 0L)
@@ -129,12 +123,12 @@ generated quantities {
   real mu_twice = 2 * mu;
   real y_rep = normal_rng(mu, 1);
 }"
-runtime_compilation <- compile_candidate("runtime_candidate", runtime_source)
+runtime_compilation <- compile_bundled("runtime_bundled", runtime_source)
 stopifnot(length(runtime_compilation$errors) == 0L,
           startsWith(runtime_compilation$result, "STANLI2:"))
 
 # `mir` is the public compatibility seam. Supplying it forces this exact
-# candidate document through the dual decoder even though the Linux runtime
+# bundled document through the dual decoder even though the Linux runtime
 # also contains an embedded source compiler.
 model <- stanli_model(mir = runtime_compilation$result)
 gradient <- log_prob_grad(model, 0.25)
@@ -152,4 +146,4 @@ stopifnot(all(c("mu", "mu_twice", "y_rep") %in% fit$columns),
                            2 * as.numeric(fit$draws[, , "mu"]),
                            tolerance = 1e-12)))
 
-message("R portable candidate OK: V8, decoder, gradient, sampling, and GQ")
+message("R bundled portable compiler OK: V8, decoder, gradient, sampling, and GQ")

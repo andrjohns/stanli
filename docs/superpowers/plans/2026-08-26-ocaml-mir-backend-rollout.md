@@ -181,24 +181,24 @@ No package registry is an architectural gate. The real constraint is direct
 cross-release compatibility because an R package can carry compiler JavaScript
 from one release while loading a runtime from another.
 
-Status: candidate readiness is complete; the shipping switch follows portable
-v2 integration. CI already loads the exact browser compiler in a fresh V8
-context, sends its output through the public `stanli_model(mir=...)` API, and
-exercises UTF-8, deterministic bytes, warnings, malformed input, gradients,
-sampling, and generated quantities. The webR side-module job runs the same
-candidate through the host-JavaScript bridge.
+Status: implemented for v0.9.4; release validation is pending. The v0.9.3
+compatibility anchor is published with a dual-reader runtime and the legacy R
+compiler. The v0.9.4 package carries the exact shared compiler artifact. CI
+loads it through the real V8 and webR helpers, sends its output through the
+public `stanli_model(mir=...)` API, and exercises UTF-8, deterministic bytes,
+warnings, malformed input, gradients, sampling, and generated quantities.
 
-Shipping work:
+Shipping implementation:
 
-- Build the tracked R compiler JavaScript from the shared OCaml package.
-- Update the real V8 and webR helpers to select callable `stanli_compile()` by
+- The tracked R compiler JavaScript is byte-identical to a fresh exact-source
+  build from the shared OCaml package, with complete producer provenance.
+- The real V8 and webR helpers select callable `stanli_compile()` by
   export presence, using stock `stanc()` only when that export is absent.
-- Never retry stock after a selected portable compiler reports an error.
-- Byte-compare the tracked artifact with a fresh exact-source build.
-- Run the new compiler against both the current runtime and the previous
+- They never retry stock after a selected portable compiler reports an error.
+- The new compiler runs against both the current runtime and the previous
   released dual-reader runtime.
-- Run the old package's legacy compiler against the new runtime.
-- Exercise V8, native subprocess, and webR source-compilation paths.
+- The old package's legacy compiler runs against the new runtime.
+- V8, native subprocess, and webR source-compilation paths are separate gates.
 
 This compatibility matrix replaces the earlier assumed release-cycle gate and
 is both stricter and directly testable.

@@ -16,6 +16,8 @@ on:
     tags: ['v*']
     paths:
       - 'r/**'
+      - 'compiler/js/**'
+      - 'compiler/ocaml/**'
       - 'runtime/include/stanli/capi.h'
       - 'tools/dev_setup.sh'
       - 'tools/stanc_embed/**'
@@ -23,6 +25,8 @@ on:
   pull_request:
     paths:
       - 'r/**'
+      - 'compiler/js/**'
+      - 'compiler/ocaml/**'
       - 'runtime/include/stanli/capi.h'
       - 'tools/dev_setup.sh'
       - 'tools/stanc_embed/**'
@@ -58,22 +62,33 @@ jobs:
           echo "runtime ${rt:-<none>}, R bridge ${r:-<none>}"
           [ -n "$rt" ] && [ "$rt" = "$r" ]
 
-      - name: Verify the bundled JavaScript compiler source
+      - name: Verify the bundled JavaScript compiler provenance
         run: |
+          source tools/stanc_embed/provenance.sh
+          record=r/inst/js/stanc.js.src
+          recorded() { sed -n "s/^$1=//p" "$record"; }
           expected_repo=$(sed -n \
             's/^STANC3_SRC_REPO=\([^ ]*\).*/\1/p' tools/dev_setup.sh)
           expected_revision=$(sed -n \
             's/^STANC3_SRC_SHA=\([0-9a-f]*\).*/\1/p' tools/dev_setup.sh)
-          artifact_repo=$(sed -n 's/^repository=//p' r/inst/js/stanc.js.src)
-          artifact_revision=$(sed -n 's/^revision=//p' r/inst/js/stanc.js.src)
-          artifact_sha=$(sed -n 's/^sha256=//p' r/inst/js/stanc.js.src)
           actual_sha=$(sha256sum r/inst/js/stanc.js | cut -d' ' -f1)
 
           [ -n "$expected_repo" ]
           [ -n "$expected_revision" ]
-          [ "$artifact_repo" = "$expected_repo" ]
-          [ "$artifact_revision" = "$expected_revision" ]
-          [ "$artifact_sha" = "$actual_sha" ]
+          [ "$(recorded format)" = stanli-portable-stancjs-v3 ]
+          [ "$(recorded stanc3_src_repo)" = "$expected_repo" ]
+          [ "$(recorded stanc3_src_sha)" = "$expected_revision" ]
+          [ "$(recorded opam_switch)" = stancjs ]
+          [ "$(recorded ocaml_version)" = \
+            "$(stanc_embed_read_setup OCAML_VERSION)" ]
+          [ -n "$(recorded ocaml_target)" ]
+          [ -n "$(recorded dune_version)" ]
+          [ "$(recorded js_of_ocaml_version)" = 6.4.1 ]
+          [ "$(recorded producer_inputs_sha256)" = \
+            "$(stanli_stancjs_inputs_sha256)" ]
+          [ "$(recorded dune_profile)" = release ]
+          [ "$(recorded dune_subst)" = 1 ]
+          [ "$(recorded artifact_sha256)" = "$actual_sha" ]
           ! grep -a -F -e '%%NAME%%' -e '%%VERSION%%' r/inst/js/stanc.js
 
   check:
