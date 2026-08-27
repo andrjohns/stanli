@@ -67,8 +67,8 @@ repeatedly below.
 
 ```
 model.stan + data.json
-  |  stanc3 parse/typecheck/O1 (upstream OCaml)
-  v  optimized typed MIR (--O1)
+  |  stanc3 parse/typecheck/Stan-Math transform (upstream OCaml)
+  v  stanli-owned O1 + vectorize_loops policy (typed OCaml)
 compiler/ocaml/stanli_pipeline.ml + portable_mir.ml
   |  canonical compact portable MIR v2
   v
@@ -92,9 +92,10 @@ reverse sweep   = gradient
 Step by step:
 
 1. **stanc3 and the stanli OCaml pipeline compile the model.** The official
-   compiler parses, typechecks, and optimizes with the same code CmdStan uses.
+   compiler parses and typechecks with the same code CmdStan uses.
    [`stanli_pipeline.ml`](../compiler/ocaml/stanli_pipeline.ml) owns stanli's
-   O1 policy, receives the optimized typed MIR value, and passes it to
+   optimization policy: upstream O1 plus the separately selected upstream
+   `vectorize_loops` pass. It passes the resulting typed MIR value to
    [`portable_mir.ml`](../compiler/ocaml/portable_mir.ml), which encodes the
    runtime's consumed slice. [`compiler/native/`](../compiler/native/) is the
    callback linked into native libraries; [`compiler/js/`](../compiler/js/)
@@ -168,7 +169,7 @@ ones through every stage, op list and register programs included.
 | Path | Owns |
 |---|---|
 | [`runtime/include/stanli/`](../runtime/include/stanli/) | Public headers. [`graph.hpp`](../runtime/include/stanli/graph.hpp) defines the IR: `Slot` and `Op` over flat arenas. |
-| [`compiler/portable_ir/SCHEMA.md`](../compiler/portable_ir/SCHEMA.md), [`compiler/ocaml/`](../compiler/ocaml/) | The stanli-owned portable MIR contract, shared O1 policy, and typed-OCaml encoder. |
+| [`compiler/portable_ir/SCHEMA.md`](../compiler/portable_ir/SCHEMA.md), [`compiler/ocaml/`](../compiler/ocaml/) | The stanli-owned portable MIR contract, shared optimization policy, and typed-OCaml encoder. |
 | [`compiler/native/`](../compiler/native/), [`compiler/js/`](../compiler/js/) | Thin native callback, js_of_ocaml, and Windows CLI entry points around the shared OCaml pipeline. |
 | [`runtime/src/lower.cpp`](../runtime/src/lower.cpp) | Lowering: transformed MIR in, op graph out. |
 | [`runtime/src/mir_decode.cpp`](../runtime/src/mir_decode.cpp), [`portable_mir_v2_reader.cpp`](../runtime/src/portable_mir_v2_reader.cpp), [`mir_reader.cpp`](../runtime/src/mir_reader.cpp) | Dispatches compact portable MIR or legacy s-expressions into one MIR representation and runs their shared finalization. |

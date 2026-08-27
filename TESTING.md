@@ -64,10 +64,10 @@ known exceptions.
 ## MIR loop-vectorization measurement
 
 [`harnesses/vectorize_ab.py`](harnesses/vectorize_ab.py) measures the upstream
-`vectorize_loops` candidate without selecting it in a shipping compiler. The
-test-only OCaml probe compiles each source once with the pass off and once with
-it on; every later check consumes those exact portable MIR files through
-`stanli_check --mir`.
+`vectorize_loops` pass selected by the shipping compiler against an explicit
+pass-off oracle. The test-only OCaml probe compiles each source once with the
+pass off and once with it on; every later check consumes those exact portable
+MIR files through `stanli_check --mir`.
 
 The complete run covers all 130 recorded models plus any posteriordb census
 model without a recorded CmdStan row:

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.9.5
+
+### Upstream MIR loop vectorization is enabled
+
+Every portable compiler now applies upstream O1 plus the separately selected
+`vectorize_loops` pass in the shared OCaml pipeline. The pass-off pipeline
+remains an explicit test oracle, and the existing C++ loop re-rolling pass
+remains enabled because the complete measurement still finds supported models
+that benefit from it.
+
 ## 0.9.4
 
 ### R and webR use the shared portable compiler

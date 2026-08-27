@@ -149,22 +149,37 @@ let o1_equivalence_models =
 let () =
   List.iter
     (fun (name, code) ->
-      let production_bytes = compile_portable code in
+      let pass_off_bytes =
+        encode (compile ~passes:{vectorize_loops= false} code) in
       let upstream_o1_bytes = encode (compile_upstream_o1 code) in
       require
-        (String.equal production_bytes upstream_o1_bytes)
-        ("pass-off output differs from upstream O1 for " ^ name))
+        (String.equal pass_off_bytes upstream_o1_bytes)
+        ("pass-off output differs from upstream O1 for " ^ name);
+      let pass_on_bytes =
+        encode (compile ~passes:{vectorize_loops= true} code) in
+      let production_bytes = compile_portable code in
+      require
+        (String.equal production_bytes pass_on_bytes)
+        ("production output differs from O1 plus vectorize_loops for " ^ name))
     o1_equivalence_models;
 
-  let off = compile matching_loop in
+  let off = compile ~passes:{vectorize_loops= false} matching_loop in
   let on = compile ~passes:{vectorize_loops= true} matching_loop in
+  let production = compile matching_loop in
   require (count_log_prob_fors off > 0) "pass-off removed the matching loop";
   require (count_log_prob_fors on = 0) "pass-on did not vectorize the loop";
   require
+    (count_log_prob_fors production = 0)
+    "production selection did not vectorize the loop";
+  require
     (log_prob_has_vector_density on)
     "pass-on did not produce a vector density statement";
+  require
+    (log_prob_has_vector_density production)
+    "production selection did not produce a vector density statement";
 
-  let side_effect_off = compile side_effect_loop in
+  let side_effect_off =
+    compile ~passes:{vectorize_loops= false} side_effect_loop in
   let side_effect_on =
     compile ~passes:{vectorize_loops= true} side_effect_loop in
   require

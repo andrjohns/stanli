@@ -181,11 +181,11 @@ No package registry is an architectural gate. The real constraint is direct
 cross-release compatibility because an R package can carry compiler JavaScript
 from one release while loading a runtime from another.
 
-Status: implemented for v0.9.4; release validation is pending. The v0.9.3
-compatibility anchor is published with a dual-reader runtime and the legacy R
-compiler. The v0.9.4 package carries the exact shared compiler artifact. CI
-loads it through the real V8 and webR helpers, sends its output through the
-public `stanli_model(mir=...)` API, and exercises UTF-8, deterministic bytes,
+Status: shipped and validated in v0.9.4. The v0.9.3 compatibility anchor is
+published with a dual-reader runtime and the legacy R compiler. The v0.9.4
+package carries the exact shared compiler artifact. CI loads it through the
+real V8 and webR helpers, sends its output through the public
+`stanli_model(mir=...)` API, and exercises UTF-8, deterministic bytes,
 warnings, malformed input, gradients, sampling, and generated quantities.
 
 Shipping implementation:
@@ -209,16 +209,22 @@ The pinned stanc3 contains the pass, but O1 leaves it disabled. Enable O1 plus
 only `vectorize_loops` in the shared stanli pipeline. Do not enable the entire
 experimental suite.
 
-Status: measurement infrastructure only. A test-only native OCaml probe can
-emit pass-off/pass-on portable MIR, and the bounded CI report checks semantic
-and reference parity while publishing graph, preparation, reroll, compiler,
-and interleaved gradient evidence. The production pass selection remains off
-in every native, Windows, browser, Python, and R producer. The no-model harness
-command covers all 130 committed reference models and labels any additional
-posteriordb census model as A/B-only; CI uses seven named models, and the timing
-ratios are descriptive rather than acceptance thresholds. See
+Status: production-enabled, with release validation pending. The shared OCaml
+default selects exactly upstream O1 plus `vectorize_loops` in every native,
+Windows, browser, Python, and R producer. A test-only native OCaml probe emits
+pass-off/pass-on portable MIR, and the bounded CI report checks semantic and
+reference parity while publishing graph, preparation, reroll, compiler, and
+interleaved gradient evidence. The no-model harness command covers all 130
+committed reference models and labels any additional posteriordb census model
+as A/B-only; CI uses seven named models, and the timing ratios are descriptive
+rather than acceptance thresholds. See
 [`TESTING.md`](../../../TESTING.md#mir-loop-vectorization-measurement) for the
 operator command and artifact contract.
+
+The release matrix advances its previous portable pair to v0.9.4: the new
+vectorizing compiler runs against that runtime, and the v0.9.4 pass-off
+compiler runs against the new runtime. The v0.9.3 legacy compiler remains a
+separate permanent decoder oracle.
 
 ### 2026-08-26 measurement baseline
 
@@ -233,7 +239,8 @@ Timing ratios remain descriptive.
 
 The pass removed only 4 of the 23 `log_prob` term-density reroll hits; 19
 models still reported that rewrite. No C++ reroll case can be retired from
-this evidence, and production pass selection remains off.
+this evidence, so production enables the upstream pass while retaining the
+complete C++ reroll pass.
 
 Keep C++ reroll enabled initially and measure with the OCaml pass both on and
 off:

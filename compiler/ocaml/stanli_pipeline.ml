@@ -8,7 +8,7 @@ type 'a compilation =
 
 type pass_selection = {vectorize_loops: bool}
 
-let default_pass_selection = {vectorize_loops= false}
+let default_pass_selection = {vectorize_loops= true}
 
 let compile_mir_at_level
     ?(include_source = Driver.Flags.default.include_source) ~optimization_level
