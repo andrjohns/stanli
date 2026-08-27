@@ -69,6 +69,13 @@ struct ProgramCompiler {
   const std::map<std::string, const mir::FunDef*>& funs;
   std::map<std::string, Range> reals;
   std::map<std::string, std::vector<long>> ints;
+  // Where each `ints` entry was declared: its branch depth, and how many
+  // loops enclosed it. Folding an assignment records a value for every
+  // later read of the name, so it is only sound where the assignment
+  // certainly runs -- which is where the declaration itself is. A name the
+  // caller seeded has no entry and is treated as declared outside
+  // everything, which is what it is.
+  std::map<std::string, std::pair<int, size_t>> int_decl_at;
   int branch_depth = 0;  // inside a branch on a runtime value
   int inline_depth = 0;
   struct LoopFrame {
@@ -274,6 +281,22 @@ struct ProgramCompiler {
       return a.len == b.len;
     if (a.kind == ViewKind::Array) return a.len == b.len && a.dims == b.dims;
     return a.rows == b.rows && a.cols == b.cols;
+  }
+
+  // Does an assignment to `name` here run on every path that can reach a
+  // read of it? It does when it sits at the declaration's own branch
+  // depth, and when no loop entered since the declaration has already
+  // taken a data-dependent break or continue -- either would jump from
+  // ahead of the assignment to behind it, past a read that the fold has
+  // already been applied to.
+  bool fold_is_certain(const std::string& name) const {
+    auto it = int_decl_at.find(name);
+    const int depth = it == int_decl_at.end() ? 0 : it->second.first;
+    const size_t enclosing = it == int_decl_at.end() ? 0 : it->second.second;
+    if (branch_depth != depth) return false;
+    for (size_t k = enclosing; k < loops.size(); ++k)
+      if (!loops[k].breaks.empty() || !loops[k].continues.empty()) return false;
+    return true;
   }
 
   static bool is_scalar(const Range& r) {
@@ -799,6 +822,7 @@ struct ProgramCompiler {
     switch (s.kind) {
       case mir::Stmt::Decl: {
         if (s.decl_type.base == "SInt") {
+          int_decl_at[s.decl_id] = {branch_depth, loops.size()};
           if (s.has_init) {
             ints[s.decl_id] = {cint(s.init)};
           } else {
@@ -832,6 +856,17 @@ struct ProgramCompiler {
       }
       case mir::Stmt::Assignment: {
         if (ints.count(s.lhs) && s.lhs_idx.empty()) {
+          // An integer is a compile-time value here: folding this
+          // assignment rewrites every later read of the name, so a path
+          // that skips the assignment and reaches a read would see the
+          // assigned value anyway. Registers hold doubles and cannot carry
+          // an integer instead, so this is refused rather than lowered.
+          // (Before the check, `if (theta > 0) n = 2;` inside a region
+          // took effect on both paths -- and the caller kept its own
+          // pre-region value, so a read after the region saw neither.)
+          if (!fold_is_certain(s.lhs))
+            bail("integer " + s.lhs +
+                 " assigned inside data-dependent control flow");
           ints[s.lhs] = {cint(s.rhs)};
           return;
         }
@@ -940,6 +975,7 @@ struct ProgramCompiler {
         bool broken = false;
         for (long v = lo; v <= hi; ++v) {
           ints[s.loopvar] = {v};
+          int_decl_at[s.loopvar] = {branch_depth, loops.size()};
           try {
             for (const auto& k : s.body) stmt(k);
           } catch (CompileContinue&) {
@@ -952,6 +988,7 @@ struct ProgramCompiler {
           if (broken) break;
         }
         ints.erase(s.loopvar);
+        int_decl_at.erase(s.loopvar);
         for (int jump : loops.back().breaks)
           p.code[(size_t)jump].dst = (int)p.code.size();
         loops.pop_back();
@@ -1044,15 +1081,20 @@ struct ProgramCompiler {
     // restore afterwards. Registers are never reused, so nothing aliases.
     auto saved_reals = reals;
     auto saved_ints = ints;
+    auto saved_int_decl_at = int_decl_at;
     const int saved_branch_depth = branch_depth;
     reals.clear();
     ints.clear();
+    int_decl_at.clear();
     branch_depth = 0;
     for (size_t k = 0; k < f.arg_names.size(); ++k) {
-      if (args[k].is_const_int)
+      if (args[k].is_const_int) {
         ints[f.arg_names[k]] = args[k].ints;
-      else
+        // The body starts here, inside whatever loop the call sits in.
+        int_decl_at[f.arg_names[k]] = {0, loops.size()};
+      } else {
         reals[f.arg_names[k]] = args[k].real;
+      }
     }
     Range out{0, 0};
     try {
@@ -1063,12 +1105,14 @@ struct ProgramCompiler {
     } catch (...) {
       reals = std::move(saved_reals);
       ints = std::move(saved_ints);
+      int_decl_at = std::move(saved_int_decl_at);
       branch_depth = saved_branch_depth;
       --inline_depth;
       throw;
     }
     reals = std::move(saved_reals);
     ints = std::move(saved_ints);
+    int_decl_at = std::move(saved_int_decl_at);
     branch_depth = saved_branch_depth;
     --inline_depth;
     return out;

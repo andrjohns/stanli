@@ -2247,6 +2247,45 @@ int main() {
           grad[i], 0.0);
   }
 
+  // An integer assigned inside a parameter-dependent region. `n = 2` runs
+  // before the break in a loop that runs once, so the fold is sound and
+  // the lowering takes the value back for `target += n * theta + z`:
+  // without that, the statements after the region kept reading the
+  // pre-region 1, silently, in both lp and the gradient. `k` is folded
+  // within the region, where the reads are the ones the fold belongs to.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_int.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    // The break skips k and z: 2 * theta.
+    ex.params_data()[0] = 0.5;
+    expect_eq("parameter-condition int break lp", ex.gradient(&grad), 1.0);
+    expect_eq("parameter-condition int break grad", grad, 2.0);
+    // Without the break, z is k * theta with k folded to 4: 6 * theta.
+    ex.params_data()[0] = -0.5;
+    expect_eq("parameter-condition int no-break lp", ex.gradient(&grad), -3.0);
+    expect_eq("parameter-condition int no-break grad", grad, 6.0);
+  }
+
+  // The same integer where the assignment may not run: refused by name.
+  // Before the check it was folded anyway -- every later read in the
+  // region saw 2 on both paths -- while the lowering outside kept its own
+  // 1, so the answer matched neither branch.
+  {
+    bool threw = false;
+    try {
+      compile_model(slurp("tests/fixtures/paramcond_intbranch.tmir.sexp"),
+                    DataMap());
+    } catch (const CompileError& e) {
+      threw = std::string(e.what()).find(
+                  "integer n assigned inside data-dependent control flow") !=
+              std::string::npos;
+    }
+    check(threw, "integer assigned under a parameter condition refused");
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.
