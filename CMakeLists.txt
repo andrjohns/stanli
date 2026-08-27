@@ -493,6 +493,17 @@ target_link_libraries(stanli_run PRIVATE stanli)
 stanli_embed_stanc(stanli_run)
 add_executable(stanli_check tools/stanli_check.cpp tests/tbb_stub.cpp)
 target_link_libraries(stanli_check PRIVATE stanli)
+add_test(NAME test_check_precompiled_mir
+         COMMAND stanli_check tests/fixtures/ar1.stan tests/fixtures/ar1.json
+                 --mir tests/fixtures/ar1.tmir.sexp
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(test_check_precompiled_mir PROPERTIES
+  PASS_REGULAR_EXPRESSION "OK ")
+add_test(NAME test_check_precompiled_mir_conflict
+         COMMAND ${CMAKE_COMMAND}
+                 -DSTANLI_CHECK=$<TARGET_FILE:stanli_check>
+                 -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_mir_conflict.cmake)
 add_executable(bench_grad tools/bench_grad.cpp tests/tbb_stub.cpp)
 target_link_libraries(bench_grad PRIVATE stanli)
 add_test(NAME test_prep_only
@@ -511,6 +522,14 @@ set_tests_properties(test_prep_profile PROPERTIES
   ENVIRONMENT "STANLI_PROFILE_PREP=1"
   PASS_REGULAR_EXPRESSION
     "stanli_prep graph=driver stage=total ns=[0-9]+")
+add_test(NAME test_prep_profile_reroll_dispositions
+         COMMAND bench_grad tests/fixtures/ar1.tmir.sexp
+                 tests/fixtures/ar1.json --prep
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(test_prep_profile_reroll_dispositions PROPERTIES
+  ENVIRONMENT "STANLI_PROFILE_PREP=1"
+  PASS_REGULAR_EXPRESSION
+    "packed_rows=[0-9]+ term_density=[0-9]+ element_density=[0-9]+ term_widen=[0-9]+ element_store=[0-9]+")
 add_executable(bench_opcost tools/bench_opcost.cpp tests/tbb_stub.cpp)
 target_link_libraries(bench_opcost PRIVATE stanli)
 add_executable(bench_dispatch tools/bench_dispatch.cpp)
@@ -575,6 +594,9 @@ if(Python3_Interpreter_FOUND)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_conformance_harness
            COMMAND ${Python3_EXECUTABLE} tests/test_conformance.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_vectorize_ab
+           COMMAND ${Python3_EXECUTABLE} tests/test_vectorize_ab.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   # The model census's coverage ratchet, over synthetic rows plus the
   # checked-in baseline. The census itself needs deps/stanc3-src, a stanc

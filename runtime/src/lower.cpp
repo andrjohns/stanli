@@ -15,6 +15,8 @@
 #include <stanli/structured_check.hpp>
 #include <stanli/wa_interp.hpp>
 
+#include "reroll_profile.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -70,6 +72,11 @@ struct PrepTrace {
     int64_t b = 0;
     int64_t c = 0;
     int64_t d = 0;
+    int64_t packed_rows = 0;
+    int64_t term_density = 0;
+    int64_t element_density = 0;
+    int64_t term_widen = 0;
+    int64_t element_store = 0;
     bool deep = false;
     int64_t params = 0;
     int64_t slot_elems = 0;
@@ -80,6 +87,8 @@ struct PrepTrace {
   };
 
   explicit PrepTrace(bool enabled) : enabled_(enabled) {}
+
+  bool enabled() const { return enabled_; }
 
   Time start() const { return enabled_ ? Clock::now() : Time{}; }
 
@@ -99,7 +108,8 @@ struct PrepTrace {
              const std::vector<std::pair<int, std::vector<double>>>& fills,
              size_t terms, size_t views, Extra extra = Extra::None,
              int64_t a = 0, int64_t b = 0, bool deep = false,
-             int64_t params = 0, int64_t c = 0, int64_t d = 0) {
+             int64_t params = 0, int64_t c = 0, int64_t d = 0,
+             const detail::RerollDispositionStats* dispositions = nullptr) {
     if (!enabled_) return;
     Row& r = next();
     r.graph = graph_name;
@@ -116,6 +126,13 @@ struct PrepTrace {
     r.b = b;
     r.c = c;
     r.d = d;
+    if (dispositions) {
+      r.packed_rows = dispositions->packed_rows;
+      r.term_density = dispositions->term_density;
+      r.element_density = dispositions->element_density;
+      r.term_widen = dispositions->term_widen;
+      r.element_store = dispositions->element_store;
+    }
     r.deep = deep;
     r.params = params;
     if (deep) {
@@ -164,6 +181,11 @@ struct PrepTrace {
           field("row_steps", r.d);
           field("list_steps", r.b);
           field("candidate_steps", r.c);
+          field("packed_rows", r.packed_rows);
+          field("term_density", r.term_density);
+          field("element_density", r.element_density);
+          field("term_widen", r.term_widen);
+          field("element_store", r.element_store);
           break;
         case Extra::Partition:
           field("groups", r.a);
@@ -5213,11 +5235,21 @@ struct Lowering {
                target_terms.size(), out.views.size(), PrepTrace::Extra::Removed,
                forwarded);
     const auto reroll_time = prep.start();
-    const RerollStats rerolled = reroll(g, out.fills, target_terms, roots);
+    RerollStats rerolled;
+    detail::RerollDispositionStats reroll_dispositions;
+    if (prep.enabled()) {
+      detail::ProfiledRerollStats profiled =
+          detail::reroll_profiled(g, out.fills, target_terms, roots);
+      rerolled = profiled.work;
+      reroll_dispositions = profiled.dispositions;
+    } else {
+      rerolled = reroll(g, out.fills, target_terms, roots);
+    }
     prep.graph(prep_graph, "reroll", reroll_time, g, out.fills,
                target_terms.size(), out.views.size(), PrepTrace::Extra::Reroll,
                rerolled.regions, rerolled.list_steps, false, 0,
-               rerolled.candidate_steps, rerolled.row_steps);
+               rerolled.candidate_steps, rerolled.row_steps,
+               &reroll_dispositions);
     // Re-roll can replace many element writes with copying slice stores.
     // Give those new ops the same last-use proof as the scalar stores.
     const auto post_reroll_inplace_time = prep.start();
@@ -5291,12 +5323,21 @@ struct Lowering {
                PrepTrace::Extra::ConstFold, constfolded.ops_removed,
                constfolded.slots_folded);
     const auto reroll_time = prep.start();
-    const RerollStats rerolled =
-        reroll(g, out.fills, target_terms, roots);  // STANLI_NO_REROLL
+    RerollStats rerolled;
+    detail::RerollDispositionStats reroll_dispositions;
+    if (prep.enabled()) {
+      detail::ProfiledRerollStats profiled =
+          detail::reroll_profiled(g, out.fills, target_terms, roots);
+      rerolled = profiled.work;
+      reroll_dispositions = profiled.dispositions;
+    } else {
+      rerolled = reroll(g, out.fills, target_terms, roots);  // STANLI_NO_REROLL
+    }
     prep.graph(prep_graph, "reroll", reroll_time, g, out.fills,
                target_terms.size(), out.views.size(), PrepTrace::Extra::Reroll,
                rerolled.regions, rerolled.list_steps, false, 0,
-               rerolled.candidate_steps, rerolled.row_steps);
+               rerolled.candidate_steps, rerolled.row_steps,
+               &reroll_dispositions);
     // Target terms may have been replaced by vector reductions, so rebuild
     // the implicit-root set before considering the slice stores reroll made.
     std::vector<int> post_reroll_roots = roots;

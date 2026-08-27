@@ -37,6 +37,8 @@
 #include <stanli/optable.hpp>
 #include <stanli/reroll.hpp>
 
+#include "reroll_profile.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
@@ -478,15 +480,17 @@ int fuse_log_sum_exp_rows(Graph& g, std::vector<int>& target_terms,
 
 }  // namespace
 
-RerollStats reroll(Graph& g,
-                   std::vector<std::pair<int, std::vector<double>>>& fills,
-                   std::vector<int>& target_terms,
-                   const std::vector<int>& extra_roots) {
+static RerollStats reroll_impl(
+    Graph& g, std::vector<std::pair<int, std::vector<double>>>& fills,
+    std::vector<int>& target_terms, const std::vector<int>& extra_roots,
+    detail::RerollDispositionStats* dispositions) {
   RerollStats st;
   if (std::getenv("STANLI_NO_REROLL")) return st;
 
-  st.regions +=
+  const int packed_rows =
       fuse_log_sum_exp_rows(g, target_terms, extra_roots, st.row_steps);
+  st.regions += packed_rows;
+  if (dispositions) dispositions->packed_rows += packed_rows;
 
   std::unordered_set<int> term_set(target_terms.begin(), target_terms.end());
   const auto is_candidate_op = [&](const Op& t) {
@@ -1205,6 +1209,14 @@ RerollStats reroll(Graph& g,
       }
       i += (size_t)P * (size_t)Luse;
       ++st.regions;
+      if (dispositions) {
+        for (const Pos& committed : pos) {
+          dispositions->term_density += committed.term_density;
+          dispositions->element_density += committed.elt_density;
+          dispositions->term_widen += committed.term_widen;
+          dispositions->element_store += committed.store_vec >= 0;
+        }
+      }
       rewrote = true;
       break;
     }
@@ -1221,5 +1233,25 @@ RerollStats reroll(Graph& g,
   g.ops = std::move(result);
   return st;
 }
+
+RerollStats reroll(Graph& g,
+                   std::vector<std::pair<int, std::vector<double>>>& fills,
+                   std::vector<int>& target_terms,
+                   const std::vector<int>& extra_roots) {
+  return reroll_impl(g, fills, target_terms, extra_roots, nullptr);
+}
+
+namespace detail {
+
+ProfiledRerollStats reroll_profiled(
+    Graph& g, std::vector<std::pair<int, std::vector<double>>>& fills,
+    std::vector<int>& target_terms, const std::vector<int>& extra_roots) {
+  ProfiledRerollStats result;
+  result.work =
+      reroll_impl(g, fills, target_terms, extra_roots, &result.dispositions);
+  return result;
+}
+
+}  // namespace detail
 
 }  // namespace stanli

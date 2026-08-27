@@ -14,6 +14,8 @@
 //             write_array mode, ODE mode
 //   --cross   the cross-path agreement matrix: recompile once per engine
 //             configuration and demand the answers agree bitwise
+//   --mir P   read already-compiled MIR from P, keeping model.stan as the
+//             report/ledger identity; mutually exclusive with --stanc
 #include "../tests/cross_path.hpp"
 
 #include <stanli/compile.hpp>
@@ -24,8 +26,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -59,16 +63,27 @@ static std::string run_stanc(const std::string& stanc,
   return out;
 }
 
+static std::string read_mir(const std::string& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) throw std::runtime_error("cannot open MIR file " + path);
+  std::ostringstream contents;
+  contents << file.rdbuf();
+  if (file.bad()) throw std::runtime_error("cannot read MIR file " + path);
+  return contents.str();
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr,
                  "usage: stanli_check model.stan data.json "
-                 "[--stanc PATH] [--point N] [--columns]\n"
+                 "[--stanc PATH | --mir PATH] [--point N] [--columns]\n"
                  "       [--paths] [--cross [--cross-one lp|grad|wa] "
                  "[--draw-variant N] [--ledger PATH]]\n");
     return 2;
   }
   std::string stanc = "deps/stanc3/stanc";
+  std::string mir_path;
+  bool stanc_arg = false;
   int variant = 0;
   bool columns_only = false;
   bool wa_values = false;
@@ -93,22 +108,32 @@ int main(int argc, char** argv) {
       draw_variant = std::atoi(argv[++i]);
     else if (a == "--ledger" && i + 1 < argc)
       ledger_path = argv[++i];
-    else if (a == "--stanc" && i + 1 < argc)
+    else if (a == "--stanc" && i + 1 < argc) {
       stanc = argv[++i];
+      stanc_arg = true;
+    } else if (a == "--mir" && i + 1 < argc)
+      mir_path = argv[++i];
     else if (a == "--point" && i + 1 < argc)
       variant = std::atoi(argv[++i]);
+  }
+  if (stanc_arg && !mir_path.empty()) {
+    std::fprintf(stderr,
+                 "stanli_check: --stanc and --mir are mutually exclusive\n");
+    return 2;
   }
   if (const char* env = std::getenv("STANC")) stanc = env;
 
   std::string mir;
   try {
-    mir = run_stanc(stanc, argv[1]);
+    mir = mir_path.empty() ? run_stanc(stanc, argv[1]) : read_mir(mir_path);
     if (mir.empty()) {
-      std::printf("COMPILE_FAIL stanc produced no MIR\n");
+      std::printf("COMPILE_FAIL %s produced no MIR\n",
+                  mir_path.empty() ? "stanc" : "MIR file");
       return 1;
     }
   } catch (const std::exception& e) {
-    std::printf("COMPILE_FAIL stanc: %s\n", e.what());
+    std::printf("COMPILE_FAIL %s: %s\n",
+                mir_path.empty() ? "stanc" : "MIR file", e.what());
     return 1;
   }
 

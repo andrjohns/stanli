@@ -184,6 +184,8 @@ jobs:
             deps/stanc3/stanc_embed.o.stamp
             deps/stanc3/stanc
             deps/stanc3/stanc.src
+            deps/stanc3/stanli-vectorize-probe
+            deps/stanc3/stanli-vectorize-probe.stamp
             deps/ocaml-include
           key: >-
             stanc-embed-v2-${{ matrix.plat }}-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-${{ hashFiles('compiler/native/**', 'compiler/ocaml/**', 'tools/stanc_embed/**') }}
@@ -194,7 +196,9 @@ jobs:
           # The stanc-embed cache missed, so any object on disk came from
           # another cache and is stale by definition.
           rm -f deps/stanc3/stanc_embed.o deps/stanc3/stanc_embed.o.stamp \
-            deps/stanc3/stanc deps/stanc3/stanc.src
+            deps/stanc3/stanc deps/stanc3/stanc.src \
+            deps/stanc3/stanli-vectorize-probe \
+            deps/stanc3/stanli-vectorize-probe.stamp
           opam init --bare --disable-sandboxing --no-setup -y
           ./tools/dev_setup.sh --embed --no-build
           mkdir -p deps/ocaml-include
@@ -208,6 +212,10 @@ jobs:
         run: |
           source tools/stanc_embed/provenance.sh
           stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
+            "$STANC3_SRC_SHA" stanc3-55
+          test -x deps/stanc3/stanli-vectorize-probe
+          stanc_embed_artifact_matches \
+            deps/stanc3/stanli-vectorize-probe \
             "$STANC3_SRC_SHA" stanc3-55
           for symbol in caml_c_thread_register caml_c_thread_unregister; do
             nm -g deps/stanc3/stanc_embed.o | awk -v wanted="$symbol" '
@@ -313,6 +321,39 @@ jobs:
         run: |
           python3 tools/verify_refs.py deps/posteriordb \
             --check build-rel/stanli_check --jobs 4
+
+      # This does not select the candidate source pass for any producer. The
+      # test-only OCaml probe emits both inputs, and stanli_check consumes the
+      # saved portable MIR directly so every point reuses the exact bytes.
+      # Semantic/reference parity gates the job; graph sizes, re-roll
+      # dispositions, and preparation timings are published as measurements.
+      - name: Bounded MIR vectorization A/B
+        if: matrix.runtime == 'linux-x86_64'
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          test -x deps/stanc3/stanli-vectorize-probe
+          source tools/stanc_embed/provenance.sh
+          stanc_embed_artifact_matches \
+            deps/stanc3/stanli-vectorize-probe \
+            "$STANC3_SRC_SHA" stanc3-55
+          python3 harnesses/vectorize_ab.py deps/posteriordb \
+            normal_mixture radon_pooled soil_incubation arK \
+            low_dim_gauss_mix hmm_example \
+            eight_schools_noncentered \
+            --compiler deps/stanc3/stanli-vectorize-probe \
+            --check build-rel/stanli_check \
+            --bench build-rel/bench_grad --dump build-rel/dump_ops \
+            --timeout 30 --gradient-timeout 20 --prep-samples 2 \
+            --output-dir build-rel/vectorize-ab
+
+      - name: Publish MIR vectorization measurements
+        if: always() && matrix.runtime == 'linux-x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mir-vectorization-measurements
+          if-no-files-found: error
+          path: build-rel/vectorize-ab
 
       # The headline numbers in both READMEs are derived, not typed.
       - name: Docs match the measured artifacts

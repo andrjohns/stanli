@@ -116,10 +116,13 @@ fi
 if [ "$WANT_EMBED" = 1 ]; then
   step "building the embeddable stanc object"
   if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
+       "$STANC3_SRC_SHA" &&
+     [ -x deps/stanc3/stanli-vectorize-probe ] &&
+     stanc_embed_artifact_matches deps/stanc3/stanli-vectorize-probe \
        "$STANC3_SRC_SHA"; then
-    echo "deps/stanc3/stanc_embed.o matches the source and producer inputs"
+    echo "embedded compiler artifacts match the source and producer inputs"
   else
-    echo "embedded object is absent or its provenance does not match; rebuilding"
+    echo "embedded compiler artifacts are absent or mismatched; rebuilding"
     tools/stanc_embed/build.sh deps/stanc3-src "$OPAM_SWITCH"
   fi
 fi
