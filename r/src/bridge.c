@@ -1,11 +1,10 @@
 /* R <-> stanli C ABI.
  *
- * The stanli runtime is a ~16 MB shared library. CRAN builds its own
- * binaries from source and will not carry one that size, so the library
- * is not linked here -- it is dlopen'd at runtime from wherever
- * stanli_install() put it, and every entry point is resolved by name.
- * That is the same shape torch's CRAN package uses for libtorch, and it
- * is why this file has no stan-math in it and compiles in seconds.
+ * The stanli runtime is a separately released shared library, so it is not
+ * linked here -- it is dlopen'd at runtime from wherever stanli_install() put
+ * it, and every entry point is resolved by name. That is the same split torch
+ * uses for libtorch, and it is why this file has no stan-math in it and
+ * compiles in seconds.
  *
  * One consequence worth stating: nothing here is callable until
  * stanli_bridge_load() has succeeded, so every wrapper checks and errors
