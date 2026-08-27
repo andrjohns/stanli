@@ -1794,6 +1794,32 @@ struct Lowering {
     return false;
   }
 
+  // A Break/Continue selected by a runtime condition cannot be lowered as a
+  // standalone conditional island: its jump target belongs to the enclosing
+  // loop. Promote that whole loop to the necessity island instead. Nested
+  // loops own their own control statements and therefore stop this search.
+  bool runtime_loop_control(const mir::Stmt& s, bool runtime_path = false) {
+    if (s.kind == mir::Stmt::Break || s.kind == mir::Stmt::Continue)
+      return runtime_path;
+    if (s.kind == mir::Stmt::For || s.kind == mir::Stmt::While) return false;
+    if (s.kind == mir::Stmt::IfElse) {
+      if (auto evaluated = try_eval_pure(s.cond)) {
+        const bool take_then = evaluated->r.at(0) != 0.0;
+        if (take_then && !s.body.empty())
+          return runtime_loop_control(s.body[0], runtime_path);
+        if (!take_then && s.body.size() > 1)
+          return runtime_loop_control(s.body[1], runtime_path);
+        return false;
+      }
+      for (const auto& arm : s.body)
+        if (runtime_loop_control(arm, true)) return true;
+      return false;
+    }
+    for (const auto& child : s.body)
+      if (runtime_loop_control(child, runtime_path)) return true;
+    return false;
+  }
+
   // Every name an Assignment targets anywhere in `s`, in first-seen order.
   void assigned_names(const mir::Stmt& s, std::vector<std::string>* out) {
     if (s.kind == mir::Stmt::Assignment &&
@@ -5119,6 +5145,11 @@ struct Lowering {
         }
         fail("unsupported statement function " + s.fn_name);
       case mir::Stmt::For: {
+        for (const auto& child : s.body)
+          if (runtime_loop_control(child)) {
+            lower_param_ifelse(s);
+            return;
+          }
         const long lo = eval_int(s.lower), hi = eval_int(s.upper);
         for (long v = lo; v <= hi; ++v) {
           int_env[s.loopvar] = v;
@@ -5134,6 +5165,11 @@ struct Lowering {
         return;
       }
       case mir::Stmt::While: {
+        for (const auto& child : s.body)
+          if (runtime_loop_control(child)) {
+            lower_param_ifelse(s);
+            return;
+          }
         // Unrolled like For. The bound only turns a nonterminating unroll
         // into an error instead of an out-of-memory kill.
         for (int64_t guard = 0;; ++guard) {
