@@ -43,6 +43,19 @@ int main() {
         "matrix column-major with dims");
   check(m.at("yi").is_int && m.at("yi").i[2] == 1, "yi int array");
 
+  // Empty leaves retain their zero-width dimension.  Stan models commonly
+  // receive array[N] vector[0] when an optional predictor count is zero.
+  DataMap z = DataMap::from_json(R"({
+    "Z2": [[], [], []],
+    "Z3": [[[], []], [[], []]]
+  })");
+  check(z.at("Z2").dims == std::vector<int64_t>({3, 0}) &&
+            z.at("Z2").r.empty() && z.at("Z2").i.empty(),
+        "JSON zero-width matrix shape");
+  check(z.at("Z3").dims == std::vector<int64_t>({2, 2, 0}) &&
+            z.at("Z3").r.empty() && z.at("Z3").i.empty(),
+        "JSON nested zero-width shape");
+
   // A var_context keeps reals and ints under separate name lists, and its
   // flat values are already column-major -- the same layout the JSON reader
   // produces -- so the conversion copies rather than reorders.
