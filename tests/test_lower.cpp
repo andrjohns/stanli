@@ -2335,6 +2335,32 @@ int main() {
     expect_eq("parameter-condition int array else grad", grad, 1.0);
   }
 
+  // A parameter-dependent region whose live-outs are all zero-width. The
+  // dimension table gives the matrices no extent, so the region has
+  // nothing to carry out and no island runs; with an extent the same
+  // model compiles the ordinary way. Refusing the empty one as a region
+  // that "produces nothing" turned a model's own data into a compile
+  // error -- that message is for a region that found no live-out at all.
+  {
+    for (int extent : {0, 2}) {
+      DataMap d;
+      d.set_int("n", extent);
+      CompiledModel cm =
+          compile_model(slurp("tests/fixtures/paramcond_empty.tmir.sexp"), d);
+      Executor ex(std::move(cm.graph));
+      cm.bind(ex);
+      double grad = 0.0;
+      const std::string tag =
+          "parameter-condition empty " + std::to_string(extent) + " ";
+      ex.params_data()[0] = 0.5;
+      expect_eq(tag + "lp", ex.gradient(&grad), 0.5);
+      expect_eq(tag + "grad", grad, 1.0);
+      ex.params_data()[0] = -0.5;
+      expect_eq(tag + "else lp", ex.gradient(&grad), -0.5);
+      expect_eq(tag + "else grad", grad, 1.0);
+    }
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.

@@ -1953,7 +1953,13 @@ struct Lowering {
     } catch (Bail& b) {
       fail("parameter-dependent region: " + b.why, s ? s->raw : e->raw);
     }
-    if (prog->out_regs.empty() && !(e && expr_out->len == 0))
+    // No live-out register is legitimate when the region found live-outs
+    // and every one of them is zero-width: the data made the values empty,
+    // as `matrix[0, 0]` from a dimension table does, so there is nothing
+    // for the program to carry out. Finding no live-out at all is the
+    // mistake this catches -- a region that lost what it was to produce.
+    if (prog->out_regs.empty() && !(e && expr_out->len == 0) &&
+        (s == nullptr || reg->out_names.empty()))
       fail("parameter-dependent region produces nothing", s ? s->raw : e->raw);
     // A region with a runtime branch keeps the var replay -- reversing
     // control flow needs the structured form the flat program has already
@@ -2033,6 +2039,11 @@ struct Lowering {
     std::vector<int> out_lens;
     for (const Range& v : reg.out_views) out_lens.push_back(v.len);
     if (reg.has_target) out_lens.push_back(1);
+    // Nothing to carry out and no target to accumulate: every live-out is
+    // zero-width, so the region has no observable effect and its values
+    // keep the empty shape they already have outside. A `target +=` would
+    // have put its own register here, so this cannot drop one.
+    if (prog->out_regs.empty()) return;
     std::vector<int> out_slots;
     emit_island(prog, reg, out_lens, &out_slots);
     // Later statements read the island's results, not the old values.
