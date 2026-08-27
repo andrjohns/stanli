@@ -31,9 +31,9 @@ parameters, and generated quantities (RNG draws stream from `seed`).
 The heavy work runs in a worker the package owns, so the page never
 blocks; calls queue and run one at a time.
 
-The preferred compiler, `stanli-compiler.js`, is 2,990,736 bytes raw and
-425,026 bytes gzipped in the current measured build. For one rollback cycle
-the package also contains stock `stancjs.bc.js` (2,971,677 bytes raw, 418,847
+The preferred compiler, `stanli-compiler.js`, is 2,988,001 bytes raw and
+424,607 bytes gzipped in the current measured build. For one rollback cycle
+the package also contains stock `stancjs.bc.js` (2,966,778 bytes raw, 417,857
 bytes gzipped). The worker loads the stock compiler only if the portable
 compiler is unavailable; its O1 legacy MIR remains accepted by the runtime.
 Carrying both temporarily doubles the compiler portion of the installed and
