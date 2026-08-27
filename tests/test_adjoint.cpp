@@ -294,11 +294,12 @@ static void test_fma() {
 
 static void test_unary_ops() {
   const Program::Code codes[] = {
-      Program::NEG,    Program::EXP,       Program::LOG,   Program::SQRT,
-      Program::SQUARE, Program::INV_LOGIT, Program::LOG1M, Program::TANH,
-      Program::INV,    Program::FABS};
-  const char* names[] = {"neg",       "exp",   "log",  "sqrt", "square",
-                         "inv_logit", "log1m", "tanh", "inv",  "fabs"};
+      Program::NEG,    Program::EXP,       Program::LOG,      Program::SQRT,
+      Program::SQUARE, Program::INV_LOGIT, Program::LOG1M,    Program::TANH,
+      Program::INV,    Program::FABS,      Program::LOG1P_EXP};
+  const char* names[] = {"neg",    "exp",       "log",      "sqrt",
+                         "square", "inv_logit", "log1m",    "tanh",
+                         "inv",    "fabs",      "log1p_exp"};
   for (size_t k = 0; k < sizeof(codes) / sizeof(codes[0]); ++k) {
     Build b({0.37});
     const int d = b.emit(codes[k], 0);

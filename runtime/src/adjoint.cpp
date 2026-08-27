@@ -569,6 +569,13 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
         adj[I.dst] = 0.0;
         adj[I.a] += t / (val[I.va] - 1.0);
         break;
+      // The derivative stan-math precomputes for its own reverse rule, and
+      // the one OP_LOG1P_EXP carries on the graph side: the two paths have
+      // to agree to the bit, and one expression is how that stays true.
+      case Program::LOG1P_EXP:
+        adj[I.dst] = 0.0;
+        adj[I.a] += t * stan::math::inv_logit(val[I.va]);
+        break;
       case Program::TANH: {
         adj[I.dst] = 0.0;
         const double ch = std::cosh(val[I.va]);

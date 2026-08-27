@@ -81,6 +81,7 @@ enum ProgramOpFlag : uint16_t {
   X(FABS, kProgramSaveA)                                                     \
   X(INV_LOGIT, kProgramSaveOut)                                              \
   X(LOG1M, kProgramSaveA)                                                    \
+  X(LOG1P_EXP, kProgramSaveA)                                                \
   X(TANH, kProgramSaveA)                                                     \
   X(GT, kProgramReadB)                                                       \
   X(GE, kProgramReadB)                                                       \
@@ -306,6 +307,9 @@ void run_program(const Program& p, T* reg) {
         break;
       case Program::LOG1M:
         d() = stan::math::log1m(ra());
+        break;
+      case Program::LOG1P_EXP:
+        d() = stan::math::log1p_exp(ra());
         break;
       case Program::TANH:
         d() = stan::math::tanh(ra());

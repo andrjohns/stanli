@@ -897,6 +897,8 @@ struct ProgramCompiler {
         c = Program::FABS;
       else if (e.name == "inv_logit")
         c = Program::INV_LOGIT;
+      else if (e.name == "log1p_exp")
+        c = Program::LOG1P_EXP;
       else
         bail("function " + e.name);
       const int r = alloc(a.len);

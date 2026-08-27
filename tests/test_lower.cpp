@@ -2396,6 +2396,29 @@ int main() {
     expect_eq("parameter-condition rep_vector empty grad", grad, 0.0);
   }
 
+  // log1p_exp in a region, on its own opcode. Both the value and the
+  // derivative are the expressions stan-math uses, which is what keeps
+  // the region's backward, the var replay and the graph's OP_LOG1P_EXP
+  // agreeing to the bit -- so the expectations here are those same calls
+  // rather than decimals.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_log1pexp.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    ex.params_data()[0] = 0.5;
+    expect_eq("parameter-condition log1p_exp lp", ex.gradient(&grad),
+              stan::math::log1p_exp(1.0));
+    expect_eq("parameter-condition log1p_exp grad", grad,
+              2.0 * stan::math::inv_logit(1.0));
+    ex.params_data()[0] = -0.5;
+    expect_eq("parameter-condition log1p_exp else lp", ex.gradient(&grad),
+              stan::math::log1p_exp(-0.5));
+    expect_eq("parameter-condition log1p_exp else grad", grad,
+              stan::math::inv_logit(-0.5));
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.
