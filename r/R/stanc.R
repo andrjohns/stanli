@@ -17,9 +17,9 @@
 # Under webR there is no V8 package and no process to run a binary in,
 # but the host already IS a JavaScript engine: the webr support
 # package's eval_js() evaluates in the worker's global scope, and the
-# same bundled stanc.js defines stanc() there once per session. The dispatch
-# also understands stanli_compile() before the package starts carrying that
-# producer, so the switch itself does not need a simultaneous R-code change.
+# same bundled stanc.js defines stanli_compile() and its stanc-compatible export
+# there once per session. Both native V8 and webR select the shared portable
+# producer by export presence.
 #
 # An explicit stanc in STANLI_STANC still wins for compiler bisects. Otherwise
 # the runtime-adjacent stanli-compile wins, followed by adjacent or PATH stanc.
