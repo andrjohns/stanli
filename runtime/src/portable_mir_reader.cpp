@@ -444,6 +444,8 @@ Stmt::Kind read_stmt_kind(const json& value, const std::string& path) {
   STANLI_ENUM_CASE(While);
   STANLI_ENUM_CASE(NRFunApp);
   STANLI_ENUM_CASE(Return);
+  STANLI_ENUM_CASE(Break);
+  STANLI_ENUM_CASE(Continue);
   STANLI_ENUM_CASE(Skip);
   STANLI_ENUM_CASE(Unsupported);
 #undef STANLI_ENUM_CASE

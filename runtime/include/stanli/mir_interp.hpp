@@ -468,7 +468,13 @@ class MirInterp {
           lv.i = {(int)v};
           lv.r = {T((double)v)};
           env_[st.loopvar] = lv;
-          for (const auto& k : st.body) exec(k);
+          try {
+            for (const auto& k : st.body) exec(k);
+          } catch (ContinueV&) {
+            continue;
+          } catch (BreakV&) {
+            break;
+          }
         }
         env_.erase(st.loopvar);
         return;
@@ -487,12 +493,22 @@ class MirInterp {
         int64_t guard = 0;
         while (val(eval(st.cond).r.at(0)) != 0.0) {
           if (++guard > 100000000) fail("while loop did not terminate");
-          for (const auto& k : st.body) exec(k);
+          try {
+            for (const auto& k : st.body) exec(k);
+          } catch (ContinueV&) {
+            continue;
+          } catch (BreakV&) {
+            break;
+          }
         }
         return;
       }
       case mir::Stmt::Return:
         throw ReturnV{st.has_init ? eval(st.rhs) : Value{}};
+      case mir::Stmt::Break:
+        throw BreakV{};
+      case mir::Stmt::Continue:
+        throw ContinueV{};
       case mir::Stmt::NRFunApp:
         // Constraint checks are not executed here, but reject() and
         // print() are: a `reject` in transformed data is how a model
@@ -562,6 +578,8 @@ class MirInterp {
   struct ReturnV {
     Value v;
   };
+  struct BreakV {};
+  struct ContinueV {};
 
   const std::map<std::string, const mir::FunDef*>& funs_;
   std::string where_;

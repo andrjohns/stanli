@@ -2164,6 +2164,27 @@ int main() {
     check(std::isnan(nan_lp), "uninitialized island selected arm is NaN");
   }
 
+  // stanc's O1 inliner lowers a UDF return through an early-return flag and
+  // Break statements inside a single-iteration loop. Both return paths must
+  // leave that synthetic loop without escaping the caller's surrounding
+  // control flow.
+  for (int first : {0, 1}) {
+    DataMap d;
+    d.set_int("first", first);
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/early_return.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    ex.params_data()[0] = 0.4;
+    double grad = 0.0;
+    const double lp = ex.gradient(&grad);
+    const double scale = first ? 2.0 : 3.0;
+    expect_eq("inlined early return lp " + std::to_string(first), lp,
+              scale * 0.4);
+    expect_eq("inlined early return grad " + std::to_string(first), grad,
+              scale);
+  }
+
   // The same region written with `~`: refused, by name, with the fix in
   // the message. Before the check existed this compiled and was wrong in
   // lp by exactly the dropped constant, with a correct gradient.

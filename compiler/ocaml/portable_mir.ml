@@ -447,9 +447,11 @@ let rec stmt_of_t (stmt : Stmt.Located.t) =
         st_kind= "Return"
       ; st_has_init= Option.is_some expr
       ; st_rhs= Option.value_map expr ~default:(default_expr ()) ~f:expr_of_t }
+  | Break -> {(default_stmt ()) with st_kind= "Break"}
+  | Continue -> {(default_stmt ()) with st_kind= "Continue"}
   | Skip -> {(default_stmt ()) with st_kind= "Skip"}
   | NRFunApp (kind, args) -> nr_fun_app_of_t kind args
-  | JacobianPE _ | Break | Continue | Profile _ ->
+  | JacobianPE _ | Profile _ ->
       { (default_stmt ()) with
         st_kind= "Unsupported"
       ; st_raw= raw_stmt_pattern stmt.pattern }

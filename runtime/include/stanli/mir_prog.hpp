@@ -71,6 +71,11 @@ struct ProgramCompiler {
   std::map<std::string, std::vector<long>> ints;
   int branch_depth = 0;  // inside a branch on a runtime value
   int inline_depth = 0;
+  struct LoopFrame {
+    std::vector<int> breaks;
+    std::vector<int> continues;
+  };
+  std::vector<LoopFrame> loops;
   // A name that is neither a local nor a compile-time integer. The ODE
   // caller leaves this empty (its arguments are all bound up front);
   // lowering installs a hook that allocates registers for the graph slot
@@ -661,6 +666,8 @@ struct ProgramCompiler {
   struct Returned {
     Range r;
   };
+  struct CompileBreak {};
+  struct CompileContinue {};
 
   int64_t sized_len(const mir::SizedType& t) {
     int64_t n = 1;
@@ -831,13 +838,66 @@ struct ProgramCompiler {
         // program has no way to express; the interpreter still handles it.
         if (branch_depth) bail("return inside a data-dependent branch");
         throw Returned{s.has_init ? expr(s.rhs) : Range{0, 0}};
+      case mir::Stmt::Break:
+        if (loops.empty()) bail("break outside a loop");
+        if (branch_depth) {
+          loops.back().breaks.push_back(emit(Program::JMP, 0));
+          return;
+        }
+        throw CompileBreak{};
+      case mir::Stmt::Continue:
+        if (loops.empty()) bail("continue outside a loop");
+        if (branch_depth) {
+          loops.back().continues.push_back(emit(Program::JMP, 0));
+          return;
+        }
+        throw CompileContinue{};
       case mir::Stmt::For: {
         const long lo = cint(s.lower), hi = cint(s.upper);
+        loops.push_back({});
+        bool broken = false;
         for (long v = lo; v <= hi; ++v) {
           ints[s.loopvar] = {v};
-          for (const auto& k : s.body) stmt(k);
+          try {
+            for (const auto& k : s.body) stmt(k);
+          } catch (CompileContinue&) {
+          } catch (CompileBreak&) {
+            broken = true;
+          }
+          for (int jump : loops.back().continues)
+            p.code[(size_t)jump].dst = (int)p.code.size();
+          loops.back().continues.clear();
+          if (broken) break;
         }
         ints.erase(s.loopvar);
+        for (int jump : loops.back().breaks)
+          p.code[(size_t)jump].dst = (int)p.code.size();
+        loops.pop_back();
+        return;
+      }
+      case mir::Stmt::While: {
+        loops.push_back({});
+        bool broken = false;
+        for (int64_t guard = 0;; ++guard) {
+          long condition;
+          if (!try_cint(s.cond, &condition))
+            bail("while condition is not known at compile time");
+          if (!condition) break;
+          if (guard > 1000000) bail("while loop did not terminate");
+          try {
+            for (const auto& k : s.body) stmt(k);
+          } catch (CompileContinue&) {
+          } catch (CompileBreak&) {
+            broken = true;
+          }
+          for (int jump : loops.back().continues)
+            p.code[(size_t)jump].dst = (int)p.code.size();
+          loops.back().continues.clear();
+          if (broken) break;
+        }
+        for (int jump : loops.back().breaks)
+          p.code[(size_t)jump].dst = (int)p.code.size();
+        loops.pop_back();
         return;
       }
       case mir::Stmt::IfElse: {

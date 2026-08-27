@@ -2402,6 +2402,8 @@ struct Lowering {
   struct LpReturn {
     Val v;
   };
+  struct LoopBreak {};
+  struct LoopContinue {};
 
   // Inline a user-defined function at its call site: arguments are lowered
   // in the caller's scope, bound under the parameter names in a shadowed
@@ -5120,7 +5122,13 @@ struct Lowering {
         const long lo = eval_int(s.lower), hi = eval_int(s.upper);
         for (long v = lo; v <= hi; ++v) {
           int_env[s.loopvar] = v;
-          for (const auto& k : s.body) lower_stmt(k);
+          try {
+            for (const auto& k : s.body) lower_stmt(k);
+          } catch (LoopContinue&) {
+            continue;
+          } catch (LoopBreak&) {
+            break;
+          }
         }
         int_env.erase(s.loopvar);
         return;
@@ -5133,7 +5141,13 @@ struct Lowering {
           if (!c) fail("while condition is not data", s.raw);
           if (c->r.at(0) == 0.0) return;
           if (guard > 1000000) fail("while loop did not terminate", s.raw);
-          for (const auto& k : s.body) lower_stmt(k);
+          try {
+            for (const auto& k : s.body) lower_stmt(k);
+          } catch (LoopContinue&) {
+            continue;
+          } catch (LoopBreak&) {
+            return;
+          }
         }
       }
       case mir::Stmt::IfElse: {
@@ -5176,6 +5190,10 @@ struct Lowering {
         // value returns); unwinds to lower_call_udf.
         if (!s.has_init) fail("void return unsupported in UDF inlining");
         throw LpReturn{lower_expr(s.rhs)};
+      case mir::Stmt::Break:
+        throw LoopBreak{};
+      case mir::Stmt::Continue:
+        throw LoopContinue{};
       default:
         fail("unsupported statement", s.raw);
     }

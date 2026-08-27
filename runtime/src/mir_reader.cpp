@@ -633,6 +633,10 @@ Stmt read_stmt(const Node& n) {
   if (p.is_atom()) {
     if (p.atom == "Skip")
       s.kind = Stmt::Skip;
+    else if (p.atom == "Break")
+      s.kind = Stmt::Break;
+    else if (p.atom == "Continue")
+      s.kind = Stmt::Continue;
     else
       s.raw = p.atom;
     return s;
