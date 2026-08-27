@@ -208,6 +208,21 @@ ratios are descriptive rather than acceptance thresholds. See
 [`TESTING.md`](../../../TESTING.md#mir-loop-vectorization-measurement) for the
 operator command and artifact contract.
 
+### 2026-08-26 measurement baseline
+
+The complete Release run at implementation revision `d3b7d26` used macOS
+26.4 arm64 and Apple clang 21. It covered 131 models and 393 evaluation
+points. Enabling the pass changed MIR for `covid19imperial_v2`,
+`covid19imperial_v3`, `normal_mixture`, `radon_pooled`, and
+`soil_incubation`. The only finite arithmetic-order changes were two
+one-ULP log-density results in `soil_incubation`; the run reported zero
+semantic failures and zero infrastructure failures and took 229.898 seconds.
+Timing ratios remain descriptive.
+
+The pass removed only 4 of the 23 `log_prob` term-density reroll hits; 19
+models still reported that rewrite. No C++ reroll case can be retired from
+this evidence, and production pass selection remains off.
+
 Keep C++ reroll enabled initially and measure with the OCaml pass both on and
 off:
 
