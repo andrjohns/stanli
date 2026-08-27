@@ -2309,6 +2309,32 @@ int main() {
     expect_eq("parameter-condition int ops else grad", grad, 1.0);
   }
 
+  // Integer reads the region cannot answer from its own tables: an
+  // element of a data array at rank two, and a literal array's size and
+  // elements -- the form stanc's inliner leaves where it substituted an
+  // `array[] int` argument. Before this the region compiler could index
+  // only a one-dimensional integer it had folded itself, so each of these
+  // refused the whole region.
+  {
+    DataMap d;
+    // Column-major, as the JSON reader stores a two-dimensional array.
+    d.set_int_array("idx", {1, 2, 3, 5, 7, 5}, {3, 2});
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/paramcond_intarray.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    // Rows 1 and 3 match on the second column, contributing 1 + 3; the
+    // literal array adds size 3 and its second element 5.
+    ex.params_data()[0] = 0.5;
+    expect_eq("parameter-condition int array lp", ex.gradient(&grad), 6.0);
+    expect_eq("parameter-condition int array grad", grad, 12.0);
+    ex.params_data()[0] = -0.5;
+    expect_eq("parameter-condition int array else lp", ex.gradient(&grad),
+              -0.5);
+    expect_eq("parameter-condition int array else grad", grad, 1.0);
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.
