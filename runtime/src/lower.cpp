@@ -1837,6 +1837,18 @@ struct Lowering {
     // would replay them during reverse mode, so ProgramCompiler refuses them
     // until necessity islands have an execute-once effect path.
     for (const auto& [name, v] : int_env) c.ints[name] = {v};
+    // Data the region reads as a compile-time integer, answered by the
+    // same interpreter that answers a size expression. The region has
+    // already resolved the indices, so what arrives is a literal read of a
+    // data-only value -- nothing here depends on the region's own scope.
+    c.extern_int = [&](const mir::Expr& x, long* out) {
+      if (!x.data_only) return false;
+      auto evaluated = try_eval_pure(x);
+      if (!evaluated || !evaluated->is_int || evaluated->i.size() != 1)
+        return false;
+      *out = evaluated->i[0];
+      return true;
+    };
     std::set<std::string> outer_names;
     for (const auto& [name, value] : scope) outer_names.insert(name);
     for (const auto& [name, value] : decls) outer_names.insert(name);

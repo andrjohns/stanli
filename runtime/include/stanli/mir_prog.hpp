@@ -29,6 +29,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -76,6 +77,10 @@ struct ProgramCompiler {
   // caller seeded has no entry and is treated as declared outside
   // everything, which is what it is.
   std::map<std::string, std::pair<int, size_t>> int_decl_at;
+  // Names bind_extern brought in. They are the caller's values rather than
+  // the region's, which is what makes them the caller's to answer about --
+  // being in `reals` only says the region has read one as a value.
+  std::set<std::string> extern_bound;
   int branch_depth = 0;  // inside a branch on a runtime value
   int inline_depth = 0;
   struct LoopFrame {
@@ -89,6 +94,13 @@ struct ProgramCompiler {
   // backing the name and records it as a live-in. Returning false means
   // "no such value", and the compile bails.
   std::function<bool(const std::string&, Range*)> bind_extern;
+  // One compile-time integer the region cannot reach on its own: a read
+  // from a data array. The caller has the data interpreter that answers
+  // sizes outside the region, and cint hands it a read whose indices are
+  // already literals -- they are the region's own loop variables, which
+  // the caller has never heard of. Lowering installs this; the ODE caller
+  // leaves it empty, and cint then refuses as before.
+  std::function<bool(const mir::Expr&, long*)> extern_int;
   // Where `target +=` accumulates, or -1 when the region may not have
   // one. Set by the caller, which also seeds it to zero.
   int target_reg = -1;
@@ -190,6 +202,30 @@ struct ProgramCompiler {
   // `rows`, `cols` and `dims` of the result mean anything; `reg` is not a
   // register, because no value was built.
   bool static_view(const mir::Expr& e, Range* out) {
+    // A literal array, which stanc's inliner substitutes for an argument:
+    // `size(when)` inside an inlined function arrives as `size({0})`.
+    if (e.kind == mir::Expr::FunApp &&
+        (e.name == "FnMakeArray" || e.name == "FnMakeRowVec")) {
+      int64_t len = 0;
+      for (const auto& a : e.args) {
+        Range part;
+        if (!static_view(a, &part)) return false;
+        len += part.len;
+      }
+      Range r{0, (int)len};
+      if (e.name == "FnMakeRowVec") {
+        r.kind = ViewKind::RowVector;
+      } else {
+        r.kind = ViewKind::Array;
+        r.dims = {(int64_t)e.args.size()};
+      }
+      *out = r;
+      return true;
+    }
+    if (e.kind == mir::Expr::LitInt || e.kind == mir::Expr::LitReal) {
+      *out = Range{0, 1};
+      return true;
+    }
     if (e.kind != mir::Expr::Var) return false;
     auto rt = reals.find(e.name);
     if (rt != reals.end()) {
@@ -206,6 +242,7 @@ struct ProgramCompiler {
     Range ext;
     if (bind_extern && bind_extern(e.name, &ext)) {
       reals[e.name] = ext;
+      extern_bound.insert(e.name);
       *out = ext;
       return true;
     }
@@ -233,15 +270,49 @@ struct ProgramCompiler {
         bail("integer " + e.name + " is not known at compile time");
       }
       case mir::Expr::Indexed: {
-        if (e.args.size() != 2 || e.args[1].name != "IndexSingle")
-          bail("integer index form");
+        if (e.args.size() < 2) bail("integer index form");
+        // The same substituted literal, indexed rather than measured.
+        if (e.args.size() == 2 && e.args[0].kind == mir::Expr::FunApp &&
+            e.args[0].name == "FnMakeArray" &&
+            e.args[1].name == "IndexSingle") {
+          const long ix = cint(e.args[1].args[0]);
+          if (ix < 1 || (size_t)ix > e.args[0].args.size())
+            bail("integer index range");
+          return cint(e.args[0].args[(size_t)ix - 1]);
+        }
         if (e.args[0].kind != mir::Expr::Var) bail("integer index base");
+        for (size_t k = 1; k < e.args.size(); ++k)
+          if (e.args[k].name != "IndexSingle" || e.args[k].args.size() != 1)
+            bail("integer index form");
         auto it = ints.find(e.args[0].name);
-        if (it == ints.end()) bail("integer array " + e.args[0].name);
-        const long ix = cint(e.args[1].args[0]);
-        if (ix < 1 || (size_t)ix > it->second.size())
-          bail("integer index range");
-        return it->second[(size_t)ix - 1];
+        if (it != ints.end()) {
+          if (e.args.size() != 2) bail("integer index form");
+          const long ix = cint(e.args[1].args[0]);
+          if (ix < 1 || (size_t)ix > it->second.size())
+            bail("integer index range");
+          return it->second[(size_t)ix - 1];
+        }
+        // A read from a data array, at any rank: `ms[ri, 8]` where the
+        // region unrolled the loop that produced `ri`. Resolving the
+        // indices here and asking for a literal read keeps the array's
+        // storage order the one place that already knows it.
+        if (extern_int && (extern_bound.count(e.args[0].name) ||
+                           !reals.count(e.args[0].name))) {
+          mir::Expr literal = e;
+          for (size_t k = 1; k < literal.args.size(); ++k) {
+            mir::Expr& ix = literal.args[k].args[0];
+            const long v = cint(ix);
+            ix = mir::Expr{};
+            ix.kind = mir::Expr::LitInt;
+            ix.lit_i = v;
+            ix.type_ = "UInt";
+            ix.unsized = {0, mir::UnsizedLeaf::Int};
+            ix.data_only = true;
+          }
+          long v;
+          if (extern_int(literal, &v)) return v;
+        }
+        bail("integer array " + e.args[0].name);
       }
       case mir::Expr::EAnd:
       case mir::Expr::EOr: {
@@ -398,6 +469,7 @@ struct ProgramCompiler {
         Range ext;
         if (bind_extern && bind_extern(e.name, &ext)) {
           reals[e.name] = ext;
+          extern_bound.insert(e.name);
           return ext;
         }
         bail("unknown variable " + e.name);
@@ -916,6 +988,7 @@ struct ProgramCompiler {
           Range ext;
           if (bind_extern && bind_extern(s.lhs, &ext)) {
             reals[s.lhs] = ext;
+            extern_bound.insert(s.lhs);
             it = reals.find(s.lhs);
           }
         }
@@ -1119,10 +1192,12 @@ struct ProgramCompiler {
     auto saved_reals = reals;
     auto saved_ints = ints;
     auto saved_int_decl_at = int_decl_at;
+    auto saved_extern_bound = extern_bound;
     const int saved_branch_depth = branch_depth;
     reals.clear();
     ints.clear();
     int_decl_at.clear();
+    extern_bound.clear();
     branch_depth = 0;
     for (size_t k = 0; k < f.arg_names.size(); ++k) {
       if (args[k].is_const_int) {
@@ -1143,6 +1218,7 @@ struct ProgramCompiler {
       reals = std::move(saved_reals);
       ints = std::move(saved_ints);
       int_decl_at = std::move(saved_int_decl_at);
+      extern_bound = std::move(saved_extern_bound);
       branch_depth = saved_branch_depth;
       --inline_depth;
       throw;
@@ -1150,6 +1226,7 @@ struct ProgramCompiler {
     reals = std::move(saved_reals);
     ints = std::move(saved_ints);
     int_decl_at = std::move(saved_int_decl_at);
+    extern_bound = std::move(saved_extern_bound);
     branch_depth = saved_branch_depth;
     --inline_depth;
     return out;
