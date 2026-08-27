@@ -2209,6 +2209,44 @@ int main() {
     expect_eq("parameter-condition rows negative theta grad", grad[0], 1.0);
   }
 
+  // The rest of the shape queries, in the integer positions: a declared
+  // extent, an integer local, a loop bound. Each is a constant the region
+  // reads off the logical view; before, only a shape query in a
+  // real-valued context was answered, and `matrix[rows(m), cols(m)] out;`
+  // inside a parameter-dependent region was refused as an unknown integer
+  // function.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_shape.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const int64_t n = ex.n_params();
+    check(n == 11, "parameter-condition shape parameter count");
+    for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = 0.0;
+    double grad[11] = {};
+    // num_elements(y) + cols(y) over a 2x3 matrix is 9, and the loop runs
+    // size(a) = 4 times over the array.
+    ex.params_data()[0] = 0.5;
+    for (int i = 7; i < 11; ++i) ex.params_data()[i] = 0.25;
+    const double positive_lp = ex.gradient(grad);
+    expect_eq("parameter-condition shape positive lp", positive_lp, 5.5);
+    expect_eq("parameter-condition shape theta grad", grad[0], 9.0);
+    for (int i = 1; i < 7; ++i)
+      expect_eq("parameter-condition shape matrix grad " + std::to_string(i),
+                grad[i], 0.0);
+    for (int i = 7; i < 11; ++i)
+      expect_eq("parameter-condition shape array grad " + std::to_string(i),
+                grad[i], 1.0);
+    ex.params_data()[0] = -0.5;
+    const double negative_lp = ex.gradient(grad);
+    expect_eq("parameter-condition shape negative lp", negative_lp, -0.5);
+    expect_eq("parameter-condition shape negative theta grad", grad[0], 1.0);
+    for (int i = 7; i < 11; ++i)
+      expect_eq(
+          "parameter-condition shape negative array grad " + std::to_string(i),
+          grad[i], 0.0);
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.

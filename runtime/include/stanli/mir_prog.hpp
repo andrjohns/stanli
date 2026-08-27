@@ -141,6 +141,70 @@ struct ProgramCompiler {
     return r;
   }
 
+  // ---- shape queries -------------------------------------------------------
+  // rows/cols/size/num_elements are integer functions of a logical view,
+  // and every view inside a region is fixed at compile time even where the
+  // value is a parameter and the branch around it is not. Answering from
+  // the view is the only way these can be answered at all: the register
+  // file holds doubles, and no opcode reports an extent.
+  static bool is_shape_query(const mir::Expr& e) {
+    return e.args.size() == 1 &&
+           (e.name == "rows" || e.name == "cols" || e.name == "size" ||
+            e.name == "num_elements" || e.name == "FnLength");
+  }
+
+  // The answers match the graph lowering's (lower.cpp): `size` and
+  // `FnLength` are an array's first extent and any other value's length,
+  // `num_elements` is the total, and rows/cols read a matrix's declared
+  // extents or a vector's orientation.
+  long shape_query(const std::string& fn, const Range& v) {
+    if (v.kind == ViewKind::Array) {
+      const std::vector<int64_t> dims =
+          v.dims.empty() ? std::vector<int64_t>{v.len} : v.dims;
+      if (fn == "size" || fn == "FnLength") return (long)dims.front();
+      if (fn == "num_elements") return v.len;
+      bail(fn + " is undefined for an array value");
+    }
+    if (fn == "rows")
+      return (long)(v.kind == ViewKind::Matrix      ? v.rows
+                    : v.kind == ViewKind::RowVector ? 1
+                                                    : v.len);
+    if (fn == "cols")
+      return (long)(v.kind == ViewKind::Matrix   ? v.cols
+                    : v.kind == ViewKind::Vector ? 1
+                                                 : v.len);
+    return v.len;
+  }
+
+  // The view of a named value, without building it: a shape query in an
+  // integer position (a declared extent, a loop bound, an index) may not
+  // emit, because try_cint swallows a Bail and a half-built branch would
+  // leave an unpatched jump in the program behind it. Only `len`, `kind`,
+  // `rows`, `cols` and `dims` of the result mean anything; `reg` is not a
+  // register, because no value was built.
+  bool static_view(const mir::Expr& e, Range* out) {
+    if (e.kind != mir::Expr::Var) return false;
+    auto rt = reals.find(e.name);
+    if (rt != reals.end()) {
+      *out = rt->second;
+      return true;
+    }
+    // Every `ints` entry is a compile-time scalar.
+    if (ints.count(e.name)) {
+      *out = Range{0, 1};
+      return true;
+    }
+    // An outside name: bind it the way expr() would. The binding is one
+    // live-in whether it is the shape that is wanted or the value.
+    Range ext;
+    if (bind_extern && bind_extern(e.name, &ext)) {
+      reals[e.name] = ext;
+      *out = ext;
+      return true;
+    }
+    return false;
+  }
+
   // ---- compile-time integers ----------------------------------------------
   long cint(const mir::Expr& e) {
     switch (e.kind) {
@@ -180,6 +244,14 @@ struct ProgramCompiler {
             return cint(e.args[0]) / cint(e.args[1]);
         }
         if (e.args.size() == 1 && e.name == "PMinus__") return -cint(e.args[0]);
+        // A declared extent, a loop bound or an index written as a shape
+        // query: `matrix[rows(m), cols(m)] out;`, `for (i in 1:rows(m))`.
+        // Before this, only a shape query in a real-valued context was
+        // answered, and these were refused as unknown integer functions.
+        if (is_shape_query(e)) {
+          Range v;
+          if (static_view(e.args[0], &v)) return shape_query(e.name, v);
+        }
         bail("integer function " + e.name);
       default:
         bail("integer expression");
@@ -408,6 +480,16 @@ struct ProgramCompiler {
   }
 
   Range fun(const mir::Expr& e) {
+    // A shape query is a constant whatever surrounds it. Ahead of every
+    // other case because `FnLength` is an internal function and the rest
+    // are library ones, and they are all answered the same way: from the
+    // named value's view where there is one, and otherwise from the view
+    // of the value the argument builds.
+    if (is_shape_query(e)) {
+      Range v;
+      if (!static_view(e.args[0], &v)) v = expr(e.args[0]);
+      return {konst((double)shape_query(e.name, v)), 1};
+    }
     if (e.fn_lib == mir::Expr::Lib::UserDefined) {
       auto it = funs.find(e.name);
       if (it == funs.end()) bail("unknown function " + e.name);
@@ -455,19 +537,6 @@ struct ProgramCompiler {
     }
     if (e.args.empty() && e.name == "negative_infinity")
       return {konst(-std::numeric_limits<double>::infinity()), 1};
-    if (e.args.size() == 1 && e.name == "rows") {
-      const Range a = expr(e.args[0]);
-      int64_t n = 0;
-      if (a.kind == ViewKind::Matrix)
-        n = a.rows;
-      else if (a.kind == ViewKind::Vector)
-        n = a.len;
-      else if (a.kind == ViewKind::RowVector)
-        n = 1;
-      else
-        bail("rows requires a matrix or vector logical view");
-      return {konst((double)n), 1};
-    }
     if (e.args.size() == 1 && e.name == "max") {
       const Range a = expr(e.args[0]);
       const int r = alloc(1);
