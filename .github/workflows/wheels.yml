@@ -992,14 +992,17 @@ jobs:
   # zero bytes after a 12-byte region, straight out of
   # poisson_log_glm_lpmf.
   #
-  # Post-submit only: a cold build runs close to the 90-minute ceiling,
-  # too long to gate merges on. It runs ctest and nothing else -- no
-  # corpus check, no conformance, no wheel -- because those are covered
-  # by jobs that are not paying for instrumentation, and the 51 test
-  # binaries are the target.
+  # Post-submit and scheduled only: a cold build runs close to the
+  # 90-minute ceiling, too long to gate merges or releases on. The exact
+  # release commit already ran this check when it landed on main, so version
+  # tags do not repeat it. It runs ctest and nothing else -- no corpus check,
+  # no conformance, no wheel -- because those are covered by jobs that are
+  # not paying for instrumentation, and the 51 test binaries are the target.
   asan:
     name: ctest under AddressSanitizer
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request' &&
+      startsWith(github.ref, 'refs/tags/') == false
     runs-on: ubuntu-24.04
     # The first shipped configuration could not finish: gcc at
     # RelWithDebInfo (-O2 -g) with ASan took 8+ minutes per densities
