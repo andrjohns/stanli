@@ -1918,6 +1918,20 @@ struct Lowering {
           reg->has_target = true;
           prog->out_regs.push_back(target_reg);
         }
+        // An integer the region folded is one this lowering holds a copy
+        // of, and the copy is a compile-time constant every later size,
+        // index and read would keep using. The region compiler folds only
+        // what certainly happens, so the value it ends with is the one
+        // every path through the region leaves behind. Nothing carries an
+        // integer out of the program itself: a live-out is a register, and
+        // registers hold doubles.
+        for (const std::string& name : assigned) {
+          auto folded = c.ints.find(name);
+          auto held = int_env.find(name);
+          if (folded != c.ints.end() && folded->second.size() == 1 &&
+              held != int_env.end())
+            held->second = folded->second[0];
+        }
       } else {
         *expr_out = c.expr(*e);
         for (int k = 0; k < expr_out->len; ++k)
