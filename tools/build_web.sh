@@ -35,6 +35,11 @@ elif git -C "$STANC3_SRC" remote get-url origin >/dev/null 2>&1; then
 else
   git -C "$STANC3_SRC" remote add origin "$STANC3_SRC_REPO"
 fi
+# dune subst derives the embedded stanc version from release tags.  A checkout
+# that was originally cloned without them produces different JavaScript even
+# at the same commit, so refresh the version tags before building.
+git -C "$STANC3_SRC" fetch -q --force origin \
+  'refs/tags/v*:refs/tags/v*'
 git -C "$STANC3_SRC" fetch -q origin "$STANC3_SRC_SHA"
 git -C "$STANC3_SRC" cat-file -e "${STANC3_SRC_SHA}^{commit}"
 
