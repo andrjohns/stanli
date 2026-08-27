@@ -2209,6 +2209,25 @@ int main() {
     expect_eq("parameter-condition rows negative theta grad", grad[0], 1.0);
   }
 
+  // A runtime-selected break targets the surrounding loop, so the loop and
+  // conditional must share one necessity island. The positive arm exits
+  // before the increment; the negative arm executes all three iterations.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_break.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    ex.params_data()[0] = 0.4;
+    const double breaking_lp = ex.gradient(&grad);
+    expect_eq("parameter-condition break lp", breaking_lp, 0.0);
+    expect_eq("parameter-condition break grad", grad, 0.0);
+    ex.params_data()[0] = -0.4;
+    const double looping_lp = ex.gradient(&grad);
+    expect_eq("parameter-condition no-break lp", looping_lp, 3.0 * -0.4);
+    expect_eq("parameter-condition no-break grad", grad, 3.0);
+  }
+
   // The same region written with `~`: refused, by name, with the fix in
   // the message. Before the check existed this compiled and was wrong in
   // lp by exactly the dropped constant, with a correct gradient.
