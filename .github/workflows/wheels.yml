@@ -1175,7 +1175,8 @@ jobs:
       - name: Load it into the newest released webR
         run: |
           npm install webr@latest
-          ver=$(node -p "require('webr/package.json').version")
+          ver=$(python3 -c \
+            'import json; print(json.load(open("node_modules/webr/package.json"))["version"])')
           if node tests/test_webr.mjs build-wasm-side/libstanli.so; then
             echo "canary: loads in webr@$ver"
           else
