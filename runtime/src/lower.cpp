@@ -1370,6 +1370,30 @@ struct Lowering {
     return s;
   }
 
+  // Materialize a declared local that has not received its first value yet.
+  // Stan initializes real locals and containers to NaN (and integer arrays
+  // to INT_MIN).  Both ordinary expression lowering and a runtime region's
+  // live-in binder must see that same value: a name can be read inside a
+  // parameter-dependent branch without being assigned by the branch, so it
+  // will not appear in the region's live-out/assignment scan.
+  int uninitialized_decl_slot(const std::string& name) {
+    auto dl = decls.find(name);
+    if (dl == decls.end()) return -1;
+    SlotInfo si = dl->second.si;
+    si.param_free = true;
+    Val value{add_slot(dl->second.len, false), dl->second.autodiff, si};
+    const double initial =
+        dl->second.int_array
+            ? static_cast<double>(std::numeric_limits<int>::min())
+            : std::numeric_limits<double>::quiet_NaN();
+    out.fills.emplace_back(value.slot,
+                           std::vector<double>(dl->second.len, initial));
+    if (dl->second.int_array) set_uninitialized_int_array(value);
+    observe_fill(value, dl->second.int_array, initial, dl->second.len);
+    scope[name] = value;
+    return value.slot;
+  }
+
   // ---- expressions ----------------------------------------------------------
   Val lower_expr(const mir::Expr& e) {
     Val value = lower_expr_impl(e);
@@ -1399,22 +1423,7 @@ struct Lowering {
           if (s >= 0) return scope.at(e.name);
           // A declared local read before its first write: Materialize
           // the same uninitialized container the indexed-assignment path would.
-          auto dl = decls.find(e.name);
-          if (dl != decls.end()) {
-            SlotInfo si = dl->second.si;
-            si.param_free = true;
-            Val value{add_slot(dl->second.len, false), dl->second.autodiff, si};
-            const double initial =
-                dl->second.int_array
-                    ? static_cast<double>(std::numeric_limits<int>::min())
-                    : std::numeric_limits<double>::quiet_NaN();
-            out.fills.emplace_back(
-                value.slot, std::vector<double>(dl->second.len, initial));
-            if (dl->second.int_array) set_uninitialized_int_array(value);
-            observe_fill(value, dl->second.int_array, initial, dl->second.len);
-            scope[e.name] = value;
-            return value;
-          }
+          if (uninitialized_decl_slot(e.name) >= 0) return scope.at(e.name);
           fail("unknown variable " + e.name);
         }
         return it->second;
@@ -1807,7 +1816,8 @@ struct Lowering {
     for (const auto& [name, value] : decls) outer_names.insert(name);
     c.bind_extern = [&](const std::string& name, Range* r) {
       auto sc = scope.find(name);
-      const int slot = sc != scope.end() ? sc->second.slot : env_slot(name);
+      int slot = sc != scope.end() ? sc->second.slot : env_slot(name);
+      if (slot < 0) slot = uninitialized_decl_slot(name);
       if (slot < 0) return false;
       const int64_t len = g.slots[slot].len;
       r->reg = c.alloc((int)len);
