@@ -213,6 +213,14 @@ struct ProgramCompiler {
   }
 
   // ---- compile-time integers ----------------------------------------------
+  // A comparison returns an integer whatever it compares, so the result
+  // type does not say whether cint may answer it: `2.5 > 1` is UInt with
+  // real operands, and cint reads a real literal by truncation, which
+  // would make it false. The operands have to be integers themselves.
+  static bool int_operand(const mir::Expr& e) {
+    return e.type_ == "UInt" || e.unsized.leaf == mir::UnsizedLeaf::Int;
+  }
+
   long cint(const mir::Expr& e) {
     switch (e.kind) {
       case mir::Expr::LitInt:
@@ -235,6 +243,19 @@ struct ProgramCompiler {
           bail("integer index range");
         return it->second[(size_t)ix - 1];
       }
+      case mir::Expr::EAnd:
+      case mir::Expr::EOr: {
+        // Stan short-circuits these, and so does this: the second operand
+        // of a decided `&&` is never evaluated, so it does not have to be
+        // a compile-time integer -- or an integer at all.
+        if (e.args.size() != 2 || !int_operand(e.args[0]))
+          bail("integer logical form");
+        const bool lhs = cint(e.args[0]) != 0;
+        if (e.kind == mir::Expr::EAnd && !lhs) return 0;
+        if (e.kind == mir::Expr::EOr && lhs) return 1;
+        if (!int_operand(e.args[1])) bail("integer logical form");
+        return cint(e.args[1]) != 0;
+      }
       case mir::Expr::FunApp:
         if (e.args.size() == 2) {
           // Each operator with the named spelling beside it: on ints the
@@ -249,8 +270,24 @@ struct ProgramCompiler {
           if (e.name == "IntDivide__" || e.name == "Divide__" ||
               e.name == "divide" || e.name == "elt_divide")
             return cint(e.args[0]) / cint(e.args[1]);
+          // The comparisons: on integers each is an integer in its own
+          // right, and a `while` condition or an integer local written
+          // with one -- `int found = (a[i] == k);` -- is as much a
+          // compile-time value as its operands are.
+          if (int_operand(e.args[0]) && int_operand(e.args[1])) {
+            if (e.name == "Equals__") return cint(e.args[0]) == cint(e.args[1]);
+            if (e.name == "NEquals__")
+              return cint(e.args[0]) != cint(e.args[1]);
+            if (e.name == "Less__") return cint(e.args[0]) < cint(e.args[1]);
+            if (e.name == "Leq__") return cint(e.args[0]) <= cint(e.args[1]);
+            if (e.name == "Greater__") return cint(e.args[0]) > cint(e.args[1]);
+            if (e.name == "Geq__") return cint(e.args[0]) >= cint(e.args[1]);
+          }
         }
         if (e.args.size() == 1 && e.name == "PMinus__") return -cint(e.args[0]);
+        if (e.args.size() == 1 && int_operand(e.args[0]) &&
+            (e.name == "PNot__" || e.name == "logical_negation"))
+          return cint(e.args[0]) == 0;
         // A declared extent, a loop bound or an index written as a shape
         // query: `matrix[rows(m), cols(m)] out;`, `for (i in 1:rows(m))`.
         // Before this, only a shape query in a real-valued context was
