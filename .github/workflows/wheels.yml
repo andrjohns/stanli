@@ -330,6 +330,7 @@ jobs:
       - name: Bounded MIR vectorization A/B
         if: matrix.runtime == 'linux-x86_64'
         timeout-minutes: 15
+        shell: bash
         run: |
           test -x deps/stanc3/stanli-vectorize-probe
           source tools/stanc_embed/provenance.sh
@@ -351,7 +352,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mir-vectorization-measurements
-          if-no-files-found: warn
+          if-no-files-found: error
           path: build-rel/vectorize-ab
 
       # The headline numbers in both READMEs are derived, not typed.
