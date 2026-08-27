@@ -782,6 +782,10 @@ jobs:
         with:
           use-public-rspm: true
 
+      - name: Install the Windows parity test dependency
+        shell: Rscript {0}
+        run: install.packages("jsonlite")
+
       - name: Check provenance and portable bytes
         run: |
           while IFS= read -r input; do
