@@ -636,6 +636,18 @@ struct ProgramCompiler {
     return out;
   }
 
+  // The diagonal, on the same terms as a row: column-major storage puts
+  // its elements rows + 1 apart, and Eigen's stops at the shorter side.
+  Range matrix_diagonal(const Range& m) {
+    const int64_t n = m.rows < m.cols ? m.rows : m.cols;
+    const int r = alloc((int)n);
+    for (int64_t k = 0; k < n; ++k)
+      emit(Program::MOV, r + (int)k, m.reg + (int)(k * (m.rows + 1)));
+    Range out{r, (int)n};
+    out.kind = ViewKind::Vector;
+    return out;
+  }
+
   Range fun(const mir::Expr& e) {
     // A shape query is a constant whatever surrounds it. Ahead of every
     // other case because `FnLength` is an internal function and the rest
@@ -694,6 +706,12 @@ struct ProgramCompiler {
     }
     if (e.args.empty() && e.name == "negative_infinity")
       return {konst(-std::numeric_limits<double>::infinity()), 1};
+    if (e.args.size() == 1 && e.name == "diagonal") {
+      const Range a = expr(e.args[0]);
+      if (a.kind != ViewKind::Matrix)
+        bail("diagonal requires a matrix logical view");
+      return matrix_diagonal(a);
+    }
     if (e.args.size() == 2 && e.name == "rep_vector") {
       // The register file is a flat run of doubles, so a vector of one
       // repeated value is a run the compiler fills -- the same fill a

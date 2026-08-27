@@ -2452,6 +2452,45 @@ int main() {
                 grad[(size_t)i], 0.0);
   }
 
+  // diagonal, which no path supported before: the region copies the
+  // elements rows + 1 apart, the graph spells the same extraction as a
+  // strided slice, and this model uses both -- the region for the sum of
+  // squares, the graph for the single element added afterwards. The
+  // expectation accumulates in the order the region emits.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_diagonal.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const int64_t n = ex.n_params();
+    check(n == 13, "parameter-condition diagonal parameter count");
+    for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = 0.1 * (double)(i + 1);
+    ex.params_data()[12] = 0.5;
+    std::vector<double> grad((size_t)n);
+    // A 3x4 matrix's diagonal is three long and steps four registers.
+    double want = stan::math::square(ex.params_data()[0]);
+    want += stan::math::square(ex.params_data()[4]);
+    want += stan::math::square(ex.params_data()[8]);
+    want += ex.params_data()[8];
+    expect_eq("parameter-condition diagonal lp", ex.gradient(grad.data()),
+              want);
+    for (int64_t i = 0; i < 12; ++i) {
+      const bool on_diagonal = i % 4 == 0;
+      const double from_square = on_diagonal ? 2.0 * ex.params_data()[i] : 0.0;
+      expect_eq("parameter-condition diagonal grad " + std::to_string(i),
+                grad[(size_t)i], i == 8 ? from_square + 1.0 : from_square);
+    }
+    expect_eq("parameter-condition diagonal theta grad", grad[12], 0.0);
+    // The other arm keeps the graph's element and drops the region's sum.
+    ex.params_data()[12] = -0.5;
+    expect_eq("parameter-condition diagonal else lp", ex.gradient(grad.data()),
+              -0.5 + ex.params_data()[8]);
+    for (int64_t i = 0; i < 12; ++i)
+      expect_eq("parameter-condition diagonal else grad " + std::to_string(i),
+                grad[(size_t)i], i == 8 ? 1.0 : 0.0);
+    expect_eq("parameter-condition diagonal else theta grad", grad[12], 1.0);
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.
