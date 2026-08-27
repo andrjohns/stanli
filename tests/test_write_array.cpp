@@ -3579,8 +3579,7 @@ void test_runtime_int_sum_is_not_compile_time() {
       "    (meta <opaque>))\n   ";
   std::string condition = base;
   condition.insert(insertion, runtime_condition);
-  expect_reduction_interp(condition,
-                          "parameter-dependent region produces nothing",
+  expect_reduction_interp(condition, "runtime-control region produces nothing",
                           "runtime sum cannot provide a condition", true);
 }
 

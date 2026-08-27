@@ -378,7 +378,7 @@ void expect_necessity_effects_refused() {
       continue;
     }
     const std::string msg = err;
-    if (msg.find("parameter-dependent region") == std::string::npos ||
+    if (msg.find("runtime-control region") == std::string::npos ||
         msg.find(effect) == std::string::npos) {
       ++failures;
       std::printf("FAIL C API necessity %s error: %s\n", effect.c_str(), err);

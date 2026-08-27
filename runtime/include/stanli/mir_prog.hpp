@@ -729,7 +729,7 @@ struct ProgramCompiler {
         // by exactly log(2*pi)/2 on a normal.)
         if (e.fn_propto)
           bail(
-              "`~` inside a parameter-dependent region (write it as "
+              "`~` inside a runtime-control region (write it as "
               "`target += " +
               e.name +
               "(...)`, which keeps every "
@@ -1059,7 +1059,7 @@ struct ProgramCompiler {
           return;
         }
         // A single All is the complete destination view. This is reachable
-        // in ODE functions and parameter-dependent statement islands, so it
+        // in ODE functions and runtime-control statement islands, so it
         // must agree with both graph lowering and MirInterp rather than
         // forcing an otherwise supported region onto the fallback path.
         if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexAll") {

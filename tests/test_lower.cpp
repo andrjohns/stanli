@@ -57,6 +57,25 @@ static std::string slurp(const std::string& path) {
   return ss.str();
 }
 
+static stanli::CompiledModel compile_without_optional_islands(
+    const std::string& mir, const stanli::DataMap& data) {
+  test_setenv("STANLI_NO_ISLAND", "1", 1);
+  try {
+    stanli::CompiledModel cm = stanli::compile_model(mir, data);
+    test_unsetenv("STANLI_NO_ISLAND");
+    return cm;
+  } catch (...) {
+    test_unsetenv("STANLI_NO_ISLAND");
+    throw;
+  }
+}
+
+static int count_opcode(const stanli::CompiledModel& cm, uint16_t opcode) {
+  return static_cast<int>(
+      std::count_if(cm.graph.ops.begin(), cm.graph.ops.end(),
+                    [=](const stanli::Op& op) { return op.opcode == opcode; }));
+}
+
 static stanli::DataMap bound_check_data(double raw = 0.0, int N = 1, int M = 1,
                                         int R = 1, int C = 1, int BR = 1,
                                         int BC = 1) {
@@ -2143,6 +2162,138 @@ int main() {
     test_unsetenv("STANLI_NO_ISLAND");
   }
 
+  // A shape-only guard on a parameter matrix is fixed when the data is
+  // bound, despite the matrix values remaining autodiffable.  It must fold
+  // before the UDF's synthetic early-return loop is lowered: the resulting
+  // design matrix is parameter-free (as normal_id_glm requires) and there is
+  // no runtime-control island.
+  {
+    const std::string mir = slurp("tests/fixtures/shape_named_guard.tmir.sexp");
+    for (int n : {0, 3}) {
+      DataMap d;
+      d.set_int("n", n);
+      d.set_real_array("y", {5.0});
+      CompiledModel cm = compile_without_optional_islands(mir, d);
+      const std::string tag = "named shape guard " + std::to_string(n);
+      check(cm.n_unconstrained == 2 * n + 2, tag + " parameter count");
+      check(count_opcode(cm, OP_ISLAND) == 0, tag + " has no island");
+
+      Executor ex(std::move(cm.graph));
+      cm.bind(ex);
+      for (int i = 0; i < 2 * n; ++i) ex.params_data()[i] = 0.1 * (i + 1);
+      ex.params_data()[2 * n] = 0.5;
+      ex.params_data()[2 * n + 1] = 0.25;
+      std::vector<double> grad(static_cast<size_t>(2 * n + 2));
+      const double lp = ex.gradient(grad.data());
+      const double x = n == 0 ? 1.0 : 2.0;
+      const double residual = 5.0 - (0.5 + x * 0.25);
+      expect_eq(tag + " lp", lp, -0.5 * residual * residual);
+      for (int i = 0; i < 2 * n; ++i)
+        expect_eq(tag + " matrix grad " + std::to_string(i), grad[i], 0.0);
+      expect_eq(tag + " alpha grad", grad[2 * n], residual);
+      expect_eq(tag + " beta grad", grad[2 * n + 1], x * residual);
+    }
+  }
+
+  // The same proof through a matrix view.  Empty and duplicate gather lists
+  // determine geometry without materializing the two-dimensional gather,
+  // while a reached out-of-bounds selector retains Stan's bind-time error.
+  {
+    const std::string mir =
+        slurp("tests/fixtures/shape_indexed_guard.tmir.sexp");
+    const auto run = [&](const std::vector<int>& idx, double scale,
+                         const std::string& tag) {
+      DataMap d;
+      d.set_int("K", static_cast<int>(idx.size()));
+      d.set_int_array("idx", idx);
+      CompiledModel cm = compile_without_optional_islands(mir, d);
+      check(cm.n_unconstrained == 10, tag + " parameter count");
+      check(count_opcode(cm, OP_ISLAND) == 0, tag + " has no island");
+      Executor ex(std::move(cm.graph));
+      cm.bind(ex);
+      for (int i = 0; i < 9; ++i) ex.params_data()[i] = 0.1 * (i + 1);
+      ex.params_data()[9] = 0.5;
+      double grad[10] = {};
+      expect_eq(tag + " lp", ex.gradient(grad), 0.5 * scale);
+      for (int i = 0; i < 9; ++i)
+        expect_eq(tag + " matrix grad " + std::to_string(i), grad[i], 0.0);
+      expect_eq(tag + " theta grad", grad[9], scale);
+    };
+    run({}, 1.0, "indexed shape guard empty");
+    run({1}, 1.0, "indexed shape guard row and column");
+    run({2, 2}, 2.0, "indexed shape guard duplicate");
+
+    DataMap bad;
+    bad.set_int("K", 2);
+    bad.set_int_array("idx", {1, 4});
+    bool threw = false;
+    try {
+      (void)compile_without_optional_islands(mir, bad);
+    } catch (const CompileError& e) {
+      threw = std::string(e.what()).find("out of bounds") != std::string::npos;
+    }
+    check(threw, "indexed shape guard rejects reached out-of-bounds index");
+  }
+
+  // Static-shape specialization is lazy across && and ||.  Both bad gathers
+  // below are unreachable through boolean, statement, and expression-ternary
+  // control, so they neither become eager bounds errors nor force runtime
+  // control.
+  {
+    DataMap d;
+    d.set_int_array("empty", {});
+    d.set_int_array("valid", {1});
+    d.set_int_array("bad", {3});
+    CompiledModel cm = compile_without_optional_islands(
+        slurp("tests/fixtures/shape_guard_lazy.tmir.sexp"), d);
+    check(cm.n_unconstrained == 5, "lazy shape guard parameter count");
+    check(count_opcode(cm, OP_ISLAND) == 0, "lazy shape guard has no island");
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    for (int i = 0; i < 4; ++i) ex.params_data()[i] = 0.1 * (i + 1);
+    ex.params_data()[4] = 0.5;
+    double grad[5] = {};
+    expect_eq("lazy shape guard lp", ex.gradient(grad), 0.5);
+    for (int i = 0; i < 4; ++i)
+      expect_eq("lazy shape guard matrix grad " + std::to_string(i), grad[i],
+                0.0);
+    expect_eq("lazy shape guard theta grad", grad[4], 1.0);
+  }
+
+  // A partially specialized || has two distinct outcomes.  With an empty
+  // matrix the shape lhs is true and a genuine parameter rhs is dead, so no
+  // island is needed.  With a nonempty matrix the same rhs remains a runtime
+  // condition.  The preceding flag guard also pins the opposite walk: a
+  // false shape lhs followed by a true data-only rhs still folds completely.
+  {
+    const std::string mir =
+        slurp("tests/fixtures/shape_partial_guard.tmir.sexp");
+    for (int n : {0, 2}) {
+      DataMap d;
+      d.set_int("n", n);
+      d.set_int("flag", 1);
+      CompiledModel cm = compile_without_optional_islands(mir, d);
+      const std::string tag = "partial shape guard " + std::to_string(n);
+      check(cm.n_unconstrained == 2 * n + 1, tag + " parameter count");
+      check(count_opcode(cm, OP_ISLAND) == (n == 0 ? 0 : 1),
+            tag + " island boundary");
+      Executor ex(std::move(cm.graph));
+      cm.bind(ex);
+      for (int i = 0; i < 2 * n; ++i) ex.params_data()[i] = 0.1 * (i + 1);
+      for (double theta : {0.5, -0.5}) {
+        ex.params_data()[2 * n] = theta;
+        std::vector<double> grad(static_cast<size_t>(2 * n + 1));
+        const double scale = n == 0 || theta > 0.0 ? 11.0 : 21.0;
+        expect_eq(tag + " lp " + std::to_string(theta),
+                  ex.gradient(grad.data()), scale * theta);
+        for (int i = 0; i < 2 * n; ++i)
+          expect_eq(tag + " matrix grad " + std::to_string(i), grad[i], 0.0);
+        expect_eq(tag + " theta grad " + std::to_string(theta), grad[2 * n],
+                  scale);
+      }
+    }
+  }
+
   // A read-only live-in can still be a declared local with no preceding
   // assignment. Ordinary lowering gives it Stan's uninitialized NaN value;
   // the necessity-island binder must materialize the same slot rather than
@@ -2426,7 +2577,7 @@ int main() {
       compile_model(slurp("tests/fixtures/paramcond_tilde.tmir.sexp"), d);
     } catch (const CompileError& e) {
       const std::string msg = e.what();
-      threw = msg.find("`~` inside a parameter-dependent region") !=
+      threw = msg.find("`~` inside a runtime-control region") !=
                   std::string::npos &&
               msg.find("target +=") != std::string::npos;
     }

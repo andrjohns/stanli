@@ -210,7 +210,7 @@ int main() {
       const std::string tag = "necessity " + effect;
       expect(tag + " refuses compilation", threw);
       expect(tag + " names the unsupported effect: " + msg,
-             msg.find("parameter-dependent region") != std::string::npos &&
+             msg.find("runtime-control region") != std::string::npos &&
                  msg.find(effect) != std::string::npos);
       expect(tag + " is not executed while refusing", lines.empty());
     }

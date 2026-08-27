@@ -1701,17 +1701,16 @@ struct Lowering {
       case mir::Expr::FunApp:
         return lower_funapp(e);
       case mir::Expr::TernaryIf: {
-        // Data-only conditions resolve at compile time; either branch may
-        // reference parameters.
-        // A parameter-dependent condition cannot pick an arm at load
-        // time, so the whole expression becomes an island.
-        if (!e.args[0].data_only) return lower_param_ternary(e);
         if (expr_effectful(e.args[0]))
           fail("effectful expression cannot be a compile-time condition",
                e.raw);
-        const bool c =
-            eval_pure(e.args[0], "a compile-time condition").r.at(0) != 0.0;
-        return lower_expr(e.args[c ? 1 : 2]);
+        // Shape specialization and ordinary data evaluation can decide a
+        // condition even when the complete expression's MIR adlevel is not
+        // DataOnly (for example `rows(x) == 0 || theta > 0`).  Only the
+        // genuinely unresolved case needs runtime control.
+        if (auto condition = try_eval_pure(e.args[0]))
+          return lower_expr(e.args[condition->r.at(0) != 0.0 ? 1 : 2]);
+        return lower_runtime_ternary(e);
       }
       case mir::Expr::EOr:
       case mir::Expr::EAnd: {
@@ -1726,9 +1725,10 @@ struct Lowering {
   }
 
   // ---- necessity islands ---------------------------------------------------
-  // A region whose control flow depends on a parameter has no op-graph
-  // form: `if (theta > 0)` picks its arm at evaluation time, and an op
-  // graph is fixed when the model is loaded. Such a region compiles
+  // A region whose control flow is not known when the graph is built has no
+  // op-graph form: `if (theta > 0)` picks its arm at evaluation time, while a
+  // DataOnly graph-local predicate may be unavailable to the data interpreter.
+  // Such a region compiles
   // instead into a register program (mir_prog.hpp) that one OP_ISLAND
   // runs -- forward on doubles, backward replayed under stan-math's
   // nested autodiff, which differentiates the arm that actually ran.
@@ -1762,9 +1762,17 @@ struct Lowering {
   }
 
   bool needs_runtime_control(const mir::Stmt& s) {
-    if (s.kind == mir::Stmt::IfElse && s.cond.data_only &&
-        !try_eval_pure(s.cond))
-      return true;
+    if (s.kind == mir::Stmt::IfElse) {
+      // This is a speculative write_array scan, so follow an already-known
+      // arm exactly as ordinary lowering will.  Besides avoiding needless
+      // work, this preserves Stan's reachability semantics for invalid shape
+      // selectors in a dead statement arm.
+      if (auto evaluated = try_eval_pure(s.cond)) {
+        const size_t arm = evaluated->r.at(0) != 0.0 ? 0 : 1;
+        return arm < s.body.size() && needs_runtime_control(s.body[arm]);
+      }
+      if (s.cond.data_only) return true;
+    }
     if (s.kind == mir::Stmt::For) {
       const long lo = eval_int(s.lower), hi = eval_int(s.upper);
       if (lo > hi) return false;
@@ -1951,7 +1959,7 @@ struct Lowering {
       }
       c.finish();
     } catch (Bail& b) {
-      fail("parameter-dependent region: " + b.why, s ? s->raw : e->raw);
+      fail("runtime-control region: " + b.why, s ? s->raw : e->raw);
     }
     // No live-out register is legitimate when the region found live-outs
     // and every one of them is zero-width: the data made the values empty,
@@ -1960,7 +1968,7 @@ struct Lowering {
     // mistake this catches -- a region that lost what it was to produce.
     if (prog->out_regs.empty() && !(e && expr_out->len == 0) &&
         (s == nullptr || reg->out_names.empty()))
-      fail("parameter-dependent region produces nothing", s ? s->raw : e->raw);
+      fail("runtime-control region produces nothing", s ? s->raw : e->raw);
     // A region with a runtime branch keeps the var replay -- reversing
     // control flow needs the structured form the flat program has already
     // lost -- so this usually declines. It is asked anyway because a region
@@ -2027,8 +2035,8 @@ struct Lowering {
     }
   }
 
-  // `if (<depends on a parameter>) ... else ...`
-  void lower_param_ifelse(const mir::Stmt& s) {
+  // `if (<not known while building the graph>) ... else ...`
+  void lower_runtime_ifelse(const mir::Stmt& s) {
     IslandRegion reg;
     std::shared_ptr<IslandProg> prog;
     Range ignored;
@@ -2075,17 +2083,17 @@ struct Lowering {
           dl->second.si = si;
         }
       }
-      // The island is parameter-dependent regardless of the old binding's
-      // provenance; treating its live-out as data would select kernels that
-      // deliberately omit adjoints for that input.
+      // Runtime regions conservatively return parameter-dependent live-outs;
+      // treating one as data without a per-output dependency proof would
+      // select kernels that deliberately omit adjoints for that input.
       si.param_free = false;
       scope[name] = Val{out_slots[k], scalar_autodiff(), si};
     }
     if (reg.has_target) target_terms.push_back(out_slots.back());
   }
 
-  // `<depends on a parameter> ? a : b`
-  Val lower_param_ternary(const mir::Expr& e) {
+  // `<not known while building the graph> ? a : b`
+  Val lower_runtime_ternary(const mir::Expr& e) {
     IslandRegion reg;
     std::shared_ptr<IslandProg> prog;
     Range value;
@@ -2197,7 +2205,10 @@ struct Lowering {
     return effect;
   }
 
-  std::optional<DataMap::Entry> try_eval_pure(const mir::Expr& e) {
+  // Ask only the MIR interpreter.  Static-shape specialization below uses
+  // this for selector values and for path-sensitive short-circuit decisions;
+  // keeping it separate from try_eval_pure prevents recursive specialization.
+  std::optional<DataMap::Entry> try_eval_interpreter(const mir::Expr& e) {
     if (expr_effectful(e)) return std::nullopt;
     try {
       return td.eval(e);
@@ -2208,6 +2219,234 @@ struct Lowering {
     } catch (const std::invalid_argument&) {
       return std::nullopt;
     }
+  }
+
+  enum class StaticProbeState : uint8_t { Unknown, Known, Invalid };
+
+  template <typename T>
+  struct StaticProbe {
+    StaticProbeState state = StaticProbeState::Unknown;
+    T value{};
+    std::string error;
+  };
+
+  struct StaticView {
+    int64_t len = 0;
+    SlotInfo si;
+  };
+
+  struct StaticSelector {
+    int64_t count = 0;
+    bool drops_dimension = false;
+  };
+
+  static bool is_shape_query(const mir::Expr& e) {
+    return e.kind == mir::Expr::FunApp && e.args.size() == 1 &&
+           (e.name == "rows" || e.name == "cols" || e.name == "size" ||
+            e.name == "num_elements");
+  }
+
+  StaticProbe<long> try_static_int(const mir::Expr& e) {
+    auto evaluated = try_eval_interpreter(e);
+    if (!evaluated) return {};
+    if (!evaluated->is_int || evaluated->i.size() != 1 ||
+        evaluated->r.size() != 1)
+      return {StaticProbeState::Invalid, 0,
+              "static matrix index is not an integer scalar"};
+    return {StaticProbeState::Known, evaluated->i[0], {}};
+  }
+
+  StaticProbe<StaticSelector> try_static_selector(const mir::Expr& index,
+                                                  int64_t extent) {
+    if (index.name == "IndexAll")
+      return {StaticProbeState::Known, {extent, false}, {}};
+    if (index.name == "IndexSingle" && index.args.size() == 1) {
+      const auto at = try_static_int(index.args[0]);
+      if (at.state != StaticProbeState::Known) return {at.state, {}, at.error};
+      if (at.value < 1 || at.value > extent)
+        return {
+            StaticProbeState::Invalid, {}, "static matrix index out of bounds"};
+      return {StaticProbeState::Known, {1, true}, {}};
+    }
+    if (index.name == "IndexBetween" && index.args.size() == 2) {
+      const auto lo = try_static_int(index.args[0]);
+      if (lo.state != StaticProbeState::Known) return {lo.state, {}, lo.error};
+      const auto hi = try_static_int(index.args[1]);
+      if (hi.state != StaticProbeState::Known) return {hi.state, {}, hi.error};
+      // Stan's range indexing treats hi < lo as empty and performs no bounds
+      // check on either endpoint (the same rule check_range implements).
+      if (hi.value < lo.value) return {StaticProbeState::Known, {0, false}, {}};
+      if (lo.value < 1 || hi.value > extent)
+        return {
+            StaticProbeState::Invalid, {}, "static matrix range out of bounds"};
+      return {StaticProbeState::Known, {hi.value - lo.value + 1, false}, {}};
+    }
+    if (index.name == "IndexMulti" && index.args.size() == 1) {
+      auto evaluated = try_eval_interpreter(index.args[0]);
+      if (!evaluated) return {};
+      if (!evaluated->is_int || evaluated->i.size() != evaluated->r.size())
+        return {StaticProbeState::Invalid,
+                {},
+                "static matrix gather index is not integer data"};
+      for (int at : evaluated->i)
+        if (at < 1 || at > extent)
+          return {StaticProbeState::Invalid,
+                  {},
+                  "static matrix gather index out of bounds"};
+      return {StaticProbeState::Known,
+              {static_cast<int64_t>(evaluated->i.size()), false},
+              {}};
+    }
+    return {};
+  }
+
+  // Logical geometry only: this probe must never materialize a data value or
+  // emit a graph op.  The first tranche deliberately handles the expression
+  // forms responsible for the ctsem false island -- named values and matrix
+  // subviews selected by compile-time integer data.  Everything else declines
+  // to the existing runtime-control path.
+  StaticProbe<StaticView> try_static_view(const mir::Expr& e) {
+    if (e.kind == mir::Expr::Var) {
+      auto value = scope.find(e.name);
+      if (value != scope.end())
+        return {StaticProbeState::Known,
+                {g.slots[value->second.slot].len, value->second.si},
+                {}};
+      auto declaration = decls.find(e.name);
+      if (declaration != decls.end())
+        return {StaticProbeState::Known,
+                {declaration->second.len, declaration->second.si},
+                {}};
+      return {};
+    }
+    if (e.kind != mir::Expr::Indexed || e.args.size() < 2 || e.args.size() > 3)
+      return {};
+    const auto base = try_static_view(e.args[0]);
+    if (base.state != StaticProbeState::Known)
+      return {base.state, {}, base.error};
+    if (!is_matrix(base.value.si)) return {};
+
+    const auto rows = try_static_selector(e.args[1], base.value.si.rows);
+    if (rows.state != StaticProbeState::Known)
+      return {rows.state, {}, rows.error};
+    StaticProbe<StaticSelector> cols{
+        StaticProbeState::Known, {base.value.si.cols, false}, {}};
+    if (e.args.size() == 3)
+      cols = try_static_selector(e.args[2], base.value.si.cols);
+    if (cols.state != StaticProbeState::Known)
+      return {cols.state, {}, cols.error};
+
+    const bool rd = rows.value.drops_dimension;
+    const bool cd = cols.value.drops_dimension;
+    StaticView out;
+    out.len = checked_product({rows.value.count, cols.value.count},
+                              "static matrix subview");
+    out.si.param_free = base.value.si.param_free;
+    if (!rd && !cd) {
+      if (e.type_ != "UMatrix")
+        return {StaticProbeState::Invalid,
+                {},
+                "static matrix subview has an inconsistent result type"};
+      out.si = matrix_view(rows.value.count, cols.value.count,
+                           base.value.si.param_free);
+    } else if (rd && !cd) {
+      if (e.type_ != "URowVector")
+        return {StaticProbeState::Invalid,
+                {},
+                "static matrix row has an inconsistent result type"};
+      out.si = view_of("URowVector");
+      out.si.param_free = base.value.si.param_free;
+    } else if (!rd && cd) {
+      if (e.type_ != "UVector")
+        return {StaticProbeState::Invalid,
+                {},
+                "static matrix column has an inconsistent result type"};
+      out.si = view_of("UVector");
+      out.si.param_free = base.value.si.param_free;
+    } else {
+      if (e.type_ != "UReal")
+        return {StaticProbeState::Invalid,
+                {},
+                "static matrix element has an inconsistent result type"};
+      out.si = view_of("UReal");
+      out.si.param_free = base.value.si.param_free;
+    }
+    return {StaticProbeState::Known, out, {}};
+  }
+
+  StaticProbe<long> try_static_shape_query(const mir::Expr& e) {
+    if (!is_shape_query(e)) return {};
+    const auto view = try_static_view(e.args[0]);
+    if (view.state != StaticProbeState::Known)
+      return {view.state, 0, view.error};
+    const StaticView& v = view.value;
+    if (is_array(v.si)) {
+      const ArrayShape& shape = array_shape(v.si);
+      if (e.name == "size")
+        return {StaticProbeState::Known, shape.dims.front(), {}};
+      if (e.name == "num_elements") return {StaticProbeState::Known, v.len, {}};
+      return {StaticProbeState::Invalid, 0,
+              e.name + " is undefined for an array value"};
+    }
+    const LogicalDims dims = logical_dims(v.si, v.len, e.name);
+    if (e.name == "rows") return {StaticProbeState::Known, dims.rows, {}};
+    if (e.name == "cols") return {StaticProbeState::Known, dims.cols, {}};
+    return {StaticProbeState::Known, v.len, {}};
+  }
+
+  // Replace only shape queries proven from immutable logical geometry.  The
+  // walk is lazy across Stan's short-circuit forms: an invalid subview in a
+  // dead RHS/arm must not become a bind-time error merely because this probe
+  // visited it.
+  bool specialize_static_shapes(mir::Expr* e) {
+    bool changed = false;
+    if (e->kind == mir::Expr::EAnd || e->kind == mir::Expr::EOr) {
+      if (e->args.size() != 2) return false;
+      changed = specialize_static_shapes(&e->args[0]);
+      auto lhs = try_eval_interpreter(e->args[0]);
+      if (!lhs || lhs->r.size() != 1) return changed;
+      const bool value = lhs->r[0] != 0.0;
+      const bool reaches_rhs = e->kind == mir::Expr::EAnd ? value : !value;
+      if (reaches_rhs) changed |= specialize_static_shapes(&e->args[1]);
+      return changed;
+    }
+    if (e->kind == mir::Expr::TernaryIf) {
+      if (e->args.size() != 3) return false;
+      changed = specialize_static_shapes(&e->args[0]);
+      auto condition = try_eval_interpreter(e->args[0]);
+      if (!condition || condition->r.size() != 1) return changed;
+      const size_t arm = condition->r[0] != 0.0 ? 1 : 2;
+      changed |= specialize_static_shapes(&e->args[arm]);
+      return changed;
+    }
+    if (is_shape_query(*e)) {
+      const auto value = try_static_shape_query(*e);
+      if (value.state == StaticProbeState::Invalid) fail(value.error, e->raw);
+      if (value.state == StaticProbeState::Known) {
+        if (value.value < std::numeric_limits<int>::min() ||
+            value.value > std::numeric_limits<int>::max())
+          fail("static shape query exceeds the Stan integer range", e->raw);
+        mir::Expr literal;
+        literal.kind = mir::Expr::LitInt;
+        literal.lit_i = value.value;
+        literal.type_ = "UInt";
+        literal.unsized = {0, mir::UnsizedLeaf::Int};
+        literal.data_only = true;
+        literal.raw = e->raw;
+        *e = std::move(literal);
+        return true;
+      }
+    }
+    for (mir::Expr& arg : e->args) changed |= specialize_static_shapes(&arg);
+    return changed;
+  }
+
+  std::optional<DataMap::Entry> try_eval_pure(const mir::Expr& e) {
+    if (expr_effectful(e)) return std::nullopt;
+    if (auto evaluated = try_eval_interpreter(e)) return evaluated;
+    mir::Expr specialized = e;
+    if (!specialize_static_shapes(&specialized)) return std::nullopt;
+    return try_eval_interpreter(specialized);
   }
 
   DataMap::Entry eval_pure(const mir::Expr& e, const std::string& use) {
@@ -4988,7 +5227,7 @@ struct Lowering {
       case mir::Stmt::Block:
       case mir::Stmt::SList:
         if (in_write_array && needs_runtime_control(s)) {
-          lower_param_ifelse(s);
+          lower_runtime_ifelse(s);
           return;
         }
         for (const auto& k : s.body) lower_stmt(k);
@@ -5202,7 +5441,7 @@ struct Lowering {
       case mir::Stmt::For: {
         for (const auto& child : s.body)
           if (runtime_loop_control(child)) {
-            lower_param_ifelse(s);
+            lower_runtime_ifelse(s);
             return;
           }
         const long lo = eval_int(s.lower), hi = eval_int(s.upper);
@@ -5222,7 +5461,7 @@ struct Lowering {
       case mir::Stmt::While: {
         for (const auto& child : s.body)
           if (runtime_loop_control(child)) {
-            lower_param_ifelse(s);
+            lower_runtime_ifelse(s);
             return;
           }
         // Unrolled like For. The bound only turns a nonterminating unroll
@@ -5273,7 +5512,7 @@ struct Lowering {
         // lives in the graph, and only the region compiler can read it there.
         // The island's live-outs come back parameter-dependent, which costs
         // adjoints such a branch does not need but is never wrong.
-        lower_param_ifelse(s);
+        lower_runtime_ifelse(s);
         return;
       }
       case mir::Stmt::Return:
