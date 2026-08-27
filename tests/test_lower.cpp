@@ -2143,6 +2143,27 @@ int main() {
     test_unsetenv("STANLI_NO_ISLAND");
   }
 
+  // A read-only live-in can still be a declared local with no preceding
+  // assignment. Ordinary lowering gives it Stan's uninitialized NaN value;
+  // the necessity-island binder must materialize the same slot rather than
+  // rejecting the name. The negative arm avoids reading it and remains a
+  // finite identity function, while the positive arm proves the NaN fill is
+  // visible when selected.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_uninitialized.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    ex.params_data()[0] = -0.25;
+    const double finite_lp = ex.gradient(&grad);
+    expect_eq("uninitialized island finite arm lp", finite_lp, -0.25);
+    expect_eq("uninitialized island finite arm grad", grad, 1.0);
+    ex.params_data()[0] = 0.25;
+    const double nan_lp = ex.gradient(&grad);
+    check(std::isnan(nan_lp), "uninitialized island selected arm is NaN");
+  }
+
   // The same region written with `~`: refused, by name, with the fix in
   // the message. Before the check existed this compiled and was wrong in
   // lp by exactly the dropped constant, with a correct gradient.
