@@ -181,11 +181,11 @@ No package registry is an architectural gate. The real constraint is direct
 cross-release compatibility because an R package can carry compiler JavaScript
 from one release while loading a runtime from another.
 
-Status: implemented for v0.9.4; release validation is pending. The v0.9.3
-compatibility anchor is published with a dual-reader runtime and the legacy R
-compiler. The v0.9.4 package carries the exact shared compiler artifact. CI
-loads it through the real V8 and webR helpers, sends its output through the
-public `stanli_model(mir=...)` API, and exercises UTF-8, deterministic bytes,
+Status: shipped and validated in v0.9.4. The v0.9.3 compatibility anchor is
+published with a dual-reader runtime and the legacy R compiler. The v0.9.4
+package carries the exact shared compiler artifact. CI loads it through the
+real V8 and webR helpers, sends its output through the public
+`stanli_model(mir=...)` API, and exercises UTF-8, deterministic bytes,
 warnings, malformed input, gradients, sampling, and generated quantities.
 
 Shipping implementation:
@@ -220,6 +220,11 @@ as A/B-only; CI uses seven named models, and the timing ratios are descriptive
 rather than acceptance thresholds. See
 [`TESTING.md`](../../../TESTING.md#mir-loop-vectorization-measurement) for the
 operator command and artifact contract.
+
+The release matrix advances its previous portable pair to v0.9.4: the new
+vectorizing compiler runs against that runtime, and the v0.9.4 pass-off
+compiler runs against the new runtime. The v0.9.3 legacy compiler remains a
+separate permanent decoder oracle.
 
 ### 2026-08-26 measurement baseline
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.5
+
 ### Upstream MIR loop vectorization is enabled
 
 Every portable compiler now applies upstream O1 plus the separately selected
