@@ -1,7 +1,8 @@
 # Exercise the candidate R/webR compiler without changing the compiler bundled
 # in the R package. The candidate is the exact browser-compiler artifact from
-# this workflow; its output is handed to the public MIR entry point of an
-# installed package backed by the real Linux runtime.
+# this workflow. It is installed into the R package's real V8 helper, and that
+# helper's output is handed to the public MIR entry point of an installed
+# package backed by the real Linux runtime.
 #
 # Usage: Rscript tests/test_r_portable_candidate.R path/to/stanli-compiler.js
 
@@ -15,34 +16,63 @@ if (!requireNamespace("V8", quietly = TRUE) ||
     !requireNamespace("jsonlite", quietly = TRUE))
   stop("the candidate check requires V8 and jsonlite", call. = FALSE)
 
-# Deliberately do not use stanli's compiler helpers here. This is a fresh V8
-# context and an explicit call to the candidate's stanli_compile() export, so
-# the check cannot accidentally pass through the compiler bundled in the R
-# package.
+suppressPackageStartupMessages(library(stanli))
+
+# Put the exact candidate artifact in the context cached by mir_from_js(). The
+# package still carries its tracked legacy file; this test changes only its own
+# fresh R session. Wrap both exports so each helper call proves which producer
+# ran and records the portable warnings that the source-compilation API leaves
+# internal on success.
 ctx <- V8::v8()
 ctx$source(compiler)
+ctx$eval("(function () {
+  var portable = globalThis.stanli_compile;
+  var classic = globalThis.stanc;
+  if (typeof portable !== 'function')
+    throw new Error('no stanli_compile() export');
+  if (typeof classic !== 'function') throw new Error('no stanc() export');
+  globalThis.__stanli_candidate = {
+    portable_calls: 0, classic_calls: 0, warnings: []
+  };
+  globalThis.stanli_compile = function() {
+    globalThis.__stanli_candidate.portable_calls += 1;
+    var r = portable.apply(this, arguments);
+    globalThis.__stanli_candidate.warnings = r.warnings
+      ? Array.prototype.map.call(r.warnings, String) : [];
+    return r;
+  };
+  globalThis.stanc = function() {
+    globalThis.__stanli_candidate.classic_calls += 1;
+    return classic.apply(this, arguments);
+  };
+})()")
+
+compiler_state <- function() {
+  jsonlite::fromJSON(
+    ctx$eval("JSON.stringify(globalThis.__stanli_candidate)"),
+    simplifyVector = TRUE)
+}
+
+state <- getFromNamespace("stanc_js_ctx", "stanli")
+state$ctx <- ctx
 
 compile_candidate <- function(name, code) {
-  ctx$assign("stanli_candidate_name", name)
-  ctx$assign("stanli_candidate_source", enc2utf8(code))
-  payload <- ctx$eval(
-    "(function () {
-       var f = globalThis.stanli_compile;
-       if (typeof f !== 'function')
-         return JSON.stringify({internal_error: 'no stanli_compile()'});
-       var r = f(stanli_candidate_name, stanli_candidate_source);
-       function strings(xs) {
-         return xs ? Array.prototype.map.call(xs, String) : [];
-       }
-       return JSON.stringify({
-         result: (typeof r.result === 'undefined') ? null : String(r.result),
-         errors: strings(r.errors),
-         warnings: strings(r.warnings)
-       });
-     })()")
-  out <- jsonlite::fromJSON(payload, simplifyVector = TRUE)
-  if (!is.null(out$internal_error)) stop(out$internal_error, call. = FALSE)
-  out
+  before <- compiler_state()
+  error <- NULL
+  result <- tryCatch(
+    stanli:::mir_from_js(enc2utf8(code), enc2utf8(name)),
+    error = function(e) {
+      error <<- conditionMessage(e)
+      NULL
+    })
+  after <- compiler_state()
+  if (!identical(after$portable_calls, before$portable_calls + 1L) ||
+      !identical(after$classic_calls, before$classic_calls))
+    stop("the R helper did not use exactly one portable compiler call",
+         call. = FALSE)
+  list(result = result,
+       errors = if (is.null(error)) character() else error,
+       warnings = after$warnings)
 }
 
 portable_payload <- function(mir) {
@@ -85,9 +115,10 @@ stopifnot(length(warning_result$errors) == 0L,
 
 bad <- compile_candidate(
   "malformed_candidate", "parameters { real x } model {}")
-stopifnot(is.null(bad$result), length(bad$errors) > 0L)
+stopifnot(is.null(bad$result), length(bad$errors) > 0L,
+          grepl("stanli_compile", bad$errors, fixed = TRUE),
+          compiler_state()$classic_calls == 0L)
 
-suppressPackageStartupMessages(library(stanli))
 if (!stanli_available())
   stop("the real stanli runtime is required for this check", call. = FALSE)
 

@@ -93,6 +93,13 @@ schema. Launch errors, nonzero exits, and empty output are reported; invalid
 portable output is rejected when decoded. None causes an automatic retry
 through stock stanc.
 
+The V8 and webR helpers are ready for a later JavaScript producer switch: they
+use `stanli_compile()` when that export exists and call `stanc()` only when it
+does not. An error from a selected portable producer is final. The JavaScript
+file currently bundled with the package still exports only `stanc()`, so this
+readiness path does not change what the R package ships. The switch follows a
+runtime release containing the compact-v2 reader.
+
 The v0.9.2 compatibility runtime carries pristine `stanc.exe`; the selection
 logic falls through to it automatically. Windows runtime tarballs built from
 this revision add `stanli-compile.exe` beside that rollback compiler for one

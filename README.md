@@ -376,13 +376,13 @@ changes signature; adding a function does not need one.
 
 Two R distribution channels:
 
-- **GitHub**, which is what users install from today:
+- **GitHub and R-universe**, the current installation routes:
   `remotes::install_github("seantalts/stanli", subdir = "r")` builds the
   bridge from any commit, and `stanli_install()` then pulls the runtime
-  from the release the package pins. **r-universe** would serve prebuilt
-  binaries from main with no tag, but it is not wired up:
-  `seantalts.r-universe.dev` answers 404 until the one-time registry
-  entry exists in `seantalts/seantalts.r-universe.dev`.
+  from the release the package pins. **R-universe** is registered and serves
+  prebuilt binaries from its selected repository ref, currently the `v0.9.2`
+  tag. Advancing that channel means updating the ref in
+  `seantalts/seantalts.r-universe.dev` and waiting for its platform builds.
 - **CRAN** cannot be automated by policy: a submission is a web-form
   upload confirmed by email. `r.yml` runs `R CMD check --as-cran` on
   every change under `r/`; a CRAN release is then bump `Version:` in

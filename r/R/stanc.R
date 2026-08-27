@@ -19,7 +19,9 @@
 # Under webR there is no V8 package and no process to run a binary in,
 # but the host already IS a JavaScript engine: the webr support
 # package's eval_js() evaluates in the worker's global scope, and the
-# same bundled stanc.js defines stanc() there once per session.
+# same bundled stanc.js defines stanc() there once per session. The dispatch
+# also understands stanli_compile() before the package starts carrying that
+# producer, so the switch itself does not need a simultaneous R-code change.
 #
 # An explicit stanc in STANLI_STANC still wins for compiler bisects. Otherwise
 # the runtime-adjacent stanli-compile wins, followed by adjacent or PATH stanc.
@@ -51,24 +53,51 @@ stanc_js <- function() {
 
 mir_from_js <- function(code, name = "stanli_model") {
   ctx <- stanc_js()
-  ctx$assign("stanli_src", code)
+  ctx$assign("stanli_src", enc2utf8(code))
   ctx$assign("stanli_name", name)
-  # js_of_ocaml exports stanc() on globalThis under V8. It returns an
-  # object with `result` on success and `errors` otherwise.
+  # Prefer the portable producer by export presence. Once selected, its
+  # diagnostics are final: a bad model must not be compiled again through the
+  # legacy producer and accidentally turn a real error into different output.
   out <- ctx$eval(
     "(function () {
-       var f = (typeof stanc === 'function') ? stanc
-             : (globalThis.stanc || (globalThis.module &&
-                globalThis.module.exports && globalThis.module.exports.stanc));
-       if (typeof f !== 'function') return JSON.stringify({e: 'no stanc()'});
-       var r = f(stanli_name, stanli_src,
-                 ['O1', 'debug-optimized-mir']);
-       if (r.errors) return JSON.stringify({e: String(r.errors)});
-       return JSON.stringify({r: r.result});
+       function exported(name) {
+         if (Object.prototype.hasOwnProperty.call(globalThis, name))
+           return {present: true, value: globalThis[name]};
+         var common = globalThis.module && globalThis.module.exports;
+         if (common && Object.prototype.hasOwnProperty.call(common, name))
+           return {present: true, value: common[name]};
+         return {present: false, value: null};
+       }
+       var portable_export = exported('stanli_compile');
+       var classic_export = exported('stanc');
+       var compiler = portable_export.present ? 'stanli_compile' : 'stanc';
+       var selected = portable_export.present ? portable_export
+                                              : classic_export;
+       if (!selected.present)
+         return JSON.stringify({e: 'no stanli_compile() or stanc() export',
+                                c: 'JavaScript compiler'});
+       if (typeof selected.value !== 'function')
+         return JSON.stringify({e: 'export is not a function', c: compiler});
+       try {
+         var r = portable_export.present
+           ? selected.value(stanli_name, stanli_src)
+           : selected.value(stanli_name, stanli_src,
+                            ['O1', 'debug-optimized-mir']);
+         if (!r || typeof r !== 'object')
+           return JSON.stringify({e: 'compiler returned no result object',
+                                  c: compiler});
+         if (r.errors)
+           return JSON.stringify({e: String(r.errors), c: compiler});
+         if (typeof r.result === 'undefined')
+           return JSON.stringify({e: 'compiler returned no MIR', c: compiler});
+         return JSON.stringify({r: String(r.result), c: compiler});
+       } catch (e) {
+         return JSON.stringify({e: String(e), c: compiler});
+       }
      })()")
   parsed <- jsonlite::fromJSON(out, simplifyVector = TRUE)
   if (!is.null(parsed$e))
-    stop("stanc: ", paste(parsed$e, collapse = "\n"), call. = FALSE)
+    stop(parsed$c, ": ", paste(parsed$e, collapse = "\n"), call. = FALSE)
   parsed$r
 }
 
@@ -115,6 +144,13 @@ read_compiler_output <- function(path) {
   value
 }
 
+write_utf8_file <- function(path, value) {
+  con <- file(path, open = "wb")
+  tryCatch(
+    writeBin(charToRaw(enc2utf8(value)), con),
+    finally = close(con))
+}
+
 mir_from_binary <- function(compiler, code, portable = FALSE,
                             run_stanc = system2) {
   work <- tempfile("stanli-compile-")
@@ -123,10 +159,7 @@ mir_from_binary <- function(compiler, code, portable = FALSE,
   on.exit(unlink(work, recursive = TRUE, force = TRUE), add = TRUE)
 
   source <- file.path(work, "model.stan")
-  con <- file(source, open = "wb")
-  tryCatch(
-    writeBin(charToRaw(enc2utf8(code)), con),
-    finally = close(con))
+  write_utf8_file(source, code)
 
   stdout_file <- file.path(work, "stdout")
   stderr_file <- file.path(work, "stderr")
@@ -181,18 +214,43 @@ mir_from_webr <- function(eval_js, code, name = "stanli_model") {
   src <- tempfile(fileext = ".stan")
   mirf <- tempfile(fileext = ".mir")
   on.exit(unlink(c(src, mirf)), add = TRUE)
-  writeLines(code, src)
+  write_utf8_file(src, code)
   status <- eval_js(sprintf("(() => {
     const src = Module.FS.readFile('%s', {encoding: 'utf8'});
-    const r = globalThis.stanc(
-      '%s', src, ['O1', 'debug-optimized-mir']);
-    if (r.errors) return 'ERR: ' + String(r.errors);
-    Module.FS.writeFile('%s', r.result);
-    return 'ok';
-  })()", src, name, mirf))
+    function exported(name) {
+      if (Object.prototype.hasOwnProperty.call(globalThis, name))
+        return {present: true, value: globalThis[name]};
+      const common = globalThis.module && globalThis.module.exports;
+      if (common && Object.prototype.hasOwnProperty.call(common, name))
+        return {present: true, value: common[name]};
+      return {present: false, value: null};
+    }
+    const portableExport = exported('stanli_compile');
+    const classicExport = exported('stanc');
+    const compiler = portableExport.present ? 'stanli_compile' : 'stanc';
+    const selected = portableExport.present ? portableExport : classicExport;
+    if (!selected.present)
+      return 'ERR:JavaScript compiler: no stanli_compile() or stanc() export';
+    if (typeof selected.value !== 'function')
+      return 'ERR:' + compiler + ': export is not a function';
+    try {
+      const r = portableExport.present
+        ? selected.value('%s', src)
+        : selected.value('%s', src, ['O1', 'debug-optimized-mir']);
+      if (!r || typeof r !== 'object')
+        return 'ERR:' + compiler + ': compiler returned no result object';
+      if (r.errors) return 'ERR:' + compiler + ': ' + String(r.errors);
+      if (typeof r.result === 'undefined')
+        return 'ERR:' + compiler + ': compiler returned no MIR';
+      Module.FS.writeFile('%s', String(r.result));
+      return 'ok';
+    } catch (e) {
+      return 'ERR:' + compiler + ': ' + String(e);
+    }
+  })()", src, name, name, mirf))
   if (!identical(status, "ok"))
-    stop("stanc: ", sub("^ERR: ", "", status), call. = FALSE)
-  paste(readLines(mirf, warn = FALSE), collapse = "\n")
+    stop(sub("^ERR:", "", status), call. = FALSE)
+  read_compiler_output(mirf)
 }
 
 stanc_mir <- function(code) {
