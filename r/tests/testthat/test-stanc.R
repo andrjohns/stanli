@@ -257,6 +257,9 @@ test_that("the webR helper selects by presence and never retries errors", {
   state$webr_loaded <- TRUE
 
   ctx <- V8::v8()
+  literal_value <- enc2utf8("C:\\Users\\runner\\file_'π\n")
+  expect_identical(
+    ctx$eval(stanli:::js_string_literal(literal_value)), literal_value)
   ctx$eval("globalThis.__stanli_source = '';
   globalThis.__stanli_written = null;
   globalThis.__stanli_calls = {
@@ -284,11 +287,12 @@ test_that("the webR helper selects by presence and never retries errors", {
   };")
 
   eval_js <- function(script) {
-    match <- regexec("Module\\.FS\\.readFile\\('([^']+)'", script)
+    match <- regexec("Module\\.FS\\.readFile\\(([^,]+),", script)
     groups <- regmatches(script, match)[[1]]
     expect_length(groups, 2)
+    source_path <- ctx$eval(groups[[2]])
     ctx$assign("__stanli_source",
-               stanli:::read_compiler_output(groups[[2]]))
+               stanli:::read_compiler_output(source_path))
     status <- ctx$eval(script)
     payload <- ctx$eval(
       "globalThis.__stanli_written
@@ -302,15 +306,16 @@ test_that("the webR helper selects by presence and never retries errors", {
   }
 
   source <- enc2utf8("model { // π ☃ θ\n}")
+  model_name <- enc2utf8("webr_'π\\name")
   expect_identical(
-    stanli:::mir_from_webr(eval_js, source, enc2utf8("webr_π")),
+    stanli:::mir_from_webr(eval_js, source, model_name),
     "STANLI2:ZmFrZQ==")
   calls <- jsonlite::fromJSON(
     ctx$eval("JSON.stringify(globalThis.__stanli_calls)"))
   expect_identical(calls$portable, 1L)
   expect_identical(calls$classic, 0L)
   expect_identical(calls$arguments, 2L)
-  expect_identical(calls$name, enc2utf8("webr_π"))
+  expect_identical(calls$name, model_name)
   expect_identical(calls$source, source)
   expect_identical(calls$warnings, 1L)
 

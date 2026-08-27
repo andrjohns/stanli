@@ -149,6 +149,10 @@ write_utf8_file <- function(path, value) {
     finally = close(con))
 }
 
+js_string_literal <- function(value) {
+  encodeString(enc2utf8(value), quote = "'")
+}
+
 mir_from_binary <- function(compiler, code, portable = FALSE,
                             run_stanc = system2) {
   work <- tempfile("stanli-compile-")
@@ -211,8 +215,11 @@ mir_from_webr <- function(eval_js, code, name = "stanli_model") {
   mirf <- tempfile(fileext = ".mir")
   on.exit(unlink(c(src, mirf)), add = TRUE)
   write_utf8_file(src, code)
+  src_js <- js_string_literal(src)
+  name_js <- js_string_literal(name)
+  mirf_js <- js_string_literal(mirf)
   status <- eval_js(sprintf("(() => {
-    const src = Module.FS.readFile('%s', {encoding: 'utf8'});
+    const src = Module.FS.readFile(%s, {encoding: 'utf8'});
     function exported(name) {
       if (Object.prototype.hasOwnProperty.call(globalThis, name))
         return {present: true, value: globalThis[name]};
@@ -231,19 +238,19 @@ mir_from_webr <- function(eval_js, code, name = "stanli_model") {
       return 'ERR:' + compiler + ': export is not a function';
     try {
       const r = portableExport.present
-        ? selected.value('%s', src)
-        : selected.value('%s', src, ['O1', 'debug-optimized-mir']);
+        ? selected.value(%s, src)
+        : selected.value(%s, src, ['O1', 'debug-optimized-mir']);
       if (!r || typeof r !== 'object')
         return 'ERR:' + compiler + ': compiler returned no result object';
       if (r.errors) return 'ERR:' + compiler + ': ' + String(r.errors);
       if (typeof r.result === 'undefined')
         return 'ERR:' + compiler + ': compiler returned no MIR';
-      Module.FS.writeFile('%s', String(r.result));
+      Module.FS.writeFile(%s, String(r.result));
       return 'ok';
     } catch (e) {
       return 'ERR:' + compiler + ': ' + String(e);
     }
-  })()", src, name, name, mirf))
+  })()", src_js, name_js, name_js, mirf_js))
   if (!identical(status, "ok"))
     stop(sub("^ERR:", "", status), call. = FALSE)
   read_compiler_output(mirf)
