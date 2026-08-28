@@ -673,7 +673,12 @@ void solve_active_fwd(KernelCtx& ctx, bool vec) {
 template <bool Left, SolveKind Kind = SolveKind::Plain>
 void solve_fwd(KernelCtx& ctx) {
   const bool vec = (ctx.variant & 2u) != 0;
-  if (ctx.variant & 1u) {
+  // forward_value_only() is CmdStan's log_prob<double> path. Even when the
+  // same graph carries adjoints for gradient(), it must take the prim solve:
+  // mdivide_left's active overload uses HouseholderQR while its double
+  // overload uses FullPivLU, and those are observably different answers on
+  // ill-conditioned inputs.
+  if ((ctx.variant & 1u) && !values_only()) {
     solve_active_fwd<Left, Kind>(ctx, vec);
   } else {
     vec ? solve_double<Left, Kind, true>(ctx)
