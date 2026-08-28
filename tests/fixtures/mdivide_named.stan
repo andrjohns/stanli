@@ -4,6 +4,12 @@
 // tape need not share. The general and triangular divisors get a dominant
 // diagonal to stay invertible; the _spd ones are symmetric positive
 // definite by construction.
+data {
+  matrix[3, 2] dm;
+  matrix[3, 3] ds;
+  matrix[2, 3] dr;
+  matrix[3, 3] dt;
+}
 parameters {
   matrix[3, 3] da0;
   matrix[3, 3] da1;
@@ -48,6 +54,12 @@ model {
             + 0.6 * mdivide_left_spd(xw1, vw1)[2]
             + -1.7 * mdivide_right_spd(mw2', xw2)[2, 3]
             + 0.8 * mdivide_right_spd(rw3, xw3)[1];
+  // Both mixed scalar-type directions. These must select stan-math's vd/dv
+  // overloads rather than promoting the data operand into the vv overload.
+  target += 0.17 * mdivide_left_spd(xw0, dm)[2, 1];
+  target += -0.23 * mdivide_left_spd(ds, mw0)[3, 2];
+  target += 0.31 * mdivide_right_spd(dr, xw2)[1, 2];
+  target += -0.37 * mdivide_right_spd(mw2', ds)[2, 2];
 
   matrix[3, 3] xc0 = dc0 + diag_matrix(rep_vector(4.0, 3));
   matrix[3, 3] xc1 = dc1 + diag_matrix(rep_vector(4.0, 3));
@@ -57,5 +69,9 @@ model {
             + -1.2 * mdivide_left_tri_low(xc1, vc1)[2]
             + 0.3 * mdivide_right_tri_low(mc2', xc2)[2, 3]
             + 1.4 * mdivide_right_tri_low(rc3, xc3)[1];
+  target += 0.41 * mdivide_left_tri_low(xc0, dm)[2, 1];
+  target += -0.43 * mdivide_left_tri_low(dt, mc0)[3, 2];
+  target += 0.47 * mdivide_right_tri_low(dr, xc2)[1, 2];
+  target += -0.53 * mdivide_right_tri_low(mc2', dt)[2, 2];
 
 }

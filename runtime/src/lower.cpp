@@ -3899,9 +3899,12 @@ struct Lowering {
       Val v = emit_value(opcode, {a, b}, n * k, dividend.si, {(int)n, (int)k});
       // The kernel solves through the operand types CmdStan's generated code
       // would have used, because stan-math answers differently for each: bit
-      // 0 is the scalar type (var reaches other overloads than double), bit 1
-      // says the dividend is a vector rather than a one-column matrix.
-      g.ops.back().variant = (uint8_t)((v.autodiff ? 1u : 0u) | (dm ? 0u : 2u));
+      // 0 says the result is var, bit 1 says the dividend is a vector rather
+      // than a one-column matrix, and bits 2/3 retain the divisor/dividend
+      // scalar types so mixed vv/vd/dv overloads do not collapse to vv.
+      g.ops.back().variant = (uint8_t)((v.autodiff ? 1u : 0u) | (dm ? 0u : 2u) |
+                                       (divisor.autodiff ? 4u : 0u) |
+                                       (dividend.autodiff ? 8u : 0u));
       return v;
     }
     // multiply is the named spelling of `*`, including its linear algebra:
