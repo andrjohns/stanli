@@ -1429,6 +1429,21 @@ struct Lowering {
         return it->second;
       }
       case mir::Expr::Indexed: {
+        // O1 index composition can leave an empty outer Indexed node around
+        // an already-indexed value. The outer node owns the final result
+        // type: for M[idx, idx] passed to a UDF that reads x[i, j], the inner
+        // single/single access still says UMatrix and this wrapper says UReal.
+        // Collapse the wrapper and lower the composed access with that final
+        // type instead of rejecting the stale intermediate matrix type.
+        if (e.args.size() == 1 && e.args[0].kind == mir::Expr::Indexed) {
+          mir::Expr composed = e.args[0];
+          composed.type_ = e.type_;
+          composed.unsized = e.unsized;
+          composed.data_only = e.data_only;
+          composed.promoted = e.promoted;
+          composed.raw = e.raw;
+          return lower_expr(composed);
+        }
         // All-Single indices with compile-time values -> element read.
         Val base = lower_expr(e.args[0]);
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;

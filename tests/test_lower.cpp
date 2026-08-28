@@ -4106,6 +4106,26 @@ int main() {
     }
   }
 
+  // O1 composes a scalar UDF index through a two-axis gather as a nested
+  // Indexed node whose empty outer layer carries UReal. The selected cell is
+  // row_indices[1], column_indices[2] = source (3,3).
+  {
+    DataMap d;
+    d.set_int_array("row_indices", {3, 1});
+    d.set_int_array("column_indices", {2, 3});
+    CompiledModel gm = compile_model(
+        slurp("tests/fixtures/matrix_multi_multi_nested.tmir.sexp"), d);
+    Executor gex(std::move(gm.graph));
+    gm.bind(gex);
+    const double q[9] = {0.2, -0.4, 0.7, 0.1, -0.3, 0.8, 0.5, 0.9, -0.6};
+    for (int i = 0; i < 9; ++i) gex.params_data()[i] = q[i];
+    double gradient[9] = {};
+    expect_eq("matrix nested index: lp", gex.gradient(gradient), 2.0 * q[8]);
+    for (int i = 0; i < 9; ++i)
+      expect_eq("matrix nested index: g" + std::to_string(i), gradient[i],
+                i == 8 ? 2.0 : 0.0);
+  }
+
   // A scalar replicated as a row vector uses the vector replication opcode,
   // but must retain its row-vector type for downstream expression lowering.
   {
