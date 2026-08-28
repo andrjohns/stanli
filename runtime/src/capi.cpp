@@ -352,14 +352,28 @@ const char* stanli_sampler_column_name(int i) {
 int stanli_sample_multi(stanli_model* m, const stanli_sample_opts* opts,
                         double* draws, double* stats, char* err,
                         size_t err_len) {
+  return stanli_sample_multi_progress(m, opts, 0, draws, stats, nullptr,
+                                      nullptr, nullptr, err, err_len);
+}
+
+int stanli_sample_multi_progress(
+    stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
+    double* stats, stanli_sample_progress_cb progress, void* progress_user,
+    stanli_sample_report* reports, char* err, size_t err_len) {
   try {
     if (opts == nullptr) {
       put_err(err, err_len, "null options");
       return 1;
     }
+    if (refresh < 0) {
+      put_err(err, err_len, "refresh must be nonnegative");
+      return 1;
+    }
     const int n_chains = opts->chains > 0 ? opts->chains : 1;
     const int64_t n = m->ex->n_params();
     const int64_t n_stored = stanli_n_stored_draws(opts);
+    if (reports != nullptr)
+      for (int c = 0; c < n_chains; ++c) reports[c] = stanli_sample_report{};
 
     stanli::NutsConfig cfg;
     cfg.seed = opts->seed;
@@ -380,9 +394,20 @@ int stanli_sample_multi(stanli_model* m, const stanli_sample_opts* opts,
     execs.push_back(m->ex.get());
     for (auto& c : clones) execs.push_back(c.get());
 
+    stanli::ChainProgressObserver progress_observer;
+    if (progress != nullptr && refresh > 0) {
+      progress_observer = [&](int chain, int64_t i, bool warmup) {
+        const int64_t completed = warmup ? i + 1 : (int64_t)cfg.warmup + i + 1;
+        progress(cfg.chain_id + chain, completed,
+                 (int64_t)cfg.warmup + cfg.samples, warmup ? 1 : 0,
+                 progress_user);
+      };
+    }
+
     std::vector<stanli::ChainResult> res;
     if (opts->inits == nullptr) {
-      res = stanli::run_nuts_chains(execs, cfg, opts->num_threads);
+      res = stanli::run_nuts_chains(execs, cfg, opts->num_threads, {},
+                                    progress_observer, refresh);
     } else {
       // Per-chain inits mean per-chain configs, which run_nuts_chains
       // does not take (it varies only the chain id). Run them one at a
@@ -394,8 +419,15 @@ int stanli_sample_multi(stanli_model* m, const stanli_sample_opts* opts,
         cc.chain_id = cfg.chain_id + c;
         cc.init = opts->inits + (int64_t)c * n;
         try {
+          stanli::ProgressObserver one_progress;
+          if (progress_observer)
+            one_progress = [&, c, cc](int64_t i, bool warmup) {
+              if (stanli::should_report_progress(cc, i, warmup, refresh))
+                progress_observer(c, i, warmup);
+            };
           res[(size_t)c].draws =
-              stanli::run_nuts(*execs[(size_t)c], cc, &res[(size_t)c].stats);
+              stanli::run_nuts(*execs[(size_t)c], cc, &res[(size_t)c].stats, {},
+                               one_progress, &res[(size_t)c].report);
         } catch (const std::exception& e) {
           res[(size_t)c].error = e.what();
         }
@@ -406,6 +438,12 @@ int stanli_sample_multi(stanli_model* m, const stanli_sample_opts* opts,
     std::string first_error;
     for (int c = 0; c < n_chains; ++c) {
       const auto& r = res[(size_t)c];
+      if (reports != nullptr) {
+        reports[c].warmup_seconds = r.report.warmup_seconds;
+        reports[c].sampling_seconds = r.report.sampling_seconds;
+        reports[c].n_divergent = r.report.n_divergent;
+        reports[c].n_max_treedepth = r.report.n_max_treedepth;
+      }
       if (!r.error.empty()) {
         if (failed++ == 0)
           first_error =

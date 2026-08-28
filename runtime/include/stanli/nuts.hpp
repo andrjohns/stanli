@@ -57,29 +57,60 @@ struct SamplerStats {
   std::vector<std::array<double, 7>> rows;
 };
 
+// Per-chain information that belongs to the run rather than to one stored
+// draw. Diagnostic counts cover every post-warmup transition, including the
+// ones thinning drops, and the two times are measured independently so a
+// parallel multi-chain caller can report each chain honestly.
+struct SamplingReport {
+  double warmup_seconds = 0;
+  double sampling_seconds = 0;
+  int64_t n_divergent = 0;
+  int64_t n_max_treedepth = 0;
+};
+
 // Optional per-transition observer for streaming consumers (the browser
 // worker's live plots): called after every transition with the phase and
 // the current unconstrained point.
 using DrawObserver =
     std::function<void(int64_t i, bool warmup, const double* q)>;
 
+// Optional lightweight observer for console progress. Unlike DrawObserver it
+// does not expose the position, so multi-chain execution can queue the small
+// event and dispatch it on the calling thread. `i` is zero-based within the
+// current phase and the callback runs after that transition completes.
+using ProgressObserver = std::function<void(int64_t i, bool warmup)>;
+
 // Adaptive diagonal-metric NUTS (stan::mcmc::adapt_diag_e_nuts) over the
 // executor's log_prob_grad. Returns one unconstrained parameter vector per
 // stored draw. `stats`, when non-null, receives one row per stored draw.
 std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg,
                                           SamplerStats* stats = nullptr,
-                                          const DrawObserver& observe = {});
+                                          const DrawObserver& observe = {},
+                                          const ProgressObserver& progress = {},
+                                          SamplingReport* report = nullptr);
 
 // ---- multi-chain -----------------------------------------------------------
 
 struct ChainResult {
   std::vector<std::vector<double>> draws;
   SamplerStats stats;
+  SamplingReport report;
   // Empty on success. A chain that fails does not take the run down with
   // it -- CmdStan reports a failed chain and keeps the others -- so the
   // caller decides what a partial run is worth.
   std::string error;
 };
+
+// Called on the thread that invoked run_nuts_chains, never on a sampler
+// worker. `chain` is the zero-based index into the supplied executor list.
+using ChainProgressObserver =
+    std::function<void(int chain, int64_t i, bool warmup)>;
+
+// CmdStan-style refresh selection. `i` is zero-based within the phase. The
+// first transition, every `refresh`-th transition within the phase, and the
+// phase's final transition are reported.
+bool should_report_progress(const NutsConfig& cfg, int64_t i, bool warmup,
+                            int refresh);
 
 // True when this build can run chains in real threads. stan-math's
 // autodiff stack is a plain static unless STAN_THREADS is defined, in
@@ -97,10 +128,10 @@ bool thread_safe_build();
 // n_threads <= 1 runs sequentially. Larger values are honoured only on a
 // thread_safe_build(); elsewhere they are clamped to 1, because the
 // alternative is a wrong answer rather than a slow one.
-std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
-                                         const NutsConfig& cfg,
-                                         int n_threads = 1,
-                                         const DrawObserver& observe = {});
+std::vector<ChainResult> run_nuts_chains(
+    const std::vector<Executor*>& execs, const NutsConfig& cfg,
+    int n_threads = 1, const DrawObserver& observe = {},
+    const ChainProgressObserver& progress = {}, int progress_refresh = 1);
 
 // Build `n` executors over the same compiled graph, copying it out of an
 // already-bound one. The caller keeps ownership; `src` is not modified.

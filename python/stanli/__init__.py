@@ -8,6 +8,7 @@ compilation on this machine.
 import ctypes
 import json
 import math
+import operator
 import os
 import pathlib
 import subprocess
@@ -78,6 +79,21 @@ class _SampleOpts(ctypes.Structure):
     ]
 
 
+class _SampleReport(ctypes.Structure):
+    """Mirrors stanli_sample_report in runtime/include/stanli/capi.h."""
+    _fields_ = [
+        ("warmup_seconds", ctypes.c_double),
+        ("sampling_seconds", ctypes.c_double),
+        ("n_divergent", ctypes.c_int64),
+        ("n_max_treedepth", ctypes.c_int64),
+    ]
+
+
+_SampleProgressCallback = ctypes.CFUNCTYPE(
+    None, ctypes.c_int32, ctypes.c_int64, ctypes.c_int64, ctypes.c_int32,
+    ctypes.c_void_p)
+
+
 def _load_lib():
     names = {"darwin": "libstanli.dylib", "linux": "libstanli.so"}
     lib = ctypes.CDLL(str(_BIN / names.get(sys.platform, "stanli.dll")))
@@ -138,6 +154,12 @@ def _load_lib():
                                         ctypes.POINTER(ctypes.c_double),
                                         ctypes.POINTER(ctypes.c_double),
                                         ctypes.c_char_p, ctypes.c_size_t]
+    lib.stanli_sample_multi_progress.restype = ctypes.c_int
+    lib.stanli_sample_multi_progress.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(_SampleOpts), ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        _SampleProgressCallback, ctypes.c_void_p,
+        ctypes.POINTER(_SampleReport), ctypes.c_char_p, ctypes.c_size_t]
     lib.stanli_summary_stats.restype = ctypes.c_int
     lib.stanli_summary_stats.argtypes = [ctypes.POINTER(ctypes.c_double),
                                          ctypes.c_int64, ctypes.c_int64,
@@ -363,6 +385,41 @@ def _fmt(v, prec=4):
     return f"{v:.{prec}f}"
 
 
+def _print_sample_progress(chain_id, iteration, total, warmup):
+    """One CmdStan-shaped progress line, through Python's live stdout."""
+    width = max(1, len(str(total)))
+    percent = 100 if total == 0 else 100 * iteration // total
+    phase = "Warmup" if warmup else "Sampling"
+    print(f"Chain [{chain_id}] Iteration: {iteration:{width}d} / {total} "
+          f"[{percent:3d}%]  ({phase})", flush=True)
+
+
+def _print_sample_reports(reports, first_chain, samples, max_depth):
+    """Per-chain timing and aggregate post-warmup sampler problems."""
+    print()
+    for c, report in enumerate(reports):
+        label = f"Chain [{first_chain + c}] Elapsed Time: "
+        indent = " " * len(label)
+        total = report.warmup_seconds + report.sampling_seconds
+        print(f"{label}{report.warmup_seconds:.3f} seconds (Warm-up)")
+        print(f"{indent}{report.sampling_seconds:.3f} seconds (Sampling)")
+        print(f"{indent}{total:.3f} seconds (Total)")
+        print()
+
+    n_divergent = sum(r.n_divergent for r in reports)
+    n_max_depth = sum(r.n_max_treedepth for r in reports)
+    n_transitions = len(reports) * samples
+    if n_divergent:
+        percent = 100 * n_divergent / n_transitions if n_transitions else 0.0
+        print(f"Warning: {n_divergent} of {n_transitions} post-warmup "
+              f"transitions ({percent:.1f}%) ended with a divergence.")
+    if n_max_depth:
+        percent = 100 * n_max_depth / n_transitions if n_transitions else 0.0
+        print(f"Warning: {n_max_depth} of {n_transitions} post-warmup "
+              f"transitions ({percent:.1f}%) saturated the maximum "
+              f"treedepth of {max_depth}.")
+
+
 class Summary:
     """Per-parameter posterior summary: the columns stansummary prints.
 
@@ -424,12 +481,20 @@ class Fit:
     which is what a trace plot or a per-chain check wants.
     """
 
-    def __init__(self, names, draws, sampler_stats, max_depth, seed):
+    def __init__(self, names, draws, sampler_stats, max_depth, seed,
+                 reports=None):
         self.names = list(names)
         self._draws = draws               # (chains, draws, cols)
         self.sampler_stats = sampler_stats  # (chains, draws, 7)
         self.max_depth = max_depth
         self.seed = seed
+        self._divergence_counts = None
+        self._max_treedepth_counts = None
+        if reports is not None:
+            self._divergence_counts = np.array(
+                [r.n_divergent for r in reports], dtype=np.int64)
+            self._max_treedepth_counts = np.array(
+                [r.n_max_treedepth for r in reports], dtype=np.int64)
 
     @property
     def n_chains(self):
@@ -480,12 +545,16 @@ class Fit:
     @property
     def divergences(self):
         """Divergent transitions per chain."""
+        if self._divergence_counts is not None:
+            return self._divergence_counts.copy()
         col = SAMPLER_COLUMNS.index("divergent__")
         return self.sampler_stats[:, :, col].sum(axis=1).astype(np.int64)
 
     @property
     def max_treedepth_hits(self):
         """Transitions that saturated max_depth, per chain."""
+        if self._max_treedepth_counts is not None:
+            return self._max_treedepth_counts.copy()
         col = SAMPLER_COLUMNS.index("treedepth__")
         return (self.sampler_stats[:, :, col] >= self.max_depth) \
             .sum(axis=1).astype(np.int64)
@@ -698,7 +767,8 @@ class Model:
 
     def sample(self, *, chains=4, seed=1, warmup=1000, samples=1000,
                delta=0.8, max_depth=10, thin=1, save_warmup=False,
-               inits=None, init_radius=2.0, parallel_chains=None):
+               inits=None, init_radius=2.0, parallel_chains=None,
+               refresh=100):
         """NUTS draws as a Fit.
 
         Four chains by default, because R-hat needs more than one and a
@@ -719,11 +789,28 @@ class Model:
         so it is on by default. A build without thread support clamps it
         to 1 (see ``thread_safe()``).
 
+        `refresh` is the number of transitions between CmdStan-shaped
+        progress updates. The default is 100; zero disables all automatic
+        progress, timing, and sampler-problem output. Reporting only observes
+        the run and does not change draws, sampler statistics, or RNG streams.
+
         Columns are every column CmdStan's CSV would carry -- constrained
         parameters, transformed parameters, generated quantities, with RNG
         draws streamed per chain -- for models with a generate_quantities
         section, and the constrained parameters otherwise.
         """
+        if isinstance(refresh, (bool, np.bool_)):
+            raise TypeError("refresh must be a nonnegative integer")
+        try:
+            refresh = operator.index(refresh)
+        except TypeError:
+            raise TypeError("refresh must be a nonnegative integer") from None
+        if refresh < 0:
+            raise ValueError("refresh must be nonnegative")
+        int_max = 2 ** (8 * ctypes.sizeof(ctypes.c_int) - 1) - 1
+        if refresh > int_max:
+            raise OverflowError("refresh does not fit in a C int")
+
         opts = _SampleOpts()
         _lib.stanli_sample_opts_init(ctypes.byref(opts))
         opts.seed = seed
@@ -759,15 +846,37 @@ class Model:
         n_stored = _lib.stanli_n_stored_draws(ctypes.byref(opts))
         raw = np.empty((opts.chains, n_stored, self.n_unconstrained))
         stats = np.empty((opts.chains, n_stored, _N_SAMPLER_COLS))
+        reports = (_SampleReport * opts.chains)()
         err = ctypes.create_string_buffer(4096)
-        failed = _lib.stanli_sample_multi(self._m, ctypes.byref(opts),
-                                          _dptr(raw), _dptr(stats),
-                                          err, len(err))
+        callback_errors = []
+        # A typed null function pointer: ctypes does not accept Python None for
+        # a CFUNCTYPE argtype, even though both represent a null C callback.
+        progress_cb = _SampleProgressCallback()
+        if refresh:
+            def progress(chain_id, iteration, total, is_warmup, _user):
+                if callback_errors:
+                    return
+                try:
+                    _print_sample_progress(chain_id, iteration, total,
+                                           is_warmup)
+                except BaseException as exc:  # ctypes cannot propagate it
+                    callback_errors.append(exc)
+
+            # Keep this object in a local until the native call returns. ctypes
+            # callbacks are raw function pointers; collecting it early would
+            # leave the sampler calling freed memory.
+            progress_cb = _SampleProgressCallback(progress)
+
+        failed = _lib.stanli_sample_multi_progress(
+            self._m, ctypes.byref(opts), refresh, _dptr(raw), _dptr(stats),
+            progress_cb, None, reports, err, len(err))
         del init_arr
         if failed:
             raise RuntimeError(
                 f"{failed} of {opts.chains} chains failed; first: "
                 f"{err.value.decode()}")
+        if callback_errors:
+            raise callback_errors[0]
 
         names, have_wa = self._column_names()
         out = np.empty((opts.chains, n_stored, len(names)))
@@ -789,4 +898,8 @@ class Model:
                 else:
                     _lib.stanli_constrain(self._m, _dptr(q), _dptr(row))
                 out[c, s] = row
-        return Fit(names, out, stats, opts.max_depth, seed)
+        fit = Fit(names, out, stats, opts.max_depth, seed, reports)
+        if refresh:
+            _print_sample_reports(reports, first_chain, opts.samples,
+                                  opts.max_depth)
+        return fit

@@ -39,7 +39,8 @@ await webR.FS.writeFile('/tmp/libstanli.so',
 const res = await webR.evalR(`
   dyn.load('/tmp/libstanli.so')
   syms <- c('stanli_abi_version', 'stanli_model_new', 'stanli_exact_lp',
-            'stanli_grad', 'stanli_sample_multi', 'stanli_optimize',
+            'stanli_grad', 'stanli_sample_multi',
+            'stanli_sample_multi_progress', 'stanli_optimize',
             'stanli_diagnose_text', 'stanli_wa_row')
   syms[!vapply(syms, is.loaded, logical(1))]
 `);

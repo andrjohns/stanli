@@ -10,16 +10,25 @@
 #include <stan/services/util/create_rng.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <exception>
+#include <mutex>
 #include <thread>
 
 namespace stanli {
 
 std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg,
                                           SamplerStats* stats,
-                                          const DrawObserver& observe) {
+                                          const DrawObserver& observe,
+                                          const ProgressObserver& progress,
+                                          SamplingReport* report) {
+  using Clock = std::chrono::steady_clock;
+  if (report) *report = SamplingReport{};
   // CmdStan's generator, seeded CmdStan's way: same engine (mixmax in this
   // Stan version, ecuyer1988 in older ones -- create_rng is what tracks
   // that), same (0, 1, seed, chain) construction, chain 1 as the default
@@ -79,26 +88,50 @@ std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg,
   const auto step = [&](int64_t i, bool warmup, bool keep) {
     s = sampler.transition(s, logger);
     s.cont_params(qd);
+    // A report covers every post-warmup transition even when thinning drops
+    // the row. Fetch the sampler parameters once when either consumer needs
+    // them; this is observational and does not touch the sampler RNG.
+    const bool inspect = (keep && stats) || (!warmup && report);
+    if (inspect) {
+      sp.clear();
+      sampler.get_sampler_params(sp);
+    }
     if (keep) {
       draws.emplace_back(qd.data(), qd.data() + n);
       if (stats) {
         // get_sampler_params yields stepsize__, treedepth__, n_leapfrog__,
         // divergent__, energy__ in that order (stan::mcmc::base_nuts).
-        sp.clear();
-        sampler.get_sampler_params(sp);
         stats->rows.push_back(
             {s.log_prob(), s.accept_stat(), sp.size() > 0 ? sp[0] : 0.0,
              sp.size() > 1 ? sp[1] : 0.0, sp.size() > 2 ? sp[2] : 0.0,
              sp.size() > 3 ? sp[3] : 0.0, sp.size() > 4 ? sp[4] : 0.0});
       }
     }
+    if (!warmup && report) {
+      if (sp.size() > 3 && sp[3] != 0.0) ++report->n_divergent;
+      if (sp.size() > 1 && (int)sp[1] >= cfg.max_depth)
+        ++report->n_max_treedepth;
+    }
     if (observe) observe(i, warmup, qd.data());
+    if (progress) progress(i, warmup);
   };
 
+  // Match Stan's timing boundary: initialization and stepsize search are
+  // setup, not warmup transitions. In particular, warmup=0 should not report
+  // model initialization as warmup time.
+  const auto warmup_started = Clock::now();
   for (int i = 0; i < cfg.warmup; ++i)
     step(i, true, cfg.save_warmup && (i % thin == 0));
+  const auto warmup_finished = Clock::now();
+  if (report)
+    report->warmup_seconds =
+        std::chrono::duration<double>(warmup_finished - warmup_started).count();
   sampler.disengage_adaptation();
+  const auto sampling_started = Clock::now();
   for (int i = 0; i < cfg.samples; ++i) step(i, false, i % thin == 0);
+  if (report)
+    report->sampling_seconds =
+        std::chrono::duration<double>(Clock::now() - sampling_started).count();
   return draws;
 }
 
@@ -120,6 +153,14 @@ bool thread_safe_build() {
 #endif
 }
 
+bool should_report_progress(const NutsConfig& cfg, int64_t i, bool warmup,
+                            int refresh) {
+  if (refresh <= 0) return false;
+  const int64_t completed = i + 1;
+  const int64_t phase_total = warmup ? cfg.warmup : cfg.samples;
+  return completed == 1 || completed == phase_total || completed % refresh == 0;
+}
+
 std::vector<std::unique_ptr<Executor>> clone_executors(const Executor& src,
                                                        int n) {
   std::vector<std::unique_ptr<Executor>> out;
@@ -130,7 +171,9 @@ std::vector<std::unique_ptr<Executor>> clone_executors(const Executor& src,
 
 std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
                                          const NutsConfig& cfg, int n_threads,
-                                         const DrawObserver& observe) {
+                                         const DrawObserver& observe,
+                                         const ChainProgressObserver& progress,
+                                         int progress_refresh) {
   const size_t n_chains = execs.size();
   std::vector<ChainResult> out(n_chains);
 
@@ -138,12 +181,13 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
   // and leaves its draws empty rather than taking the run down: CmdStan
   // reports a failed chain and keeps the others, and a three-of-four run
   // is something the caller can decide about.
-  const auto run_one = [&](size_t c) {
+  const auto run_one = [&](size_t c, const ProgressObserver& one_progress) {
     NutsConfig cc = cfg;
     cc.chain_id = cfg.chain_id + (int)c;
     try {
       out[c].draws = run_nuts(*execs[c], cc, &out[c].stats,
-                              n_chains == 1 ? observe : DrawObserver{});
+                              n_chains == 1 ? observe : DrawObserver{},
+                              one_progress, &out[c].report);
     } catch (const std::exception& e) {
       out[c].error = e.what();
     }
@@ -158,7 +202,23 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
   if (!thread_safe_build()) threads = 1;
 
   if (threads <= 1) {
-    for (size_t c = 0; c < n_chains; ++c) run_one(c);
+    std::exception_ptr progress_error;
+    for (size_t c = 0; c < n_chains; ++c) {
+      ProgressObserver one_progress;
+      if (progress)
+        one_progress = [&, c](int64_t i, bool warmup) {
+          if (!should_report_progress(cfg, i, warmup, progress_refresh) ||
+              progress_error)
+            return;
+          try {
+            progress((int)c, i, warmup);
+          } catch (...) {
+            progress_error = std::current_exception();
+          }
+        };
+      run_one(c, one_progress);
+    }
+    if (progress_error) std::rethrow_exception(progress_error);
     return out;
   }
 
@@ -168,6 +228,20 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
   std::atomic<size_t> next{0};
   std::vector<std::thread> pool;
   pool.reserve((size_t)threads);
+
+  // R's console API is main-thread-only, and a Python callback from a new
+  // native thread has avoidable interpreter overhead. Workers therefore
+  // enqueue only the three small fields; this calling thread drains them and
+  // invokes the public observer while the pool runs.
+  struct ProgressEvent {
+    int chain;
+    int64_t i;
+    bool warmup;
+  };
+  std::mutex progress_mutex;
+  std::condition_variable progress_ready;
+  std::deque<ProgressEvent> progress_events;
+  int live_workers = threads;
   for (int t = 0; t < threads; ++t)
     pool.emplace_back([&] {
       // stan-math REQUIRES this. Under STAN_THREADS its autodiff stack
@@ -180,9 +254,58 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
       // first nested_rev_autodiff on a worker dereferences null inside
       // start_nested(), which is a segfault, not a wrong number.
       stan::math::ChainableStack ad_tape_for_this_thread;
-      for (size_t c = next++; c < n_chains; c = next++) run_one(c);
+      for (size_t c = next++; c < n_chains; c = next++) {
+        ProgressObserver one_progress;
+        if (progress)
+          one_progress = [&, c](int64_t i, bool warmup) {
+            if (!should_report_progress(cfg, i, warmup, progress_refresh))
+              return;
+            {
+              std::lock_guard<std::mutex> lock(progress_mutex);
+              progress_events.push_back({(int)c, i, warmup});
+            }
+            progress_ready.notify_one();
+          };
+        run_one(c, one_progress);
+      }
+      {
+        // Completion is part of the condition-variable predicate, so mutate
+        // it under the same mutex. Otherwise the final notify can race
+        // between the caller's predicate check and its wait and be lost.
+        std::lock_guard<std::mutex> lock(progress_mutex);
+        --live_workers;
+      }
+      progress_ready.notify_one();
     });
+
+  std::exception_ptr progress_error;
+  if (progress) {
+    for (;;) {
+      ProgressEvent event{};
+      {
+        std::unique_lock<std::mutex> lock(progress_mutex);
+        progress_ready.wait(lock, [&] {
+          return !progress_events.empty() || live_workers == 0;
+        });
+        if (progress_events.empty()) break;
+        event = progress_events.front();
+        progress_events.pop_front();
+      }
+      // A public C++ observer is allowed to throw. Keep draining so workers
+      // cannot block behind an abandoned queue, join every thread, and only
+      // then let the exception escape; destroying a joinable std::thread
+      // during unwinding would terminate the process.
+      if (!progress_error) {
+        try {
+          progress(event.chain, event.i, event.warmup);
+        } catch (...) {
+          progress_error = std::current_exception();
+        }
+      }
+    }
+  }
   for (auto& th : pool) th.join();
+  if (progress_error) std::rethrow_exception(progress_error);
   return out;
 }
 

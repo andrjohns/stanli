@@ -51,6 +51,13 @@ stanli_diagnose(fit)  # divergences, treedepth, E-BFMI, R-hat, ESS
 as_draws_array(fit)   # a posterior::draws_array
 ```
 
+Sampling prints periodic per-chain progress, elapsed warmup and sampling
+times, and any divergent-transition or maximum-treedepth warnings. Set
+`refresh = 0` for a quiet run. Exact per-chain times and problem counts are
+also available in `fit$report`. When the package is deliberately paired with
+a compatible older runtime, sampling still works but these new report fields
+are `NA` and `fit$report$available` is `FALSE`.
+
 Four chains of eight schools (8000 draws, full summary and diagnostics)
 take about 70 ms, because the model is lowered to a graph over
 precompiled kernels rather than translated to C++ and compiled.

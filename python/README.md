@@ -28,6 +28,29 @@ fit["mu"].mean()        # every draw of a column, chains concatenated
 fit.draws("mu")         # (chains, draws), for a trace plot
 ```
 
+Sampling reports CmdStan-shaped progress every 100 transitions by default,
+followed by per-chain warm-up, sampling, and total times:
+
+```text
+Chain [1] Iteration:    1 / 2000 [  0%]  (Warmup)
+Chain [1] Iteration: 1000 / 2000 [ 50%]  (Warmup)
+Chain [1] Iteration: 1001 / 2000 [ 50%]  (Sampling)
+Chain [1] Iteration: 2000 / 2000 [100%]  (Sampling)
+
+Chain [1] Elapsed Time: 0.821 seconds (Warm-up)
+                        0.169 seconds (Sampling)
+                        0.990 seconds (Total)
+```
+
+Set `refresh=0` for a completely quiet run, or another positive integer to
+change the update interval. Progress is written through Python's `sys.stdout`,
+so notebook output and `contextlib.redirect_stdout()` work normally. Reporting
+only observes completed transitions: changing `refresh` does not change draws,
+sampler statistics, generated-quantity RNG streams, or reproducibility. If any
+post-warmup transition diverges or saturates the maximum treedepth, the final
+output also reports the aggregate count. Those counts cover all transitions,
+including transitions omitted by thinning.
+
 ## Chains and convergence
 
 Four chains by default, run in parallel, because R-hat needs more than
@@ -181,7 +204,8 @@ model.constrained_names             # ['mu', 'tau', 'theta.1', ...]
 
 lp, grad = model.log_prob_grad(q)   # sampling log density and its gradient
 
-fit = model.sample(seed=1, warmup=1000, samples=1000, delta=0.8)
+fit = model.sample(seed=1, warmup=1000, samples=1000, delta=0.8,
+                   refresh=100)
 fit["theta.1"]                      # ndarray, chains concatenated
 ```
 

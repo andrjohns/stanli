@@ -80,6 +80,19 @@ typedef struct {
   int num_threads;
 } stanli_sample_opts;
 
+/* Mirrors the result-only struct used by stanli_sample_multi_progress. It is
+ * part of that new entry point rather than stanli_sample_opts, so adding it
+ * does not change the version-1 options layout above. */
+typedef struct {
+  double warmup_seconds;
+  double sampling_seconds;
+  int64_t n_divergent;
+  int64_t n_max_treedepth;
+} stanli_sample_report;
+
+typedef void (*stanli_sample_progress_cb)(int32_t, int64_t, int64_t, int32_t,
+                                          void*);
+
 typedef struct {
   uint32_t seed;
   int chain_id;
@@ -115,6 +128,10 @@ static void (*p_sample_opts_init)(stanli_sample_opts*);
 static int64_t (*p_n_stored_draws)(const stanli_sample_opts*);
 static int (*p_sample_multi)(void*, const stanli_sample_opts*, double*, double*,
                              char*, size_t);
+static int (*p_sample_multi_progress)(void*, const stanli_sample_opts*, int,
+                                      double*, double*,
+                                      stanli_sample_progress_cb, void*,
+                                      stanli_sample_report*, char*, size_t);
 static const char* (*p_sampler_column_name)(int);
 static int (*p_summary_stats)(const double*, int64_t, int64_t, int64_t,
                               double*);
@@ -185,6 +202,11 @@ SEXP stanli_bridge_load(SEXP path) {
   BIND("stanli_sample_opts_init", p_sample_opts_init);
   BIND("stanli_n_stored_draws", p_n_stored_draws);
   BIND("stanli_sample_multi", p_sample_multi);
+  /* Added without an ABI bump: a version-1 runtime may legitimately predate
+   * progress reporting. Keep the old sampler as the compatibility path rather
+   * than making an optional feature prevent the library loading. */
+  *(void**)(&p_sample_multi_progress) =
+      dl_sym(g_lib, "stanli_sample_multi_progress");
   BIND("stanli_sampler_column_name", p_sampler_column_name);
   BIND("stanli_summary_stats", p_summary_stats);
   BIND("stanli_diagnose_text", p_diagnose_text);
@@ -321,28 +343,92 @@ static void fill_sample_opts(stanli_sample_opts* o, SEXP l) {
   o->num_threads = asInteger(VECTOR_ELT(l, 9));
 }
 
-SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits) {
+/* The runtime guarantees this is called on the thread that entered
+ * stanli_r_sample, even when chains themselves run on worker threads. R's
+ * console API is not thread-safe, so keep this callback deliberately tiny and
+ * never call user R code from it. */
+static void sample_progress(int32_t chain_id, int64_t iteration, int64_t total,
+                            int32_t warmup, void* user) {
+  (void)user;
+  const int pct = total > 0 ? (int)(100 * iteration / total) : 100;
+  Rprintf("Chain [%d] Iteration: %4lld / %lld [%3d%%]  (%s)\n", chain_id,
+          (long long)iteration, (long long)total, pct,
+          warmup ? "Warmup" : "Sampling");
+  R_FlushConsole();
+}
+
+static void print_sample_reports(const stanli_sample_opts* o, int64_t nchain,
+                                 const stanli_sample_report* reports) {
+  int64_t n_divergent = 0;
+  int64_t n_max_treedepth = 0;
+  const int first_chain = o->chain_id > 0 ? o->chain_id : 1;
+  for (int64_t c = 0; c < nchain; ++c) {
+    const stanli_sample_report* r = reports + c;
+    Rprintf("\nChain [%d] Elapsed Time: %.3f seconds (Warm-up)\n",
+            first_chain + (int)c, r->warmup_seconds);
+    Rprintf("                  %.3f seconds (Sampling)\n", r->sampling_seconds);
+    Rprintf("                  %.3f seconds (Total)\n",
+            r->warmup_seconds + r->sampling_seconds);
+    n_divergent += r->n_divergent;
+    n_max_treedepth += r->n_max_treedepth;
+  }
+
+  const int64_t transitions = nchain * (int64_t)o->samples;
+  if (n_divergent > 0)
+    Rprintf(
+        "\nWarning: %lld of %lld post-warmup transitions diverged. "
+        "Raise delta or reparameterize.\n",
+        (long long)n_divergent, (long long)transitions);
+  if (n_max_treedepth > 0)
+    Rprintf(
+        "\nWarning: %lld of %lld post-warmup transitions saturated the "
+        "maximum treedepth of %d. Raise max_depth to allow deeper "
+        "trajectories.\n",
+        (long long)n_max_treedepth, (long long)transitions,
+        o->max_depth > 0 ? o->max_depth : 10);
+  R_FlushConsole();
+}
+
+SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits, SEXP refresh) {
   require_loaded();
   void* mm = model_ptr(m);
   stanli_sample_opts o;
   fill_sample_opts(&o, optlist);
   if (XLENGTH(inits) > 0) o.inits = REAL(inits);
+  const int refresh_rate = asInteger(refresh);
 
   const int64_t n = p_n_unconstrained(mm);
   const int64_t rows = p_n_stored_draws(&o);
   const int64_t nchain = o.chains > 0 ? o.chains : 1;
+  stanli_sample_report* reports =
+      (stanli_sample_report*)R_alloc((size_t)nchain, sizeof(*reports));
 
   SEXP raw = PROTECT(allocVector(REALSXP, (R_xlen_t)(nchain * rows * n)));
   SEXP stats = PROTECT(allocVector(REALSXP, (R_xlen_t)(nchain * rows * 7)));
   char err[4096];
   err[0] = '\0';
+  const int have_reports = p_sample_multi_progress != NULL;
+  if (!have_reports && refresh_rate > 0) {
+    Rprintf(
+        "Sampling progress is unavailable with this older stanli runtime; "
+        "sampling will continue without automatic output. Run "
+        "stanli_install(overwrite = TRUE) to update.\n");
+    R_FlushConsole();
+  }
   const int failed =
-      p_sample_multi(mm, &o, REAL(raw), REAL(stats), err, sizeof err);
+      have_reports
+          ? p_sample_multi_progress(mm, &o, refresh_rate, REAL(raw),
+                                    REAL(stats),
+                                    refresh_rate > 0 ? sample_progress : NULL,
+                                    NULL, reports, err, sizeof err)
+          : p_sample_multi(mm, &o, REAL(raw), REAL(stats), err, sizeof err);
   if (failed) {
     UNPROTECT(2);
     error("%d of %d chains failed; first: %s", failed, (int)nchain,
           err[0] ? err : "(no message)");
   }
+  if (have_reports && refresh_rate > 0)
+    print_sample_reports(&o, nchain, reports);
 
   /* Constrain every stored draw into the CSV columns, per chain, so the
    * RNG stream in generated quantities differs by chain the way CmdStan's
@@ -369,20 +455,46 @@ SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits) {
     }
   }
 
-  SEXP out = PROTECT(allocVector(VECSXP, 5));
+  SEXP warmup_seconds = PROTECT(allocVector(REALSXP, (R_xlen_t)nchain));
+  SEXP sampling_seconds = PROTECT(allocVector(REALSXP, (R_xlen_t)nchain));
+  SEXP n_divergent = PROTECT(allocVector(REALSXP, (R_xlen_t)nchain));
+  SEXP n_max_treedepth = PROTECT(allocVector(REALSXP, (R_xlen_t)nchain));
+  double* warmup_out = REAL(warmup_seconds);
+  double* sampling_out = REAL(sampling_seconds);
+  double* divergent_out = REAL(n_divergent);
+  double* treedepth_out = REAL(n_max_treedepth);
+  for (int64_t c = 0; c < nchain; ++c) {
+    warmup_out[c] = have_reports ? reports[c].warmup_seconds : NA_REAL;
+    sampling_out[c] = have_reports ? reports[c].sampling_seconds : NA_REAL;
+    divergent_out[c] = have_reports ? (double)reports[c].n_divergent : NA_REAL;
+    treedepth_out[c] =
+        have_reports ? (double)reports[c].n_max_treedepth : NA_REAL;
+  }
+
+  SEXP out = PROTECT(allocVector(VECSXP, 10));
   SET_VECTOR_ELT(out, 0, vals);
   SET_VECTOR_ELT(out, 1, stats);
   SET_VECTOR_ELT(out, 2, ScalarInteger((int)nchain));
   SET_VECTOR_ELT(out, 3, ScalarInteger((int)rows));
   SET_VECTOR_ELT(out, 4, raw);
-  SEXP nm = PROTECT(allocVector(STRSXP, 5));
+  SET_VECTOR_ELT(out, 5, warmup_seconds);
+  SET_VECTOR_ELT(out, 6, sampling_seconds);
+  SET_VECTOR_ELT(out, 7, n_divergent);
+  SET_VECTOR_ELT(out, 8, n_max_treedepth);
+  SET_VECTOR_ELT(out, 9, ScalarLogical(have_reports));
+  SEXP nm = PROTECT(allocVector(STRSXP, 10));
   SET_STRING_ELT(nm, 0, mkChar("values"));
   SET_STRING_ELT(nm, 1, mkChar("stats"));
   SET_STRING_ELT(nm, 2, mkChar("chains"));
   SET_STRING_ELT(nm, 3, mkChar("draws"));
   SET_STRING_ELT(nm, 4, mkChar("unconstrained"));
+  SET_STRING_ELT(nm, 5, mkChar("warmup_seconds"));
+  SET_STRING_ELT(nm, 6, mkChar("sampling_seconds"));
+  SET_STRING_ELT(nm, 7, mkChar("n_divergent"));
+  SET_STRING_ELT(nm, 8, mkChar("n_max_treedepth"));
+  SET_STRING_ELT(nm, 9, mkChar("report_available"));
   setAttrib(out, R_NamesSymbol, nm);
-  UNPROTECT(5);
+  UNPROTECT(9);
   return out;
 }
 
