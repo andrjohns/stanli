@@ -216,6 +216,11 @@ print(fit.summary())      # stansummary's table
 print(fit.diagnose())     # the convergence checks, in words
 ```
 
+Sampling prints per-chain progress, elapsed warmup/sampling time, and any
+divergence or maximum-treedepth warnings. `refresh=100` is the default update
+interval; pass `refresh=0` for a quiet run. Reporting is observational and
+does not change draws or RNG streams.
+
 Four chains by default, run in parallel. Threading does not change the
 answer: each chain owns its executor and its RNG stream, so the draws
 are byte-identical to a sequential run. macOS and Linux release wheels compile
@@ -258,6 +263,10 @@ m <- stanli_model(file = "eight_schools.stan", data = list(J = 8L, y = y, sigma 
 fit <- sample_model(m, chains = 4, seed = 1)
 summary(fit)          # mean, MCSE, sd, quantiles, bulk/tail ESS, R-hat
 ```
+
+`sample_model()` reports the same progress, timing, and sampler problems as
+the Python binding. Set `refresh = 0` to suppress automatic output; doing so
+does not change the sampled result.
 
 The runtime is a separate release artifact so installing the R bridge never
 rebuilds stan-math. `stanli_install()` is explicit and pins the release the

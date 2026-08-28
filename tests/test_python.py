@@ -7,7 +7,10 @@ Run against an installed wheel (CI does) or a local build:
 """
 import base64
 import concurrent.futures
+import contextlib
+import io
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -30,7 +33,7 @@ def _portable_payload(mir):
 def test_sample_eight_schools():
     m = stanli.Model(stan_file=FIXTURES / "es.stan",
                      data=FIXTURES / "eight_schools.json")
-    d = m.sample(seed=1, warmup=1000, samples=1000)
+    d = m.sample(seed=1, warmup=1000, samples=1000, refresh=0)
     mu = d["mu"].mean()
     assert 3.0 < mu < 6.0, mu
 
@@ -62,7 +65,7 @@ def test_sample_returns_transformed_parameters():
     # write_array path must surface it alongside the declared parameters.
     m = stanli.Model(stan_file=FIXTURES / "es.stan",
                      data=FIXTURES / "eight_schools.json")
-    d = m.sample(seed=1, warmup=200, samples=100)
+    d = m.sample(seed=1, warmup=200, samples=100, refresh=0)
     for col in ("mu", "tau", "theta.1", "theta.8"):
         assert col in d, sorted(d)[:12]
     assert abs(d["theta.1"].mean()) < 30.0
@@ -73,21 +76,137 @@ def test_sample_returns_generated_quantities():
     # columns and seeded RNG stream must both reach Python.
     code = (FIXTURES / "gqrng.stan").read_text()
     m = stanli.Model(stan_code=code, data={"N": 5})
-    d = m.sample(seed=7, warmup=200, samples=50)
+    d = m.sample(seed=7, warmup=200, samples=50, refresh=0)
     for col in ("sigma", "yrep", "crep", "branchy", "p"):
         assert col in d, sorted(d)
     crep = d["crep"]
     assert ((crep == np.floor(crep)) & (crep >= 0) & (crep <= 5)).all()
     assert (d["p"] == 6.0).all()
     assert d["yrep"].std() > 0.0
-    d2 = stanli.Model(stan_code=code, data={"N": 5}).sample(
-        seed=7, warmup=200, samples=50)
-    assert (d["yrep"] == d2["yrep"]).all(), "same seed, different GQ draws"
+    progress = io.StringIO()
+    with contextlib.redirect_stdout(progress):
+        d2 = stanli.Model(stan_code=code, data={"N": 5}).sample(
+            seed=7, warmup=200, samples=50, refresh=1)
+    assert "Iteration:" in progress.getvalue()
+    assert np.array_equal(d.draws(), d2.draws()), \
+        "progress changed parameter or generated-quantity draws"
+    assert np.array_equal(d.sampler_stats, d2.sampler_stats), \
+        "progress changed sampler statistics"
 
 
 def _es():
     return stanli.Model(stan_file=FIXTURES / "es.stan",
                         data=FIXTURES / "eight_schools.json")
+
+
+def _normal():
+    return stanli.Model(
+        stan_code="parameters { real x; } model { x ~ normal(0, 1); }")
+
+
+def test_sample_progress_output_and_refresh_zero():
+    # The formatter is Python-side so redirect_stdout works in notebooks and
+    # test runners rather than only at the process file-descriptor level.
+    exact = io.StringIO()
+    with contextlib.redirect_stdout(exact):
+        stanli._print_sample_progress(1, 1, 2000, True)
+    assert exact.getvalue() == (
+        "Chain [1] Iteration:    1 / 2000 [  0%]  (Warmup)\n")
+
+    shown = io.StringIO()
+    with contextlib.redirect_stdout(shown):
+        fit = _normal().sample(chains=1, warmup=4, samples=3,
+                               parallel_chains=1, refresh=2)
+    assert fit.n_draws == 3
+    text = shown.getvalue()
+    lines = [line for line in text.splitlines() if "Iteration:" in line]
+    iterations = [int(re.search(r"Iteration:\s+(\d+)", line).group(1))
+                  for line in lines]
+    assert iterations == [1, 2, 4, 5, 6, 7], lines
+    assert all("(Warmup)" in line for line in lines[:3])
+    assert all("(Sampling)" in line for line in lines[3:])
+    assert "Elapsed Time:" in text
+    assert "seconds (Warm-up)" in text
+    assert "seconds (Sampling)" in text
+    assert "seconds (Total)" in text
+
+    quiet = io.StringIO()
+    with contextlib.redirect_stdout(quiet):
+        _normal().sample(chains=1, warmup=4, samples=3,
+                         parallel_chains=1, refresh=0)
+    assert quiet.getvalue() == ""
+
+
+def test_sample_progress_callback_runs_on_the_calling_thread():
+    owner = threading.get_ident()
+
+    class SameThreadStream(io.StringIO):
+        def write(self, text):
+            assert threading.get_ident() == owner, \
+                "Python progress callback ran on a sampler worker"
+            return super().write(text)
+
+    stream = SameThreadStream()
+    with contextlib.redirect_stdout(stream):
+        _normal().sample(chains=2, warmup=20, samples=10,
+                         parallel_chains=2, refresh=7)
+
+    seen = {1: [], 2: []}
+    for line in stream.getvalue().splitlines():
+        match = re.search(r"Chain \[(\d+)\] Iteration:\s+(\d+)", line)
+        if match:
+            seen[int(match.group(1))].append(int(match.group(2)))
+    assert all(seen.values()), seen
+    assert all(values == sorted(values) for values in seen.values()), seen
+
+
+def test_sample_refresh_validation():
+    m = _normal()
+    for bad, error in [(-1, ValueError), (1.5, TypeError), ("2", TypeError),
+                       (True, TypeError), (np.bool_(False), TypeError),
+                       (None, TypeError), (2 ** 31, OverflowError)]:
+        try:
+            m.sample(chains=1, warmup=0, samples=1, refresh=bad)
+        except error:
+            pass
+        else:
+            raise AssertionError(f"refresh={bad!r} did not raise {error.__name__}")
+
+    # numpy integer scalars are useful in programmatic configurations and
+    # satisfy Python's integer-index protocol.
+    with contextlib.redirect_stdout(io.StringIO()):
+        fit = m.sample(chains=1, warmup=0, samples=1,
+                       refresh=np.int64(0))
+    assert fit.n_draws == 1
+
+
+def test_fit_uses_full_transition_report_counts():
+    # Stored sampler rows can be thinned and can include saved warmup rows.
+    # Fit's headline counts must therefore use the run report, not recount the
+    # retained stats array.
+    reports = (stanli._SampleReport * 2)()
+    reports[0].warmup_seconds = 0.25
+    reports[0].sampling_seconds = 0.50
+    reports[0].n_divergent = 3
+    reports[0].n_max_treedepth = 4
+    reports[1].warmup_seconds = 0.75
+    reports[1].sampling_seconds = 1.00
+    reports[1].n_divergent = 5
+    reports[1].n_max_treedepth = 6
+    fit = stanli.Fit(["x"], np.zeros((2, 1, 1)), np.zeros((2, 1, 7)),
+                     10, 1, reports)
+    assert fit.divergences.tolist() == [3, 5]
+    assert fit.max_treedepth_hits.tolist() == [4, 6]
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        stanli._print_sample_reports(reports, first_chain=1, samples=10,
+                                     max_depth=12)
+    text = output.getvalue()
+    assert "8 of 20 post-warmup transitions (40.0%)" in text
+    assert "10 of 20 post-warmup transitions (50.0%)" in text
+    assert "maximum treedepth of 12" in text
+    assert text.count("Elapsed Time:") == 2
 
 
 def test_sample_opts_defaults_match_the_header():
@@ -108,7 +227,7 @@ def test_sample_opts_defaults_match_the_header():
 
 def test_multichain_shapes_and_dict_protocol():
     m = _es()
-    fit = m.sample(chains=3, seed=2, warmup=300, samples=200)
+    fit = m.sample(chains=3, seed=2, warmup=300, samples=200, refresh=0)
     assert fit.n_chains == 3 and fit.n_draws == 200
     assert fit.draws().shape == (3, 200, len(fit.names))
     assert fit.draws("mu").shape == (3, 200)
@@ -125,8 +244,8 @@ def test_multichain_shapes_and_dict_protocol():
 
 def test_chains_are_different_streams_and_seeds_reproduce():
     m = _es()
-    a = m.sample(chains=2, seed=3, warmup=200, samples=100)
-    b = m.sample(chains=2, seed=3, warmup=200, samples=100)
+    a = m.sample(chains=2, seed=3, warmup=200, samples=100, refresh=0)
+    b = m.sample(chains=2, seed=3, warmup=200, samples=100, refresh=0)
     assert (a.draws("mu") == b.draws("mu")).all(), "same seed must reproduce"
     # Chain 2 uses a different stream of the same seed, so its draws must
     # not be chain 1's. Identical chains would mean the chain id never
@@ -137,7 +256,7 @@ def test_chains_are_different_streams_and_seeds_reproduce():
 
 def test_summary_and_diagnostics():
     m = _es()
-    fit = m.sample(chains=4, seed=4, warmup=1000, samples=1000)
+    fit = m.sample(chains=4, seed=4, warmup=1000, samples=1000, refresh=0)
     s = fit.summary()
     assert len(s) == len(fit.names)
     assert 3.0 < s["mu"]["mean"] < 6.0, s["mu"]
@@ -177,7 +296,8 @@ def test_diagnostics_report_a_broken_fit():
         parameters { real log_tau; vector[9] z; }
         model { log_tau ~ normal(0, 3); z ~ normal(0, exp(log_tau)); }
     """)
-    fit = m.sample(chains=2, seed=5, warmup=150, samples=300, delta=0.5)
+    fit = m.sample(chains=2, seed=5, warmup=150, samples=300, delta=0.5,
+                   refresh=0)
     text = fit.diagnose()
     assert ("diverged" in text or "R-hat reaches" in text
             or "ESS falls" in text or "E-BFMI is below" in text), text
@@ -192,9 +312,9 @@ def test_parallel_chains_match_sequential_bitwise():
     # assertion cannot be weakened by the build.
     m = _es()
     seq = m.sample(chains=4, seed=11, warmup=300, samples=300,
-                   parallel_chains=1)
+                   parallel_chains=1, refresh=0)
     par = m.sample(chains=4, seed=11, warmup=300, samples=300,
-                   parallel_chains=4)
+                   parallel_chains=4, refresh=0)
     assert (seq.draws() == par.draws()).all(), "threading changed the draws"
     assert (seq.sampler_stats == par.sampler_stats).all()
 
@@ -202,9 +322,9 @@ def test_parallel_chains_match_sequential_bitwise():
 def test_thin_and_save_warmup_change_the_row_count():
     m = _es()
     assert m.sample(chains=1, seed=6, warmup=100, samples=100,
-                    thin=4).n_draws == 25
+                    thin=4, refresh=0).n_draws == 25
     assert m.sample(chains=1, seed=6, warmup=100, samples=100,
-                    save_warmup=True).n_draws == 200
+                    save_warmup=True, refresh=0).n_draws == 200
 
 
 def test_explicit_inits():
@@ -213,12 +333,12 @@ def test_explicit_inits():
     # One vector is broadcast to every chain; a per-chain matrix is taken
     # as given. Both must sample.
     assert m.sample(chains=2, seed=8, warmup=50, samples=50,
-                    inits=np.zeros(n)).n_draws == 50
+                    inits=np.zeros(n), refresh=0).n_draws == 50
     assert m.sample(chains=2, seed=8, warmup=50, samples=50,
-                    inits=np.zeros((2, n))).n_draws == 50
+                    inits=np.zeros((2, n)), refresh=0).n_draws == 50
     # init_radius=0 is CmdStan's `init=0`.
     assert m.sample(chains=1, seed=8, warmup=50, samples=50,
-                    init_radius=0.0).n_draws == 50
+                    init_radius=0.0, refresh=0).n_draws == 50
     try:
         m.sample(chains=2, seed=8, warmup=10, samples=10,
                  inits=np.zeros((3, n)))
@@ -233,7 +353,7 @@ def test_generated_quantities_differ_across_chains():
     # same posterior-predictive draws and the predictive check is a lie.
     code = (FIXTURES / "gqrng.stan").read_text()
     fit = stanli.Model(stan_code=code, data={"N": 5}).sample(
-        chains=2, seed=9, warmup=200, samples=50)
+        chains=2, seed=9, warmup=200, samples=50, refresh=0)
     assert not (fit.draws("yrep")[0] == fit.draws("yrep")[1]).all()
 
 
@@ -255,7 +375,7 @@ def test_optimize_finds_a_mode_and_feeds_sample():
 
     # Starting the sampler from the mode is the point of having it.
     fit = m.sample(chains=1, seed=2, warmup=200, samples=200,
-                   inits=r.unconstrained)
+                   inits=r.unconstrained, refresh=0)
     assert fit.n_draws == 200
 
 

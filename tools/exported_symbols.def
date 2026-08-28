@@ -35,6 +35,7 @@ EXPORTS
   stanli_n_stored_draws
   stanli_thread_safe
   stanli_sample_multi
+  stanli_sample_multi_progress
   stanli_sampler_column_name
   stanli_summary_stats
   stanli_diagnose_text

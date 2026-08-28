@@ -155,6 +155,35 @@ int stanli_sample_multi(stanli_model* m, const stanli_sample_opts* opts,
                         double* draws, double* stats, char* err,
                         size_t err_len);
 
+/* Per-chain facts that are not properties of one stored draw. Counts cover
+ * every post-warmup transition even when thinning drops rows. */
+typedef struct {
+  double warmup_seconds;
+  double sampling_seconds;
+  int64_t n_divergent;
+  int64_t n_max_treedepth;
+} stanli_sample_report;
+
+/* A completed transition selected by `refresh`. The iteration is one-based
+ * across warmup and sampling together, `total` is warmup + samples, and
+ * warmup is nonzero for the warmup phase. Callbacks are serialized on the
+ * thread that called stanli_sample_multi_progress, never a sampler worker, so
+ * language bindings may safely write to their own consoles. */
+typedef void (*stanli_sample_progress_cb)(int32_t chain_id, int64_t iteration,
+                                          int64_t total, int32_t warmup,
+                                          void* user);
+
+/* Progress-capable form of stanli_sample_multi. `refresh` follows CmdStan's
+ * convention: in each phase, report the first transition, every refresh-th
+ * transition, and the phase's final transition.
+ * Zero disables callbacks; negative values are rejected. `reports`, when
+ * non-null, holds opts->chains entries. This is an additive entry point, so
+ * stanli_sample_opts and STANLI_ABI_VERSION remain unchanged. */
+int stanli_sample_multi_progress(
+    stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
+    double* stats, stanli_sample_progress_cb progress, void* progress_user,
+    stanli_sample_report* reports, char* err, size_t err_len);
+
 /* The seven sampler columns, in order: lp__, accept_stat__, stepsize__,
  * treedepth__, n_leapfrog__, divergent__, energy__. */
 #define STANLI_N_SAMPLER_COLS 7

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Sampling reports progress and problems
+
+The Python and R samplers now print CmdStan-style per-chain iteration updates,
+warmup/sampling timings, and warnings for divergent transitions or maximum
+treedepth saturation. A `refresh` argument controls the update interval and
+`refresh = 0` keeps sampling quiet. Progress events are marshalled back to the
+calling thread, so parallel R and Python console output is safe, and reporting
+does not change draws, sampler statistics, or RNG streams (#230).
+
 ### Complete indexed assignments lower everywhere
 
 Assignments such as `x[:] = rhs` now preserve the destination's declared

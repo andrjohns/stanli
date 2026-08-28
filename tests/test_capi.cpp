@@ -10,13 +10,15 @@
 #include <stanli/capi.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <limits>
 #include <sstream>
-#include <utility>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -37,6 +39,12 @@ void expect_eq(const char* what, const std::string& got,
   ++failures;
   std::printf("FAIL %s\n  got  %s\n  want %s\n", what, got.c_str(),
               want.c_str());
+}
+
+void expect_true(const std::string& what, bool ok) {
+  if (ok) return;
+  ++failures;
+  std::printf("FAIL %s\n", what.c_str());
 }
 
 void expect_near(const std::string& what, double got, double want) {
@@ -448,6 +456,104 @@ void expect_pathfinder() {
   stanli_model_free(model);
 }
 
+struct ProgressCapture {
+  std::thread::id caller;
+  bool caller_thread = true;
+  std::vector<std::array<int64_t, 4>> events;
+};
+
+void capture_progress(int32_t chain_id, int64_t iteration, int64_t total,
+                      int32_t warmup, void* user) {
+  auto* capture = static_cast<ProgressCapture*>(user);
+  capture->caller_thread =
+      capture->caller_thread && std::this_thread::get_id() == capture->caller;
+  capture->events.push_back({chain_id, iteration, total, warmup});
+}
+
+// The additive progress entry point must be the old sampler plus observation:
+// same bytes, caller-thread callbacks, exact refresh schedule and reports.
+void expect_sampling_progress() {
+  const std::string mir = slurp("tests/fixtures/gqconst.tmir.sexp");
+  const char* data = R"({"rectangular":[[1,4],[2,5],[3,6]]})";
+  char err[8192]{};
+  stanli_model* quiet = stanli_model_new(mir.c_str(), data, err, sizeof err);
+  stanli_model* observed = stanli_model_new(mir.c_str(), data, err, sizeof err);
+  if (quiet == nullptr || observed == nullptr) {
+    ++failures;
+    std::printf("FAIL C API progress model construction: %s\n", err);
+    if (quiet) stanli_model_free(quiet);
+    if (observed) stanli_model_free(observed);
+    return;
+  }
+
+  stanli_sample_opts opts;
+  stanli_sample_opts_init(&opts);
+  opts.seed = 230;
+  opts.chains = 2;
+  opts.warmup = 4;
+  opts.samples = 3;
+  opts.init_radius = 0.0;
+  opts.num_threads = 2;
+  const int64_t n = stanli_n_unconstrained(quiet);
+  const int64_t rows = stanli_n_stored_draws(&opts);
+  std::vector<double> quiet_draws((size_t)(opts.chains * rows * n));
+  std::vector<double> quiet_stats(
+      (size_t)(opts.chains * rows * STANLI_N_SAMPLER_COLS));
+  std::vector<double> observed_draws(quiet_draws.size());
+  std::vector<double> observed_stats(quiet_stats.size());
+
+  const int quiet_failed = stanli_sample_multi(
+      quiet, &opts, quiet_draws.data(), quiet_stats.data(), err, sizeof err);
+  ProgressCapture capture{std::this_thread::get_id()};
+  std::vector<stanli_sample_report> reports((size_t)opts.chains);
+  const int observed_failed = stanli_sample_multi_progress(
+      observed, &opts, 2, observed_draws.data(), observed_stats.data(),
+      capture_progress, &capture, reports.data(), err, sizeof err);
+  expect_true("C API progress runs succeed",
+              quiet_failed == 0 && observed_failed == 0);
+  expect_true("C API progress leaves draws bitwise unchanged",
+              quiet_draws == observed_draws);
+  expect_true("C API progress leaves stats bitwise unchanged",
+              quiet_stats == observed_stats);
+  expect_true("C API progress callback uses the caller thread",
+              capture.caller_thread);
+
+  const std::vector<int64_t> wanted{1, 2, 4, 5, 6, 7};
+  for (int chain = 1; chain <= opts.chains; ++chain) {
+    std::vector<int64_t> got;
+    for (const auto& event : capture.events) {
+      if (event[0] != chain) continue;
+      got.push_back(event[1]);
+      expect_true("C API progress total is stable", event[2] == 7);
+      expect_true("C API progress phase matches the boundary",
+                  (event[1] <= opts.warmup) == (event[3] != 0));
+    }
+    expect_true(
+        "C API progress refresh sequence for chain " + std::to_string(chain),
+        got == wanted);
+    const auto& report = reports[(size_t)(chain - 1)];
+    expect_true("C API reports nonnegative timings",
+                report.warmup_seconds >= 0.0 && report.sampling_seconds >= 0.0);
+    expect_true("C API reports bounded problem counts",
+                report.n_divergent >= 0 && report.n_divergent <= opts.samples &&
+                    report.n_max_treedepth >= 0 &&
+                    report.n_max_treedepth <= opts.samples);
+  }
+
+  ProgressCapture rejected{std::this_thread::get_id()};
+  err[0] = '\0';
+  const int negative = stanli_sample_multi_progress(
+      observed, &opts, -1, observed_draws.data(), observed_stats.data(),
+      capture_progress, &rejected, reports.data(), err, sizeof err);
+  expect_true("C API rejects negative refresh",
+              negative != 0 &&
+                  std::string(err).find("refresh") != std::string::npos &&
+                  rejected.events.empty());
+
+  stanli_model_free(quiet);
+  stanli_model_free(observed);
+}
+
 }  // namespace
 
 int main() {
@@ -488,6 +594,7 @@ int main() {
   expect_compiled_scalar_rng();
   expect_necessity_effects_refused();
   expect_pathfinder();
+  expect_sampling_progress();
 
   if (failures == 0) std::printf("test_capi OK\n");
   return failures == 0 ? 0 : 1;

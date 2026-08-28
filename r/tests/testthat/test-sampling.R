@@ -19,6 +19,12 @@ es_model <- function() {
     sigma = c(15, 10, 16, 11, 9, 11, 10, 18)))
 }
 
+progress_model <- function() {
+  stanli_model(code = "
+    parameters { real x; }
+    model { x ~ normal(0, 1); }")
+}
+
 test_that("a model compiles and reports its shape", {
   skip_without_runtime()
   m <- es_model()
@@ -35,10 +41,94 @@ test_that("log_prob_grad returns lp and a gradient of the right length", {
   expect_length(g$grad, m$n_unconstrained)
 })
 
+test_that("refresh is a single nonnegative integer", {
+  bad <- list(-1, 1.5, NA_real_, NaN, Inf, c(1, 2), "1", TRUE, NULL)
+  for (value in bad)
+    expect_error(sample_model(NULL, refresh = value),
+                 "single nonnegative integer", fixed = TRUE)
+})
+
+test_that("sampling progress is informative and observational", {
+  skip_without_runtime()
+  m <- progress_model()
+  loud <- NULL
+  text <- capture.output({
+    loud <- sample_model(m, chains = 1, seed = 9182, warmup = 3, samples = 4,
+                         init = 0, init_radius = 0, parallel_chains = 1,
+                         refresh = 2)
+  })
+
+  progress <- grep("^Chain \\[1\\] Iteration:", text, value = TRUE)
+  iterations <- as.integer(sub("^.*Iteration: +([0-9]+) /.*$", "\\1",
+                               progress))
+  expect_identical(iterations, c(1L, 2L, 3L, 4L, 5L, 7L))
+  expect_true(all(grepl("\\(Warmup\\)$", progress[1:3])))
+  expect_true(all(grepl("\\(Sampling\\)$", progress[4:6])))
+  expect_equal(sum(grepl("^Chain \\[1\\] Elapsed Time:", text)), 1)
+  expect_true(loud$report$available)
+  expect_length(loud$report$warmup_seconds, 1)
+  expect_gte(loud$report$warmup_seconds, 0)
+  expect_gte(loud$report$sampling_seconds, 0)
+  expect_gte(loud$report$n_divergent, 0)
+  expect_gte(loud$report$n_max_treedepth, 0)
+  expect_identical(names(loud)[seq_len(7)],
+                   c("draws", "sampler", "unconstrained", "columns",
+                     "max_depth", "seed", "model"))
+
+  quiet <- NULL
+  quiet_text <- capture.output({
+    quiet <- sample_model(m, chains = 1, seed = 9182, warmup = 3, samples = 4,
+                          init = 0, init_radius = 0, parallel_chains = 1,
+                          refresh = 0)
+  })
+  expect_length(quiet_text, 0)
+  expect_identical(loud$draws, quiet$draws)
+  expect_identical(loud$sampler, quiet$sampler)
+  expect_identical(loud$unconstrained, quiet$unconstrained)
+  expect_identical(loud$report$n_divergent, quiet$report$n_divergent)
+  expect_identical(loud$report$n_max_treedepth,
+                   quiet$report$n_max_treedepth)
+})
+
+test_that("problem output uses exact unthinned report counts", {
+  skip_without_runtime()
+  m <- progress_model()
+  fit <- NULL
+  text <- capture.output({
+    fit <- sample_model(m, chains = 1, seed = 7, warmup = 10, samples = 20,
+                        thin = 3, max_depth = 1, init = 0, init_radius = 0,
+                        parallel_chains = 1, refresh = 100)
+  })
+
+  expect_gt(fit$report$n_max_treedepth, dim(fit$sampler)[1])
+  expect_true(any(grepl(
+    paste0("Warning: ", fit$report$n_max_treedepth,
+           " of 20 post-warmup transitions saturated"),
+    text, fixed = TRUE)))
+})
+
+test_that("parallel chains report through the R console", {
+  skip_without_runtime()
+  m <- progress_model()
+  text <- capture.output(
+    sample_model(m, chains = 2, seed = 7, warmup = 2, samples = 2,
+                 init = 0, init_radius = 0, parallel_chains = 2, refresh = 1))
+
+  for (chain in 1:2) {
+    progress <- grep(paste0("^Chain \\[", chain, "\\] Iteration:"), text,
+                     value = TRUE)
+    iterations <- as.integer(sub("^.*Iteration: +([0-9]+) /.*$", "\\1",
+                                 progress))
+    expect_identical(iterations, 1:4)
+    expect_equal(sum(grepl(paste0("^Chain \\[", chain,
+                                  "\\] Elapsed Time:"), text)), 1)
+  }
+})
+
 test_that("sampling recovers the eight schools posterior", {
   skip_without_runtime()
   fit <- sample_model(es_model(), chains = 4, seed = 1, warmup = 1000,
-                      samples = 1000)
+                      samples = 1000, refresh = 0)
   expect_equal(dim(fit$draws)[1:2], c(1000L, 4L))
   s <- summary(fit)
   mu <- s[s$variable == "mu", ]
@@ -52,9 +142,9 @@ test_that("threading does not change the answer", {
   skip_without_runtime()
   m <- es_model()
   a <- sample_model(m, chains = 4, seed = 7, warmup = 300, samples = 300,
-                    parallel_chains = 1)
+                    parallel_chains = 1, refresh = 0)
   b <- sample_model(m, chains = 4, seed = 7, warmup = 300, samples = 300,
-                    parallel_chains = 4)
+                    parallel_chains = 4, refresh = 0)
   # Each chain owns its executor and its RNG stream, so a parallel run is
   # byte-identical. This holds on a single-threaded build too, which is
   # the point: turning threads on cannot quietly change a result.
@@ -64,8 +154,10 @@ test_that("threading does not change the answer", {
 test_that("chains are different streams of the same seed", {
   skip_without_runtime()
   m <- es_model()
-  a <- sample_model(m, chains = 2, seed = 3, warmup = 200, samples = 200)
-  b <- sample_model(m, chains = 2, seed = 3, warmup = 200, samples = 200)
+  a <- sample_model(m, chains = 2, seed = 3, warmup = 200, samples = 200,
+                    refresh = 0)
+  b <- sample_model(m, chains = 2, seed = 3, warmup = 200, samples = 200,
+                    refresh = 0)
   expect_identical(a$draws, b$draws)
   # Identical chains would mean the chain id never reached the RNG, and
   # R-hat of two identical chains is a clean 1.0 -- nothing would show it.
@@ -75,7 +167,7 @@ test_that("chains are different streams of the same seed", {
 test_that("the draws array is posterior-shaped and keeps its names", {
   skip_without_runtime()
   fit <- sample_model(es_model(), chains = 2, seed = 4, warmup = 200,
-                      samples = 200)
+                      samples = 200, refresh = 0)
   a <- as_draws_array(fit)
   # The dims carry names (iteration, chain, variable), which is what
   # posterior expects, so compare the values rather than the vector.
@@ -88,7 +180,7 @@ test_that("the draws array is posterior-shaped and keeps its names", {
 test_that("diagnostics report on a converged fit", {
   skip_without_runtime()
   fit <- sample_model(es_model(), chains = 4, seed = 5, warmup = 1000,
-                      samples = 1000)
+                      samples = 1000, refresh = 0)
   txt <- capture.output(stanli_diagnose(fit))
   expect_true(any(grepl("R-hat is below", txt)))
   expect_true(any(grepl("E-BFMI is above", txt)))
@@ -103,7 +195,7 @@ test_that("optimize finds a mode the sampler can start from", {
   # optimizer minimizes.
   expect_equal(o$lp, log_prob_grad(m, o$unconstrained)$lp, tolerance = 1e-8)
   fit <- sample_model(m, chains = 1, seed = 2, warmup = 200, samples = 200,
-                      init = o$unconstrained)
+                      init = o$unconstrained, refresh = 0)
   expect_equal(dim(fit$draws)[1], 200L)
 })
 

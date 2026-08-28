@@ -16,7 +16,8 @@ sample_model(
   save_warmup = FALSE,
   init = NULL,
   init_radius = 2,
-  parallel_chains = NULL
+  parallel_chains = NULL,
+  refresh = 100
 )
 }
 \arguments{
@@ -40,9 +41,16 @@ exist.}
 the origin.}
 
 \item{parallel_chains}{Chains to run at once. Defaults to all of them.}
+
+\item{refresh}{Print a progress update every `refresh` transitions within
+each phase, plus the first and last transition of the phase. Set to 0 to
+suppress all automatic sampling output.}
 }
 \value{
-An object of class `stanli_fit`.
+An object of class `stanli_fit`. Its `report` element contains per-chain
+warmup and sampling times plus exact divergence and maximum-treedepth counts.
+With a compatible older runtime that predates progress reporting,
+`report$available` is `FALSE` and those values are `NA`.
 }
 \description{
 Four chains by default, run in parallel: R-hat needs more than one

@@ -117,12 +117,25 @@ log_prob_grad <- function(model, q) {
 #' @param init_radius Random inits are drawn uniform(-r, r); 0 starts at
 #'   the origin.
 #' @param parallel_chains Chains to run at once. Defaults to all of them.
-#' @return An object of class `stanli_fit`.
+#' @param refresh Print a progress update every `refresh` transitions within
+#'   each phase, plus the first and last transition of the phase. Set to 0 to
+#'   suppress all automatic sampling output.
+#' @return An object of class `stanli_fit`. Its `report` element contains
+#'   per-chain warmup and sampling times plus exact divergence and
+#'   maximum-treedepth counts. With a compatible older runtime that predates
+#'   progress reporting, `report$available` is `FALSE` and those values are
+#'   `NA`.
 #' @export
 sample_model <- function(model, chains = 4, seed = 1, warmup = 1000,
                          samples = 1000, thin = 1, delta = 0.8,
                          max_depth = 10, save_warmup = FALSE, init = NULL,
-                         init_radius = 2, parallel_chains = NULL) {
+                         init_radius = 2, parallel_chains = NULL,
+                         refresh = 100) {
+  if (length(refresh) != 1L || !is.numeric(refresh) || is.na(refresh) ||
+      !is.finite(refresh) || refresh < 0 || refresh != floor(refresh) ||
+      refresh > .Machine$integer.max)
+    stop("refresh must be a single nonnegative integer", call. = FALSE)
+  refresh <- as.integer(refresh)
   load_runtime()
   if (is.null(parallel_chains)) parallel_chains <- chains
   init_vec <- numeric(0)
@@ -140,7 +153,7 @@ sample_model <- function(model, chains = 4, seed = 1, warmup = 1000,
                as.integer(samples), as.integer(thin), as.double(delta),
                as.integer(max_depth), isTRUE(save_warmup),
                as.double(init_radius), as.integer(parallel_chains))
-  res <- .Call("stanli_r_sample", model$ptr, opts, init_vec)
+  res <- .Call("stanli_r_sample", model$ptr, opts, init_vec, refresh)
 
   nchain <- res$chains
   ndraw <- res$draws
@@ -157,9 +170,14 @@ sample_model <- function(model, chains = 4, seed = 1, warmup = 1000,
                       dim = c(model$n_unconstrained, ndraw, nchain)),
                 c(2, 3, 1))
 
+  report <- list(available = res$report_available,
+                 warmup_seconds = res$warmup_seconds,
+                 sampling_seconds = res$sampling_seconds,
+                 n_divergent = res$n_divergent,
+                 n_max_treedepth = res$n_max_treedepth)
   structure(list(draws = arr, sampler = sarr, unconstrained = uarr,
                  columns = model$columns, max_depth = max_depth, seed = seed,
-                 model = model),
+                 model = model, report = report),
             class = "stanli_fit")
 }
 

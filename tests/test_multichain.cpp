@@ -13,9 +13,12 @@
 #include <stanli/diagnose.hpp>
 #include <stanli/nuts.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 static int failures = 0;
@@ -191,6 +194,154 @@ int main() {
       same = same && seq[c].draws == par[c].draws;
     }
     expect("threaded chains are bitwise the sequential chains", same);
+  }
+
+  // ---- progress is rate-limited, caller-threaded, and observational ----
+  {
+    NutsConfig schedule;
+    schedule.warmup = 4;
+    schedule.samples = 3;
+    std::vector<int64_t> selected;
+    for (int i = 0; i < schedule.warmup; ++i)
+      if (should_report_progress(schedule, i, true, 2))
+        selected.push_back(i + 1);
+    for (int i = 0; i < schedule.samples; ++i)
+      if (should_report_progress(schedule, i, false, 2))
+        selected.push_back(schedule.warmup + i + 1);
+    expect("refresh selects first, boundary, multiples, and final",
+           selected == std::vector<int64_t>({1, 2, 4, 5, 6, 7}));
+    NutsConfig nonmultiple;
+    nonmultiple.warmup = 3;
+    nonmultiple.samples = 4;
+    selected.clear();
+    for (int i = 0; i < nonmultiple.warmup; ++i)
+      if (should_report_progress(nonmultiple, i, true, 2))
+        selected.push_back(i + 1);
+    for (int i = 0; i < nonmultiple.samples; ++i)
+      if (should_report_progress(nonmultiple, i, false, 2))
+        selected.push_back(nonmultiple.warmup + i + 1);
+    expect("refresh intervals restart at the sampling phase",
+           selected == std::vector<int64_t>({1, 2, 3, 4, 5, 7}));
+    expect("refresh zero selects no transitions",
+           !should_report_progress(schedule, 0, true, 0) &&
+               !should_report_progress(schedule, 2, false, 0));
+
+    const int C = 2;
+    Executor quiet_base(normal_graph(3));
+    quiet_base.value_ptr(2)[0] = 1.0;
+    auto quiet_clones = clone_executors(quiet_base, C - 1);
+    std::vector<Executor*> quiet_execs{&quiet_base};
+    for (auto& c : quiet_clones) quiet_execs.push_back(c.get());
+
+    Executor observed_base(normal_graph(3));
+    observed_base.value_ptr(2)[0] = 1.0;
+    auto observed_clones = clone_executors(observed_base, C - 1);
+    std::vector<Executor*> observed_execs{&observed_base};
+    for (auto& c : observed_clones) observed_execs.push_back(c.get());
+
+    NutsConfig cfg;
+    cfg.seed = 8181;
+    cfg.warmup = 50;
+    cfg.samples = 30;
+    const auto quiet = run_nuts_chains(quiet_execs, cfg, C);
+
+    const std::thread::id caller = std::this_thread::get_id();
+    bool caller_thread = true;
+    std::vector<std::vector<int64_t>> events(C);
+    const auto observed = run_nuts_chains(
+        observed_execs, cfg, C, {},
+        [&](int chain, int64_t i, bool warmup) {
+          caller_thread = caller_thread && std::this_thread::get_id() == caller;
+          events[(size_t)chain].push_back(warmup ? i + 1 : cfg.warmup + i + 1);
+        },
+        7);
+    bool same = quiet.size() == observed.size();
+    for (int c = 0; same && c < C; ++c) {
+      same = quiet[(size_t)c].draws == observed[(size_t)c].draws &&
+             quiet[(size_t)c].stats.rows == observed[(size_t)c].stats.rows;
+      expect(
+          "progress events are monotone within a chain",
+          std::is_sorted(events[(size_t)c].begin(), events[(size_t)c].end()));
+      expect("progress includes each chain's final transition",
+             !events[(size_t)c].empty() &&
+                 events[(size_t)c].back() == cfg.warmup + cfg.samples);
+      expect("sampling timings are nonnegative",
+             observed[(size_t)c].report.warmup_seconds >= 0.0 &&
+                 observed[(size_t)c].report.sampling_seconds >= 0.0);
+    }
+    expect("progress callbacks run on the caller thread", caller_thread);
+    expect("progress does not change draws or sampler stats", same);
+
+    Executor throwing_base(normal_graph(3));
+    throwing_base.value_ptr(2)[0] = 1.0;
+    auto throwing_clones = clone_executors(throwing_base, C - 1);
+    std::vector<Executor*> throwing_execs{&throwing_base};
+    for (auto& c : throwing_clones) throwing_execs.push_back(c.get());
+    bool callback_error_rethrown = false;
+    try {
+      (void)run_nuts_chains(
+          throwing_execs, cfg, C, {},
+          [](int, int64_t, bool) {
+            throw std::runtime_error("progress callback failed");
+          },
+          7);
+    } catch (const std::runtime_error& e) {
+      callback_error_rethrown =
+          std::string(e.what()) == "progress callback failed";
+    }
+    expect("throwing progress callback finishes safely and rethrows",
+           callback_error_rethrown);
+
+    NutsConfig empty_cfg = cfg;
+    empty_cfg.warmup = 0;
+    empty_cfg.samples = 0;
+    Executor empty_base(normal_graph(3));
+    empty_base.value_ptr(2)[0] = 1.0;
+    auto empty_clones = clone_executors(empty_base, C - 1);
+    std::vector<Executor*> empty_execs{&empty_base};
+    for (auto& c : empty_clones) empty_execs.push_back(c.get());
+    int empty_events = 0;
+    const auto empty = run_nuts_chains(
+        empty_execs, empty_cfg, C, {},
+        [&](int, int64_t, bool) { ++empty_events; }, 1);
+    expect("zero-transition chains complete without callbacks",
+           empty.size() == C && empty_events == 0);
+  }
+
+  // ---- reports cover transitions that thinning does not store -----------
+  {
+    Executor full_ex(normal_graph(2));
+    full_ex.value_ptr(2)[0] = 1.0;
+    Executor thin_ex(normal_graph(2));
+    thin_ex.value_ptr(2)[0] = 1.0;
+    NutsConfig full_cfg;
+    full_cfg.seed = 9191;
+    full_cfg.warmup = 30;
+    full_cfg.samples = 40;
+    full_cfg.max_depth = 1;
+    SamplerStats full_stats;
+    SamplingReport full_report;
+    (void)run_nuts(full_ex, full_cfg, &full_stats, {}, {}, &full_report);
+
+    int64_t full_depth_hits = 0;
+    for (const auto& row : full_stats.rows)
+      if ((int)row[3] >= full_cfg.max_depth) ++full_depth_hits;
+    expect("report agrees with unthinned sampler stats",
+           full_report.n_max_treedepth == full_depth_hits);
+    expect("depth-one run exercises saturation reporting", full_depth_hits > 0);
+
+    NutsConfig thin_cfg = full_cfg;
+    thin_cfg.thin = 7;
+    thin_cfg.save_warmup = true;
+    SamplingReport thin_report;
+    SamplerStats thin_stats;
+    (void)run_nuts(thin_ex, thin_cfg, &thin_stats, {}, {}, &thin_report);
+    expect("thinned report keeps every post-warmup diagnostic",
+           thin_report.n_divergent == full_report.n_divergent &&
+               thin_report.n_max_treedepth == full_report.n_max_treedepth);
+    expect(
+        "thinned stats really omit transitions",
+        thin_stats.rows.size() < (size_t)(thin_cfg.warmup + thin_cfg.samples));
   }
 
   // ---- thinning and saved warmup change the row count -------------------
