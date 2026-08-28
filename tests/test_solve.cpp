@@ -136,6 +136,45 @@ int main() {
   A << 2.0, 0.5, -1.0, 1.0, 3.0, 0.25, -0.5, 0.75, 4.0;
   const std::vector<double> q = draw();
 
+  // forward_value_only() is the model's double instantiation, not merely a
+  // gradient graph with its backward sweep skipped. That distinction matters
+  // for mdivide_left: stan-math's active overload uses HouseholderQR, while
+  // the prim overload uses FullPivLU. A Hilbert matrix makes the two value
+  // paths observably different and pins each Executor entry point to the one
+  // CmdStan calls.
+  {
+    constexpr int n = 5;
+    Eigen::MatrixXd a(n, n);
+    Eigen::VectorXd b(n);
+    for (int j = 0; j < n; ++j)
+      for (int i = 0; i < n; ++i) a(i, j) = 1.0 / (i + j + 1.0);
+    b << 1.0, -2.0, 3.0, -4.0, 5.0;
+
+    const double double_ref = stan::math::sum(stan::math::mdivide_left(a, b));
+    Eigen::Matrix<var, -1, -1> av = a.cast<var>();
+    Eigen::Matrix<var, -1, 1> bv = b.cast<var>();
+    const var active = stan::math::sum(stan::math::mdivide_left(av, bv));
+    const double active_ref = active.val();
+    check(double_ref != active_ref,
+          "value-only solve fixture distinguishes LU from QR");
+    stan::math::recover_memory();
+
+    Graph g;
+    const int as = g.add_slot(n * n, true);
+    const int bs = g.add_slot(n, true);
+    const int solved = g.add_slot(n, false);
+    const int total = g.add_slot(1, false);
+    g.add_op(OP_MDIVIDE_LEFT, {as, bs}, solved, {n, 1});
+    g.ops.back().variant = 1u | 2u | 4u | 8u;
+    g.add_op(OP_SUM_VEC, {solved}, total);
+    g.result_slot = total;
+    Executor sex(std::move(g));
+    for (int i = 0; i < n * n; ++i) sex.params_data()[i] = a.data()[i];
+    for (int i = 0; i < n; ++i) sex.params_data()[n * n + i] = b(i);
+    expect_eq("active solve forward", sex.forward(), active_ref);
+    expect_eq("active solve value-only", sex.forward_value_only(), double_ref);
+  }
+
   CompiledModel cm = compile_model(slurp("tests/fixtures/solve.tmir.sexp"), d);
   check(cm.n_unconstrained == 21, "solve 21 unconstrained");
 

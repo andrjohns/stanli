@@ -5427,6 +5427,109 @@ int main() {
           "quad_form_sym active-vector scalar symmetrization overflow");
   }
 
+  // The named solves, all six, at both dividend shapes. Each reaches the
+  // same stan-math call the operator spellings do, so the reference is that
+  // call -- with the dividend at the Eigen shape its Stan type implies,
+  // which is the distinction the vector variant bit preserves.
+  {
+    DataMap d = DataMap::from_json(R"({
+      "dm": [[0.3, -0.2], [0.7, 0.4], [-0.5, 0.9]],
+      "ds": [[4.5, 0.2, -0.3], [0.2, 3.7, 0.4], [-0.3, 0.4, 4.1]],
+      "dr": [[0.6, -0.8, 0.5], [0.2, 0.9, -0.4]],
+      "dt": [[2.8, 9.1, -7.3], [-0.4, 3.2, 8.2], [0.6, -0.5, 2.9]]
+    })");
+    CompiledModel mm =
+        compile_model(slurp("tests/fixtures/mdivide_named.tmir.sexp"), d);
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    // Three families of 54 reals: four divisors, then the matrix, vector,
+    // transposed-matrix and row-vector dividends they each solve against.
+    constexpr int kN = 162;
+    double p[kN];
+    for (int i = 0; i < kN; ++i) p[i] = 0.6 * std::sin(0.7 * (i + 1));
+    for (int i = 0; i < kN; ++i) mex.params_data()[i] = p[i];
+    double gradient[kN] = {};
+    const double lp = mex.gradient(gradient);
+
+    using stan::math::var;
+    using VarMat = Eigen::Matrix<var, -1, -1>;
+    VarMat div[3][4], mat[3][2];
+    Eigen::Matrix<var, -1, 1> vec[3];
+    Eigen::Matrix<var, 1, -1> row[3];
+    int at = 0;
+    const auto take = [&](auto& m, int rows, int cols) {
+      m.resize(rows, cols);
+      for (int i = 0; i < rows * cols; ++i) m.data()[i] = p[at++];
+    };
+    for (int f = 0; f < 3; ++f) {
+      for (int k = 0; k < 4; ++k) take(div[f][k], 3, 3);
+      take(mat[f][0], 3, 2);
+      take(vec[f], 3, 1);
+      take(mat[f][1], 3, 2);
+      take(row[f], 1, 3);
+    }
+    // The divisors the fixture builds: a dominant diagonal for the general
+    // and triangular solves, symmetric positive definite for _spd.
+    const auto divisor = [](const VarMat& m, bool spd) {
+      VarMat out = spd ? VarMat(m + m.transpose()) : m;
+      for (int i = 0; i < 3; ++i) out(i, i) = out(i, i) + (spd ? 6.0 : 4.0);
+      return out;
+    };
+    VarMat x[3][4];
+    for (int f = 0; f < 3; ++f)
+      for (int k = 0; k < 4; ++k) x[f][k] = divisor(div[f][k], f == 1);
+    const VarMat t0 = mat[0][1].transpose(), t1 = mat[1][1].transpose(),
+                 t2 = mat[2][1].transpose();
+    Eigen::MatrixXd dm(3, 2), ds(3, 3), dr(2, 3), dt(3, 3);
+    dm << 0.3, -0.2, 0.7, 0.4, -0.5, 0.9;
+    ds << 4.5, 0.2, -0.3, 0.2, 3.7, 0.4, -0.3, 0.4, 4.1;
+    dr << 0.6, -0.8, 0.5, 0.2, 0.9, -0.4;
+    dt << 2.8, 9.1, -7.3, -0.4, 3.2, 8.2, 0.6, -0.5, 2.9;
+
+    var reference = 1.0 * stan::math::mdivide_left(x[0][0], mat[0][0])(0, 0) +
+                    -0.7 * stan::math::mdivide_left(x[0][1], vec[0])(1) +
+                    1.3 * stan::math::mdivide_right(t0, x[0][2])(1, 2) +
+                    -0.9 * stan::math::mdivide_right(row[0], x[0][3])(0);
+    reference += 1.1 * stan::math::mdivide_left_spd(x[1][0], mat[1][0])(0, 0) +
+                 0.6 * stan::math::mdivide_left_spd(x[1][1], vec[1])(1) +
+                 -1.7 * stan::math::mdivide_right_spd(t1, x[1][2])(1, 2) +
+                 0.8 * stan::math::mdivide_right_spd(row[1], x[1][3])(0);
+    reference += 0.17 * stan::math::mdivide_left_spd(x[1][0], dm)(1, 0);
+    reference += -0.23 * stan::math::mdivide_left_spd(ds, mat[1][0])(2, 1);
+    reference += 0.31 * stan::math::mdivide_right_spd(dr, x[1][2])(0, 1);
+    reference += -0.37 * stan::math::mdivide_right_spd(t1, ds)(1, 1);
+    reference +=
+        0.5 * stan::math::mdivide_left_tri_low(x[2][0], mat[2][0])(0, 0) +
+        -1.2 * stan::math::mdivide_left_tri_low(x[2][1], vec[2])(1) +
+        0.3 * stan::math::mdivide_right_tri_low(t2, x[2][2])(1, 2) +
+        1.4 * stan::math::mdivide_right_tri_low(row[2], x[2][3])(0);
+    reference += 0.41 * stan::math::mdivide_left_tri_low(x[2][0], dm)(1, 0);
+    reference += -0.43 * stan::math::mdivide_left_tri_low(dt, mat[2][0])(2, 1);
+    reference += 0.47 * stan::math::mdivide_right_tri_low(dr, x[2][2])(0, 1);
+    reference += -0.53 * stan::math::mdivide_right_tri_low(t2, dt)(1, 1);
+
+    reference.grad();
+    // Separate solve kernels accumulate their target terms one ULP apart from
+    // this single reference expression; gradients still pin every overload
+    // bit-for-bit, and the value remains within the project's parity budget.
+    expect_ulp("mdivide named lp", lp, reference.val());
+    at = 0;
+    const auto compare = [&](const std::string& tag, const auto& m) {
+      for (int i = 0; i < m.size(); ++i, ++at)
+        expect_eq(tag + std::to_string(i), gradient[at], m.data()[i].adj());
+    };
+    for (int f = 0; f < 3; ++f) {
+      const std::string tag = "mdivide " + std::to_string(f) + " ";
+      for (int k = 0; k < 4; ++k)
+        compare(tag + "d" + std::to_string(k), div[f][k]);
+      compare(tag + "m0", mat[f][0]);
+      compare(tag + "v", vec[f]);
+      compare(tag + "m2", mat[f][1]);
+      compare(tag + "r", row[f]);
+    }
+    stan::math::recover_memory();
+  }
+
   if (failures == 0) std::printf("test_lower OK\n");
   return failures == 0 ? 0 : 1;
 }

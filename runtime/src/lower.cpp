@@ -3841,9 +3841,38 @@ struct Lowering {
     // `./` is never a solve -- which is the rule the MIR interpreter applies,
     // kept identical here so a solve does not mean one thing in the model
     // block and another in transformed data.
-    if (e.name == "LDivide__" ||
+    //
+    // The named spellings share this lowering: they arrive with the same
+    // argument order the operators use, divisor first for a left solve and
+    // second for a right one. The _spd and _tri_low families get their own
+    // opcodes rather than a flag because stan-math answers them by different
+    // factorisations -- an LLT of a symmetric positive definite matrix, and
+    // a triangular solve that never reads the upper triangle -- so they are
+    // different results, not faster routes to the same one.
+    struct NamedSolve {
+      const char* name;
+      bool left;
+      uint16_t opcode;
+    };
+    static constexpr NamedSolve kNamedSolves[] = {
+        {"mdivide_left", true, OP_MDIVIDE_LEFT},
+        {"mdivide_right", false, OP_MDIVIDE_RIGHT},
+        {"mdivide_left_spd", true, OP_MDIVIDE_LEFT_SPD},
+        {"mdivide_right_spd", false, OP_MDIVIDE_RIGHT_SPD},
+        {"mdivide_left_tri_low", true, OP_MDIVIDE_LEFT_TRI_LOW},
+        {"mdivide_right_tri_low", false, OP_MDIVIDE_RIGHT_TRI_LOW},
+    };
+    const NamedSolve* named_solve = nullptr;
+    if (e.args.size() == 2)
+      for (const NamedSolve& candidate : kNamedSolves)
+        if (e.name == candidate.name) named_solve = &candidate;
+    if (named_solve != nullptr || e.name == "LDivide__" ||
         (e.name == "Divide__" && e.args.at(1).type_ == "UMatrix")) {
-      const bool left = e.name == "LDivide__";
+      const bool left =
+          named_solve != nullptr ? named_solve->left : e.name == "LDivide__";
+      const uint16_t opcode = named_solve != nullptr
+                                  ? named_solve->opcode
+                                  : (left ? OP_MDIVIDE_LEFT : OP_MDIVIDE_RIGHT);
       Val a = lower_expr(e.args[0]);
       Val b = lower_expr(e.args[1]);
       const Val& divisor = left ? a : b;
@@ -3867,13 +3896,15 @@ struct Lowering {
                  std::to_string(n) + " against " + std::to_string(shared) + ")",
              e.raw);
       const int64_t k = dm ? (left ? dividend.si.cols : dividend.si.rows) : 1;
-      Val v = emit_value(left ? OP_MDIVIDE_LEFT : OP_MDIVIDE_RIGHT, {a, b},
-                         n * k, dividend.si, {(int)n, (int)k});
+      Val v = emit_value(opcode, {a, b}, n * k, dividend.si, {(int)n, (int)k});
       // The kernel solves through the operand types CmdStan's generated code
       // would have used, because stan-math answers differently for each: bit
-      // 0 is the scalar type (var reaches other overloads than double), bit 1
-      // says the dividend is a vector rather than a one-column matrix.
-      g.ops.back().variant = (uint8_t)((v.autodiff ? 1u : 0u) | (dm ? 0u : 2u));
+      // 0 says the result is var, bit 1 says the dividend is a vector rather
+      // than a one-column matrix, and bits 2/3 retain the divisor/dividend
+      // scalar types so mixed vv/vd/dv overloads do not collapse to vv.
+      g.ops.back().variant = (uint8_t)((v.autodiff ? 1u : 0u) | (dm ? 0u : 2u) |
+                                       (divisor.autodiff ? 4u : 0u) |
+                                       (dividend.autodiff ? 8u : 0u));
       return v;
     }
     // multiply is the named spelling of `*`, including its linear algebra:

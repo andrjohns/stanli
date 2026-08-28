@@ -544,7 +544,10 @@ void gemm_bwd(KernelCtx& ctx) {
 //     it is the hand-written rev overload, whose value is a HouseholderQR
 //     solve instead. mdivide_right has no rev overload at all, so the prim
 //     template runs at whatever scalar type reaches it. Variant bit 0 says
-//     CmdStan would have typed this expression `var`.
+//     the result is active, bits 2 and 3 preserve the divisor and dividend
+//     scalar types independently. That distinction also selects stan-math's
+//     vv/vd/dv SPD and triangular pullbacks, whose floating-point association
+//     is observably different.
 //   * Eigen shape. A vector dividend passed as a one-column matrix takes
 //     Eigen's matrix code paths, which reassociate: 1 ULP on the value and
 //     on the adjoint, measured on `A \ v`. Variant bit 1 says the dividend
@@ -554,12 +557,33 @@ void gemm_bwd(KernelCtx& ctx) {
 // The MIR interpreter makes both distinctions too -- the scalar one falls
 // out of overload resolution on its own T -- which is what keeps the two
 // halves of the runtime answering the same thing.
-template <bool Left, typename A, typename B>
+//   * factorisation family. The Stan language names three, and they are
+//     different answers rather than different speeds: the plain solve
+//     factors a general matrix, `_spd` takes an LLT of a symmetric positive
+//     definite one, and `_tri_low` reads only the lower triangle and never
+//     looks at the rest. Each gets its own opcode; `Kind` selects the call.
+enum class SolveKind { Plain, Spd, TriLow };
+
+template <bool Left, SolveKind Kind, typename A, typename B>
 auto solve_at(const A& a, const B& b) {
-  if constexpr (Left) {
-    return stan::math::mdivide_left(a, b);
+  if constexpr (Kind == SolveKind::Spd) {
+    if constexpr (Left) {
+      return stan::math::mdivide_left_spd(a, b);
+    } else {
+      return stan::math::mdivide_right_spd(b, a);
+    }
+  } else if constexpr (Kind == SolveKind::TriLow) {
+    if constexpr (Left) {
+      return stan::math::mdivide_left_tri_low(a, b);
+    } else {
+      return stan::math::mdivide_right_tri_low(b, a);
+    }
   } else {
-    return stan::math::mdivide_right(b, a);
+    if constexpr (Left) {
+      return stan::math::mdivide_left(a, b);
+    } else {
+      return stan::math::mdivide_right(b, a);
+    }
   }
 }
 
@@ -569,20 +593,27 @@ using Dividend = std::conditional_t<
     !Vec, Eigen::Matrix<T, -1, -1>,
     std::conditional_t<Left, Eigen::Matrix<T, -1, 1>, Eigen::Matrix<T, 1, -1>>>;
 
-// Promote both operands on a nested tape, write the value out, and -- when
-// the caller wants gradients -- seed the output adjoints and scatter back.
-// The var replay is the whole point: it is the call CmdStan makes.
-template <bool Left, bool Vec, bool Grad>
+// Replay the exact operand scalar types on a nested tape, write the value out,
+// and -- when the caller wants gradients -- seed the output adjoints and
+// scatter back. The mixed stan-math overloads are numerically distinct from
+// promoting their data operand to var, so the two activity flags are template
+// parameters rather than a single result-active flag.
+template <bool Left, SolveKind Kind, bool DivisorVar, bool DividendVar,
+          bool Vec, bool Grad>
 void solve_var(KernelCtx& ctx) {
   using stan::math::var;
+  static_assert(DivisorVar || DividendVar);
+  using DivisorScalar = std::conditional_t<DivisorVar, var, double>;
+  using DividendScalar = std::conditional_t<DividendVar, var, double>;
   const int64_t n = ctx.idata[0], k = ctx.idata[1];
   const int ai = Left ? 0 : 1, bi = Left ? 1 : 0;
   const int64_t br = Left ? n : k, bc = Left ? k : n;
   stan::math::nested_rev_autodiff nested;
-  VarM a = tail_m(ctx, ai, n, n);
-  Dividend<Left, Vec, var> b(br, bc);
+  Eigen::Matrix<DivisorScalar, -1, -1> a(n, n);
+  for (int64_t i = 0; i < n * n; ++i) a.data()[i] = ctx.in[ai].data[i];
+  Dividend<Left, Vec, DividendScalar> b(br, bc);
   for (int64_t i = 0; i < br * bc; ++i) b.data()[i] = ctx.in[bi].data[i];
-  auto out = solve_at<Left>(a, b);
+  auto out = solve_at<Left, Kind>(a, b);
   for (Eigen::Index i = 0; i < out.size(); ++i)
     ctx.out.data[i] = out.data()[i].val();
   if constexpr (Grad) {
@@ -593,16 +624,20 @@ void solve_var(KernelCtx& ctx) {
       seed.data()[i] = ctx.out_adj_vec.data[i];
     var j = stan::math::sum(stan::math::elt_multiply(out, seed));
     stan::math::grad(j.vi_);
-    if (ctx.in_adj[ai].data)
-      for (int64_t i = 0; i < n * n; ++i)
-        ctx.in_adj[ai].data[i] += a.data()[i].adj();
-    if (ctx.in_adj[bi].data)
-      for (int64_t i = 0; i < br * bc; ++i)
-        ctx.in_adj[bi].data[i] += b.data()[i].adj();
+    if constexpr (DivisorVar) {
+      if (ctx.in_adj[ai].data)
+        for (int64_t i = 0; i < n * n; ++i)
+          ctx.in_adj[ai].data[i] += a.data()[i].adj();
+    }
+    if constexpr (DividendVar) {
+      if (ctx.in_adj[bi].data)
+        for (int64_t i = 0; i < br * bc; ++i)
+          ctx.in_adj[bi].data[i] += b.data()[i].adj();
+    }
   }
 }
 
-template <bool Left, bool Vec>
+template <bool Left, SolveKind Kind, bool Vec>
 void solve_double(KernelCtx& ctx) {
   const int64_t n = ctx.idata[0], k = ctx.idata[1];
   const int ai = Left ? 0 : 1, bi = Left ? 1 : 0;
@@ -610,28 +645,64 @@ void solve_double(KernelCtx& ctx) {
   MatD a = CMapM(ctx.in[ai].data, n, n);
   Dividend<Left, Vec, double> b(br, bc);
   for (int64_t i = 0; i < br * bc; ++i) b.data()[i] = ctx.in[bi].data[i];
-  auto out = solve_at<Left>(a, b);
+  auto out = solve_at<Left, Kind>(a, b);
   for (Eigen::Index i = 0; i < out.size(); ++i) ctx.out.data[i] = out.data()[i];
 }
 
-template <bool Left>
-void solve_fwd(KernelCtx& ctx) {
-  const bool vec = (ctx.variant & 2u) != 0;
-  if (ctx.variant & 1u) {
-    vec ? solve_var<Left, true, false>(ctx)
-        : solve_var<Left, false, false>(ctx);
-  } else {
-    vec ? solve_double<Left, true>(ctx) : solve_double<Left, false>(ctx);
+template <bool Left, SolveKind Kind = SolveKind::Plain>
+void solve_active_fwd(KernelCtx& ctx, bool vec) {
+  // Bits 2 and 3 are the exact divisor/dividend scalar types. Activity 0 on
+  // an active result is the pre-detail encoding; retain its old vv behavior
+  // for an in-memory graph built by an older caller.
+  switch ((ctx.variant >> 2u) & 3u) {
+    case 1u:
+      vec ? solve_var<Left, Kind, true, false, true, false>(ctx)
+          : solve_var<Left, Kind, true, false, false, false>(ctx);
+      return;
+    case 2u:
+      vec ? solve_var<Left, Kind, false, true, true, false>(ctx)
+          : solve_var<Left, Kind, false, true, false, false>(ctx);
+      return;
+    default:
+      vec ? solve_var<Left, Kind, true, true, true, false>(ctx)
+          : solve_var<Left, Kind, true, true, false, false>(ctx);
+      return;
   }
 }
 
-template <bool Left>
-void solve_bwd(KernelCtx& ctx) {
-  // Reached only from a gradient, which is a var context by definition.
-  if (ctx.variant & 2u) {
-    solve_var<Left, true, true>(ctx);
+template <bool Left, SolveKind Kind = SolveKind::Plain>
+void solve_fwd(KernelCtx& ctx) {
+  const bool vec = (ctx.variant & 2u) != 0;
+  // forward_value_only() is CmdStan's log_prob<double> path. Even when the
+  // same graph carries adjoints for gradient(), it must take the prim solve:
+  // mdivide_left's active overload uses HouseholderQR while its double
+  // overload uses FullPivLU, and those are observably different answers on
+  // ill-conditioned inputs.
+  if ((ctx.variant & 1u) && !values_only()) {
+    solve_active_fwd<Left, Kind>(ctx, vec);
   } else {
-    solve_var<Left, false, true>(ctx);
+    vec ? solve_double<Left, Kind, true>(ctx)
+        : solve_double<Left, Kind, false>(ctx);
+  }
+}
+
+template <bool Left, SolveKind Kind = SolveKind::Plain>
+void solve_bwd(KernelCtx& ctx) {
+  const bool vec = (ctx.variant & 2u) != 0;
+  switch ((ctx.variant >> 2u) & 3u) {
+    case 1u:
+      vec ? solve_var<Left, Kind, true, false, true, true>(ctx)
+          : solve_var<Left, Kind, true, false, false, true>(ctx);
+      return;
+    case 2u:
+      vec ? solve_var<Left, Kind, false, true, true, true>(ctx)
+          : solve_var<Left, Kind, false, true, false, true>(ctx);
+      return;
+    default:
+      // Includes the legacy active encoding with neither detail bit set.
+      vec ? solve_var<Left, Kind, true, true, true, true>(ctx)
+          : solve_var<Left, Kind, true, true, false, true>(ctx);
+      return;
   }
 }
 
@@ -1246,6 +1317,18 @@ void register_matrix_kernels() {
                   Kernel{solve_fwd<true>, solve_bwd<true>, nullptr});
   register_kernel(OP_MDIVIDE_RIGHT,
                   Kernel{solve_fwd<false>, solve_bwd<false>, nullptr});
+  register_kernel(OP_MDIVIDE_LEFT_SPD,
+                  Kernel{solve_fwd<true, SolveKind::Spd>,
+                         solve_bwd<true, SolveKind::Spd>, nullptr});
+  register_kernel(OP_MDIVIDE_RIGHT_SPD,
+                  Kernel{solve_fwd<false, SolveKind::Spd>,
+                         solve_bwd<false, SolveKind::Spd>, nullptr});
+  register_kernel(OP_MDIVIDE_LEFT_TRI_LOW,
+                  Kernel{solve_fwd<true, SolveKind::TriLow>,
+                         solve_bwd<true, SolveKind::TriLow>, nullptr});
+  register_kernel(OP_MDIVIDE_RIGHT_TRI_LOW,
+                  Kernel{solve_fwd<false, SolveKind::TriLow>,
+                         solve_bwd<false, SolveKind::TriLow>, nullptr});
   register_kernel(OP_EIGENVALUES_SYM,
                   Kernel{eigvals_fwd, eigvals_bwd, eigvals_scratch});
   register_kernel(OP_EIGENVECTORS_SYM,
