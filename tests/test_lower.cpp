@@ -4082,6 +4082,50 @@ int main() {
       expect_ulp("tcrossprod: g" + std::to_string(i), gradient[i], a(i).adj());
   }
 
+  // Two IndexMulti selectors on a matrix form their Cartesian submatrix.
+  // Different reordered row/column lists pin column-major gather order and
+  // route each gathered cell's adjoint back to the source matrix.
+  {
+    DataMap d;
+    d.set_int_array("row_indices", {3, 1});
+    d.set_int_array("column_indices", {2, 3});
+    CompiledModel gm =
+        compile_model(slurp("tests/fixtures/matrix_multi_multi.tmir.sexp"), d);
+    Executor gex(std::move(gm.graph));
+    gm.bind(gex);
+    const double q[9] = {0.2, -0.4, 0.7, 0.1, -0.3, 0.8, 0.5, 0.9, -0.6};
+    for (int i = 0; i < 9; ++i) gex.params_data()[i] = q[i];
+    double gradient[9] = {};
+    const double lp = gex.gradient(gradient);
+    const double want = 2.0 * q[5] + 2.0 * q[3] + 2.0 * q[8] + 2.0 * q[6];
+    expect_eq("matrix multi/multi: lp", lp, want);
+    for (int i = 0; i < 9; ++i) {
+      const bool selected = i == 3 || i == 5 || i == 6 || i == 8;
+      expect_eq("matrix multi/multi: g" + std::to_string(i), gradient[i],
+                selected ? 2.0 : 0.0);
+    }
+  }
+
+  // O1 composes a scalar UDF index through a two-axis gather as a nested
+  // Indexed node whose empty outer layer carries UReal. The selected cell is
+  // row_indices[1], column_indices[2] = source (3,3).
+  {
+    DataMap d;
+    d.set_int_array("row_indices", {3, 1});
+    d.set_int_array("column_indices", {2, 3});
+    CompiledModel gm = compile_model(
+        slurp("tests/fixtures/matrix_multi_multi_nested.tmir.sexp"), d);
+    Executor gex(std::move(gm.graph));
+    gm.bind(gex);
+    const double q[9] = {0.2, -0.4, 0.7, 0.1, -0.3, 0.8, 0.5, 0.9, -0.6};
+    for (int i = 0; i < 9; ++i) gex.params_data()[i] = q[i];
+    double gradient[9] = {};
+    expect_eq("matrix nested index: lp", gex.gradient(gradient), 2.0 * q[8]);
+    for (int i = 0; i < 9; ++i)
+      expect_eq("matrix nested index: g" + std::to_string(i), gradient[i],
+                i == 8 ? 2.0 : 0.0);
+  }
+
   // A scalar replicated as a row vector uses the vector replication opcode,
   // but must retain its row-vector type for downstream expression lowering.
   {
@@ -5122,6 +5166,265 @@ int main() {
       expect_eq(tag + " gz", g[3], 0.0);
       stan::math::recover_memory();
     }
+  }
+
+  // append_array concatenates scalar-element and container-element arrays in
+  // outer-array order. O1 also materializes the loop sequence through an
+  // unsized integer-array temporary whose first assignment supplies its shape.
+  {
+    DataMap d;
+    d.set_int_array("selected", {2, 4});
+    CompiledModel am =
+        compile_model(slurp("tests/fixtures/unsized_append_loop.tmir.sexp"), d);
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    const double q[6] = {0.5, -0.7, 0.2, 1.1, -0.4, 0.8};
+    for (int i = 0; i < 6; ++i) aex.params_data()[i] = q[i];
+    double gradient[6] = {};
+    expect_eq("append array lp", aex.gradient(gradient),
+              10.0 * q[0] + 2.0 * q[3] + 3.0 * q[4]);
+    const double want[6] = {10.0, 0.0, 0.0, 2.0, 3.0, 0.0};
+    for (int i = 0; i < 6; ++i)
+      expect_eq("append array gradient " + std::to_string(i), gradient[i],
+                want[i]);
+  }
+
+  // DataMap observations are first-index-fast, unlike the graph's outer-major
+  // array slots. A rank-two append used by constant indexing must preserve the
+  // former order. An empty operand also takes its suffix shape from the
+  // nonempty side, as stan-math does.
+  {
+    DataMap d = DataMap::from_json(R"({"a":[[1,2]],"b":[[10,20]]})");
+    CompiledModel am =
+        compile_model(slurp("tests/fixtures/append_regression.tmir.sexp"), d);
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    const double q[4] = {0.1, 0.5, -0.7, 1.2};
+    for (int i = 0; i < 4; ++i) aex.params_data()[i] = q[i];
+    double gradient[4] = {};
+    expect_eq("rank-two append lp", aex.gradient(gradient), 6.0);
+    const double want[4] = {30.0, 3.0, 3.0, 3.0};
+    for (int i = 0; i < 4; ++i)
+      expect_eq("rank-two append gradient " + std::to_string(i), gradient[i],
+                want[i]);
+  }
+
+  // The same new MIR forms can occur inside parameter-dependent control.
+  // That route is compiled by ProgramCompiler rather than the main lowerer:
+  // it needs Cartesian matrix gathers, O1's empty Indexed wrapper, and
+  // deferred shape adoption for an unsized loop-sequence temporary.
+  {
+    DataMap d;
+    CompiledModel im =
+        compile_model(slurp("tests/fixtures/pr236_island.tmir.sexp"), d);
+    Executor iex(std::move(im.graph));
+    im.bind(iex);
+    const double positive[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    std::copy(positive, positive + 9, iex.params_data());
+    double gradient[9] = {};
+    expect_eq("PR236 island positive lp", iex.gradient(gradient), 75.0);
+    const double positive_gradient[9] = {5, 0, 0, 2, 0, 2, 2, 0, 4};
+    for (int i = 0; i < 9; ++i)
+      expect_eq("PR236 island positive gradient " + std::to_string(i),
+                gradient[i], positive_gradient[i]);
+
+    std::copy(positive, positive + 9, iex.params_data());
+    iex.params_data()[0] = -1.0;
+    std::fill(gradient, gradient + 9, 0.0);
+    expect_eq("PR236 island negative lp", iex.gradient(gradient), -1.0);
+    for (int i = 0; i < 9; ++i)
+      expect_eq("PR236 island negative gradient " + std::to_string(i),
+                gradient[i], i == 0 ? 1.0 : 0.0);
+  }
+
+  // The non-O1 producer keeps this UDF call intact. Its data-only integer
+  // array formals must retain their compile-time values when ProgramCompiler
+  // enters the callee, or the matrix gather cannot resolve rows and columns.
+  {
+    DataMap d;
+    CompiledModel im =
+        compile_model(slurp("tests/fixtures/pr236_island_udf.tmir.sexp"), d);
+    Executor iex(std::move(im.graph));
+    im.bind(iex);
+    const double positive[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    std::copy(positive, positive + 9, iex.params_data());
+    double gradient[9] = {};
+    expect_eq("PR236 island UDF lp", iex.gradient(gradient), 26.0);
+    const double want[9] = {0, 0, 0, 1, 0, 1, 1, 0, 1};
+    for (int i = 0; i < 9; ++i)
+      expect_eq("PR236 island UDF gradient " + std::to_string(i), gradient[i],
+                want[i]);
+  }
+
+  // O1 also uses deferred unsized temporaries for an appended integer loop
+  // sequence and for arrays of row-vector literals. Both values are built
+  // inside the runtime branch, then indexed by the unrolled source loop.
+  {
+    DataMap d;
+    d.set_int_array("d", {2});
+    CompiledModel im = compile_model(
+        slurp("tests/fixtures/pr236_unsized_island.tmir.sexp"), d);
+    Executor iex(std::move(im.graph));
+    im.bind(iex);
+    iex.params_data()[0] = 0.5;
+    double gradient[1] = {};
+    expect_eq("PR236 unsized island positive lp", iex.gradient(gradient), 6.5);
+    expect_eq("PR236 unsized island positive gradient", gradient[0], 13.0);
+    iex.params_data()[0] = -0.5;
+    expect_eq("PR236 unsized island negative lp", iex.gradient(gradient), 0.0);
+    expect_eq("PR236 unsized island negative gradient", gradient[0], 0.0);
+  }
+
+  // matrix_exp retains the square matrix view and differentiates every output
+  // element through the full, nonsymmetric matrix exponential.
+  {
+    DataMap d;
+    CompiledModel mm =
+        compile_model(slurp("tests/fixtures/matrix_exp.tmir.sexp"), d);
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    const double q[4] = {0.2, -0.4, 0.7, -0.1};
+    for (int i = 0; i < 4; ++i) mex.params_data()[i] = q[i];
+    double gradient[4] = {};
+    const double lp = mex.gradient(gradient);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> a(2, 2);
+    for (int i = 0; i < 4; ++i) a.data()[i] = q[i];
+    Eigen::Matrix<var, -1, -1> e = stan::math::matrix_exp(a);
+    var reference = e(0, 0) - 0.7 * e(1, 0) + 1.3 * e(0, 1) + 0.4 * e(1, 1);
+    reference.grad();
+    expect_eq("matrix exp lp", lp, reference.val());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("matrix exp gradient " + std::to_string(i), gradient[i],
+                a.data()[i].adj());
+    stan::math::recover_memory();
+  }
+
+  // Transformed data and write_array recovery run MirInterp rather than the
+  // graph kernels. Both new functions must exist there as well. The test-only
+  // hook attaches the same interpreter used by ordinary late-truncation
+  // recovery beside this fixture's complete write_array graph.
+  {
+    DataMap d = DataMap::from_json(R"({"a":[7],"m":[[0,0],[0,0]]})");
+    check(test_setenv("STANLI_WA_FORCE_INTERP", "1", 1) == 0,
+          "enable new-functions write_array interpreter");
+    CompiledModel fm;
+    try {
+      fm = compile_model(slurp("tests/fixtures/interp_new_functions.tmir.sexp"),
+                         d);
+    } catch (...) {
+      test_unsetenv("STANLI_WA_FORCE_INTERP");
+      throw;
+    }
+    check(test_unsetenv("STANLI_WA_FORCE_INTERP") == 0,
+          "disable new-functions write_array interpreter");
+    Executor fex(std::move(fm.graph));
+    fm.bind(fex);
+    fex.params_data()[0] = 0.3;
+    double gradient[1] = {};
+    expect_eq("interpreter functions lp", fex.gradient(gradient), 3.3);
+    expect_eq("interpreter functions gradient", gradient[0], 11.0);
+
+    check(fm.write_array && fm.write_array->interp,
+          "new functions interpreted write_array selected");
+    if (fm.write_array && fm.write_array->interp) {
+      fex.params_data()[0] = 0.3;
+      fex.run_forward_only();
+      WaRng rng(1234);
+      const std::vector<double> row =
+          fm.write_array->interp->eval(fm.constrained_env(fex), rng);
+      const std::vector<std::string> names =
+          CompiledModel::csv_names(fm.write_array->interp->columns());
+      const auto expect_column = [&](const std::string& name, double want) {
+        const auto it = std::find(names.begin(), names.end(), name);
+        check(it != names.end(), "interpreted column " + name);
+        if (it != names.end())
+          expect_eq("interpreted value " + name,
+                    row.at((size_t)std::distance(names.begin(), it)), want);
+      };
+      expect_column("g_joined.1", 0.3);
+      expect_column("g_joined.2", 2.0);
+      Eigen::MatrixXd input = Eigen::MatrixXd::Zero(2, 2);
+      input(0, 0) = 0.3;
+      const Eigen::MatrixXd output = stan::math::matrix_exp(input);
+      expect_column("g_exp.1.1", output(0, 0));
+      expect_column("g_exp.2.1", output(1, 0));
+      expect_column("g_exp.1.2", output(0, 1));
+      expect_column("g_exp.2.2", output(1, 1));
+      expect_column("product", std::exp(0.3) * std::exp(2.0));
+    }
+  }
+
+  // quad_form_sym at both overloads and both scalar types: a matrix B gives
+  // 0.5 * (C + C'), a vector B the scalar B' A B, and stan-math associates
+  // that scalar one way at double and the other at var. `a + a'` is exactly
+  // symmetric, so the symmetry check passes.
+  {
+    DataMap d;
+    const std::vector<double> dm = {1.5, 0.3,  -0.2, 0.3, 2.0,
+                                    0.7, -0.2, 0.7,  1.1};
+    const std::vector<double> dvv = {0.6, -1.2, 0.4};
+    d.set_real_array("d", dm);
+    d.set_real_array("dv", dvv);
+    CompiledModel mm =
+        compile_model(slurp("tests/fixtures/quad_form_sym.tmir.sexp"), d);
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    const double q[18] = {0.2, -0.4, 0.7, -0.1, 0.9,  0.3, -0.6, 0.5,  0.8,
+                          1.1, -0.3, 0.2, 0.4,  -0.9, 0.6, 0.7,  -0.5, 0.15};
+    for (int i = 0; i < 18; ++i) mex.params_data()[i] = q[i];
+    double gradient[18] = {};
+    const double lp = mex.gradient(gradient);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> a(3, 3), b(3, 2);
+    Eigen::Matrix<var, -1, 1> v(3);
+    for (int i = 0; i < 9; ++i) a.data()[i] = q[i];
+    for (int i = 0; i < 6; ++i) b.data()[i] = q[9 + i];
+    for (int i = 0; i < 3; ++i) v.data()[i] = q[15 + i];
+    Eigen::MatrixXd dmat(3, 3);
+    Eigen::VectorXd dvec(3);
+    for (int i = 0; i < 9; ++i) dmat.data()[i] = dm[(size_t)i];
+    for (int i = 0; i < 3; ++i) dvec.data()[i] = dvv[(size_t)i];
+
+    const Eigen::Matrix<var, -1, -1> sym = a + a.transpose();
+    const Eigen::Matrix<var, -1, -1> qm = stan::math::quad_form_sym(sym, b);
+    var reference = qm(0, 0) - 0.7 * qm(1, 0) + 1.3 * qm(0, 1) + 0.4 * qm(1, 1);
+    reference += 0.9 * stan::math::quad_form_sym(sym, v);
+    reference += 1.7 * stan::math::quad_form_sym(dmat, dvec);
+    reference += 0.3 * stan::math::quad_form_sym(dmat, v);
+    reference.grad();
+    expect_eq("quad form sym lp", lp, reference.val());
+    for (int i = 0; i < 9; ++i)
+      expect_eq("quad form sym da " + std::to_string(i), gradient[i],
+                a.data()[i].adj());
+    for (int i = 0; i < 6; ++i)
+      expect_eq("quad form sym db " + std::to_string(i), gradient[9 + i],
+                b.data()[i].adj());
+    for (int i = 0; i < 3; ++i)
+      expect_eq("quad form sym dv " + std::to_string(i), gradient[15 + i],
+                v.data()[i].adj());
+    stan::math::recover_memory();
+  }
+
+  // Stan Math's reverse-mode vector overload still evaluates 0.5 * (c + c)
+  // for the scalar result. Preserve that operation at overflow rather than
+  // returning the finite unsymmetrized c.
+  {
+    DataMap d;
+    d.set_real_array("d", std::vector<double>(9, 0.0));
+    d.set_real_array("dv", std::vector<double>(3, 0.0));
+    CompiledModel qm =
+        compile_model(slurp("tests/fixtures/quad_form_sym.tmir.sexp"), d);
+    Executor qex(std::move(qm.graph));
+    qm.bind(qex);
+    std::fill(qex.params_data(), qex.params_data() + 18, 0.0);
+    qex.params_data()[0] = 0.5;
+    qex.params_data()[15] = 1e154;
+    const double lp = qex.forward();
+    check(std::isinf(lp) && lp > 0.0,
+          "quad_form_sym active-vector scalar symmetrization overflow");
   }
 
   if (failures == 0) std::printf("test_lower OK\n");

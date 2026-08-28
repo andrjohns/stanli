@@ -70,6 +70,18 @@ struct ProgramCompiler {
   const std::map<std::string, const mir::FunDef*>& funs;
   std::map<std::string, Range> reals;
   std::map<std::string, std::vector<long>> ints;
+  // Integer containers still occupy registers when a real-valued expression
+  // consumes them, but their values are data and therefore available while
+  // the program is being compiled.  Keep that provenance beside the register
+  // view: stanc's O1 lowering spells `for (i in {2, 3})` as an unsized array
+  // temporary, a whole-array assignment, then scalar indexed reads.
+  std::map<std::string, std::vector<long>> known_int_arrays;
+  std::set<std::string> int_array_names;
+  // Optimizer temporaries declared with an Unsized container acquire their
+  // complete Range from the first whole-variable assignment.  A zero-width
+  // sized declaration is not the same thing, so keep the protocol explicit
+  // rather than inferring it from Range::len.
+  std::map<std::string, mir::UnsizedView> deferred_shapes;
   // Where each `ints` entry was declared: its branch depth, and how many
   // loops enclosed it. Folding an assignment records a value for every
   // later read of the name, so it is only sound where the assignment
@@ -227,14 +239,20 @@ struct ProgramCompiler {
       return true;
     }
     if (e.kind != mir::Expr::Var) return false;
+    if (deferred_shapes.count(e.name)) return false;
     auto rt = reals.find(e.name);
     if (rt != reals.end()) {
       *out = rt->second;
       return true;
     }
-    // Every `ints` entry is a compile-time scalar.
-    if (ints.count(e.name)) {
-      *out = Range{0, 1};
+    auto ii = ints.find(e.name);
+    if (ii != ints.end()) {
+      Range r{0, (int)ii->second.size()};
+      if (e.unsized.depth != 0) {
+        r.kind = ViewKind::Array;
+        r.dims = {(int64_t)ii->second.size()};
+      }
+      *out = r;
       return true;
     }
     // An outside name: bind it the way expr() would. The binding is one
@@ -284,6 +302,14 @@ struct ProgramCompiler {
         for (size_t k = 1; k < e.args.size(); ++k)
           if (e.args[k].name != "IndexSingle" || e.args[k].args.size() != 1)
             bail("integer index form");
+        auto known = known_int_arrays.find(e.args[0].name);
+        if (known != known_int_arrays.end()) {
+          if (e.args.size() != 2) bail("integer index form");
+          const long ix = cint(e.args[1].args[0]);
+          if (ix < 1 || (size_t)ix > known->second.size())
+            bail("integer index range");
+          return known->second[(size_t)ix - 1];
+        }
         auto it = ints.find(e.args[0].name);
         if (it != ints.end()) {
           if (e.args.size() != 2) bail("integer index form");
@@ -382,6 +408,90 @@ struct ProgramCompiler {
     }
   }
 
+  // A data-only integer array used by IndexMulti.  Literal arrays are the
+  // form O1 emits for source selectors such as `{3, 1}`.  Named arrays cover
+  // both ODE x_i arguments and statement-island data bindings; the latter are
+  // read one scalar at a time through extern_int, the callback that already
+  // owns their storage-order semantics.
+  std::vector<long> cints(const mir::Expr& e) {
+    if (e.kind == mir::Expr::Var) {
+      auto known = known_int_arrays.find(e.name);
+      if (known != known_int_arrays.end()) return known->second;
+      auto held = ints.find(e.name);
+      if (held != ints.end()) return held->second;
+
+      Range view;
+      if (static_view(e, &view) && view.kind == ViewKind::Array &&
+          view.len >= 0) {
+        std::vector<long> values;
+        values.reserve((size_t)view.len);
+        for (int k = 0; k < view.len; ++k) {
+          mir::Expr literal;
+          literal.kind = mir::Expr::LitInt;
+          literal.lit_i = k + 1;
+          literal.type_ = "UInt";
+          literal.unsized = {0, mir::UnsizedLeaf::Int};
+          literal.data_only = true;
+
+          mir::Expr single;
+          single.kind = mir::Expr::FunApp;
+          single.name = "IndexSingle";
+          single.args.push_back(std::move(literal));
+
+          mir::Expr indexed;
+          indexed.kind = mir::Expr::Indexed;
+          indexed.type_ = "UInt";
+          indexed.unsized = {0, mir::UnsizedLeaf::Int};
+          indexed.data_only = true;
+          indexed.args.push_back(e);
+          indexed.args.push_back(std::move(single));
+          values.push_back(cint(indexed));
+        }
+        return values;
+      }
+      bail("integer array " + e.name + " is not known at compile time");
+    }
+    if (e.kind == mir::Expr::FunApp && e.name == "FnMakeArray") {
+      std::vector<long> values;
+      values.reserve(e.args.size());
+      for (const auto& value : e.args) values.push_back(cint(value));
+      return values;
+    }
+    if (e.kind == mir::Expr::FunApp && e.name == "append_array" &&
+        e.args.size() == 2) {
+      std::vector<long> values = cints(e.args[0]);
+      std::vector<long> tail = cints(e.args[1]);
+      values.insert(values.end(), tail.begin(), tail.end());
+      return values;
+    }
+    bail("integer gather selector is not known at compile time");
+  }
+
+  bool try_cints(const mir::Expr& e, std::vector<long>* out) {
+    try {
+      *out = cints(e);
+      return true;
+    } catch (Bail&) {
+      return false;
+    }
+  }
+
+  std::vector<int64_t> matrix_gather_positions(const mir::Expr& index,
+                                               int64_t extent,
+                                               const std::string& axis) {
+    if (index.name != "IndexMulti" || index.args.size() != 1)
+      bail("matrix " + axis + " gather index form");
+    const std::vector<long> values = cints(index.args[0]);
+    std::vector<int64_t> positions;
+    positions.reserve(values.size());
+    for (long value : values) {
+      if (value < 1 || value > extent)
+        bail("matrix " + axis + " gather out of the declared range");
+      positions.push_back((int64_t)value - 1);
+    }
+    return positions;
+  }
+
   static bool same_view(const Range& a, const Range& b) {
     if (a.kind != b.kind) return false;
     if (a.kind == ViewKind::Flat) return a.len == 1 && b.len == 1;
@@ -449,6 +559,32 @@ struct ProgramCompiler {
     return r;
   }
 
+  static bool unsized_accepts(const mir::UnsizedView& type, const Range& r) {
+    if (type.leaf == mir::UnsizedLeaf::Unknown ||
+        type.leaf == mir::UnsizedLeaf::Complex)
+      return false;
+    if (type.depth != 0) {
+      if (r.kind != ViewKind::Array) return false;
+      const size_t leaf_rank = type.leaf == mir::UnsizedLeaf::Matrix ? 2
+                               : type.leaf == mir::UnsizedLeaf::Vector ||
+                                       type.leaf == mir::UnsizedLeaf::RowVector
+                                   ? 1
+                                   : 0;
+      // Old register ranges did not stamp the sole scalar-array extent.
+      // Retain that compatibility while requiring complete geometry for
+      // every structural container newly represented here.
+      if (r.dims.empty()) return type.depth == 1 && leaf_rank == 0;
+      return r.dims.size() == (size_t)type.depth + leaf_rank;
+    }
+    if (type.leaf == mir::UnsizedLeaf::Vector)
+      return r.kind == ViewKind::Vector;
+    if (type.leaf == mir::UnsizedLeaf::RowVector)
+      return r.kind == ViewKind::RowVector;
+    if (type.leaf == mir::UnsizedLeaf::Matrix)
+      return r.kind == ViewKind::Matrix;
+    return is_scalar(r);
+  }
+
   // ---- expressions ---------------------------------------------------------
   Range expr(const mir::Expr& e) {
     switch (e.kind) {
@@ -457,6 +593,8 @@ struct ProgramCompiler {
       case mir::Expr::LitReal:
         return {konst(e.lit), 1};
       case mir::Expr::Var: {
+        if (deferred_shapes.count(e.name))
+          bail("unsized local read before its first assignment: " + e.name);
         auto it = reals.find(e.name);
         if (it != reals.end()) return it->second;
         auto ii = ints.find(e.name);
@@ -464,7 +602,12 @@ struct ProgramCompiler {
           const std::vector<double> vals(ii->second.begin(), ii->second.end());
           const int r = alloc((int)vals.size());
           emit_const(r, vals.data(), (int)vals.size());
-          return {r, (int)vals.size()};
+          Range out{r, (int)vals.size()};
+          if (e.unsized.depth != 0) {
+            out.kind = ViewKind::Array;
+            out.dims = {(int64_t)vals.size()};
+          }
+          return out;
         }
         Range ext;
         if (bind_extern && bind_extern(e.name, &ext)) {
@@ -475,8 +618,46 @@ struct ProgramCompiler {
         bail("unknown variable " + e.name);
       }
       case mir::Expr::Indexed: {
+        // O1's index-composition pass may retain a base-only outer Indexed
+        // node.  Its metadata is the final type while the inner node still
+        // carries the pre-composition matrix type, so collapse it before any
+        // logical-view decision.
+        if (e.args.size() == 1 && e.args[0].kind == mir::Expr::Indexed) {
+          mir::Expr composed = e.args[0];
+          composed.type_ = e.type_;
+          composed.unsized = e.unsized;
+          composed.data_only = e.data_only;
+          composed.promoted = e.promoted;
+          composed.raw = e.raw;
+          return expr(composed);
+        }
+        if (e.args.empty()) bail("index form");
         const Range b = expr(e.args[0]);
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return b;
+        // Two IndexMulti axes select their Cartesian submatrix.  Matrix
+        // registers are column-major, so selected columns are the outer loop
+        // and selected rows the inner loop; this preserves selector order and
+        // duplicates exactly as the graph lowerer does.
+        if (b.kind == ViewKind::Matrix && e.args.size() == 3 &&
+            e.args[1].name == "IndexMulti" && e.args[2].name == "IndexMulti") {
+          const std::vector<int64_t> rows =
+              matrix_gather_positions(e.args[1], b.rows, "row");
+          const std::vector<int64_t> cols =
+              matrix_gather_positions(e.args[2], b.cols, "column");
+          if (!rows.empty() && cols.size() > (size_t)kMaxRegs / rows.size())
+            bail("matrix gather needs too many registers");
+          const size_t width = rows.size() * cols.size();
+          const int r = alloc((int)width);
+          int at = 0;
+          for (int64_t j : cols)
+            for (int64_t i : rows)
+              emit(Program::MOV, r + at++, b.reg + (int)(j * b.rows + i));
+          Range out{r, (int)width};
+          out.kind = ViewKind::Matrix;
+          out.rows = (int64_t)rows.size();
+          out.cols = (int64_t)cols.size();
+          return out;
+        }
         // A matrix row, `m[i]` or `m[i, ]`. Ahead of the all-single check
         // below, which the explicit `IndexAll` would not pass.
         if (b.kind == ViewKind::Matrix && e.args.size() >= 2 &&
@@ -547,10 +728,24 @@ struct ProgramCompiler {
         }
         int64_t len = 1;
         for (size_t d = n_idx; d < dims.size(); ++d) len *= dims[d];
-        if (len == 1) return {b.reg + (int)off, 1};
+        if (len == 1 && (e.type_ == "UReal" || e.type_ == "UInt"))
+          return {b.reg + (int)off, 1};
         Range out{b.reg + (int)off, (int)len};
-        out.kind = ViewKind::Array;
-        out.dims.assign(dims.begin() + (long)n_idx, dims.end());
+        if (e.type_ == "UVector") {
+          out.kind = ViewKind::Vector;
+        } else if (e.type_ == "URowVector") {
+          out.kind = ViewKind::RowVector;
+        } else if (e.type_ == "UMatrix") {
+          // Matrix leaves need a leaf tag as well as two extents to prove
+          // their column-major subrange. Range intentionally has no such tag,
+          // so retain the established fail-loud boundary.
+          bail(
+              "array-of-matrix indexing is unsupported by the register "
+              "program");
+        } else {
+          out.kind = ViewKind::Array;
+          out.dims.assign(dims.begin() + (long)n_idx, dims.end());
+        }
         return out;
       }
       case mir::Expr::TernaryIf: {
@@ -670,6 +865,14 @@ struct ProgramCompiler {
         if (a.type_ == "UInt" && try_cint(a, &v)) {
           arg.is_const_int = true;
           arg.ints = {v};
+        } else if (a.unsized.depth == 1 &&
+                   a.unsized.leaf == mir::UnsizedLeaf::Int &&
+                   try_cints(a, &arg.ints)) {
+          // Function arguments are rebound in a fresh compiler scope. Carry
+          // a data-only selector as values, not merely as its register Range,
+          // so the callee (and a nested inline call) can still use it in
+          // IndexMulti or a compile-time scalar indexed read.
+          arg.is_const_int = true;
         } else {
           arg.real = expr(a);
         }
@@ -683,14 +886,31 @@ struct ProgramCompiler {
         int total = 0;
         for (const auto& a : e.args) {
           parts.push_back(expr(a));
+          if (parts.back().len > kMaxRegs - total)
+            bail("array literal needs too many registers");
           total += parts.back().len;
         }
+        ViewKind array_leaf = ViewKind::Flat;
+        int array_leaf_width = 1;
         if (e.name == "FnMakeArray") {
-          for (const Range& q : parts)
-            if (!is_scalar(q))
+          if (!parts.empty() && !is_scalar(parts.front())) {
+            array_leaf = parts.front().kind;
+            if (array_leaf != ViewKind::Vector &&
+                array_leaf != ViewKind::RowVector)
               bail(
-                  "only flat scalar arrays are supported by the register "
-                  "program");
+                  "array literal element view is unsupported by the "
+                  "register program");
+            if (e.type_ == "UMatrix")
+              bail("matrix literals are unsupported by the register program");
+            array_leaf_width = parts.front().len;
+            for (const Range& q : parts)
+              if (!same_view(q, parts.front()))
+                bail("array literal elements have different logical views");
+          } else {
+            for (const Range& q : parts)
+              if (!is_scalar(q))
+                bail("array literal mixes scalar and container elements");
+          }
         }
         const int r = alloc(total);
         int at = 0;
@@ -700,12 +920,69 @@ struct ProgramCompiler {
         Range out{r, total};
         out.kind =
             e.name == "FnMakeRowVec" ? ViewKind::RowVector : ViewKind::Array;
+        if (e.name == "FnMakeArray") {
+          out.dims = {(int64_t)e.args.size()};
+          if (array_leaf != ViewKind::Flat)
+            out.dims.push_back(array_leaf_width);
+        }
         return out;
       }
       bail("internal function " + e.name);
     }
     if (e.args.empty() && e.name == "negative_infinity")
       return {konst(-std::numeric_limits<double>::infinity()), 1};
+    if (e.args.size() == 2 && e.name == "append_array") {
+      const Range a = expr(e.args[0]);
+      const Range b = expr(e.args[1]);
+      if (a.kind != ViewKind::Array || b.kind != ViewKind::Array)
+        bail("append_array requires two array arguments");
+      if (e.args[0].unsized.depth != e.args[1].unsized.depth ||
+          e.args[0].unsized.leaf != e.args[1].unsized.leaf)
+        bail("append_array element logical views differ");
+
+      const auto dimensions = [&](const Range& value) {
+        return value.dims.empty() ? std::vector<int64_t>{value.len}
+                                  : value.dims;
+      };
+      const auto validate_dimensions = [&](const Range& value,
+                                           const std::vector<int64_t>& dims) {
+        int64_t product = 1;
+        for (int64_t extent : dims) {
+          if (extent < 0 ||
+              (extent != 0 && product > (int64_t)kMaxRegs / extent))
+            bail("append_array has an invalid element shape");
+          product *= extent;
+        }
+        if (product != value.len)
+          bail("append_array storage and logical shape disagree");
+      };
+      const std::vector<int64_t> adims = dimensions(a);
+      const std::vector<int64_t> bdims = dimensions(b);
+      validate_dimensions(a, adims);
+      validate_dimensions(b, bdims);
+      if (adims.size() != bdims.size())
+        bail("append_array element shapes differ");
+      const int64_t a_outer = adims.front();
+      const int64_t b_outer = bdims.front();
+      if (a_outer != 0 && b_outer != 0 &&
+          !std::equal(adims.begin() + 1, adims.end(), bdims.begin() + 1))
+        bail("append_array element shapes differ");
+      if (a_outer > std::numeric_limits<int64_t>::max() - b_outer ||
+          b.len > kMaxRegs - a.len)
+        bail("append_array result is too large");
+
+      std::vector<int64_t> out_dims =
+          a_outer == 0 && b_outer != 0 ? bdims : adims;
+      out_dims[0] = a_outer + b_outer;
+      const int r = alloc(a.len + b.len);
+      for (int k = 0; k < a.len; ++k) emit(Program::MOV, r + k, a.reg + k);
+      for (int k = 0; k < b.len; ++k)
+        emit(Program::MOV, r + a.len + k, b.reg + k);
+      Range out{r, a.len + b.len};
+      out.kind = ViewKind::Array;
+      out.dims = std::move(out_dims);
+      return out;
+    }
     if (e.args.size() == 1 && e.name == "diagonal") {
       const Range a = expr(e.args[0]);
       if (a.kind != ViewKind::Matrix)
@@ -1033,6 +1310,57 @@ struct ProgramCompiler {
   void stmt(const mir::Stmt& s) {
     switch (s.kind) {
       case mir::Stmt::Decl: {
+        // A declaration shadows every compile-time fact retained for an
+        // earlier optimized symbol with the same name.
+        deferred_shapes.erase(s.decl_id);
+        known_int_arrays.erase(s.decl_id);
+        int_array_names.erase(s.decl_id);
+        int_decl_at.erase(s.decl_id);
+        if (s.decl_type.base.empty() &&
+            s.decl_type.unsized.leaf != mir::UnsizedLeaf::Unknown) {
+          const mir::UnsizedView view = s.decl_type.unsized;
+          if (view.leaf == mir::UnsizedLeaf::Complex)
+            bail("complex unsized declaration " + s.decl_id);
+          // Scalar Unsized declarations are normalized to SInt/SReal by the
+          // reader.  Refuse an unnormalized scalar here rather than treating
+          // its fixed width as a deferred container shape.
+          if (view.depth == 0 && view.leaf != mir::UnsizedLeaf::Vector &&
+              view.leaf != mir::UnsizedLeaf::RowVector &&
+              view.leaf != mir::UnsizedLeaf::Matrix)
+            bail("scalar unsized declaration " + s.decl_id);
+
+          reals.erase(s.decl_id);
+          ints.erase(s.decl_id);
+          if (view.depth != 0 && view.leaf == mir::UnsizedLeaf::Int) {
+            int_array_names.insert(s.decl_id);
+            int_decl_at[s.decl_id] = {branch_depth, loops.size()};
+          }
+          if (!s.has_init) {
+            reals[s.decl_id] = Range{};
+            deferred_shapes[s.decl_id] = view;
+            return;
+          }
+
+          const Range v = expr(s.init);
+          if (!unsized_accepts(view, v))
+            bail("declaration logical view mismatch for " + s.decl_id);
+          const double fill =
+              int_array_names.count(s.decl_id)
+                  ? static_cast<double>(std::numeric_limits<int>::min())
+                  : std::numeric_limits<double>::quiet_NaN();
+          const Range d = declare(s.decl_id, v.len, v, fill);
+          for (int k = 0; k < v.len; ++k)
+            emit(Program::MOV, d.reg + k, v.reg + k);
+          if (int_array_names.count(s.decl_id)) {
+            std::vector<long> values;
+            if (try_cints(s.init, &values) && values.size() == (size_t)v.len)
+              known_int_arrays[s.decl_id] = std::move(values);
+          }
+          return;
+        }
+        if (s.decl_type.base.empty())
+          bail("declaration has no sized or unsized logical view: " +
+               s.decl_id);
         if (s.decl_type.base == "SInt") {
           int_decl_at[s.decl_id] = {branch_depth, loops.size()};
           if (s.has_init) {
@@ -1041,6 +1369,12 @@ struct ProgramCompiler {
             ints[s.decl_id] = {std::numeric_limits<int>::min()};
           }
           return;
+        }
+        const bool int_array =
+            s.decl_type.base == "SArray" && s.decl_type.elem_base == "SInt";
+        if (int_array) {
+          int_array_names.insert(s.decl_id);
+          int_decl_at[s.decl_id] = {branch_depth, loops.size()};
         }
         if (s.has_init) {
           const Range v = expr(s.init);
@@ -1055,6 +1389,11 @@ struct ProgramCompiler {
           const Range d = declare(s.decl_id, want, expected);
           for (int k = 0; k < want; ++k)
             emit(Program::MOV, d.reg + k, v.reg + k);
+          if (int_array) {
+            std::vector<long> values;
+            if (try_cints(s.init, &values) && values.size() == (size_t)want)
+              known_int_arrays[s.decl_id] = std::move(values);
+          }
         } else {
           Range view;
           const double fill =
@@ -1063,10 +1402,46 @@ struct ProgramCompiler {
                   : std::numeric_limits<double>::quiet_NaN();
           declare(s.decl_id, (int)sized_len(s.decl_type),
                   declared(view, s.decl_type), fill);
+          if (int_array)
+            known_int_arrays[s.decl_id] =
+                std::vector<long>((size_t)sized_len(s.decl_type),
+                                  std::numeric_limits<int>::min());
         }
         return;
       }
       case mir::Stmt::Assignment: {
+        auto deferred = deferred_shapes.find(s.lhs);
+        if (deferred != deferred_shapes.end()) {
+          if (!s.lhs_idx.empty())
+            bail("indexed assignment before unsized shape adoption for " +
+                 s.lhs);
+          const Range v = expr(s.rhs);
+          if (!unsized_accepts(deferred->second, v))
+            bail("assignment logical view mismatch for " + s.lhs);
+          auto binding = reals.find(s.lhs);
+          if (binding == reals.end()) bail("assignment to undeclared " + s.lhs);
+
+          Range adopted = v;
+          adopted.reg = alloc(v.len);
+          // The assignment may be under a runtime jump.  Fill the adopted
+          // run before control flow starts so backward replay and an untaken
+          // path never observe uninitialized register cells.
+          if (v.len != 0) late_bound.emplace_back(adopted.reg, v.len);
+          for (int k = 0; k < v.len; ++k)
+            emit(Program::MOV, adopted.reg + k, v.reg + k);
+          binding->second = adopted;
+          deferred_shapes.erase(deferred);
+
+          if (int_array_names.count(s.lhs)) {
+            std::vector<long> values;
+            if (fold_is_certain(s.lhs) && try_cints(s.rhs, &values) &&
+                values.size() == (size_t)v.len)
+              known_int_arrays[s.lhs] = std::move(values);
+            else
+              known_int_arrays.erase(s.lhs);
+          }
+          return;
+        }
         if (ints.count(s.lhs) && s.lhs_idx.empty()) {
           // An integer is a compile-time value here: folding this
           // assignment rewrites every later read of the name, so a path
@@ -1099,6 +1474,11 @@ struct ProgramCompiler {
         const Range dst = it->second;
         const Range v = expr(s.rhs);
         if (s.lhs_idx.empty()) {
+          std::vector<long> folded_ints;
+          const bool have_folded_ints = int_array_names.count(s.lhs) &&
+                                        fold_is_certain(s.lhs) &&
+                                        try_cints(s.rhs, &folded_ints) &&
+                                        folded_ints.size() == (size_t)v.len;
           if (dst.len == 0 && v.len != 0) {
             // The zero-length declaration is stanc3's --O1 inliner
             // leaving a return variable unsized (`vector[0]`) for the
@@ -1120,6 +1500,10 @@ struct ProgramCompiler {
             for (int k = 0; k < v.len; ++k)
               emit(Program::MOV, nd.reg + k, v.reg + k);
             it->second = nd;
+            if (have_folded_ints)
+              known_int_arrays[s.lhs] = std::move(folded_ints);
+            else if (int_array_names.count(s.lhs))
+              known_int_arrays.erase(s.lhs);
             return;
           }
           if (v.len != dst.len) bail("assignment width mismatch for " + s.lhs);
@@ -1127,6 +1511,10 @@ struct ProgramCompiler {
             bail("assignment logical view mismatch for " + s.lhs);
           for (int k = 0; k < v.len; ++k)
             emit(Program::MOV, dst.reg + k, v.reg + k);
+          if (have_folded_ints)
+            known_int_arrays[s.lhs] = std::move(folded_ints);
+          else if (int_array_names.count(s.lhs))
+            known_int_arrays.erase(s.lhs);
           return;
         }
         // A single All is the complete destination view. This is reachable
@@ -1142,6 +1530,14 @@ struct ProgramCompiler {
             bail("full-span assignment logical view mismatch for " + s.lhs);
           for (int k = 0; k < v.len; ++k)
             emit(Program::MOV, dst.reg + k, v.reg + k);
+          if (int_array_names.count(s.lhs)) {
+            std::vector<long> values;
+            if (fold_is_certain(s.lhs) && try_cints(s.rhs, &values) &&
+                values.size() == (size_t)v.len)
+              known_int_arrays[s.lhs] = std::move(values);
+            else
+              known_int_arrays.erase(s.lhs);
+          }
           return;
         }
         for (const auto& ix : s.lhs_idx)
@@ -1176,6 +1572,16 @@ struct ProgramCompiler {
           flat = ix - 1;
         }
         emit(Program::MOV, dst.reg + (int)flat, v.reg);
+        if (int_array_names.count(s.lhs)) {
+          long value = 0;
+          auto known = known_int_arrays.find(s.lhs);
+          if (fold_is_certain(s.lhs) && try_cint(s.rhs, &value) &&
+              known != known_int_arrays.end() && flat >= 0 &&
+              (size_t)flat < known->second.size())
+            known->second[(size_t)flat] = value;
+          else
+            known_int_arrays.erase(s.lhs);
+        }
         return;
       }
       case mir::Stmt::Return:
@@ -1309,11 +1715,17 @@ struct ProgramCompiler {
     // restore afterwards. Registers are never reused, so nothing aliases.
     auto saved_reals = reals;
     auto saved_ints = ints;
+    auto saved_known_int_arrays = known_int_arrays;
+    auto saved_int_array_names = int_array_names;
+    auto saved_deferred_shapes = deferred_shapes;
     auto saved_int_decl_at = int_decl_at;
     auto saved_extern_bound = extern_bound;
     const int saved_branch_depth = branch_depth;
     reals.clear();
     ints.clear();
+    known_int_arrays.clear();
+    int_array_names.clear();
+    deferred_shapes.clear();
     int_decl_at.clear();
     extern_bound.clear();
     branch_depth = 0;
@@ -1335,6 +1747,9 @@ struct ProgramCompiler {
     } catch (...) {
       reals = std::move(saved_reals);
       ints = std::move(saved_ints);
+      known_int_arrays = std::move(saved_known_int_arrays);
+      int_array_names = std::move(saved_int_array_names);
+      deferred_shapes = std::move(saved_deferred_shapes);
       int_decl_at = std::move(saved_int_decl_at);
       extern_bound = std::move(saved_extern_bound);
       branch_depth = saved_branch_depth;
@@ -1343,6 +1758,9 @@ struct ProgramCompiler {
     }
     reals = std::move(saved_reals);
     ints = std::move(saved_ints);
+    known_int_arrays = std::move(saved_known_int_arrays);
+    int_array_names = std::move(saved_int_array_names);
+    deferred_shapes = std::move(saved_deferred_shapes);
     int_decl_at = std::move(saved_int_decl_at);
     extern_bound = std::move(saved_extern_bound);
     branch_depth = saved_branch_depth;

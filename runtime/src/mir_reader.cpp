@@ -147,6 +147,8 @@ void validate_funapp_arity(const Expr& e) {
                 "diag_pre_multiply",
                 "diag_post_multiply",
                 "quad_form_diag",
+                "quad_form_sym",
+                "append_array",
                 "append_row",
                 "append_col",
                 "rep_vector",
@@ -195,6 +197,7 @@ void validate_funapp_arity(const Expr& e) {
                 "diag_matrix",
                 "diagonal",
                 "cholesky_decompose",
+                "matrix_exp",
                 "eigenvalues_sym",
                 "eigenvectors_sym",
                 "categorical_rng",
@@ -653,12 +656,10 @@ Stmt read_stmt(const Node& n) {
       s.decl_type = t.head_is("Sized") ? read_sized(t[1]) : SizedType{};
       if (!t.head_is("Sized")) {
         s.decl_type.raw = dump(t);
-        // stanc3 declares scalar temporaries unsized. A vectorized `T[,]`
-        // whose location is a container loops over the elements and hoists
-        // the scale into one of these. A scalar carries no size
-        // expression, so give it the sized spelling. Unsized containers
-        // still reach the failure in sized_len, which is where their
-        // missing size belongs.
+        // stanc3 declares scalar and container temporaries unsized. Scalars
+        // have a fixed width, so retain the historical sized spelling;
+        // container shapes are restored during finalization and supplied by
+        // their first whole-variable assignment during lowering.
         if (t.size() > 1 && t[1].is_atom()) {
           if (t[1].atom == "UReal")
             s.decl_type.base = "SReal";
@@ -1029,6 +1030,8 @@ using Bindings = std::map<std::string, Binding>;
 using Functions = std::map<std::string, const FunDef*>;
 
 UnsizedView declared_view(const SizedType& type) {
+  if (type.unsized.leaf != UnsizedLeaf::Unknown) return type.unsized;
+
   const std::string& base = type.base == "SArray" ? type.elem_base : type.base;
   UnsizedView view;
   if (base == "SInt")
@@ -1188,8 +1191,28 @@ void validate_bindings(const Stmt& s, Bindings& bindings,
             "mir: FnCheck value type disagrees with its declaration");
     }
   }
+  if (strict_variable_metadata && s.kind == Stmt::Assignment &&
+      s.lhs_idx.empty()) {
+    const auto binding = bindings.find(s.lhs);
+    if (binding != bindings.end() &&
+        binding->second.view.leaf != UnsizedLeaf::Unknown &&
+        s.rhs.unsized.leaf != UnsizedLeaf::Unknown &&
+        (binding->second.view.depth != s.rhs.unsized.depth ||
+         binding->second.view.leaf != s.rhs.unsized.leaf))
+      throw std::runtime_error(
+          "mir: assignment type disagrees with its binding for " + s.lhs);
+  }
   if (s.kind == Stmt::Decl) {
-    bindings[s.decl_id] = Binding{declared_view(s.decl_type), s.decl_data_only};
+    const UnsizedView view = declared_view(s.decl_type);
+    if (strict_variable_metadata &&
+        s.decl_type.unsized.leaf != UnsizedLeaf::Unknown && s.has_init &&
+        s.init.unsized.leaf != UnsizedLeaf::Unknown &&
+        (view.depth != s.init.unsized.depth ||
+         view.leaf != s.init.unsized.leaf))
+      throw std::runtime_error(
+          "mir: declaration initializer type disagrees with its binding for " +
+          s.decl_id);
+    bindings[s.decl_id] = Binding{view, s.decl_data_only};
   }
   if (s.kind == Stmt::SList) {
     validate_bindings(s.body, bindings, functions, strict_variable_metadata);
@@ -1304,6 +1327,32 @@ void resolve_calls(Stmt& s, const Overloads& overloads) {
   for (Stmt& k : s.body) resolve_calls(k, overloads);
 }
 
+void restore_unsized_decls(Stmt& s, bool strict) {
+  if (s.kind == Stmt::Decl && s.decl_type.base.empty()) {
+    const std::string& raw = s.decl_type.raw;
+    const bool looks_unsized = raw.compare(0, 8, "(Unsized") == 0;
+    const bool wrapped = raw.size() > 10 &&
+                         raw.compare(0, 9, "(Unsized ") == 0 &&
+                         raw.back() == ')';
+    bool parsed = false;
+    if (wrapped) {
+      const std::string_view spelling(raw.data() + 9, raw.size() - 10);
+      parsed = parse_unsized_spelling(spelling, &s.decl_type.unsized);
+    }
+    if (strict && looks_unsized && !parsed)
+      malformed("unsized declaration type");
+  }
+  for (Stmt& child : s.body) restore_unsized_decls(child, strict);
+}
+
+void restore_unsized_decls(Program& prog, bool strict) {
+  for (auto* body :
+       {&prog.prepare_data, &prog.log_prob, &prog.generate_quantities})
+    for (Stmt& s : *body) restore_unsized_decls(s, strict);
+  for (FunDef& f : prog.fun_defs)
+    for (Stmt& s : f.body) restore_unsized_decls(s, strict);
+}
+
 void resolve_overloads(Program& prog) {
   std::map<std::string, std::vector<FunDef*>> by_name;
   for (FunDef& f : prog.fun_defs) by_name[f.name].push_back(&f);
@@ -1335,6 +1384,7 @@ void detail::validate_portable_program(const Program& prog) {
 }
 
 void detail::finalize_program(Program& prog, bool strict_variable_metadata) {
+  restore_unsized_decls(prog, strict_variable_metadata);
   resolve_overloads(prog);
   Functions functions;
   for (const auto& f : prog.fun_defs) {

@@ -1379,6 +1379,8 @@ struct Lowering {
   int uninitialized_decl_slot(const std::string& name) {
     auto dl = decls.find(name);
     if (dl == decls.end()) return -1;
+    if (dl->second.deferred_shape)
+      fail("unsized local read before its first assignment: " + name);
     SlotInfo si = dl->second.si;
     si.param_free = true;
     Val value{add_slot(dl->second.len, false), dl->second.autodiff, si};
@@ -1429,6 +1431,21 @@ struct Lowering {
         return it->second;
       }
       case mir::Expr::Indexed: {
+        // O1 index composition can leave an empty outer Indexed node around
+        // an already-indexed value. The outer node owns the final result
+        // type: for M[idx, idx] passed to a UDF that reads x[i, j], the inner
+        // single/single access still says UMatrix and this wrapper says UReal.
+        // Collapse the wrapper and lower the composed access with that final
+        // type instead of rejecting the stale intermediate matrix type.
+        if (e.args.size() == 1 && e.args[0].kind == mir::Expr::Indexed) {
+          mir::Expr composed = e.args[0];
+          composed.type_ = e.type_;
+          composed.unsized = e.unsized;
+          composed.data_only = e.data_only;
+          composed.promoted = e.promoted;
+          composed.raw = e.raw;
+          return lower_expr(composed);
+        }
         // All-Single indices with compile-time values -> element read.
         Val base = lower_expr(e.args[0]);
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
@@ -1497,6 +1514,28 @@ struct Lowering {
                                     base.si.param_free);
           return emit_value(OP_GATHER, {base},
                             (int64_t)rows.size() * base.si.cols, si, gather);
+        }
+        // A two-axis matrix gather is the Cartesian selection M[rows, cols],
+        // not a pairwise zip. Preserve both index arrays' order and
+        // duplicates; column-major output means selected columns are outer
+        // and selected rows are inner in the flat gather list.
+        if (e.args.size() == 3 && is_matrix(base.si) &&
+            e.args[1].name == "IndexMulti" && e.args[2].name == "IndexMulti") {
+          const std::vector<int64_t> rows = index_positions(
+              e.args[1], base.si.rows, "matrix row gather", e.raw);
+          const std::vector<int64_t> cols = index_positions(
+              e.args[2], base.si.cols, "matrix column gather", e.raw);
+          std::vector<int> gather;
+          gather.reserve(rows.size() * cols.size());
+          for (int64_t j : cols)
+            for (int64_t i : rows)
+              gather.push_back(checked_immediate(j * base.si.rows + i,
+                                                 "matrix gather offset"));
+          SlotInfo si = matrix_view((int64_t)rows.size(), (int64_t)cols.size(),
+                                    base.si.param_free);
+          return emit_value(OP_GATHER, {base},
+                            (int64_t)rows.size() * (int64_t)cols.size(), si,
+                            gather);
         }
         // A range over the outermost array dimension is contiguous because
         // graph storage keeps each whole outer element together. Preserve
@@ -3246,6 +3285,77 @@ struct Lowering {
     if (auto v = lower_density_fn(e)) return *v;
     if (auto v = lower_bound_transform(e)) return *v;
     if (auto v = lower_eltwise_fn(e)) return *v;
+    if (e.name == "append_array" && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      Val b = lower_expr(e.args[1]);
+      if (!is_array(a.si) || !is_array(b.si))
+        fail("append_array: arguments must be arrays", e.raw);
+      const ArrayShape& ash = array_shape(a.si);
+      const ArrayShape& bsh = array_shape(b.si);
+      if (ash.dims.empty() || bsh.dims.empty() ||
+          ash.dims.size() != bsh.dims.size() || ash.leaf != bsh.leaf)
+        fail("append_array: element shapes must match", e.raw);
+      const int64_t a_outer = ash.dims[0], b_outer = bsh.dims[0];
+      // stan-math checks element geometry only when both sides contain an
+      // element. An empty side contributes no value whose shape could
+      // disagree, and the nonempty side supplies the result's suffix.
+      if (a_outer != 0 && b_outer != 0 &&
+          !std::equal(ash.dims.begin() + 1, ash.dims.end(),
+                      bsh.dims.begin() + 1, bsh.dims.end()))
+        fail("append_array: element shapes must match", e.raw);
+      if (a_outer > std::numeric_limits<int64_t>::max() - b_outer)
+        fail("append_array: outer extent overflows", e.raw);
+      const int64_t alen = g.slots[a.slot].len;
+      const int64_t blen = g.slots[b.slot].len;
+      if (alen > std::numeric_limits<int64_t>::max() - blen)
+        fail("append_array: storage length overflows", e.raw);
+      std::vector<int64_t> dims =
+          a_outer == 0 && b_outer != 0 ? bsh.dims : ash.dims;
+      dims[0] = a_outer + b_outer;
+      const int64_t suffix_count =
+          checked_product(std::vector<int64_t>(dims.begin() + 1, dims.end()),
+                          "append_array element shape");
+      SlotInfo si = array_view(std::move(dims), ash.leaf);
+      Val joined = emit_value(OP_CONCAT2, {a, b}, alen + blen, si);
+
+      // Preserve exact data values for compile-time integer loops and index
+      // expressions. Integer arrays are always data-only in Stan, but this
+      // also keeps real data arrays available to the ordinary const folder.
+      const DataMap::Entry* ao = observation(a);
+      const DataMap::Entry* bo = observation(b);
+      if (ao && bo && ao->is_int == bo->is_int) {
+        DataMap::Entry en;
+        en.is_int = ao->is_int;
+        en.r.reserve((size_t)(alen + blen));
+        // DataMap is first-index-fast, unlike the graph's outer-major array
+        // storage. Concatenation along dimension zero therefore interleaves
+        // the two outer-axis blocks once for every suffix coordinate.
+        const int64_t observation_lanes =
+            a_outer + b_outer == 0 ? 0 : suffix_count;
+        for (int64_t lane = 0; lane < observation_lanes; ++lane) {
+          const auto ab = ao->r.begin() + lane * a_outer;
+          const auto bb = bo->r.begin() + lane * b_outer;
+          en.r.insert(en.r.end(), ab, ab + a_outer);
+          en.r.insert(en.r.end(), bb, bb + b_outer);
+        }
+        if (en.is_int) {
+          en.i.reserve((size_t)(alen + blen));
+          for (int64_t lane = 0; lane < observation_lanes; ++lane) {
+            const auto ab = ao->i.begin() + lane * a_outer;
+            const auto bb = bo->i.begin() + lane * b_outer;
+            en.i.insert(en.i.end(), ab, ab + a_outer);
+            en.i.insert(en.i.end(), bb, bb + b_outer);
+          }
+          set_int_initialized(joined);
+          if (!en.i.empty()) {
+            const auto bounds = std::minmax_element(en.i.begin(), en.i.end());
+            set_int_range(joined, *bounds.first, *bounds.second);
+          }
+        }
+        observe(joined, std::move(en));
+      }
+      return joined;
+    }
     if (auto v = lower_matrix_fn(e)) return *v;
     if (auto v = lower_algebra_fn(e)) return *v;
     if (auto v = lower_ode_fn(e)) return *v;
@@ -4189,6 +4299,14 @@ struct Lowering {
       return emit_value(OP_CHOLESKY, {a}, g.slots[a.slot].len, si,
                         {(int)a.si.rows});
     }
+    if (e.name == "matrix_exp" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail("matrix_exp: needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail("matrix_exp: needs a square matrix", e.raw);
+      return emit_value(OP_MATRIX_EXP, {a}, g.slots[a.slot].len, a.si,
+                        {checked_immediate(a.si.rows, "matrix_exp extent")});
+    }
 
     if ((e.name == "eigenvalues_sym" || e.name == "eigenvectors_sym") &&
         e.args.size() == 1) {
@@ -4216,6 +4334,41 @@ struct Lowering {
           emit_value(OP_GEMM, {d, m}, n * n, si, {(int)n, (int)n, (int)n});
       return emit_value(OP_GEMM, {left, d}, n * n, si,
                         {(int)n, (int)n, (int)n});
+    }
+
+    if (e.name == "quad_form_sym" && e.args.size() == 2) {
+      // 0.5 * (C + C') with C = B' A B, and the plain scalar B' A B when B
+      // is a vector. This stays one op rather than a transpose and two
+      // GEMMs because stan-math's own association is part of the answer:
+      // the kernel makes the same calls CmdStan does, including the
+      // symmetry check on A, which throws when A is only nearly symmetric.
+      Val a = lower_expr(e.args[0]);
+      Val b = lower_expr(e.args[1]);
+      if (!is_matrix(a.si)) fail("quad_form_sym: needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail("quad_form_sym: needs a square matrix", e.raw);
+      const bool b_matrix = is_matrix(b.si);
+      if (!b_matrix && !is_vector(b.si))
+        fail("quad_form_sym: second argument is not a matrix or vector", e.raw);
+      const int64_t n = a.si.rows;
+      const int64_t rb = b_matrix ? b.si.rows : g.slots[b.slot].len;
+      const int64_t m = b_matrix ? b.si.cols : 1;
+      if (rb != n)
+        fail("quad_form_sym: inner dimension mismatch (" + std::to_string(n) +
+                 "x" + std::to_string(n) + " against " + std::to_string(rb) +
+                 ")",
+             e.raw);
+      const SlotInfo si = b_matrix ? matrix_view(m, m) : SlotInfo{};
+      Val v = emit_value(OP_QUAD_FORM_SYM, {a, b}, m * m, si,
+                         {checked_immediate(n, "quad_form_sym extent"),
+                          checked_immediate(m, "quad_form_sym extent")});
+      // Bit 0 is the operand shape. Bit 1 says CmdStan would have typed
+      // this expression `var`, which for a vector B picks stan-math's other
+      // association of the same product -- the same distinction the matrix
+      // solves make, and for the same reason.
+      g.ops.back().variant =
+          (uint8_t)((b_matrix ? 0u : 1u) | (v.autodiff ? 2u : 0u));
+      return v;
     }
 
     if ((e.name == "append_row" || e.name == "append_col") &&
@@ -4870,6 +5023,7 @@ struct Lowering {
     bool autodiff = false;
     SlotInfo si;
     bool int_array = false;
+    bool deferred_shape = false;
   };
   // The only name-keyed declaration protocol. Runtime values carry the same
   // static scalar type and SlotInfo in `scope`; this registry is needed only
@@ -4913,6 +5067,30 @@ struct Lowering {
           // a shape query on a slot-bound value (rows(lscale) inside an
           // inlined function), which only eval_int can answer.
           if (s.has_init) int_env[s.decl_id] = eval_int(s.init);
+        } else if (s.decl_type.base.empty() &&
+                   s.decl_type.unsized.leaf != mir::UnsizedLeaf::Unknown) {
+          // O1 introduces unsized container temporaries for expressions such
+          // as a for-loop sequence built with append_array. C++ assignment
+          // gives these locals the RHS shape, so delay allocating or checking
+          // their view until the first whole-variable assignment does likewise.
+          scope.erase(s.decl_id);
+          DeclView sh;
+          sh.autodiff = s.decl_type.unsized.leaf != mir::UnsizedLeaf::Int &&
+                        !s.decl_data_only && scalar_autodiff();
+          sh.int_array = s.decl_type.unsized.leaf == mir::UnsizedLeaf::Int;
+          sh.deferred_shape = true;
+          if (s.has_init) {
+            Val v = lower_expr(s.init);
+            sh.len = g.slots[v.slot].len;
+            sh.si = v.si;
+            sh.deferred_shape = false;
+            v.autodiff = sh.autodiff;
+            scope[s.decl_id] = v;
+            sync_data_local(s.decl_id, s.init, v);
+          } else {
+            td.env().erase(s.decl_id);
+          }
+          decls[s.decl_id] = sh;
         } else {
           // A redeclaration shadows whatever the name held: --O1 inlining
           // reuses one symbol for a callee's local across loop iterations,
@@ -5202,7 +5380,11 @@ struct Lowering {
           } else {
             auto dl = decls.find(s.lhs);
             if (dl != decls.end()) {
-              if (dl->second.len == 0 && g.slots[rhs.slot].len != 0) {
+              if (dl->second.deferred_shape) {
+                dl->second.len = g.slots[rhs.slot].len;
+                dl->second.si = rhs.si;
+                dl->second.deferred_shape = false;
+              } else if (dl->second.len == 0 && g.slots[rhs.slot].len != 0) {
                 // stanc3's --O1 inliner declares a function's return
                 // variable zero-length (`array[real, 0]`, `vector[0]`)
                 // because the returned size is the callee's business, and

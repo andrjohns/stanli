@@ -198,6 +198,9 @@ struct SizedType {
   std::vector<Expr> dims;  // outer-to-inner for SArray chains
   std::string elem_base;   // for SArray: the innermost element base
   std::string raw;         // Unsupported diagnostics
+  // stanc also uses unsized declarations for optimizer temporaries. Their
+  // shape is supplied by the first whole-variable assignment.
+  UnsizedView unsized;
 };
 
 struct Stmt {
