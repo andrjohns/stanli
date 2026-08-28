@@ -5189,6 +5189,32 @@ int main() {
                 want[i]);
   }
 
+  // matrix_exp retains the square matrix view and differentiates every output
+  // element through the full, nonsymmetric matrix exponential.
+  {
+    DataMap d;
+    CompiledModel mm =
+        compile_model(slurp("tests/fixtures/matrix_exp.tmir.sexp"), d);
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    const double q[4] = {0.2, -0.4, 0.7, -0.1};
+    for (int i = 0; i < 4; ++i) mex.params_data()[i] = q[i];
+    double gradient[4] = {};
+    const double lp = mex.gradient(gradient);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> a(2, 2);
+    for (int i = 0; i < 4; ++i) a.data()[i] = q[i];
+    Eigen::Matrix<var, -1, -1> e = stan::math::matrix_exp(a);
+    var reference = e(0, 0) - 0.7 * e(1, 0) + 1.3 * e(0, 1) + 0.4 * e(1, 1);
+    reference.grad();
+    expect_eq("matrix exp lp", lp, reference.val());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("matrix exp gradient " + std::to_string(i), gradient[i],
+                a.data()[i].adj());
+    stan::math::recover_memory();
+  }
+
   if (failures == 0) std::printf("test_lower OK\n");
   return failures == 0 ? 0 : 1;
 }

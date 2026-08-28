@@ -4272,6 +4272,14 @@ struct Lowering {
       return emit_value(OP_CHOLESKY, {a}, g.slots[a.slot].len, si,
                         {(int)a.si.rows});
     }
+    if (e.name == "matrix_exp" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail("matrix_exp: needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail("matrix_exp: needs a square matrix", e.raw);
+      return emit_value(OP_MATRIX_EXP, {a}, g.slots[a.slot].len, a.si,
+                        {checked_immediate(a.si.rows, "matrix_exp extent")});
+    }
 
     if ((e.name == "eigenvalues_sym" || e.name == "eigenvectors_sym") &&
         e.args.size() == 1) {

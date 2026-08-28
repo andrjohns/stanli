@@ -131,6 +131,20 @@ void chol_bwd(KernelCtx& ctx) {
              [](const auto& a) { return stan::math::cholesky_decompose(a); });
 }
 
+// ---- matrix_exp(A) ---------------------------------------------------------
+void matrix_exp_fwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  MapM(ctx.out.data, n, n) =
+      stan::math::matrix_exp(CMapM(ctx.in[0].data, n, n));
+}
+void matrix_exp_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  nary_bwd(ctx, [n](std::vector<VarV>& xs) {
+    Eigen::Map<VarM> a(xs[0].data(), n, n);
+    return stan::math::matrix_exp(a);
+  });
+}
+
 // Bind a slot as a var matrix or vector, and scatter the adjoints back
 // afterwards. Shared by the multivariate densities below and by the tail
 // densities further down.
@@ -1165,6 +1179,8 @@ void register_matrix_kernels() {
       Kernel{olglm_fwd, tail_density_bwd<3>, tail_density_scratch<3>});
   register_kernel(OP_DIAG_MATRIX, Kernel{diag_fwd, diag_bwd, nullptr});
   register_kernel(OP_CHOLESKY, Kernel{chol_fwd, chol_bwd, nullptr});
+  register_kernel(OP_MATRIX_EXP,
+                  Kernel{matrix_exp_fwd, matrix_exp_bwd, nullptr});
   register_kernel(OP_MULTI_NORMAL_CHOL_LPDF,
                   Kernel{mnc_fwd, mnc_bwd, mnc_scratch});
   register_kernel(OP_MULTI_NORMAL_LPDF,
