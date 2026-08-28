@@ -2547,6 +2547,199 @@ int main() {
     expect_eq("parameter-condition rep_vector empty grad", grad, 0.0);
   }
 
+  // log1p_exp in a region, on its own opcode. Both the value and the
+  // derivative are the expressions stan-math uses, which is what keeps
+  // the region's backward, the var replay and the graph's OP_LOG1P_EXP
+  // agreeing to the bit -- so the expectations here are those same calls
+  // rather than decimals.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_log1pexp.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    double grad = 0.0;
+    ex.params_data()[0] = 0.5;
+    expect_eq("parameter-condition log1p_exp lp", ex.gradient(&grad),
+              stan::math::log1p_exp(1.0));
+    expect_eq("parameter-condition log1p_exp grad", grad,
+              2.0 * stan::math::inv_logit(1.0));
+    ex.params_data()[0] = -0.5;
+    expect_eq("parameter-condition log1p_exp else lp", ex.gradient(&grad),
+              stan::math::log1p_exp(-0.5));
+    expect_eq("parameter-condition log1p_exp else grad", grad,
+              stan::math::inv_logit(-0.5));
+  }
+
+  // A matrix row in a region. Two facts to pin: which elements the row is
+  // -- three apart, in column-major storage -- and the order the sum
+  // accumulates them, which has to be the ascending one stan-math uses on
+  // a strided block. The expectation is built in that order rather than
+  // written as a decimal.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_matrixrow.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const int64_t n = ex.n_params();
+    check(n == 13, "parameter-condition matrix row parameter count");
+    for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = 0.1 * (double)(i + 1);
+    ex.params_data()[12] = 0.5;
+    std::vector<double> grad((size_t)n);
+    double want = stan::math::square(ex.params_data()[1]);
+    for (int j = 1; j < 4; ++j)
+      want += stan::math::square(ex.params_data()[1 + 3 * j]);
+    expect_eq("parameter-condition matrix row lp", ex.gradient(grad.data()),
+              want);
+    for (int64_t i = 0; i < 12; ++i)
+      expect_eq("parameter-condition matrix row grad " + std::to_string(i),
+                grad[(size_t)i], i % 3 == 1 ? 2.0 * ex.params_data()[i] : 0.0);
+    expect_eq("parameter-condition matrix row theta grad", grad[12], 0.0);
+    // The other arm never reads the row.
+    ex.params_data()[12] = -0.5;
+    expect_eq("parameter-condition matrix row else lp",
+              ex.gradient(grad.data()), -0.5);
+    for (int64_t i = 0; i < 12; ++i)
+      expect_eq("parameter-condition matrix row else grad " + std::to_string(i),
+                grad[(size_t)i], 0.0);
+  }
+
+  // Diagonal pre/post multiplication in a runtime region must replay the
+  // stan-math operations themselves. Their callbacks reduce all coefficients
+  // for one vector element at once; scalarizing the products changes both the
+  // accumulation order and when a prior adjoint is added.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_diag_multiply.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    constexpr int kDim = 4;
+    constexpr int kMatrix = kDim * kDim;
+    constexpr int kLeft = kMatrix;
+    constexpr int kRight = kLeft + kDim;
+    constexpr int kTheta = kRight + kDim;
+    constexpr int kParams = kTheta + 1;
+    check(ex.n_params() == kParams,
+          "parameter-condition diagonal multiply parameter count");
+    std::vector<double> grad(kParams);
+    auto check_math = [&](const std::string& tag,
+                          const std::vector<double>& values) {
+      check(values.size() == kParams, tag + " input size");
+      for (int i = 0; i < kParams; ++i) ex.params_data()[i] = values[(size_t)i];
+      const double lp = ex.gradient(grad.data());
+
+      using stan::math::var;
+      Eigen::Matrix<var, Eigen::Dynamic, Eigen::Dynamic> m(kDim, kDim);
+      Eigen::Matrix<var, Eigen::Dynamic, 1> left(kDim), right(kDim);
+      for (int j = 0; j < kDim; ++j)
+        for (int i = 0; i < kDim; ++i) m(i, j) = values[(size_t)(kDim * j + i)];
+      for (int i = 0; i < kDim; ++i) {
+        left(i) = values[(size_t)(kLeft + i)];
+        right(i) = values[(size_t)(kRight + i)];
+      }
+      var ref_lp = stan::math::sum(stan::math::diag_pre_multiply(left, m)) +
+                   stan::math::sum(stan::math::diag_post_multiply(m, right));
+      if (values[kTheta] > 1.0) ref_lp += left(0) + right(0);
+      ref_lp.grad();
+      expect_ulp(tag + " lp", lp, ref_lp.val());
+      for (int j = 0; j < kDim; ++j)
+        for (int i = 0; i < kDim; ++i)
+          expect_eq(tag + " matrix grad " + std::to_string(kDim * j + i),
+                    grad[(size_t)(kDim * j + i)], m(i, j).adj());
+      for (int i = 0; i < kDim; ++i) {
+        expect_eq(tag + " pre vector grad " + std::to_string(i),
+                  grad[(size_t)(kLeft + i)], left(i).adj());
+        expect_eq(tag + " post vector grad " + std::to_string(i),
+                  grad[(size_t)(kRight + i)], right(i).adj());
+      }
+      expect_eq(tag + " theta grad", grad[kTheta], 0.0);
+      stan::math::recover_memory();
+    };
+
+    check_math(
+        "parameter-condition diagonal multiply regular",
+        {0.2, 0.5, -0.3, 0.7, 1.1,  -0.4, 1.3, -0.8, 0.6, 1.5, -0.2, 0.4, -0.6,
+         0.9, 1.2, -0.5, 0.4, -1.1, 0.8,  1.3, -0.7, 0.3, 1.1, -0.2, 0.4});
+
+    // With no prior adjoint, the rowwise callback keeps the trailing unit;
+    // reversing four independent product callbacks loses it.
+    std::vector<double> pre_cancel(kParams, 0.0);
+    pre_cancel[0] = 1e16;
+    pre_cancel[4] = -1e16;
+    pre_cancel[8] = 1.0;
+    pre_cancel[kTheta] = 0.4;
+    check_math("parameter-condition diagonal pre cancellation", pre_cancel);
+
+    // The row and column both reduce to zero. With theta > 1, stan-math adds
+    // each grouped reduction once to the direct vector term's prior adjoint;
+    // independent scalar callbacks instead lose that prior unit.
+    std::vector<double> prior_cancel(kParams, 0.0);
+    prior_cancel[0] = 1e16;
+    prior_cancel[1] = -1e16;
+    prior_cancel[4] = -1e16;
+    prior_cancel[kTheta] = 2.0;
+    check_math("parameter-condition diagonal prior cancellation", prior_cancel);
+
+    // A contiguous four-row column takes Eigen's packet reduction path.
+    // This input also distinguishes that grouping from either scalar fold.
+    std::vector<double> post_cancel(kParams, 0.0);
+    post_cancel[0] = 0x1.0000000000001p+0;
+    post_cancel[1] = 0x1p+53;
+    post_cancel[2] = -0x1p+53;
+    post_cancel[3] = 0x1p-53;
+    post_cancel[kTheta] = 0.4;
+    check_math("parameter-condition diagonal post packet cancellation",
+               post_cancel);
+
+    ex.params_data()[kTheta] = -0.4;
+    expect_eq("parameter-condition diagonal multiply else lp",
+              ex.gradient(grad.data()), -0.4);
+    for (int i = 0; i < kTheta; ++i)
+      expect_eq("parameter-condition diagonal multiply else grad " +
+                    std::to_string(i),
+                grad[(size_t)i], 0.0);
+    expect_eq("parameter-condition diagonal multiply else theta grad",
+              grad[kTheta], 1.0);
+  }
+
+  // diagonal, which no path supported before: the region copies the
+  // elements rows + 1 apart, the graph spells the same extraction as a
+  // strided slice, and this model uses both -- the region for the sum of
+  // squares, the graph for the single element added afterwards. The
+  // expectation accumulates in the order the region emits.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/paramcond_diagonal.tmir.sexp"), DataMap());
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const int64_t n = ex.n_params();
+    check(n == 13, "parameter-condition diagonal parameter count");
+    for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = 0.1 * (double)(i + 1);
+    ex.params_data()[12] = 0.5;
+    std::vector<double> grad((size_t)n);
+    // A 3x4 matrix's diagonal is three long and steps four registers.
+    double want = stan::math::square(ex.params_data()[0]);
+    want += stan::math::square(ex.params_data()[4]);
+    want += stan::math::square(ex.params_data()[8]);
+    want += ex.params_data()[8];
+    expect_eq("parameter-condition diagonal lp", ex.gradient(grad.data()),
+              want);
+    for (int64_t i = 0; i < 12; ++i) {
+      const bool on_diagonal = i % 4 == 0;
+      const double from_square = on_diagonal ? 2.0 * ex.params_data()[i] : 0.0;
+      expect_eq("parameter-condition diagonal grad " + std::to_string(i),
+                grad[(size_t)i], i == 8 ? from_square + 1.0 : from_square);
+    }
+    expect_eq("parameter-condition diagonal theta grad", grad[12], 0.0);
+    // The other arm keeps the graph's element and drops the region's sum.
+    ex.params_data()[12] = -0.5;
+    expect_eq("parameter-condition diagonal else lp", ex.gradient(grad.data()),
+              -0.5 + ex.params_data()[8]);
+    for (int64_t i = 0; i < 12; ++i)
+      expect_eq("parameter-condition diagonal else grad " + std::to_string(i),
+                grad[(size_t)i], i == 8 ? 1.0 : 0.0);
+    expect_eq("parameter-condition diagonal else theta grad", grad[12], 1.0);
+  }
+
   // A runtime-selected break targets the surrounding loop, so the loop and
   // conditional must share one necessity island. The positive arm exits
   // before the increment; the negative arm executes all three iterations.
@@ -3841,10 +4034,12 @@ int main() {
 
   // Matrix functions used in transformed data run through MirInterp rather
   // than the graph kernels. diag_matrix must preserve column-major layout and
-  // zero every off-diagonal entry on that path too.
+  // zero every off-diagonal entry on that path too; diagonal must extract a
+  // rectangular matrix with the rows+1 column-major stride.
   {
     DataMap d;
     d.set_real_array("diagonal", {1.0, 2.0, 3.0}, {3});
+    d.set_real_array("rectangular", {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, {3, 2});
     CompiledModel dm =
         compile_model(slurp("tests/fixtures/diagtd.tmir.sexp"), d);
     Executor dex(std::move(dm.graph));
@@ -3855,11 +4050,10 @@ int main() {
 
     using stan::math::var;
     var theta = 0.4;
-    var reference_lp = stan::math::normal_lpdf<true>(theta, 2.0, 1.0);
+    var reference_lp = stan::math::normal_lpdf<true>(theta, 7.0, 1.0);
     reference_lp.grad();
-    expect_eq("transformed-data diag_matrix: lp", lp, reference_lp.val());
-    expect_eq("transformed-data diag_matrix: gradient", gradient[0],
-              theta.adj());
+    expect_eq("transformed-data diagonal: lp", lp, reference_lp.val());
+    expect_eq("transformed-data diagonal: gradient", gradient[0], theta.adj());
   }
 
   // tcrossprod(A) is A * A'. It reuses the transpose and GEMM graph ops, so

@@ -1006,6 +1006,56 @@ int main(int argc, char** argv) {
             name + " counts elements of either vector kind");
   }
 
+  // diagonal() is an interpreter primitive as well as a graph slice.  Pin
+  // both rectangular orientations because they choose different sides of
+  // min(rows, cols), while storage always advances by rows+1.
+  {
+    std::map<std::string, const mir::FunDef*> functions;
+    MirInterp<double> interp(functions, "diagonal test");
+    auto set_real = [&](const std::string& name, std::vector<double> values,
+                        std::vector<int64_t> dims) {
+      DataMap::Entry value;
+      value.r = std::move(values);
+      value.dims = std::move(dims);
+      interp.env()[name] = std::move(value);
+    };
+    set_real("tall", {1, 2, 3, 4, 5, 6}, {3, 2});
+    set_real("wide", {1, 2, 3, 4, 5, 6}, {2, 3});
+    set_real("empty", {}, {0, 3});
+    set_real("vector", {1, 2}, {2});
+    auto call = [&](const std::string& name) {
+      mir::Expr argument;
+      argument.kind = mir::Expr::Var;
+      argument.name = name;
+      argument.type_ = name == "vector" ? "UVector" : "UMatrix";
+      argument.data_only = true;
+      mir::Expr expression;
+      expression.kind = mir::Expr::FunApp;
+      expression.name = "diagonal";
+      expression.type_ = "UVector";
+      expression.data_only = true;
+      expression.args = {argument};
+      return interp.eval(expression);
+    };
+    const DataMap::Entry tall = call("tall"), wide = call("wide"),
+                         empty = call("empty");
+    check(tall.dims == std::vector<int64_t>({2}) &&
+              tall.r == std::vector<double>({1, 5}),
+          "diagonal extracts tall rectangular matrix");
+    check(wide.dims == std::vector<int64_t>({2}) &&
+              wide.r == std::vector<double>({1, 4}),
+          "diagonal extracts wide rectangular matrix");
+    check(empty.dims == std::vector<int64_t>({0}) && empty.r.empty(),
+          "diagonal preserves empty vector shape");
+    bool refused_vector = false;
+    try {
+      (void)call("vector");
+    } catch (const std::exception&) {
+      refused_vector = true;
+    }
+    check(refused_vector, "diagonal rejects a non-matrix argument");
+  }
+
   if (failures == 0) std::printf("test_mir OK\n");
   return failures == 0 ? 0 : 1;
 }

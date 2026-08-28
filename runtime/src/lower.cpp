@@ -4274,6 +4274,16 @@ struct Lowering {
       return emit_value(OP_SLICE, {a}, a.si.rows, view_of(e.type_),
                         {(int)((j - 1) * a.si.rows)});
     }
+    if (e.name == "diagonal" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail("diagonal on a slot without matrix shape");
+      // Eigen's diagonal steps one row and one column at a time, which in
+      // column-major storage is rows + 1 apart, and stops at the shorter
+      // side.
+      const int64_t n = std::min(a.si.rows, a.si.cols);
+      return emit_value(OP_SLICE_STRIDED, {a}, n, view_of(e.type_),
+                        {0, (int)(a.si.rows + 1)});
+    }
     if (e.name == "row" && e.args.size() == 2) {
       Val a = lower_expr(e.args[0]);
       if (!is_matrix(a.si)) fail("row on a slot without matrix shape");

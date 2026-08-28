@@ -477,6 +477,13 @@ struct ProgramCompiler {
       case mir::Expr::Indexed: {
         const Range b = expr(e.args[0]);
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return b;
+        // A matrix row, `m[i]` or `m[i, ]`. Ahead of the all-single check
+        // below, which the explicit `IndexAll` would not pass.
+        if (b.kind == ViewKind::Matrix && e.args.size() >= 2 &&
+            e.args[1].name == "IndexSingle" &&
+            (e.args.size() == 2 ||
+             (e.args.size() == 3 && e.args[2].name == "IndexAll")))
+          return matrix_row(b, cint(e.args[1].args[0]));
         for (size_t k = 1; k < e.args.size(); ++k)
           if (e.args[k].name != "IndexSingle") bail("index form");
 
@@ -488,10 +495,9 @@ struct ProgramCompiler {
               bail("matrix index out of the declared range");
             return {b.reg + (int)((j - 1) * b.rows + i - 1), 1};
           }
-          // A direct matrix row is a strided Eigen view in generated C++.
-          // Materializing it here can change packet grouping in a following
-          // reduction, so this first runtime-control tranche accepts only
-          // explicit scalar matrix elements.
+          // A column, `m[, j]`, is a contiguous run this could return as a
+          // view; nothing reaches it yet, so it stays refused rather than
+          // untested.
           bail("matrix index form");
         }
 
@@ -611,6 +617,37 @@ struct ProgramCompiler {
     return out;
   }
 
+  // One row of a matrix, copied into a run of its own. Column-major
+  // storage puts a row's elements `rows` apart, and a strided Eigen block
+  // has no packet access -- so stan-math reduces such a row in ascending
+  // scalar order, which is the order every reduction this compiler emits
+  // walks a run in. That is what makes the copy safe rather than merely
+  // convenient: `sum` accumulates ascending, `max` compares, and the rest
+  // are elementwise. A reduction with its own grouping (DOT, SOFTMAX,
+  // LSE_RANGE) is not one this compiler emits, and adding one would have
+  // to answer this question again.
+  Range matrix_row(const Range& m, long i) {
+    if (i < 1 || i > m.rows) bail("matrix index out of the declared range");
+    const int r = alloc((int)m.cols);
+    for (int64_t j = 0; j < m.cols; ++j)
+      emit(Program::MOV, r + (int)j, m.reg + (int)(j * m.rows + (i - 1)));
+    Range out{r, (int)m.cols};
+    out.kind = ViewKind::RowVector;
+    return out;
+  }
+
+  // The diagonal, on the same terms as a row: column-major storage puts
+  // its elements rows + 1 apart, and Eigen's stops at the shorter side.
+  Range matrix_diagonal(const Range& m) {
+    const int64_t n = m.rows < m.cols ? m.rows : m.cols;
+    const int r = alloc((int)n);
+    for (int64_t k = 0; k < n; ++k)
+      emit(Program::MOV, r + (int)k, m.reg + (int)(k * (m.rows + 1)));
+    Range out{r, (int)n};
+    out.kind = ViewKind::Vector;
+    return out;
+  }
+
   Range fun(const mir::Expr& e) {
     // A shape query is a constant whatever surrounds it. Ahead of every
     // other case because `FnLength` is an internal function and the rest
@@ -669,6 +706,12 @@ struct ProgramCompiler {
     }
     if (e.args.empty() && e.name == "negative_infinity")
       return {konst(-std::numeric_limits<double>::infinity()), 1};
+    if (e.args.size() == 1 && e.name == "diagonal") {
+      const Range a = expr(e.args[0]);
+      if (a.kind != ViewKind::Matrix)
+        bail("diagonal requires a matrix logical view");
+      return matrix_diagonal(a);
+    }
     if (e.args.size() == 2 && e.name == "rep_vector") {
       // The register file is a flat run of doubles, so a vector of one
       // repeated value is a run the compiler fills -- the same fill a
@@ -779,6 +822,32 @@ struct ProgramCompiler {
       Range out = shaped;
       out.reg = r;
       out.len = n;
+      return typed(out, e.type_);
+    }
+    if ((e.name == "diag_pre_multiply" || e.name == "diag_post_multiply") &&
+        e.args.size() == 2) {
+      // One instruction preserves stan-math's diagonal-product callback as a
+      // unit. Scalar MULs would accumulate the repeated vector's adjoint in
+      // tape order instead of the callback's rowwise/colwise reduction order.
+      const bool pre = e.name == "diag_pre_multiply";
+      const Range v = expr(e.args[pre ? 0 : 1]);
+      const Range m = expr(e.args[pre ? 1 : 0]);
+      if (m.kind != ViewKind::Matrix)
+        bail(e.name + " requires a matrix argument");
+      if (v.kind != ViewKind::Vector && v.kind != ViewKind::RowVector)
+        bail(e.name + " requires a vector argument");
+      const int64_t expected = pre ? m.rows : m.cols;
+      if (v.len != expected)
+        bail(e.name + " vector length does not match the matrix");
+      const int r = alloc(m.len);
+      // A zero-size multiplication has no values or adjoints. In particular,
+      // do not narrow an arbitrarily large empty dimension into Instr.
+      if (m.len != 0)
+        p.code.push_back(Program::Instr{
+            pre ? Program::DIAG_PRE_MULTIPLY : Program::DIAG_POST_MULTIPLY, r,
+            v.reg, m.reg, (int32_t)m.rows, (int32_t)m.cols});
+      Range out = m;
+      out.reg = r;
       return typed(out, e.type_);
     }
     if (e.args.size() == 2) {
@@ -897,6 +966,8 @@ struct ProgramCompiler {
         c = Program::FABS;
       else if (e.name == "inv_logit")
         c = Program::INV_LOGIT;
+      else if (e.name == "log1p_exp")
+        c = Program::LOG1P_EXP;
       else
         bail("function " + e.name);
       const int r = alloc(a.len);
