@@ -5168,19 +5168,25 @@ int main() {
     }
   }
 
-  // O1 materializes an array-valued loop sequence through an unsized integer
-  // array temporary. Its first assignment supplies the three-element shape
-  // used by both FnLength and subsequent indexing.
+  // append_array concatenates scalar-element and container-element arrays in
+  // outer-array order. O1 also materializes the loop sequence through an
+  // unsized integer-array temporary whose first assignment supplies its shape.
   {
     DataMap d;
+    d.set_int_array("selected", {2, 4});
     CompiledModel am =
         compile_model(slurp("tests/fixtures/unsized_append_loop.tmir.sexp"), d);
     Executor aex(std::move(am.graph));
     am.bind(aex);
-    aex.params_data()[0] = 0.5;
-    double gradient = 0.0;
-    expect_eq("unsized append loop lp", aex.gradient(&gradient), 4.5);
-    expect_eq("unsized append loop gradient", gradient, 9.0);
+    const double q[6] = {0.5, -0.7, 0.2, 1.1, -0.4, 0.8};
+    for (int i = 0; i < 6; ++i) aex.params_data()[i] = q[i];
+    double gradient[6] = {};
+    expect_eq("append array lp", aex.gradient(gradient),
+              10.0 * q[0] + 2.0 * q[3] + 3.0 * q[4]);
+    const double want[6] = {10.0, 0.0, 0.0, 2.0, 3.0, 0.0};
+    for (int i = 0; i < 6; ++i)
+      expect_eq("append array gradient " + std::to_string(i), gradient[i],
+                want[i]);
   }
 
   if (failures == 0) std::printf("test_lower OK\n");

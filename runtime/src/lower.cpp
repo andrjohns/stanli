@@ -3283,6 +3283,52 @@ struct Lowering {
     if (auto v = lower_density_fn(e)) return *v;
     if (auto v = lower_bound_transform(e)) return *v;
     if (auto v = lower_eltwise_fn(e)) return *v;
+    if (e.name == "append_array" && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      Val b = lower_expr(e.args[1]);
+      if (!is_array(a.si) || !is_array(b.si))
+        fail("append_array: arguments must be arrays", e.raw);
+      const ArrayShape& ash = array_shape(a.si);
+      const ArrayShape& bsh = array_shape(b.si);
+      if (ash.dims.empty() || bsh.dims.empty() ||
+          ash.dims.size() != bsh.dims.size() || ash.leaf != bsh.leaf ||
+          !std::equal(ash.dims.begin() + 1, ash.dims.end(),
+                      bsh.dims.begin() + 1, bsh.dims.end()))
+        fail("append_array: element shapes must match", e.raw);
+      if (ash.dims[0] > std::numeric_limits<int64_t>::max() - bsh.dims[0])
+        fail("append_array: outer extent overflows", e.raw);
+      const int64_t alen = g.slots[a.slot].len;
+      const int64_t blen = g.slots[b.slot].len;
+      if (alen > std::numeric_limits<int64_t>::max() - blen)
+        fail("append_array: storage length overflows", e.raw);
+      std::vector<int64_t> dims = ash.dims;
+      dims[0] += bsh.dims[0];
+      SlotInfo si = array_view(std::move(dims), ash.leaf);
+      Val joined = emit_value(OP_CONCAT2, {a, b}, alen + blen, si);
+
+      // Preserve exact data values for compile-time integer loops and index
+      // expressions. Integer arrays are always data-only in Stan, but this
+      // also keeps real data arrays available to the ordinary const folder.
+      const DataMap::Entry* ao = observation(a);
+      const DataMap::Entry* bo = observation(b);
+      if (ao && bo && ao->is_int == bo->is_int) {
+        DataMap::Entry en;
+        en.is_int = ao->is_int;
+        en.r = ao->r;
+        en.r.insert(en.r.end(), bo->r.begin(), bo->r.end());
+        if (en.is_int) {
+          en.i = ao->i;
+          en.i.insert(en.i.end(), bo->i.begin(), bo->i.end());
+          set_int_initialized(joined);
+          if (!en.i.empty()) {
+            const auto bounds = std::minmax_element(en.i.begin(), en.i.end());
+            set_int_range(joined, *bounds.first, *bounds.second);
+          }
+        }
+        observe(joined, std::move(en));
+      }
+      return joined;
+    }
     if (auto v = lower_matrix_fn(e)) return *v;
     if (auto v = lower_algebra_fn(e)) return *v;
     if (auto v = lower_ode_fn(e)) return *v;
