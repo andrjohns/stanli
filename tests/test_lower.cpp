@@ -5215,6 +5215,58 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // quad_form_sym at both overloads and both scalar types: a matrix B gives
+  // 0.5 * (C + C'), a vector B the scalar B' A B, and stan-math associates
+  // that scalar one way at double and the other at var. `a + a'` is exactly
+  // symmetric, so the symmetry check passes.
+  {
+    DataMap d;
+    const std::vector<double> dm = {1.5, 0.3,  -0.2, 0.3, 2.0,
+                                    0.7, -0.2, 0.7,  1.1};
+    const std::vector<double> dvv = {0.6, -1.2, 0.4};
+    d.set_real_array("d", dm);
+    d.set_real_array("dv", dvv);
+    CompiledModel mm =
+        compile_model(slurp("tests/fixtures/quad_form_sym.tmir.sexp"), d);
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    const double q[18] = {0.2, -0.4, 0.7, -0.1, 0.9,  0.3, -0.6, 0.5,  0.8,
+                          1.1, -0.3, 0.2, 0.4,  -0.9, 0.6, 0.7,  -0.5, 0.15};
+    for (int i = 0; i < 18; ++i) mex.params_data()[i] = q[i];
+    double gradient[18] = {};
+    const double lp = mex.gradient(gradient);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> a(3, 3), b(3, 2);
+    Eigen::Matrix<var, -1, 1> v(3);
+    for (int i = 0; i < 9; ++i) a.data()[i] = q[i];
+    for (int i = 0; i < 6; ++i) b.data()[i] = q[9 + i];
+    for (int i = 0; i < 3; ++i) v.data()[i] = q[15 + i];
+    Eigen::MatrixXd dmat(3, 3);
+    Eigen::VectorXd dvec(3);
+    for (int i = 0; i < 9; ++i) dmat.data()[i] = dm[(size_t)i];
+    for (int i = 0; i < 3; ++i) dvec.data()[i] = dvv[(size_t)i];
+
+    const Eigen::Matrix<var, -1, -1> sym = a + a.transpose();
+    const Eigen::Matrix<var, -1, -1> qm = stan::math::quad_form_sym(sym, b);
+    var reference = qm(0, 0) - 0.7 * qm(1, 0) + 1.3 * qm(0, 1) + 0.4 * qm(1, 1);
+    reference += 0.9 * stan::math::quad_form_sym(sym, v);
+    reference += 1.7 * stan::math::quad_form_sym(dmat, dvec);
+    reference += 0.3 * stan::math::quad_form_sym(dmat, v);
+    reference.grad();
+    expect_eq("quad form sym lp", lp, reference.val());
+    for (int i = 0; i < 9; ++i)
+      expect_eq("quad form sym da " + std::to_string(i), gradient[i],
+                a.data()[i].adj());
+    for (int i = 0; i < 6; ++i)
+      expect_eq("quad form sym db " + std::to_string(i), gradient[9 + i],
+                b.data()[i].adj());
+    for (int i = 0; i < 3; ++i)
+      expect_eq("quad form sym dv " + std::to_string(i), gradient[15 + i],
+                v.data()[i].adj());
+    stan::math::recover_memory();
+  }
+
   if (failures == 0) std::printf("test_lower OK\n");
   return failures == 0 ? 0 : 1;
 }

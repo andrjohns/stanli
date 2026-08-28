@@ -147,6 +147,7 @@ void validate_funapp_arity(const Expr& e) {
                 "diag_pre_multiply",
                 "diag_post_multiply",
                 "quad_form_diag",
+                "quad_form_sym",
                 "append_row",
                 "append_col",
                 "rep_vector",

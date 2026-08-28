@@ -145,6 +145,55 @@ void matrix_exp_bwd(KernelCtx& ctx) {
   });
 }
 
+// ---- quad_form_sym(A, B) --------------------------------------------------
+// in = {A (n x n), B (n x m)}; idata = {n, m}. The output is the m x m
+// matrix 0.5 * (C + C') with C = B' A B, or the single scalar B' A B when B
+// is a vector -- there C is 1 x 1, where the symmetrisation is exact and so
+// does nothing. stan-math checks A for symmetry and throws what CmdStan
+// would when it is not.
+//
+// Variant bit 0 says the second operand is a vector; bit 1 says CmdStan
+// would have typed this expression `var`. Only the vector overload needs
+// that second bit, because stan-math associates it two ways: prim computes
+// B.dot(A * B), a gemv and then a dot, while the rev path builds a
+// quad_form_vari over a column vector and evaluates B' * A * B, grouping
+// from the other end. The matrix overload has one association in both.
+void qfs_fwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0], m = ctx.idata[1];
+  const CMapM a(ctx.in[0].data, n, n);
+  if (!(ctx.variant & 1u)) {
+    const CMapM b(ctx.in[1].data, n, m);
+    MapM(ctx.out.data, m, m) = stan::math::quad_form_sym(a, b);
+    return;
+  }
+  const VecD b = CMapV(ctx.in[1].data, n);
+  if (!(ctx.variant & 2u)) {
+    ctx.out.data[0] = stan::math::quad_form_sym(a, b);
+    return;
+  }
+  stan::math::check_multiplicable("quad_form_sym", "A", a, "B", b);
+  stan::math::check_symmetric("quad_form_sym", "A", a);
+  const MatD c = b.transpose() * a * b;
+  ctx.out.data[0] = c(0, 0);
+}
+void qfs_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0], m = ctx.idata[1];
+  // The rev overload is the one CmdStan reaches at either shape, so the
+  // replay needs no variant beyond the operand shape itself.
+  if (ctx.variant & 1u) {
+    nary_bwd(ctx, [n](std::vector<VarV>& xs) {
+      Eigen::Map<VarM> a(xs[0].data(), n, n);
+      return stan::math::quad_form_sym(a, xs[1]);
+    });
+    return;
+  }
+  nary_bwd(ctx, [n, m](std::vector<VarV>& xs) {
+    Eigen::Map<VarM> a(xs[0].data(), n, n);
+    Eigen::Map<VarM> b(xs[1].data(), n, m);
+    return stan::math::quad_form_sym(a, b);
+  });
+}
+
 // Bind a slot as a var matrix or vector, and scatter the adjoints back
 // afterwards. Shared by the multivariate densities below and by the tail
 // densities further down.
@@ -1181,6 +1230,7 @@ void register_matrix_kernels() {
   register_kernel(OP_CHOLESKY, Kernel{chol_fwd, chol_bwd, nullptr});
   register_kernel(OP_MATRIX_EXP,
                   Kernel{matrix_exp_fwd, matrix_exp_bwd, nullptr});
+  register_kernel(OP_QUAD_FORM_SYM, Kernel{qfs_fwd, qfs_bwd, nullptr});
   register_kernel(OP_MULTI_NORMAL_CHOL_LPDF,
                   Kernel{mnc_fwd, mnc_bwd, mnc_scratch});
   register_kernel(OP_MULTI_NORMAL_LPDF,

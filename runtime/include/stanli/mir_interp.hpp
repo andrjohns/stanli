@@ -1589,6 +1589,41 @@ class MirInterp {
                                      v.r.at((size_t)j);
       return o;
     }
+    if (e.name == "quad_form_sym" && e.args.size() == 2) {
+      // B' A B, symmetrised. Overload resolution on T reaches the same
+      // stan-math call the graph kernel makes -- prim's B.dot(A * B) at
+      // double, quad_form_vari's B' * A * B at var -- so the two paths
+      // group the arithmetic the same way. stan-math checks A for symmetry
+      // and throws the std::domain_error CmdStan would.
+      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+      Value a = eval(e.args[0]);
+      Value b = eval(e.args[1]);
+      if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
+        fail("quad_form_sym: needs a square matrix", e.raw);
+      const int64_t n = a.dims[0];
+      Mat A(n, n);
+      for (int64_t j = 0; j < n; ++j)
+        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
+      Value o;
+      if (b.dims.size() != 2) {
+        // A vector goes in as a vector: the one-column matrix would take
+        // Eigen's matrix paths and associate the product differently.
+        Eigen::Matrix<T, Eigen::Dynamic, 1> B((Eigen::Index)b.r.size());
+        for (size_t i = 0; i < b.r.size(); ++i) B((Eigen::Index)i) = b.r[i];
+        o.r = {stan::math::quad_form_sym(A, B)};
+        return o;
+      }
+      const int64_t rb = b.dims[0], m = b.dims[1];
+      Mat B(rb, m);
+      for (int64_t j = 0; j < m; ++j)
+        for (int64_t i = 0; i < rb; ++i) B(i, j) = b.r.at((size_t)(j * rb + i));
+      const Mat c = stan::math::quad_form_sym(A, B);
+      o.dims = {m, m};
+      o.r.resize((size_t)(m * m));
+      for (int64_t j = 0; j < m; ++j)
+        for (int64_t i = 0; i < m; ++i) o.r[(size_t)(j * m + i)] = c(i, j);
+      return o;
+    }
     if (e.name == "gp_exp_quad_cov" && e.args.size() == 3) {
       // K(i,j) = alpha^2 exp(-|x_i - x_j|^2 / (2 rho^2)); x is array[N]
       // real or array[N] vector[D] in Fortran storage.

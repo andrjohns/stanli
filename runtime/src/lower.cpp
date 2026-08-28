@@ -4309,6 +4309,41 @@ struct Lowering {
                         {(int)n, (int)n, (int)n});
     }
 
+    if (e.name == "quad_form_sym" && e.args.size() == 2) {
+      // 0.5 * (C + C') with C = B' A B, and the plain scalar B' A B when B
+      // is a vector. This stays one op rather than a transpose and two
+      // GEMMs because stan-math's own association is part of the answer:
+      // the kernel makes the same calls CmdStan does, including the
+      // symmetry check on A, which throws when A is only nearly symmetric.
+      Val a = lower_expr(e.args[0]);
+      Val b = lower_expr(e.args[1]);
+      if (!is_matrix(a.si)) fail("quad_form_sym: needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail("quad_form_sym: needs a square matrix", e.raw);
+      const bool b_matrix = is_matrix(b.si);
+      if (!b_matrix && !is_vector(b.si))
+        fail("quad_form_sym: second argument is not a matrix or vector", e.raw);
+      const int64_t n = a.si.rows;
+      const int64_t rb = b_matrix ? b.si.rows : g.slots[b.slot].len;
+      const int64_t m = b_matrix ? b.si.cols : 1;
+      if (rb != n)
+        fail("quad_form_sym: inner dimension mismatch (" + std::to_string(n) +
+                 "x" + std::to_string(n) + " against " + std::to_string(rb) +
+                 ")",
+             e.raw);
+      const SlotInfo si = b_matrix ? matrix_view(m, m) : SlotInfo{};
+      Val v = emit_value(OP_QUAD_FORM_SYM, {a, b}, m * m, si,
+                         {checked_immediate(n, "quad_form_sym extent"),
+                          checked_immediate(m, "quad_form_sym extent")});
+      // Bit 0 is the operand shape. Bit 1 says CmdStan would have typed
+      // this expression `var`, which for a vector B picks stan-math's other
+      // association of the same product -- the same distinction the matrix
+      // solves make, and for the same reason.
+      g.ops.back().variant =
+          (uint8_t)((b_matrix ? 0u : 1u) | (v.autodiff ? 2u : 0u));
+      return v;
+    }
+
     if ((e.name == "append_row" || e.name == "append_col") &&
         e.args.size() == 2) {
       Val a = lower_expr(e.args[0]);
