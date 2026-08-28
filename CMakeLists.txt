@@ -287,7 +287,8 @@ set(STANLI_RUNTIME_SOURCES
   runtime/src/cse.cpp
   runtime/src/partition.cpp
   runtime/src/data.cpp
-  runtime/src/data_var_context.cpp)
+  runtime/src/data_var_context.cpp
+  runtime/src/program_softmax.cpp)
 
 if(NOT EMSCRIPTEN)
 add_library(stanli_shared SHARED

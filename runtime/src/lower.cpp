@@ -1988,6 +1988,8 @@ struct Lowering {
     for (int len : out_lens) packed += len;
     Op is;
     is.opcode = OP_ISLAND;
+    // Variant stays zero: kIslandSoftmax3Variant is a tagged-payload contract
+    // and may only accompany Softmax3IslandProg (the graph carver creates it).
     std::vector<int> inputs = reg.in_slots;
     if (inputs.size() <= 6) {
       for (size_t k = 0; k < prog->ins.size(); ++k) {

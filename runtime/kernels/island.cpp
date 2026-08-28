@@ -44,6 +44,8 @@ int64_t island_scratch(const Op& op, const Slot* slots) {
 void island_fwd(KernelCtx& ctx) {
   const auto& p = *static_cast<const IslandProg*>(ctx.udata);
   if (p.native_adj) {
+    // Mirrored by island_softmax3_fwd; keep these seed and harvest loops in
+    // lockstep with runtime/src/program_softmax.cpp.
     for (size_t k = 0; k < p.ins.size(); ++k) {
       const auto& li = p.ins[k];
       const int input = li.input >= 0 ? li.input : (int)k;

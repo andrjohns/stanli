@@ -361,6 +361,16 @@ island's backward as a second instruction list at load time;
 which is what [`tests/test_adjoint.cpp`](tests/test_adjoint.cpp) checks
 the generated program against.
 
+Native-adjoint islands can additionally select the shared three-lane softmax
+forward specialization. `STANLI_NO_ISLAND_SOFTMAX3=1` leaves the admitted
+island and its generated backward intact but uses the canonical forward
+program, giving a focused A/B switch. `test_adjoint` compares the specialized
+and canonical forward register files bit-for-bit, checks the generated
+backward, and covers the activation threshold, clone budget, overlap, and NaN
+behavior. `test_island` covers the opt-out through graph carving and execution,
+tagged-payload lifetime, and the rule that opcode zero remains invalid for
+graph carving and binding after the private helper is registered.
+
 ## Testing graph transformations
 
 Each group of graph transformations has a diagnostic environment switch.
