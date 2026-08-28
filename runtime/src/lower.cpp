@@ -1379,6 +1379,8 @@ struct Lowering {
   int uninitialized_decl_slot(const std::string& name) {
     auto dl = decls.find(name);
     if (dl == decls.end()) return -1;
+    if (dl->second.deferred_shape)
+      fail("unsized local read before its first assignment: " + name);
     SlotInfo si = dl->second.si;
     si.param_free = true;
     Val value{add_slot(dl->second.len, false), dl->second.autodiff, si};
@@ -4905,6 +4907,7 @@ struct Lowering {
     bool autodiff = false;
     SlotInfo si;
     bool int_array = false;
+    bool deferred_shape = false;
   };
   // The only name-keyed declaration protocol. Runtime values carry the same
   // static scalar type and SlotInfo in `scope`; this registry is needed only
@@ -4948,6 +4951,30 @@ struct Lowering {
           // a shape query on a slot-bound value (rows(lscale) inside an
           // inlined function), which only eval_int can answer.
           if (s.has_init) int_env[s.decl_id] = eval_int(s.init);
+        } else if (s.decl_type.base.empty() &&
+                   s.decl_type.unsized.leaf != mir::UnsizedLeaf::Unknown) {
+          // O1 introduces unsized container temporaries for expressions such
+          // as a for-loop sequence built with append_array. C++ assignment
+          // gives these locals the RHS shape, so delay allocating or checking
+          // their view until the first whole-variable assignment does likewise.
+          scope.erase(s.decl_id);
+          DeclView sh;
+          sh.autodiff = s.decl_type.unsized.leaf != mir::UnsizedLeaf::Int &&
+                        !s.decl_data_only && scalar_autodiff();
+          sh.int_array = s.decl_type.unsized.leaf == mir::UnsizedLeaf::Int;
+          sh.deferred_shape = true;
+          if (s.has_init) {
+            Val v = lower_expr(s.init);
+            sh.len = g.slots[v.slot].len;
+            sh.si = v.si;
+            sh.deferred_shape = false;
+            v.autodiff = sh.autodiff;
+            scope[s.decl_id] = v;
+            sync_data_local(s.decl_id, s.init, v);
+          } else {
+            td.env().erase(s.decl_id);
+          }
+          decls[s.decl_id] = sh;
         } else {
           // A redeclaration shadows whatever the name held: --O1 inlining
           // reuses one symbol for a callee's local across loop iterations,
@@ -5237,7 +5264,11 @@ struct Lowering {
           } else {
             auto dl = decls.find(s.lhs);
             if (dl != decls.end()) {
-              if (dl->second.len == 0 && g.slots[rhs.slot].len != 0) {
+              if (dl->second.deferred_shape) {
+                dl->second.len = g.slots[rhs.slot].len;
+                dl->second.si = rhs.si;
+                dl->second.deferred_shape = false;
+              } else if (dl->second.len == 0 && g.slots[rhs.slot].len != 0) {
                 // stanc3's --O1 inliner declares a function's return
                 // variable zero-length (`array[real, 0]`, `vector[0]`)
                 // because the returned size is the callee's business, and

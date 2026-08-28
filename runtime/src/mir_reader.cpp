@@ -653,12 +653,10 @@ Stmt read_stmt(const Node& n) {
       s.decl_type = t.head_is("Sized") ? read_sized(t[1]) : SizedType{};
       if (!t.head_is("Sized")) {
         s.decl_type.raw = dump(t);
-        // stanc3 declares scalar temporaries unsized. A vectorized `T[,]`
-        // whose location is a container loops over the elements and hoists
-        // the scale into one of these. A scalar carries no size
-        // expression, so give it the sized spelling. Unsized containers
-        // still reach the failure in sized_len, which is where their
-        // missing size belongs.
+        // stanc3 declares scalar and container temporaries unsized. Scalars
+        // have a fixed width, so retain the historical sized spelling;
+        // container shapes are restored during finalization and supplied by
+        // their first whole-variable assignment during lowering.
         if (t.size() > 1 && t[1].is_atom()) {
           if (t[1].atom == "UReal")
             s.decl_type.base = "SReal";
@@ -1304,6 +1302,26 @@ void resolve_calls(Stmt& s, const Overloads& overloads) {
   for (Stmt& k : s.body) resolve_calls(k, overloads);
 }
 
+void restore_unsized_decls(Stmt& s) {
+  if (s.kind == Stmt::Decl && s.decl_type.base.empty() &&
+      s.decl_type.raw.size() > 10 &&
+      s.decl_type.raw.compare(0, 9, "(Unsized ") == 0 &&
+      s.decl_type.raw.back() == ')') {
+    const std::string_view spelling(s.decl_type.raw.data() + 9,
+                                    s.decl_type.raw.size() - 10);
+    parse_unsized_spelling(spelling, &s.decl_type.unsized);
+  }
+  for (Stmt& child : s.body) restore_unsized_decls(child);
+}
+
+void restore_unsized_decls(Program& prog) {
+  for (auto* body :
+       {&prog.prepare_data, &prog.log_prob, &prog.generate_quantities})
+    for (Stmt& s : *body) restore_unsized_decls(s);
+  for (FunDef& f : prog.fun_defs)
+    for (Stmt& s : f.body) restore_unsized_decls(s);
+}
+
 void resolve_overloads(Program& prog) {
   std::map<std::string, std::vector<FunDef*>> by_name;
   for (FunDef& f : prog.fun_defs) by_name[f.name].push_back(&f);
@@ -1335,6 +1353,7 @@ void detail::validate_portable_program(const Program& prog) {
 }
 
 void detail::finalize_program(Program& prog, bool strict_variable_metadata) {
+  restore_unsized_decls(prog);
   resolve_overloads(prog);
   Functions functions;
   for (const auto& f : prog.fun_defs) {
