@@ -5,8 +5,8 @@
       (decl_type
        (Sized
         (SMatrix AoS
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -14,9 +14,9 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 2))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-               ((pattern (Lit Int 3))
+               ((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern AoS)))
            ()))
@@ -27,7 +27,7 @@
       (decl_type
        (Sized
         (SVector AoS
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -35,7 +35,7 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 2))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern AoS)))
            ()))
@@ -46,7 +46,7 @@
       (decl_type
        (Sized
         (SVector AoS
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -54,7 +54,7 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 3))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern AoS)))
            ()))
@@ -109,6 +109,44 @@
                           (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
                       (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+               (meta <opaque>))
+              ((pattern
+                (IfElse
+                 ((pattern
+                   (FunApp (StanLib Greater__ FnPlain AoS)
+                    (((pattern (Var theta))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                     ((pattern (Lit Int 1))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel AutoDiffable))))
+                 ((pattern
+                   (Block
+                    (((pattern
+                       (TargetPE
+                        ((pattern
+                          (FunApp (StanLib Plus__ FnPlain AoS)
+                           (((pattern
+                              (Indexed
+                               ((pattern (Var left))
+                                (meta
+                                 ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
+                               ((Single
+                                 ((pattern (Lit Int 1))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                             (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                            ((pattern
+                              (Indexed
+                               ((pattern (Var right))
+                                (meta
+                                 ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
+                               ((Single
+                                 ((pattern (Lit Int 1))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                             (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                         (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                      (meta <opaque>)))))
+                  (meta <opaque>))
+                 ()))
                (meta <opaque>)))))
            (meta <opaque>))
           (((pattern
@@ -127,8 +165,8 @@
       (decl_type
        (Sized
         (SMatrix SoA
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -136,9 +174,9 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 2))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-               ((pattern (Lit Int 3))
+               ((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern SoA)))
            ()))
@@ -149,7 +187,7 @@
       (decl_type
        (Sized
         (SVector SoA
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -157,7 +195,7 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 2))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern SoA)))
            ()))
@@ -168,7 +206,7 @@
       (decl_type
        (Sized
         (SVector SoA
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -176,7 +214,7 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 3))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern SoA)))
            ()))
@@ -231,6 +269,44 @@
                           (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
                       (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+               (meta <opaque>))
+              ((pattern
+                (IfElse
+                 ((pattern
+                   (FunApp (StanLib Greater__ FnPlain SoA)
+                    (((pattern (Var theta))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                     ((pattern (Lit Int 1))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel AutoDiffable))))
+                 ((pattern
+                   (Block
+                    (((pattern
+                       (TargetPE
+                        ((pattern
+                          (FunApp (StanLib Plus__ FnPlain SoA)
+                           (((pattern
+                              (Indexed
+                               ((pattern (Var left))
+                                (meta
+                                 ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
+                               ((Single
+                                 ((pattern (Lit Int 1))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                             (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                            ((pattern
+                              (Indexed
+                               ((pattern (Var right))
+                                (meta
+                                 ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
+                               ((Single
+                                 ((pattern (Lit Int 1))
+                                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                             (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                         (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                      (meta <opaque>)))))
+                  (meta <opaque>))
+                 ()))
                (meta <opaque>)))))
            (meta <opaque>))
           (((pattern
@@ -249,8 +325,8 @@
       (decl_type
        (Sized
         (SMatrix AoS
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -258,9 +334,9 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 2))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-               ((pattern (Lit Int 3))
+               ((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern AoS)))
            ()))
@@ -271,7 +347,7 @@
       (decl_type
        (Sized
         (SVector AoS
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -279,7 +355,7 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 2))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern AoS)))
            ()))
@@ -290,7 +366,7 @@
       (decl_type
        (Sized
         (SVector AoS
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
         ((pattern
@@ -298,7 +374,7 @@
            (CompilerInternal
             (FnReadParam (constrain Identity)
              (dims
-              (((pattern (Lit Int 3))
+              (((pattern (Lit Int 4))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
              (mem_pattern AoS)))
            ()))
@@ -382,8 +458,8 @@
       (decl_type
        (Sized
         (SMatrix AoS
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize Default)))
     (meta <opaque>))
    ((pattern
@@ -410,7 +486,7 @@
            ((pattern (Lit Int 1))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (upper
-           ((pattern (Lit Int 3))
+           ((pattern (Lit Int 4))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (body
            ((pattern
@@ -421,7 +497,7 @@
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
                   (upper
-                   ((pattern (Lit Int 2))
+                   ((pattern (Lit Int 4))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
                   (body
                    ((pattern
@@ -474,7 +550,7 @@
       (decl_type
        (Sized
         (SVector AoS
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize Default)))
     (meta <opaque>))
    ((pattern
@@ -501,7 +577,7 @@
            ((pattern (Lit Int 1))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (upper
-           ((pattern (Lit Int 2))
+           ((pattern (Lit Int 4))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (body
            ((pattern
@@ -549,7 +625,7 @@
       (decl_type
        (Sized
         (SVector AoS
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize Default)))
     (meta <opaque>))
    ((pattern
@@ -576,7 +652,7 @@
            ((pattern (Lit Int 1))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (upper
-           ((pattern (Lit Int 3))
+           ((pattern (Lit Int 4))
             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
           (body
            ((pattern
@@ -651,16 +727,16 @@
       (decl_type
        (Sized
         (SMatrix AoS
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable m) ()) UMatrix
       ((pattern
         (FunApp (CompilerInternal FnReadDeserializer)
-         (((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-          ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         (((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+          ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
        (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))))
     (meta <opaque>))
    ((pattern
@@ -676,14 +752,14 @@
       (decl_type
        (Sized
         (SVector AoS
-         ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable left) ()) UVector
       ((pattern
         (FunApp (CompilerInternal FnReadDeserializer)
-         (((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         (((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
        (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))
     (meta <opaque>))
    ((pattern
@@ -700,14 +776,14 @@
       (decl_type
        (Sized
         (SVector AoS
-         ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable right) ()) UVector
       ((pattern
         (FunApp (CompilerInternal FnReadDeserializer)
-         (((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+         (((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
        (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))
     (meta <opaque>))
    ((pattern
@@ -740,28 +816,28 @@
   ((m <opaque>
     ((out_unconstrained_st
       (SMatrix AoS
-       ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-       ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+       ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+       ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
      (out_constrained_st
       (SMatrix AoS
-       ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-       ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+       ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+       ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
      (out_block Parameters) (out_trans Identity)))
    (left <opaque>
     ((out_unconstrained_st
       (SVector AoS
-       ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+       ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
      (out_constrained_st
       (SVector AoS
-       ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+       ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
      (out_block Parameters) (out_trans Identity)))
    (right <opaque>
     ((out_unconstrained_st
       (SVector AoS
-       ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+       ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
      (out_constrained_st
       (SVector AoS
-       ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+       ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
      (out_block Parameters) (out_trans Identity)))
    (theta <opaque>
     ((out_unconstrained_st SReal) (out_constrained_st SReal) (out_block Parameters)

@@ -826,9 +826,9 @@ struct ProgramCompiler {
     }
     if ((e.name == "diag_pre_multiply" || e.name == "diag_post_multiply") &&
         e.args.size() == 2) {
-      // These are diagonal matrix products, but forming the diagonal and
-      // running a dense GEMM would multiply and add explicit zeros. Emit the
-      // equivalent row or column scaling directly in column-major order.
+      // One instruction preserves stan-math's diagonal-product callback as a
+      // unit. Scalar MULs would accumulate the repeated vector's adjoint in
+      // tape order instead of the callback's rowwise/colwise reduction order.
       const bool pre = e.name == "diag_pre_multiply";
       const Range v = expr(e.args[pre ? 0 : 1]);
       const Range m = expr(e.args[pre ? 1 : 0]);
@@ -840,12 +840,12 @@ struct ProgramCompiler {
       if (v.len != expected)
         bail(e.name + " vector length does not match the matrix");
       const int r = alloc(m.len);
-      for (int64_t j = 0; j < m.cols; ++j)
-        for (int64_t i = 0; i < m.rows; ++i) {
-          const int64_t k = j * m.rows + i;
-          emit(Program::MUL, r + (int)k, m.reg + (int)k,
-               v.reg + (int)(pre ? i : j));
-        }
+      // A zero-size multiplication has no values or adjoints. In particular,
+      // do not narrow an arbitrarily large empty dimension into Instr.
+      if (m.len != 0)
+        p.code.push_back(Program::Instr{
+            pre ? Program::DIAG_PRE_MULTIPLY : Program::DIAG_POST_MULTIPLY, r,
+            v.reg, m.reg, (int32_t)m.rows, (int32_t)m.cols});
       Range out = m;
       out.reg = r;
       return typed(out, e.type_);

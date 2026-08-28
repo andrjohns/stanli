@@ -721,6 +721,8 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
       case Program::MAX_RANGE:
       case Program::JZ:
       case Program::JMP:
+      case Program::DIAG_PRE_MULTIPLY:
+      case Program::DIAG_POST_MULTIPLY:
         break;  // gen_adjoint refuses these; unreachable
       case Program::CALL:
         break;  // handled before this switch

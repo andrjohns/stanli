@@ -103,6 +103,8 @@ enum ProgramOpFlag : uint16_t {
   X(LOG_MIX, kProgramReadB | kProgramReadC | kProgramSaveA | kProgramSaveB | \
                  kProgramSaveC)                                              \
   X(FMA, kProgramReadB | kProgramReadC | kProgramSaveA | kProgramSaveB)      \
+  X(DIAG_PRE_MULTIPLY, kProgramReadB | kProgramNoAdjoint)                    \
+  X(DIAG_POST_MULTIPLY, kProgramReadB | kProgramNoAdjoint)                   \
   X(DENSITY, 0)                                                              \
   X(CALL, 0)
 
@@ -202,6 +204,9 @@ inline constexpr const ProgramOpSpec& program_code_spec(Program::Code code) {
 }
 
 inline constexpr int program_output_len(const Program::Instr& instr) {
+  if (instr.code == Program::DIAG_PRE_MULTIPLY ||
+      instr.code == Program::DIAG_POST_MULTIPLY)
+    return static_cast<int>(static_cast<int64_t>(instr.c) * instr.len);
   const ProgramOpSpec& spec = program_code_spec(instr.code);
   return spec.has(kProgramNoOutput)      ? 0
          : spec.has(kProgramRangeOutput) ? instr.len
@@ -392,6 +397,23 @@ void run_program(const Program& p, T* reg) {
       case Program::FMA:
         d() = stan::math::fma(ra(), rb(), reg[(size_t)I.c]);
         break;
+      case Program::DIAG_PRE_MULTIPLY:
+      case Program::DIAG_POST_MULTIPLY: {
+        using MatT = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+        const int32_t rows = I.c, cols = I.len;
+        // A zero-size result contributes neither a value nor an adjoint.
+        // Avoid forming Maps from a null register file in the 0x0 case.
+        if (rows == 0 || cols == 0) break;
+        const int32_t vlen = I.code == Program::DIAG_PRE_MULTIPLY ? rows : cols;
+        Eigen::Map<const VecT> v(reg + I.a, vlen);
+        Eigen::Map<const MatT> m(reg + I.b, rows, cols);
+        Eigen::Map<MatT> out(reg + I.dst, rows, cols);
+        if (I.code == Program::DIAG_PRE_MULTIPLY)
+          out = stan::math::diag_pre_multiply(v, m);
+        else
+          out = stan::math::diag_post_multiply(m, v);
+        break;
+      }
         // One call for every scalar continuous density the runtime has;
       // program_density.cpp holds the switch, so the 27 instantiations
       // are paid in one translation unit instead of in every one that

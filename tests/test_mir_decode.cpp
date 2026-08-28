@@ -923,8 +923,9 @@ void check_structural_rejections() {
   bad_call.args.push_back(literal());
   expect_compile_error(write_v2(target_program(bad_call)), "Plus__ call",
                        "known function arity");
-  for (const char* name : {"pow", "std_normal_qf", "trigamma", "is_nan",
-                           "tcrossprod", "map_rect", "algebra_solver"}) {
+  for (const char* name :
+       {"pow", "std_normal_qf", "trigamma", "is_nan", "tcrossprod", "diagonal",
+        "map_rect", "algebra_solver"}) {
     bad_call.name = name;
     bad_call.args.clear();
     expect_error(write_v2(target_program(bad_call)),

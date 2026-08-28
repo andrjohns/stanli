@@ -193,6 +193,7 @@ void validate_funapp_arity(const Expr& e) {
                 "dims",
                 "multiply_lower_tri_self_transpose",
                 "diag_matrix",
+                "diagonal",
                 "cholesky_decompose",
                 "eigenvalues_sym",
                 "eigenvectors_sym",

@@ -1717,6 +1717,20 @@ class MirInterp {
         r.r[(size_t)(i * n + i)] = diagonal.r[(size_t)i];
       return r;
     }
+    if (e.name == "diagonal") {
+      if (e.args.size() != 1)
+        fail("diagonal: needs exactly one argument", e.raw);
+      Value matrix = eval(e.args[0]);
+      if (matrix.dims.size() != 2) fail("diagonal: needs a matrix", e.raw);
+      const int64_t rows = matrix.dims[0], cols = matrix.dims[1];
+      const int64_t n = std::min(rows, cols);
+      const int64_t stride = rows + 1;
+      r.dims = {n};
+      r.r.reserve((size_t)n);
+      for (int64_t i = 0; i < n; ++i)
+        r.r.push_back(matrix.r.at((size_t)(i * stride)));
+      return r;
+    }
     if (e.name == "cholesky_decompose" && e.args.size() == 1) {
       // Standard column-oriented Cholesky on the templated scalar.
       Value a = eval(e.args[0]);

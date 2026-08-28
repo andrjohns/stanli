@@ -105,7 +105,9 @@ void compact_program(Program& p, std::vector<std::pair<int, int>>& seeded) {
   if (n_regs <= 0) return;
   // DYN_INDEX's `c` is an offset into a run rather than a register.
   for (const auto& I : p.code) {
-    if (I.code == Program::DYN_INDEX) return;
+    if (I.code == Program::DYN_INDEX || I.code == Program::DIAG_PRE_MULTIPLY ||
+        I.code == Program::DIAG_POST_MULTIPLY)
+      return;
     if (I.code == Program::CALL && (I.a < 0 || (size_t)I.a >= p.calls.size()))
       return;
   }

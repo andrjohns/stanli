@@ -705,6 +705,7 @@ void test_transformed_parameter_checks() {
 void test_constant_folded_gq_column() {
   using namespace stanli;
   DataMap data;
+  data.set_real_array("rectangular", {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, {3, 2});
   CompiledModel cm =
       compile_model(slurp("tests/fixtures/gqconst.tmir.sexp"), data);
   if (!cm.write_array || !cm.write_array->interp) {
@@ -719,8 +720,10 @@ void test_constant_folded_gq_column() {
   params["x"] = x;
   WaRng rng(1);
   const std::vector<double> row = wi.eval(params, rng);
-  expect_eq("gqconst header", joined(wi.columns()), "x,z");
-  if (row.size() != 2 || row[0] != 0.25 || row[1] != 3.0) {
+  expect_eq("gqconst header", joined(wi.columns()),
+            "x,z,extracted.1,extracted.2");
+  if (row.size() != 4 || row[0] != 0.25 || row[1] != 3.0 || row[2] != 1.0 ||
+      row[3] != 5.0) {
     ++failures;
     std::printf("FAIL gqconst row: got %zu values\n", row.size());
   }
