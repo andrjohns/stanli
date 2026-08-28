@@ -15,6 +15,9 @@
 
 namespace stanli {
 
+using ForwardFn = void (*)(KernelCtx&);
+ForwardFn resolve_forward_fn(const Op& op);
+
 static Kernel g_table[OP_COUNT_];
 
 Kernel& kernel(uint16_t opcode) {
@@ -203,7 +206,7 @@ void Executor::bind_() {
   int64_t scratch = 0;
   for (auto& op : graph_.ops) {
     const Kernel& k = kernel(op.opcode);
-    if (k.forward == nullptr)
+    if (op.opcode == OP_NONE_ || k.forward == nullptr)
       // Name it. A browser build can be missing a kernel because its
       // density pack has not been loaded yet, and the caller decides what
       // to do from this string.
@@ -237,7 +240,7 @@ void Executor::bind_() {
   bwd_.clear();
   bwd_.reserve(graph_.ops.size());
   for (size_t i = 0; i < graph_.ops.size(); ++i)
-    fwd_fn_[i] = kernel(graph_.ops[i].opcode).forward;
+    fwd_fn_[i] = resolve_forward_fn(graph_.ops[i]);
   for (size_t i = graph_.ops.size(); i-- > 0;) {
     void (*b)(KernelCtx&) = kernel(graph_.ops[i].opcode).backward;
     if (b) bwd_.push_back(BwdStep{b, &ctx_[i], out2_adj_ptr_[i]});
@@ -331,7 +334,11 @@ void Executor::run_forward_only(EvalState state) {
   } restore{eval_state_, eval_state_};
   eval_state_ = state;
   // The profiled path keeps the opcode-keyed loop (attribution needs the
-  // opcode anyway, and the timing calls dwarf dispatch cost).
+  // opcode anyway, and the timing calls dwarf dispatch cost). This bypasses
+  // resolve_forward_fn, so a variant-specialized op is timed through its
+  // canonical kernel. island.hpp requires the two forwards to leave bitwise-
+  // identical outputs and scratch; switch this loop to fwd_fn_ only when the
+  // executor's layout is next re-gated.
   if (profile_) {
     const size_t np = graph_.ops.size();
     for (size_t i = 0; i < np; ++i) {

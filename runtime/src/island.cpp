@@ -114,7 +114,7 @@ bool callable(const Graph& g, const Op& op) {
   if (op.udata != nullptr || op.out2 >= 0) return false;
   if (op.variant & 0x80u) return false;
   if (g.slots[op.out].len != 1) return false;
-  return find_kernel(op.opcode) != nullptr;
+  return op.opcode != OP_NONE_ && find_kernel(op.opcode) != nullptr;
 }
 
 // Structural vocabulary test. Shape/idata details are re-checked during
@@ -629,15 +629,31 @@ int carve_islands(Graph& g,
     if (compiled) {
       int64_t packed = 0;
       for (int o : live_outs) packed += g.slots[o].len;
-      auto prog = std::make_shared<IslandProg>(std::move(cc.prog));
+      std::shared_ptr<const Program> optimized;
+      if (!std::getenv("STANLI_NO_ISLAND_SOFTMAX3"))
+        optimized = specialize_softmax3(cc.prog);
+      const bool specialized = static_cast<bool>(optimized);
       Op is;
       is.opcode = OP_ISLAND;
+      is.variant = specialized ? kIslandSoftmax3Variant : 0;
       is.n_in = (int)cc.live_in_slots.size();
       for (int k = 0; k < is.n_in; ++k) is.in[k] = cc.live_in_slots[k];
       is.out = g.add_slot(packed, false);
       slot_active.resize(g.slots.size(), 1);
-      is.udata = prog.get();
-      g.udata_pool.push_back(std::move(prog));
+      if (specialized) {
+        auto specialized_prog = std::make_shared<Softmax3IslandProg>();
+        static_cast<IslandProg&>(*specialized_prog) = std::move(cc.prog);
+        specialized_prog->optimized_double = std::move(optimized);
+        // Erase the converted base pointer, not the derived pointer: readers
+        // shared with OP_ISLAND recover IslandProg directly from udata.
+        std::shared_ptr<IslandProg> prog = std::move(specialized_prog);
+        is.udata = prog.get();
+        g.udata_pool.push_back(std::move(prog));
+      } else {
+        auto prog = std::make_shared<IslandProg>(std::move(cc.prog));
+        is.udata = prog.get();
+        g.udata_pool.push_back(std::move(prog));
+      }
       result.push_back(is);
       // Extractions write the ORIGINAL slot ids, so downstream readers,
       // roots, and target terms are untouched -- except for the

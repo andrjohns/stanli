@@ -94,9 +94,9 @@ int main(int argc, char** argv) {
     const auto& p = *static_cast<const IslandProg*>(op.udata);
     std::printf(
         "\n== island %d (graph op %zu): %zu instrs, %d regs, "
-        "%zu calls, adjoint %zu instrs, native_adj=%d\n",
+        "%zu calls, adjoint %zu instrs, native_adj=%d, softmax3=%d\n",
         n++, u, p.code.size(), p.n_regs, p.calls.size(), p.adj.code.size(),
-        (int)p.native_adj);
+        (int)p.native_adj, (int)(op.variant == kIslandSoftmax3Variant));
     std::printf("  live-ins:");
     for (size_t k = 0; k < p.ins.size(); ++k)
       std::printf(" slot%d->r%d[len %d]", op.in[k], p.ins[k].reg, p.ins[k].len);
