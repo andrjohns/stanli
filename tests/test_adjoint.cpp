@@ -424,6 +424,119 @@ static void test_compact_adjoint_ranges() {
   check("compact ranges parity", std::move(parity));
 }
 
+// The HMM shape writes one state cell repeatedly: a producer writes a private
+// temporary and MOV installs it into the state. Destination forwarding removes
+// both MOVs before adjoint generation; the direct ADD rules must still consume
+// and clear the state adjoint at each write in exactly the replay's order.
+static void test_forwarded_repeated_destination() {
+  Build b({0.31, 0.72, -0.45, 1.1});
+  const int state = b.alloc();
+  const int first_tmp = b.emit(Program::ADD, 0, 1);
+  b.emit_to(Program::MOV, state, first_tmp);
+  const int first_use = b.emit(Program::MUL, state, 2);
+  const int second_tmp = b.emit(Program::ADD, 2, 3);
+  b.emit_to(Program::MOV, state, second_tmp);
+  const int second_use = b.emit(Program::MUL, state, 0);
+  const int out = b.emit(Program::ADD, first_use, second_use);
+  Case c = b.done({out}, {0.83});
+  compact_island(c.p);
+  int moves = 0;
+  for (const Program::Instr& I : c.p.code)
+    if (I.code == Program::MOV || I.code == Program::MOVR) ++moves;
+  expect("forwarded repeated destination removes copies", moves == 0);
+  check("forwarded repeated destination", std::move(c));
+}
+
+static void test_forwarded_saveout_last_write() {
+  Build b({0.31, 0.72});
+  const int state = b.alloc();
+  b.emit_to(Program::MOV, state, 1);  // an earlier, overwritten initializer
+  const int temporary = b.emit(Program::EXP, 0);
+  b.emit_to(Program::MOV, state, temporary);
+  const int out = b.emit(Program::MUL, state, 1);
+  Case c = b.done({out}, {0.83});
+  compact_island(c.p);
+  bool exp_then_copy = false;
+  for (size_t i = 0; i + 1 < c.p.code.size(); ++i)
+    if (c.p.code[i].code == Program::EXP &&
+        (c.p.code[i + 1].code == Program::MOV ||
+         c.p.code[i + 1].code == Program::MOVR))
+      exp_then_copy = true;
+  expect("SaveOut final write forwards", !exp_then_copy);
+  check("forwarded SaveOut final write", std::move(c));
+}
+
+static void test_saveout_later_write_refuses_forwarding() {
+  Build b({0.31, 0.72});
+  const int state = b.alloc();
+  b.emit_to(Program::MOV, state, 1);
+  const int temporary = b.emit(Program::EXP, 0);
+  b.emit_to(Program::MOV, state, temporary);
+  const int first_use = b.emit(Program::MUL, state, 1);
+  b.emit_to(Program::MOV, state, 0);  // would overwrite EXP's saved output
+  const int out = b.emit(Program::ADD, first_use, state);
+  Case c = b.done({out}, {0.83});
+  compact_island(c.p);
+  bool exp_then_copy = false;
+  for (size_t i = 0; i + 1 < c.p.code.size(); ++i)
+    if (c.p.code[i].code == Program::EXP &&
+        (c.p.code[i + 1].code == Program::MOV ||
+         c.p.code[i + 1].code == Program::MOVR))
+      exp_then_copy = true;
+  expect("SaveOut later write keeps copy", exp_then_copy);
+  check("SaveOut later write", std::move(c));
+}
+
+static void test_forwarded_ranged_producers() {
+  for (Program::Code code : {Program::LOG_RANGE, Program::EXP_RANGE}) {
+    Build b({0.31, 0.72, 1.45}, 3);
+    const int left = b.alloc();
+    const int destination = b.alloc(3);
+    const int right = b.alloc();
+    const int temporary = b.emit(code, 0, 0, 0, 3, 3);
+    b.emit_to(Program::MOVR, destination, temporary, 0, 0, 3);
+    // Make the copy boundaries interior to a later ranged read. The ordinary
+    // source-alias pass must keep that MOVR, so its disappearance specifically
+    // exercises producer destination forwarding.
+    b.p.pool = {-0.45, 1.1};
+    b.emit_to(Program::CONST, left, 0);
+    b.emit_to(Program::CONST, right, 1);
+    const int out = b.emit(Program::LSE_RANGE, left, 0, 0, 5);
+    Case c = b.done({out}, {0.83});
+    compact_island(c.p);
+    bool producer_then_copy = false;
+    for (size_t i = 0; i + 1 < c.p.code.size(); ++i)
+      if (c.p.code[i].code == code && c.p.code[i + 1].code == Program::MOVR)
+        producer_then_copy = true;
+    expect(code == Program::LOG_RANGE ? "LOG_RANGE destination forwards"
+                                      : "EXP_RANGE destination forwards",
+           !producer_then_copy);
+    check(code == Program::LOG_RANGE ? "forwarded LOG_RANGE"
+                                     : "forwarded EXP_RANGE",
+          std::move(c));
+  }
+}
+
+static void test_ranged_saveout_partial_later_write_refuses() {
+  Build b({0.31, 0.72, 1.45, -0.45}, 4);
+  const int state = b.alloc(3);
+  const int temporary = b.emit(Program::EXP_RANGE, 0, 0, 0, 3, 3);
+  b.emit_to(Program::MOVR, state, temporary, 0, 0, 3);
+  const int before = b.emit(Program::LSE_RANGE, state, 0, 0, 3);
+  b.emit_to(Program::MOV, state + 1, 3);
+  const int after = b.emit(Program::LSE_RANGE, state, 0, 0, 3);
+  const int out = b.emit(Program::ADD, before, after);
+  Case c = b.done({out}, {0.83});
+  compact_island(c.p);
+  bool exp_then_copy = false;
+  for (size_t i = 0; i + 1 < c.p.code.size(); ++i)
+    if (c.p.code[i].code == Program::EXP_RANGE &&
+        c.p.code[i + 1].code == Program::MOVR)
+      exp_then_copy = true;
+  expect("ranged SaveOut one-lane later write keeps copy", exp_then_copy);
+  check("ranged SaveOut one-lane later write", std::move(c));
+}
+
 static void test_accumulate_into_one_register() {
   // OP_ADD_N lowers to a chain of ADD d,d,x -- pure routing, but the
   // adjoint has to keep the running register's adjoint alive across it.
@@ -1157,6 +1270,11 @@ int main() {
   test_live_copy_both_read();
   test_copy_then_modify_chain();
   test_compact_adjoint_ranges();
+  test_forwarded_repeated_destination();
+  test_forwarded_saveout_last_write();
+  test_saveout_later_write_refuses_forwarding();
+  test_forwarded_ranged_producers();
+  test_ranged_saveout_partial_later_write_refuses();
   test_accumulate_into_one_register();
   test_ranged();
   test_softmax3_activation();

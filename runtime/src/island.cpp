@@ -442,15 +442,37 @@ struct Compiler {
   }
 };
 
+// Retaining the raw program lets an accepted island receive destination
+// forwarding after the legacy program has been priced, but copying every
+// candidate would add avoidable preparation work. Every legal rewrite has
+// this adjacent producer/copy syntax. The full pass remains the authority for
+// opcode, range, liveness, overlap, and branch safety, so false positives here
+// are harmless while this deliberately coarse probe cannot suppress a legal
+// rewrite.
+bool may_forward_adjacent_copy_destination(const Program& p) {
+  for (size_t i = 0; i + 1 < p.code.size(); ++i) {
+    const Program::Instr& producer = p.code[i];
+    const Program::Instr& copy = p.code[i + 1];
+    if ((copy.code == Program::MOV || copy.code == Program::MOVR) &&
+        copy.a == producer.dst)
+      return true;
+  }
+  return false;
+}
+
 }  // namespace
 
-void compact_island(IslandProg& p) {
-  if (std::getenv("STANLI_NO_ISLAND_COMPACT")) return;
+void compact_island(IslandProg& p) { (void)compact_island_gated(p, true); }
+
+bool compact_island_gated(IslandProg& p, bool enable_destination_forwarding) {
+  if (std::getenv("STANLI_NO_ISLAND_COMPACT")) return false;
   std::vector<std::pair<int, int>> seeded;
   seeded.reserve(p.ins.size());
   for (const auto& li : p.ins) seeded.emplace_back(li.reg, li.len);
-  compact_program(p, seeded);
+  const bool destination_forwarded =
+      compact_program_gated(p, seeded, enable_destination_forwarding);
   for (size_t k = 0; k < p.ins.size(); ++k) p.ins[k].reg = seeded[k].first;
+  return destination_forwarded;
 }
 
 int carve_islands(Graph& g,
@@ -550,18 +572,24 @@ int carve_islands(Graph& g,
         for (int e = 0; e < (int)g.slots[o].len; ++e)
           cc.prog.out_regs.push_back(cc.reg_of.at(o) + e);
 
-    // Generate the backward before estimating, because generating it is
-    // what the estimate is about: it appends the checkpoint saves the
-    // adjoint needs, so both the register count and the instruction count
-    // below are the ones the island will actually run. STANLI_NO_NATIVE_ADJ
-    // does not skip this -- it only stops the kernel USING the result, so
-    // the two backwards can be compared over the same islands.
+    // Price the pre-destination-forwarding program. This deliberately keeps
+    // activation identical to the established cost model: copy coalescing may
+    // make an island that was already selected faster, but it cannot use its
+    // own savings to pull a new island across the line. A raw copy is retained
+    // only when the optimization is enabled, and is compacted after the cost
+    // decision below.
+    std::unique_ptr<IslandProg> destination_source;
+    bool priced_gen = false;
     if (compiled) {
       for (size_t k = 0; k < cc.prog.ins.size(); ++k)
         cc.prog.ins[k].active = slot_active[(size_t)cc.live_in_slots[k]] != 0;
-      compact_island(cc.prog);
-      const bool gen = gen_adjoint(cc.prog);
-      cc.prog.native_adj = gen && !std::getenv("STANLI_NO_NATIVE_ADJ");
+      if (!std::getenv("STANLI_NO_PROGRAM_DEST_FORWARD") &&
+          !std::getenv("STANLI_NO_ISLAND_COMPACT") &&
+          may_forward_adjacent_copy_destination(cc.prog))
+        destination_source = std::make_unique<IslandProg>(cc.prog);
+      compact_island_gated(cc.prog, false);
+      priced_gen = gen_adjoint(cc.prog);
+      cc.prog.native_adj = priced_gen && !std::getenv("STANLI_NO_NATIVE_ADJ");
       // The var replay cannot execute a CALL (kernels are double
       // machinery), so a CALL-bearing island exists only with its
       // generated adjoint; otherwise the run stays as ops, which is the
@@ -571,7 +599,7 @@ int carve_islands(Graph& g,
       // gradient -- but it is worth being able to see, because it is the
       // difference between a region that is fast and one that merely
       // works, and nothing else about the model would show it.
-      if (!gen && std::getenv("STANLI_DEBUG_ISLAND"))
+      if (!priced_gen && std::getenv("STANLI_DEBUG_ISLAND"))
         std::fprintf(stderr,
                      "island: no adjoint generated for a %zu-op region; "
                      "it will replay under var\n",
@@ -625,6 +653,26 @@ int carve_islands(Graph& g,
         std::fprintf(stderr, "island? ops=%zu graph=%lld island=%lld\n", j - i,
                      (long long)graph_cost, (long long)island_cost);
       if (graph_cost < island_cost) compiled = false;
+    }
+    if (compiled && destination_source && priced_gen) {
+      IslandProg optimized = std::move(*destination_source);
+      if (compact_island_gated(optimized, true)) {
+        const bool optimized_gen = gen_adjoint(optimized);
+        optimized.native_adj =
+            optimized_gen && !std::getenv("STANLI_NO_NATIVE_ADJ");
+        // Do not trade the existing generated backward for replay if
+        // forwarding exposes an unforeseen generator limitation. CALL cannot
+        // replay at all.
+        const bool usable =
+            optimized_gen && (optimized.calls.empty() || optimized.native_adj);
+        if (usable) {
+          cc.prog = std::move(optimized);
+        } else if (std::getenv("STANLI_DEBUG_ISLAND")) {
+          std::fprintf(stderr,
+                       "island: destination forwarding kept the priced "
+                       "program because its optimized adjoint was refused\n");
+        }
+      }
     }
     if (compiled) {
       int64_t packed = 0;

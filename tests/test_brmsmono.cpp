@@ -16,6 +16,10 @@
 // and folding the wrong dimension would still compile and still produce
 // a finite gradient.
 #include <stanli/compile.hpp>
+#include <stanli/island.hpp>
+#include <stanli/optable.hpp>
+
+#include "env_helpers.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -42,8 +46,38 @@ int main() {
   using namespace stanli;
 
   DataMap data = DataMap::from_json_file("tests/fixtures/brmsmono.json");
-  CompiledModel cm =
-      compile_model(slurp("tests/fixtures/brmsmono.tmir.sexp"), data);
+  const std::string mir = slurp("tests/fixtures/brmsmono.tmir.sexp");
+  CompiledModel cm = compile_model(mir, data);
+  auto island_count = [](const Graph& g) {
+    int n = 0;
+    for (const Op& op : g.ops)
+      if (op.opcode == OP_ISLAND) ++n;
+    return n;
+  };
+  // Destination forwarding makes this marginal program look cheaper but the
+  // resulting newly activated island measures slower than the graph. It may
+  // optimize an explicitly forced island, but must not change the default
+  // activation decision used to price the feature.
+  expect("destination forwarding does not activate a marginal island",
+         island_count(cm.graph) == 0);
+  test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);
+  CompiledModel forced = compile_model(mir, data);
+  test_setenv("STANLI_NO_PROGRAM_DEST_FORWARD", "1", 1);
+  CompiledModel unforwarded = compile_model(mir, data);
+  test_unsetenv("STANLI_NO_PROGRAM_DEST_FORWARD");
+  test_unsetenv("STANLI_ISLAND_ALWAYS");
+  expect("marginal island remains available when forced",
+         island_count(forced.graph) == 1);
+  auto island_instructions = [](const Graph& g) {
+    size_t n = 0;
+    for (const Op& op : g.ops)
+      if (op.opcode == OP_ISLAND)
+        n += static_cast<const IslandProg*>(op.udata)->code.size();
+    return n;
+  };
+  expect("forced island still receives destination forwarding",
+         island_instructions(forced.graph) <
+             island_instructions(unforwarded.graph));
   Executor ex(std::move(cm.graph));
   cm.bind(ex);
 

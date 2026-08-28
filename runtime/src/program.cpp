@@ -20,6 +20,7 @@
 // renumbering only drops registers nothing names.
 #include <stanli/program.hpp>
 
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -97,19 +98,138 @@ bool branches(Program::Code code) {
   return code == Program::JZ || code == Program::JMP;
 }
 
+bool overlaps(Span lhs, Span rhs) {
+  return lhs.reg < rhs.reg + rhs.len && rhs.reg < lhs.reg + lhs.len;
+}
+
+bool forwardable_producer(Program::Code code) {
+  // Copies already have a dedicated aliasing pass below. CALL payloads carry
+  // output and scratch ranges outside Instr. Instructions without a generated
+  // adjoint are outside this experiment as well: the important saving is the
+  // producer/copy pair in both the forward and generated reverse streams.
+  if (code == Program::MOV || code == Program::MOVR || code == Program::CALL)
+    return false;
+  const ProgramOpSpec& spec = program_code_spec(code);
+  return !spec.has(kProgramNoOutput) && !spec.has(kProgramNoAdjoint);
+}
+
+// Turn
+//
+//   producer temporary <- ...
+//   MOV[/R] destination <- temporary
+//
+// into a producer that writes destination directly. This is ordinary,
+// model-independent copy coalescing, but it complements the forward aliasing
+// pass below: that pass must keep copies into the interior of a ranged value,
+// while redirecting the producer preserves the range as a range.
+//
+// The producer and copy must be adjacent, the temporary must be private to
+// the pair, and the destination must not overlap any producer input. The last
+// condition keeps a previously out-of-place ranged operation out of place and
+// avoids relying on opcode-specific in-place semantics. Branch-bearing
+// programs retain the old path for now so erasing the copy cannot change a
+// jump target.
+bool forward_adjacent_copy_destinations(
+    Program& p, const std::vector<std::pair<int, int>>& seeded, bool enabled) {
+  if (!enabled || std::getenv("STANLI_NO_PROGRAM_DEST_FORWARD") ||
+      p.code.size() < 2)
+    return false;
+  for (const Program::Instr& I : p.code)
+    if (branches(I.code)) return false;
+
+  const size_t n_regs = static_cast<size_t>(p.n_regs);
+  std::vector<int> reads(n_regs, 0), writes(n_regs, 0);
+  std::vector<size_t> last_write(n_regs, p.code.size());
+  for (size_t i = 0; i < p.code.size(); ++i) {
+    const Program::Instr& I = p.code[i];
+    each_read(p, I, [&](Span span) {
+      for (int k = 0; k < span.len; ++k) ++reads[(size_t)(span.reg + k)];
+    });
+    each_write(p, I, [&](Span span) {
+      for (int k = 0; k < span.len; ++k) {
+        const size_t reg = (size_t)(span.reg + k);
+        ++writes[reg];
+        last_write[reg] = i;
+      }
+    });
+  }
+
+  std::vector<char> externally_named(n_regs, 0);
+  for (const auto& seed : seeded)
+    for (int k = 0; k < seed.second; ++k)
+      externally_named[(size_t)(seed.first + k)] = 1;
+  for (int reg : p.out_regs) externally_named[(size_t)reg] = 1;
+
+  std::vector<char> remove(p.code.size(), 0);
+  for (size_t i = 0; i + 1 < p.code.size(); ++i) {
+    Program::Instr& producer = p.code[i];
+    const Program::Instr& copy = p.code[i + 1];
+    if (!forwardable_producer(producer.code) ||
+        (copy.code != Program::MOV && copy.code != Program::MOVR))
+      continue;
+
+    const int output_len = program_output_len(producer);
+    const int copy_len = copy.code == Program::MOV ? 1 : copy.len;
+    if (output_len <= 0 || copy_len != output_len || copy.a != producer.dst)
+      continue;
+    const Span temporary{producer.dst, output_len};
+    const Span destination{copy.dst, copy_len};
+    if (overlaps(temporary, destination)) continue;
+
+    bool safe = true;
+    // When the reverse rule needs the producer's output value, it must survive
+    // in the destination until reverse. Earlier writes do not matter (the
+    // original copy overwrote them), but a later write would require a
+    // checkpoint copy and give the instruction straight back. Rules without
+    // SaveOut consume the destination adjoint directly and may forward into a
+    // repeatedly written state cell.
+    const bool saves_output =
+        program_code_spec(producer.code).has(kProgramSaveOut);
+    for (int k = 0; k < output_len && safe; ++k) {
+      const size_t src = (size_t)(temporary.reg + k);
+      const size_t dst = (size_t)(destination.reg + k);
+      safe = reads[src] == 1 && writes[src] == 1 && !externally_named[src] &&
+             (last_write[dst] == i + 1 || !saves_output);
+    }
+    each_read(p, producer, [&](Span input) {
+      if (overlaps(destination, input)) safe = false;
+    });
+    if (!safe) continue;
+
+    producer.dst = copy.dst;
+    remove[i + 1] = 1;
+    ++i;  // A copy cannot also begin another producer/copy pair.
+  }
+
+  size_t kept = 0;
+  for (char drop : remove)
+    if (!drop) ++kept;
+  if (kept == p.code.size()) return false;
+  std::vector<Program::Instr> code;
+  code.reserve(kept);
+  for (size_t i = 0; i < p.code.size(); ++i)
+    if (!remove[i]) code.push_back(p.code[i]);
+  p.code = std::move(code);
+  return true;
+}
+
 }  // namespace
 
 void compact_program(Program& p, std::vector<std::pair<int, int>>& seeded) {
+  (void)compact_program_gated(p, seeded, true);
+}
+
+bool compact_program_gated(Program& p, std::vector<std::pair<int, int>>& seeded,
+                           bool enable_destination_forwarding) {
   const int n_regs = p.n_regs;
-  const size_t n = p.code.size();
-  if (n_regs <= 0) return;
+  if (n_regs <= 0) return false;
   // DYN_INDEX's `c` is an offset into a run rather than a register.
   for (const auto& I : p.code) {
     if (I.code == Program::DYN_INDEX || I.code == Program::DIAG_PRE_MULTIPLY ||
         I.code == Program::DIAG_POST_MULTIPLY)
-      return;
+      return false;
     if (I.code == Program::CALL && (I.a < 0 || (size_t)I.a >= p.calls.size()))
-      return;
+      return false;
   }
 
   auto in_file = [&](Span s) { return s.reg >= 0 && s.reg + s.len <= n_regs; };
@@ -117,12 +237,16 @@ void compact_program(Program& p, std::vector<std::pair<int, int>>& seeded) {
     bool ok = true;
     each_write(p, I, [&](Span s) { ok = ok && in_file(s); });
     each_read(p, I, [&](Span s) { ok = ok && in_file(s); });
-    if (!ok) return;
+    if (!ok) return false;
   }
   for (const auto& s : seeded)
-    if (s.second > 0 && !in_file(Span{s.first, s.second})) return;
+    if (s.second > 0 && !in_file(Span{s.first, s.second})) return false;
   for (int reg : p.out_regs)
-    if (reg < 0 || reg >= n_regs) return;
+    if (reg < 0 || reg >= n_regs) return false;
+
+  const bool destination_forwarded = forward_adjacent_copy_destinations(
+      p, seeded, enable_destination_forwarding);
+  const size_t n = p.code.size();
 
   std::vector<char> pinned((size_t)n_regs, 0);
   std::vector<char> interior((size_t)n_regs + 1, 0);
@@ -272,7 +396,7 @@ void compact_program(Program& p, std::vector<std::pair<int, int>>& seeded) {
     each_read(p, p.code[i], check);
   }
   for (int reg : p.out_regs) used[(size_t)alias[(size_t)reg]] = 1;
-  if (!contiguous) return;
+  if (!contiguous) return destination_forwarded;
 
   std::vector<int> renumber((size_t)n_regs, -1);
   int at = 0;
@@ -304,6 +428,7 @@ void compact_program(Program& p, std::vector<std::pair<int, int>>& seeded) {
   for (auto& s : seeded)
     if (s.second > 0) s.first = map[(size_t)s.first];
   p.n_regs = at;
+  return destination_forwarded;
 }
 
 }  // namespace stanli
