@@ -5189,6 +5189,7 @@ int main() {
                 want[i]);
   }
 
+<<<<<<< HEAD
   // DataMap observations are first-index-fast, unlike the graph's outer-major
   // array slots. A rank-two append used by constant indexing must preserve the
   // former order. An empty operand also takes its suffix shape from the
@@ -5275,6 +5276,8 @@ int main() {
     expect_eq("PR236 unsized island negative gradient", gradient[0], 0.0);
   }
 
+=======
+>>>>>>> 6236ab8 (Implement mdivide functions)
   // matrix_exp retains the square matrix view and differentiates every output
   // element through the full, nonsymmetric matrix exponential.
   {
@@ -5301,6 +5304,7 @@ int main() {
     stan::math::recover_memory();
   }
 
+<<<<<<< HEAD
   // Transformed data and write_array recovery run MirInterp rather than the
   // graph kernels. Both new functions must exist there as well. The test-only
   // hook attaches the same interpreter used by ordinary late-truncation
@@ -5356,6 +5360,8 @@ int main() {
     }
   }
 
+=======
+>>>>>>> 6236ab8 (Implement mdivide functions)
   // quad_form_sym at both overloads and both scalar types: a matrix B gives
   // 0.5 * (C + C'), a vector B the scalar B' A B, and stan-math associates
   // that scalar one way at double and the other at var. `a + a'` is exactly
@@ -5408,6 +5414,7 @@ int main() {
     stan::math::recover_memory();
   }
 
+<<<<<<< HEAD
   // Stan Math's reverse-mode vector overload still evaluates 0.5 * (c + c)
   // for the scalar result. Preserve that operation at overflow rather than
   // returning the finite unsymmetrized c.
@@ -5425,6 +5432,88 @@ int main() {
     const double lp = qex.forward();
     check(std::isinf(lp) && lp > 0.0,
           "quad_form_sym active-vector scalar symmetrization overflow");
+=======
+  // The named solves, all six, at both dividend shapes. Each reaches the
+  // same stan-math call the operator spellings do, so the reference is that
+  // call -- with the dividend at the Eigen shape its Stan type implies,
+  // which is the distinction the vector variant bit preserves.
+  {
+    DataMap d;
+    CompiledModel mm =
+        compile_model(slurp("tests/fixtures/mdivide_named.tmir.sexp"), d);
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    // Three families of 54 reals: four divisors, then the matrix, vector,
+    // transposed-matrix and row-vector dividends they each solve against.
+    constexpr int kN = 162;
+    double p[kN];
+    for (int i = 0; i < kN; ++i) p[i] = 0.6 * std::sin(0.7 * (i + 1));
+    for (int i = 0; i < kN; ++i) mex.params_data()[i] = p[i];
+    double gradient[kN] = {};
+    const double lp = mex.gradient(gradient);
+
+    using stan::math::var;
+    using VarMat = Eigen::Matrix<var, -1, -1>;
+    VarMat div[3][4], mat[3][2];
+    Eigen::Matrix<var, -1, 1> vec[3];
+    Eigen::Matrix<var, 1, -1> row[3];
+    int at = 0;
+    const auto take = [&](auto& m, int rows, int cols) {
+      m.resize(rows, cols);
+      for (int i = 0; i < rows * cols; ++i) m.data()[i] = p[at++];
+    };
+    for (int f = 0; f < 3; ++f) {
+      for (int k = 0; k < 4; ++k) take(div[f][k], 3, 3);
+      take(mat[f][0], 3, 2);
+      take(vec[f], 3, 1);
+      take(mat[f][1], 3, 2);
+      take(row[f], 1, 3);
+    }
+    // The divisors the fixture builds: a dominant diagonal for the general
+    // and triangular solves, symmetric positive definite for _spd.
+    const auto divisor = [](const VarMat& m, bool spd) {
+      VarMat out = spd ? VarMat(m + m.transpose()) : m;
+      for (int i = 0; i < 3; ++i) out(i, i) = out(i, i) + (spd ? 6.0 : 4.0);
+      return out;
+    };
+    VarMat x[3][4];
+    for (int f = 0; f < 3; ++f)
+      for (int k = 0; k < 4; ++k) x[f][k] = divisor(div[f][k], f == 1);
+    const VarMat t0 = mat[0][1].transpose(), t1 = mat[1][1].transpose(),
+                 t2 = mat[2][1].transpose();
+
+    var reference = 1.0 * stan::math::mdivide_left(x[0][0], mat[0][0])(0, 0) +
+                    -0.7 * stan::math::mdivide_left(x[0][1], vec[0])(1) +
+                    1.3 * stan::math::mdivide_right(t0, x[0][2])(1, 2) +
+                    -0.9 * stan::math::mdivide_right(row[0], x[0][3])(0);
+    reference += 1.1 * stan::math::mdivide_left_spd(x[1][0], mat[1][0])(0, 0) +
+                 0.6 * stan::math::mdivide_left_spd(x[1][1], vec[1])(1) +
+                 -1.7 * stan::math::mdivide_right_spd(t1, x[1][2])(1, 2) +
+                 0.8 * stan::math::mdivide_right_spd(row[1], x[1][3])(0);
+    reference +=
+        0.5 * stan::math::mdivide_left_tri_low(x[2][0], mat[2][0])(0, 0) +
+        -1.2 * stan::math::mdivide_left_tri_low(x[2][1], vec[2])(1) +
+        0.3 * stan::math::mdivide_right_tri_low(t2, x[2][2])(1, 2) +
+        1.4 * stan::math::mdivide_right_tri_low(row[2], x[2][3])(0);
+
+    reference.grad();
+    expect_eq("mdivide named lp", lp, reference.val());
+    at = 0;
+    const auto compare = [&](const std::string& tag, const auto& m) {
+      for (int i = 0; i < m.size(); ++i, ++at)
+        expect_eq(tag + std::to_string(i), gradient[at], m.data()[i].adj());
+    };
+    for (int f = 0; f < 3; ++f) {
+      const std::string tag = "mdivide " + std::to_string(f) + " ";
+      for (int k = 0; k < 4; ++k)
+        compare(tag + "d" + std::to_string(k), div[f][k]);
+      compare(tag + "m0", mat[f][0]);
+      compare(tag + "v", vec[f]);
+      compare(tag + "m2", mat[f][1]);
+      compare(tag + "r", row[f]);
+    }
+    stan::math::recover_memory();
+>>>>>>> 6236ab8 (Implement mdivide functions)
   }
 
   if (failures == 0) std::printf("test_lower OK\n");
