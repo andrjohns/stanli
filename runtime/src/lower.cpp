@@ -1498,6 +1498,28 @@ struct Lowering {
           return emit_value(OP_GATHER, {base},
                             (int64_t)rows.size() * base.si.cols, si, gather);
         }
+        // A two-axis matrix gather is the Cartesian selection M[rows, cols],
+        // not a pairwise zip. Preserve both index arrays' order and
+        // duplicates; column-major output means selected columns are outer
+        // and selected rows are inner in the flat gather list.
+        if (e.args.size() == 3 && is_matrix(base.si) &&
+            e.args[1].name == "IndexMulti" && e.args[2].name == "IndexMulti") {
+          const std::vector<int64_t> rows = index_positions(
+              e.args[1], base.si.rows, "matrix row gather", e.raw);
+          const std::vector<int64_t> cols = index_positions(
+              e.args[2], base.si.cols, "matrix column gather", e.raw);
+          std::vector<int> gather;
+          gather.reserve(rows.size() * cols.size());
+          for (int64_t j : cols)
+            for (int64_t i : rows)
+              gather.push_back(checked_immediate(j * base.si.rows + i,
+                                                 "matrix gather offset"));
+          SlotInfo si = matrix_view((int64_t)rows.size(), (int64_t)cols.size(),
+                                    base.si.param_free);
+          return emit_value(OP_GATHER, {base},
+                            (int64_t)rows.size() * (int64_t)cols.size(), si,
+                            gather);
+        }
         // A range over the outermost array dimension is contiguous because
         // graph storage keeps each whole outer element together. Preserve
         // the complete suffix shape even when its storage width is zero.

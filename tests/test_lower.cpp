@@ -4082,6 +4082,30 @@ int main() {
       expect_ulp("tcrossprod: g" + std::to_string(i), gradient[i], a(i).adj());
   }
 
+  // Two IndexMulti selectors on a matrix form their Cartesian submatrix.
+  // Different reordered row/column lists pin column-major gather order and
+  // route each gathered cell's adjoint back to the source matrix.
+  {
+    DataMap d;
+    d.set_int_array("row_indices", {3, 1});
+    d.set_int_array("column_indices", {2, 3});
+    CompiledModel gm =
+        compile_model(slurp("tests/fixtures/matrix_multi_multi.tmir.sexp"), d);
+    Executor gex(std::move(gm.graph));
+    gm.bind(gex);
+    const double q[9] = {0.2, -0.4, 0.7, 0.1, -0.3, 0.8, 0.5, 0.9, -0.6};
+    for (int i = 0; i < 9; ++i) gex.params_data()[i] = q[i];
+    double gradient[9] = {};
+    const double lp = gex.gradient(gradient);
+    const double want = 2.0 * q[5] + 2.0 * q[3] + 2.0 * q[8] + 2.0 * q[6];
+    expect_eq("matrix multi/multi: lp", lp, want);
+    for (int i = 0; i < 9; ++i) {
+      const bool selected = i == 3 || i == 5 || i == 6 || i == 8;
+      expect_eq("matrix multi/multi: g" + std::to_string(i), gradient[i],
+                selected ? 2.0 : 0.0);
+    }
+  }
+
   // A scalar replicated as a row vector uses the vector replication opcode,
   // but must retain its row-vector type for downstream expression lowering.
   {
