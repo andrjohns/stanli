@@ -84,6 +84,14 @@ void check(const std::string& name, const stanli::mir::FunDef& f,
 
     std::vector<double> got;
     run_rhs<double>(p, t, y.data(), th.data(), x_r.data(), got);
+    std::vector<double> got_into(p.out_regs.size());
+    run_rhs_into<double>(p, t, y.data(), th.data(), x_r.data(),
+                         got_into.data());
+    if (got_into != got) {
+      ++failures;
+      std::printf("FAIL %s: caller-owned output differs\n", name.c_str());
+      return;
+    }
 
     MirInterp<double> ev(funs, "ODE function");
     std::vector<double> tv{t}, xrv(x_r.begin(), x_r.end());
@@ -135,7 +143,7 @@ std::vector<uint64_t> tape_bits(const std::vector<stan::math::vari_base*>& tape,
   return out;
 }
 
-template <bool YAutodiff, bool ThetaAutodiff, bool Staged>
+template <bool YAutodiff, bool ThetaAutodiff, bool Staged, bool Into = false>
 MixedRun mixed_run(const stanli::RhsProgram& p, double t,
                    const std::vector<double>& y_values,
                    const std::vector<double>& theta_values,
@@ -152,7 +160,11 @@ MixedRun mixed_run(const stanli::RhsProgram& p, double t,
   const size_t nochain_first = stack->var_nochain_stack_.size();
 
   std::vector<T> out;
-  if constexpr (Staged) {
+  if constexpr (Into) {
+    out.resize(p.out_regs.size());
+    stanli::run_rhs_into<T>(p, t, y.data(), theta.data(), theta.size(),
+                            x_r.data(), out.data());
+  } else if constexpr (Staged) {
     std::vector<T> staged_y(y.begin(), y.end());
     std::vector<T> staged_theta(theta.begin(), theta.end());
     const T staged_t(t);
@@ -201,6 +213,8 @@ void check_mixed_seed(const stanli::RhsProgram& p, const char* label) {
       mixed_run<YAutodiff, ThetaAutodiff, true>(p, 0.73, y, theta, x_r);
   const MixedRun direct =
       mixed_run<YAutodiff, ThetaAutodiff, false>(p, 0.73, y, theta, x_r);
+  const MixedRun into =
+      mixed_run<YAutodiff, ThetaAutodiff, false, true>(p, 0.73, y, theta, x_r);
   const std::string prefix = std::string("mixed seed ") + label + ": ";
   expect(prefix + "output bits", direct.values == staged.values);
   expect(prefix + "y gradient bits", direct.y_grads == staged.y_grads);
@@ -209,6 +223,15 @@ void check_mixed_seed(const stanli::RhsProgram& p, const char* label) {
   expect(prefix + "chain tape order", direct.chain_tape == staged.chain_tape);
   expect(prefix + "nochain tape order",
          direct.nochain_tape == staged.nochain_tape);
+  expect(prefix + "caller-owned output bits", into.values == staged.values);
+  expect(prefix + "caller-owned y gradient bits",
+         into.y_grads == staged.y_grads);
+  expect(prefix + "caller-owned theta gradient bits",
+         into.theta_grads == staged.theta_grads);
+  expect(prefix + "caller-owned chain tape order",
+         into.chain_tape == staged.chain_tape);
+  expect(prefix + "caller-owned nochain tape order",
+         into.nochain_tape == staged.nochain_tape);
 }
 
 }  // namespace

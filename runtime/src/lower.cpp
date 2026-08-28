@@ -4579,8 +4579,8 @@ struct Lowering {
   }
 
   // stan-math's own defaults differ per solver: rk45 1e-6/1e-6/1e6 (the
-  // OdeSpec field initializers), bdf 1e-10/1e-10/1e8. Using one set for
-  // both left one_comp_mm's gradients 2.9e-6 off CmdStan, so both
+  // OdeSpec field initializers), BDF/Adams 1e-10/1e-10/1e8. Using one set
+  // for both left one_comp_mm's gradients 2.9e-6 off CmdStan, so both
   // families stamp them from here.
   void stamp_ode_defaults(OdeSpec& spec) {
     if (!spec.stiff) return;
@@ -4734,7 +4734,14 @@ struct Lowering {
   // The integrate_ode_* family.
   std::optional<Val> lower_ode_fn(const mir::Expr& e) {
     if (auto v = lower_ode_variadic(e)) return v;
-    if (e.name.rfind("integrate_ode_", 0) == 0) {
+    std::optional<OdeSpec::Solver> legacy_solver;
+    if (e.name == "integrate_ode_rk45")
+      legacy_solver = OdeSpec::RK45;
+    else if (e.name == "integrate_ode_bdf")
+      legacy_solver = OdeSpec::BDF;
+    else if (e.name == "integrate_ode_adams")
+      legacy_solver = OdeSpec::ADAMS;
+    if (legacy_solver) {
       // integrate_ode_*(f, z_init, t0, ts, theta, x_r, x_i[, rtol, atol,
       // max_steps]). Everything but z_init and theta is data, and is
       // captured in the spec the kernel reads through the op payload.
@@ -4745,9 +4752,10 @@ struct Lowering {
         fail(e.name + ": unknown right-hand side " + e.args[0].name, e.raw);
       spec->adopt(fun_defs);
       spec->rhs_name = e.args[0].name;
-      spec->stiff = e.name.find("bdf") != std::string::npos;
       spec->legacy = true;
-      spec->solver = spec->stiff ? OdeSpec::BDF : OdeSpec::RK45;
+      spec->solver = *legacy_solver;
+      spec->stiff =
+          spec->solver == OdeSpec::BDF || spec->solver == OdeSpec::ADAMS;
       stamp_ode_defaults(*spec);
       spec->t0 = const_values(e.args[2]).at(0);
       spec->ts = const_values(e.args[3]);

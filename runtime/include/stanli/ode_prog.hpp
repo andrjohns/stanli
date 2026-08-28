@@ -87,10 +87,12 @@ std::vector<T>& rhs_regs() {
   return reg;
 }
 
+namespace detail {
+
 template <typename T, typename T_time, typename T_y, typename T_theta>
-void run_rhs(const RhsProgram& p, const T_time& t, const T_y* y,
-             const T_theta* th, size_t n_th_source, const double* xr,
-             std::vector<T>& out) {
+std::vector<T>& eval_rhs_regs(const RhsProgram& p, const T_time& t,
+                              const T_y* y, const T_theta* th,
+                              size_t n_th_source, const double* xr) {
   std::vector<T>& reg = rhs_regs<T>();
   if ((int)reg.size() < p.n_regs) reg.resize((size_t)p.n_regs);
   for (int i = 0; i < p.n_y; ++i) reg[(size_t)(p.y0 + i)] = T(y[i]);
@@ -102,7 +104,34 @@ void run_rhs(const RhsProgram& p, const T_time& t, const T_y* y,
   for (int i = 0; i < p.n_xr; ++i) reg[(size_t)(p.xr0 + i)] = T(xr[i]);
 
   run_program(p, reg);
+  return reg;
+}
 
+}  // namespace detail
+
+// Caller-owned output form for hot callback adapters. The destination must
+// hold p.out_regs.size() scalars and must not alias the reusable register file.
+// Unlike the vector wrapper below this performs no output allocation.
+template <typename T, typename T_time, typename T_y, typename T_theta>
+void run_rhs_into(const RhsProgram& p, const T_time& t, const T_y* y,
+                  const T_theta* th, size_t n_th_source, const double* xr,
+                  T* out) {
+  const std::vector<T>& reg =
+      detail::eval_rhs_regs<T>(p, t, y, th, n_th_source, xr);
+  for (size_t i = 0; i < p.out_regs.size(); ++i)
+    out[i] = reg[(size_t)p.out_regs[i]];
+}
+
+template <typename T, typename T_time, typename T_y, typename T_theta>
+void run_rhs(const RhsProgram& p, const T_time& t, const T_y* y,
+             const T_theta* th, size_t n_th_source, const double* xr,
+             std::vector<T>& out) {
+  const std::vector<T>& reg =
+      detail::eval_rhs_regs<T>(p, t, y, th, n_th_source, xr);
+
+  // Keep resize after the program replay, as in the original adapter. Besides
+  // retaining allocation behavior for existing callers, this leaves the
+  // observable var/nochain tape order unchanged.
   out.resize(p.out_regs.size());
   for (size_t i = 0; i < p.out_regs.size(); ++i)
     out[i] = reg[(size_t)p.out_regs[i]];
@@ -115,6 +144,12 @@ template <typename T, typename T_time, typename T_y, typename T_theta>
 void run_rhs(const RhsProgram& p, const T_time& t, const T_y* y,
              const T_theta* th, const double* xr, std::vector<T>& out) {
   run_rhs<T>(p, t, y, th, (size_t)p.n_th, xr, out);
+}
+
+template <typename T, typename T_time, typename T_y, typename T_theta>
+void run_rhs_into(const RhsProgram& p, const T_time& t, const T_y* y,
+                  const T_theta* th, const double* xr, T* out) {
+  run_rhs_into<T>(p, t, y, th, (size_t)p.n_th, xr, out);
 }
 
 }  // namespace stanli

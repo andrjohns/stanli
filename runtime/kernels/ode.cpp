@@ -113,12 +113,22 @@ struct VarRhs {
   template <typename T_y, typename T_param>
   Eigen::Matrix<stan::return_type_t<T_y, T_param>, Eigen::Dynamic, 1>
   operator()(const double& t, const Eigen::Matrix<T_y, Eigen::Dynamic, 1>& y,
-             std::ostream*, const std::vector<T_param>& theta,
+             std::ostream* msgs, const std::vector<T_param>& theta,
              const std::vector<double>& x_r,
              const std::vector<int>& x_i) const {
     using T = stan::return_type_t<T_y, T_param>;
+    if (spec->prog.ok) {
+      Eigen::Matrix<T, Eigen::Dynamic, 1> out(
+          (Eigen::Index)spec->prog.out_regs.size());
+      // Write the register outputs directly into Stan Math's required Eigen
+      // return object. The vector-returning MirRhs entry remains the exact
+      // interpreter fallback and compatibility path.
+      run_rhs_into<T>(spec->prog, t, y.data(), theta.data(), theta.size(),
+                      x_r.data(), out.data());
+      return out;
+    }
     const std::vector<T> dy =
-        MirRhs{spec}.eval(t, y.data(), (size_t)y.size(), theta, x_r, x_i);
+        MirRhs{spec}.eval(t, y.data(), (size_t)y.size(), theta, x_r, x_i, msgs);
     Eigen::Matrix<T, Eigen::Dynamic, 1> out(dy.size());
     for (size_t i = 0; i < dy.size(); ++i) out(i) = dy[i];
     return out;
@@ -133,22 +143,40 @@ std::vector<std::vector<stan::return_type_t<T_y0, T_theta>>> solve(
     const OdeSpec& s, const std::vector<T_y0>& z0,
     const std::vector<T_theta>& theta) {
   using T = stan::return_type_t<T_y0, T_theta>;
-  // The deprecated entry points, unchanged: the four corpus ODE models
-  // are verified against exactly this call.
-  if (s.legacy) {
-    MirRhs f{&s};
-    if (s.stiff)
-      return stan::math::integrate_ode_bdf(f, z0, s.t0, s.ts, theta, s.x_r,
-                                           s.x_i, nullptr, s.rtol, s.atol,
-                                           s.max_steps);
-    return stan::math::integrate_ode_rk45(f, z0, s.t0, s.ts, theta, s.x_r,
-                                          s.x_i, nullptr, s.rtol, s.atol,
-                                          s.max_steps);
-  }
-
   VarRhs f{&s};
   Eigen::Matrix<T_y0, Eigen::Dynamic, 1> y0((Eigen::Index)z0.size());
   for (size_t i = 0; i < z0.size(); ++i) y0((Eigen::Index)i) = z0[i];
+
+  // The public integrate_ode_* wrappers adapt Eigen state to std::vector for
+  // every RHS call and convert the result back. Our RHS already implements
+  // the Eigen convention, so call the same underlying solver implementation
+  // with the legacy function name retained for validation and error messages.
+  // This changes only container marshalling, not the solver or its defaults.
+  if (s.legacy) {
+    std::vector<Eigen::Matrix<T, Eigen::Dynamic, 1>> res;
+    switch (s.solver) {
+      case OdeSpec::BDF:
+        res = stan::math::ode_bdf_tol_impl("integrate_ode_bdf", f, y0, s.t0,
+                                           s.ts, s.rtol, s.atol, s.max_steps,
+                                           nullptr, theta, s.x_r, s.x_i);
+        break;
+      case OdeSpec::ADAMS:
+        res = stan::math::ode_adams_tol_impl("integrate_ode_adams", f, y0, s.t0,
+                                             s.ts, s.rtol, s.atol, s.max_steps,
+                                             nullptr, theta, s.x_r, s.x_i);
+        break;
+      default:
+        res = stan::math::ode_rk45_tol_impl("integrate_ode_rk45", f, y0, s.t0,
+                                            s.ts, s.rtol, s.atol, s.max_steps,
+                                            nullptr, theta, s.x_r, s.x_i);
+        break;
+    }
+    std::vector<std::vector<T>> out;
+    out.reserve(res.size());
+    for (const auto& r : res) out.emplace_back(r.data(), r.data() + r.size());
+    return out;
+  }
+
   // Dispatch on the solver the model actually named. Mapping adams onto
   // bdf (or ckrk onto rk45) agrees to tolerance on an easy system and is
   // still the wrong integrator for the user who picked one for its
