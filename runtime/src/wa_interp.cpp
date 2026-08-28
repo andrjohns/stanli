@@ -296,7 +296,16 @@ struct InterpAlgebraSystem {
 
 bool WaInterp::ode_fun(MirInterp<double>& in, const mir::Expr& e,
                        DataMap::Entry* out) {
-  if (e.name.rfind("integrate_ode_", 0) != 0) return false;
+  enum class LegacySolver { RK45, BDF, ADAMS };
+  LegacySolver solver;
+  if (e.name == "integrate_ode_rk45")
+    solver = LegacySolver::RK45;
+  else if (e.name == "integrate_ode_bdf")
+    solver = LegacySolver::BDF;
+  else if (e.name == "integrate_ode_adams")
+    solver = LegacySolver::ADAMS;
+  else
+    return false;
   if (e.args.size() < 7)
     throw CompileError("stanli write_array: " + e.name + " arity");
   auto fit = funs_.find(e.args[0].name);
@@ -313,22 +322,33 @@ bool WaInterp::ode_fun(MirInterp<double>& in, const mir::Expr& e,
   std::vector<int> x_i = xie.i;
   if (x_i.empty())
     for (double v : xie.r) x_i.push_back((int)v);
-  const bool stiff = e.name.find("bdf") != std::string::npos;
+  const bool multistep =
+      solver == LegacySolver::BDF || solver == LegacySolver::ADAMS;
   // Solver defaults match the lowering's (and stan-math's own): rk45
-  // 1e-6/1e-6/1e6, bdf 1e-10/1e-10/1e8.
-  double rtol = stiff ? 1e-10 : 1e-6, atol = rtol;
-  long max_steps = stiff ? 100000000 : 1000000;
+  // 1e-6/1e-6/1e6, BDF and Adams 1e-10/1e-10/1e8.
+  double rtol = multistep ? 1e-10 : 1e-6, atol = rtol;
+  long max_steps = multistep ? 100000000 : 1000000;
   if (e.args.size() >= 10) {
     rtol = vec(7).at(0);
     atol = vec(8).at(0);
     max_steps = (long)vec(9).at(0);
   }
   InterpRhs f{&funs_, fit->second};
-  const auto sol =
-      stiff ? stan::math::integrate_ode_bdf(f, z0, t0, ts, theta, x_r, x_i,
-                                            nullptr, rtol, atol, max_steps)
-            : stan::math::integrate_ode_rk45(f, z0, t0, ts, theta, x_r, x_i,
-                                             nullptr, rtol, atol, max_steps);
+  std::vector<std::vector<double>> sol;
+  switch (solver) {
+    case LegacySolver::RK45:
+      sol = stan::math::integrate_ode_rk45(f, z0, t0, ts, theta, x_r, x_i,
+                                           nullptr, rtol, atol, max_steps);
+      break;
+    case LegacySolver::BDF:
+      sol = stan::math::integrate_ode_bdf(f, z0, t0, ts, theta, x_r, x_i,
+                                          nullptr, rtol, atol, max_steps);
+      break;
+    case LegacySolver::ADAMS:
+      sol = stan::math::integrate_ode_adams(f, z0, t0, ts, theta, x_r, x_i,
+                                            nullptr, rtol, atol, max_steps);
+      break;
+  }
   // array[N, S]: Fortran storage to match the interpreter's N-D indexing.
   const int64_t N = (int64_t)sol.size();
   const int64_t S = N > 0 ? (int64_t)sol[0].size() : 0;

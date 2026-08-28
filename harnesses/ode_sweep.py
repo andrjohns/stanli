@@ -20,6 +20,7 @@ Needs a CmdStan checkout, so it does not run in CI;
 """
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -96,8 +97,8 @@ CASES = [
      "ode_rk45(rhs_mixed, y0, 0.0, ts, a, p, d_real, d_int)"),
 ]
 
-# The deprecated interface, swept alongside so its regression shows here.
-LEGACY = ("""
+# The deprecated interfaces, swept alongside so their regressions show here.
+LEGACY_FNS = """
 functions {
   array[] real rhs_old(real t, array[] real y, array[] real theta,
                        array[] real x_r, array[] int x_i) {
@@ -107,14 +108,32 @@ functions {
     return dy;
   }
 }
-""", "integrate_ode_rk45(rhs_old, y0, 0.0, ts, "
-     "{a, b}, x_r_arr, x_i_arr)")
+"""
+
+LEGACY_CASES = [
+    ("legacy_rk45", "", "integrate_ode_rk45(rhs_old, y0, 0.0, ts, "
+     "{a, b}, x_r_arr, x_i_arr)"),
+    ("legacy_bdf", "", "integrate_ode_bdf(rhs_old, y0, 0.0, ts, "
+     "{a, b}, x_r_arr, x_i_arr)"),
+    ("legacy_adams", "", "integrate_ode_adams(rhs_old, y0, 0.0, ts, "
+     "{a, b}, x_r_arr, x_i_arr)"),
+    ("legacy_rk45_tol", "", "integrate_ode_rk45(rhs_old, y0, 0.0, ts, "
+     "{a, b}, x_r_arr, x_i_arr, 1e-4, 1e-4, 100000)"),
+    ("legacy_bdf_tol", "", "integrate_ode_bdf(rhs_old, y0, 0.0, ts, "
+     "{a, b}, x_r_arr, x_i_arr, 1e-4, 1e-4, 100000)"),
+    ("legacy_adams_tol", "", "integrate_ode_adams(rhs_old, y0, 0.0, ts, "
+     "{a, b}, x_r_arr, x_i_arr, 1e-4, 1e-4, 100000)"),
+]
 
 
 def model_for(name, extra_params, call, legacy=False):
-    fns = LEGACY[0] if legacy else MODERN_FNS
+    fns = LEGACY_FNS if legacy else MODERN_FNS
     decl = "array[N, 2] real z" if legacy else "array[N] vector[2] z"
-    read = ("sum(to_vector(z[n]))" if legacy else "sum(z[n])")
+    # The RHS conserves z[1] + z[2], so summing a state is blind to the
+    # selected integrator. This weighted nonlinear read makes a wrong solver
+    # change both the density and its gradient while keeping the system small.
+    read = ("0.7 * z[n, 1] - 1.3 * z[n, 2] + 0.2 * square(z[n, 1])"
+            if legacy else "sum(z[n])")
     y0_decl = ("array[2] real<lower=0> y0;" if legacy
                else "vector<lower=0>[2] y0;")
     return f"""{fns}
@@ -160,6 +179,40 @@ def reldiff(a, b):
     return d / scale
 
 
+def output_line(stdout, prefix):
+    for line in stdout.splitlines():
+        if line.startswith(prefix + " "):
+            return line[len(prefix) + 1:]
+    return None
+
+
+def compare_legacy_write_array(exe, check, stan, data):
+    """Force the interpreter and compare every output column at three points."""
+    worst, n_cmp = 0.0, 0
+    env = os.environ.copy()
+    env["STANLI_WA_FORCE_INTERP"] = "1"
+    for point in range(3):
+        ref = run([exe, data, point])
+        got = run([check, stan, data, "--stanc", REPO / "deps/stanc3/stanc",
+                   "--point", point, "--wa-values"], env=env)
+        rn = output_line(ref.stdout, "WANAMES")
+        gn = output_line(got.stdout, "WANAMES")
+        rv = output_line(ref.stdout, "WAVALS")
+        gv = output_line(got.stdout, "WAVALS")
+        if None in (rn, gn, rv, gv) or any(
+                v.startswith("FAIL") for v in (rn, gn, rv, gv)):
+            return worst, n_cmp, ("wa_failed", f"point {point}")
+        if rn != gn:
+            return worst, n_cmp, ("wa_names", f"point {point}")
+        a, b = [float(v) for v in rv.split()], [float(v) for v in gv.split()]
+        if len(a) != len(b):
+            return worst, n_cmp, (
+                "wa_shape", f"point {point}: cmdstan {len(a)}, stanli {len(b)}")
+        n_cmp += len(a)
+        worst = max([worst] + [reldiff(x, y) for x, y in zip(a, b)])
+    return worst, n_cmp, None
+
+
 def sweep_one(case, cs, tmp, build, legacy=False):
     name, extra, call = case
     d = tmp / name
@@ -189,6 +242,13 @@ def sweep_one(case, cs, tmp, build, legacy=False):
         return (name,) + err
     if n_cmp == 0:
         return name, "no_valid_point", ""
+    if legacy:
+        wa_worst, wa_n, wa_err = compare_legacy_write_array(
+            exe, check, stan, data)
+        if wa_err:
+            return (name,) + wa_err
+        worst = max(worst, wa_worst)
+        n_cmp += wa_n
     # An ODE solve is iterative, so bitwise is not the bar an integrator
     # can be held to the way a density can -- but "agrees to a few ULP"
     # and "ran a different solver" are the two outcomes, and they are
@@ -211,8 +271,7 @@ def main():
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="ode_sweep_"))
     cases = [(c, False) for c in CASES if args.filter in c[0]]
-    if args.filter in "legacy_integrate_ode":
-        cases.append((("legacy_integrate_ode", "", LEGACY[1]), True))
+    cases += [(c, True) for c in LEGACY_CASES if args.filter in c[0]]
 
     bad = 0
     for case, legacy in cases:
@@ -221,7 +280,8 @@ def main():
             bad += 1
         print(f"{'ok  ' if status == 'ok' else 'FAIL'} {name:22s} "
               f"{status:16s} {note}")
-    print(f"\n{len(cases) - bad}/{len(cases)} ODE interfaces bitwise vs CmdStan")
+    print(f"\n{len(cases) - bad}/{len(cases)} ODE interfaces within "
+          f"{MAX_REL:.0e} relative of CmdStan")
     if args.keep:
         print(f"artifacts in {tmp}")
     return 1 if bad else 0
