@@ -1,227 +1,508 @@
-# How stanli works, and why an interpreter can outrun a compiler
+# How stanli works and why it is fast
 
-stanli runs Stan models with no C++ compiler on your machine, and on
-many models it evaluates gradients faster than the natively compiled
-model CmdStan produces. Both halves of that sentence sound wrong. This
-document explains why they are not.
+## Abstract
 
-## What "compiling a model" actually does
+HMC and NUTS evaluate the same log density and gradient many times; only the
+parameter values change. stanli exploits this by preparing a reusable
+execution plan once, after reading the Stan program and its data.
 
-When CmdStan builds your model, `stanc` translates it into a C++ file,
-and a C++ compiler spends several seconds turning that into machine
-code. But the generated file contains less than you might think. Your
-model block
+stanli runs the official `stanc` front end, then lowers the optimized program
+to a fixed graph of precompiled C++ operations. At model load it assigns fixed
+locations to graph values, graph adjoints (reverse-mode derivative
+accumulators), and each operation's declared scratch space. A native-path
+gradient then loads new parameters and runs the outer forward and reverse
+sweeps over double buffers.
+
+Four mechanisms provide most of the speedup:
+
+1. **No model-specific C++ build.** stanli does not compile and link generated
+   C++, so model preparation is much shorter.
+2. **A reusable reverse-mode plan.** The graph and most derivative storage are
+   built once, instead of reconstructing a model-wide Stan Math autodiff tape
+   for every gradient.
+3. **Vector-sized operations.** One graph operation can evaluate a vector
+   expression or density over all observations, so interpreter dispatch is
+   paid per vector operation, not per scalar element.
+4. **Specialization using the loaded data.** Data-only expressions are
+   computed once. Known loop bounds, shapes, indexes, and data-only branches
+   let stanli recover broadcasts, slices, gathers, and independent batches
+   from scalar loops.
+
+In the current 120-model snapshot, 119 models have gradient measurements from
+both runtimes. The median warmed-gradient speedup is 2.91x, and 116 of those
+119 models are at or above CmdStan. Models with large vector operations, or
+scalar loops stanli can turn back into vector operations, gain the most.
+Models dominated by one large Stan Math kernel are usually near parity, and
+the measured ODE models remain slightly slower. Full results are in
+[benchmarks.md](benchmarks.md).
+
+## Scale of the four effects
+
+These are rough scales for intuition. The effects overlap, and actual gains
+depend on model structure.
+
+| mechanism | rough scale | why it helps |
+| --- | --- | --- |
+| Skip model-specific C++ compilation | Model setup takes milliseconds rather than seconds on small models; the first complete Eight Schools run is roughly 100x faster. | stanli builds a graph in memory instead of invoking a C++ compiler and linker. |
+| Reuse the reverse-mode plan | Around 2x when rebuilding the autodiff tape is a substantial part of gradient cost. | Fixed graph and derivative storage replace repeated tape construction. |
+| Execute vector-sized operations | Commonly a few times faster on vector-heavy models; sometimes close to 10x. | One dispatch can process tens, hundreds, or thousands of elements. |
+| Specialize and recover loops using data | Several-fold on suitable loop-heavy models. | Data-only work is done once, and scalar iterations can become a few vector batches. |
+
+Constant folding is the simplest form of data specialization: an expression
+that depends only on data cannot change during sampling, so stanli evaluates
+it once at model load.
+
+Loaded data can also determine graph structure. If `group[n]` is data and
+selects one of two likelihoods inside a loop, every branch outcome is fixed
+before sampling starts. stanli can then split the observations into two
+independent sets and run one vectorized likelihood per set — a scalar loop
+with an `if` becomes two vector batches, without changing the model. A worked
+example appears in [Partitioning loops using data](#partitioning-loops-using-data).
+
+## The work repeated during sampling
+
+At an HMC position `q`, each leapfrog step needs `log p(q)` and its gradient.
+Parameters change between calls; the data, declared shapes, and most of the
+computation do not. The useful distinction is work done once per model versus
+work done once per gradient.
+
+CmdStan has two stages:
+
+1. `stanc` translates the model to C++, then a C++ compiler builds and links
+   it.
+2. The compiled model evaluates with Stan Math reverse-mode autodiff. Each
+   gradient call creates the autodiff inputs, records the work for that call,
+   runs the reverse pass, copies the gradient, and recovers the autodiff
+   arena. The benchmark driver in
+   [`tools/bench_cmdstan_grad.cpp`](../tools/bench_cmdstan_grad.cpp) shows this
+   sequence directly.
+
+stanli still uses `stanc` for parsing, type checking, and Stan-specific
+optimization. It replaces the model-specific C++ build and the repeated
+model-wide autodiff recording with a reusable graph.
+
+Note that native compilation and autodiff recording are separate costs.
+Compiling a model fixes its machine-code instruction sequence; Stan Math still
+constructs the autodiff state each time that compiled function runs.
+
+## From Stan source to a bound operation graph
+
+Consider this statement:
 
 ```stan
 y ~ normal(mu + tau * theta_tilde, sigma);
 ```
 
-becomes, in essence,
+CmdStan's generated C++ arranges arithmetic and probability functions from
+Stan Math. The model-specific information is mostly which functions run, in
+what order, with what shapes and connections. stanli stores that arrangement
+as data:
 
-```cpp
-lp += normal_lpdf(y, mu + tau * theta_tilde, sigma);
+```text
+MUL          tau, theta_tilde -> scaled       # vector scale
+ADD          mu, scaled       -> theta        # scalar broadcast
+NORMAL_LPDF  y, theta, sigma  -> target       # summed vector density
 ```
 
-where `normal_lpdf` and everything else your model touches are calls
-into stan-math, a library that could have been compiled long before
-your model existed. The generated code contributes no new math, only an
-*arrangement*: which library operations to call, in what order, wired
-to which variables.
+Each row is an operation, or *op*, containing an opcode and indexes into fixed
+buffers. The C++ implementation of each opcode is already compiled into the
+stanli shared library.
 
-That is the whole trick. The vocabulary of operations is closed, because
-it is exactly the Stan function library. New models do not add
-operations; they arrange existing ones. And an arrangement does not
-need a compiler. An arrangement is data.
+Model preparation has four stages:
 
-## The op graph
-
-stanli ships every operation precompiled inside one shared library and
-turns your model into a flat list of operations, each an opcode plus
-indexes into a preallocated array of doubles:
-
+```text
+Stan source + data
+        |
+        v
+stanc: parse, type check, optimize
+        |
+        v
+lowering: compiler representation -> operation graph
+        |
+        v
+graph passes: fold constants, recover loops, remove redundant work
+        |
+        v
+binding: allocate buffers and resolve kernel pointers
 ```
-op 0: MUL          tau, theta_tilde   -> t0        (vector scale)
-op 1: ADD          mu, t0             -> theta     (broadcast add)
-op 2: NORMAL_LPDF  y, theta, sigma    -> target    (summed vector density)
+
+This is still compilation in the broad sense — the model is analyzed and
+converted to a lower-level representation — but no model-specific native C++
+is compiled or linked.
+
+### Storage is assigned once
+
+Binding creates three main arrays:
+
+- The **value arena** holds parameters, data views, intermediate values, and
+  the log density.
+- The **adjoint arena** holds derivatives for parameters and live
+  intermediates. Data and slots removed by graph optimization need no adjoint
+  storage.
+- The **scratch arena** holds partial derivatives and other values needed by
+  reverse kernels.
+
+Here, *arena* means a contiguous array whose offsets are chosen at model load
+— not Stan Math's dynamic autodiff memory pool, discussed in the next section.
+
+Binding also gives each op direct input, output, adjoint, and scratch
+pointers, and resolves the forward and reverse functions into two flat lists.
+The setup code is in
+[`runtime/src/executor.cpp`](../runtime/src/executor.cpp).
+
+A gradient evaluation is then approximately:
+
+1. Copy the unconstrained parameters into their assigned cells.
+2. Run the forward list, computing values and saved partials.
+3. Clear the compact adjoint arena and seed the log density with adjoint 1.
+4. Run the reverse list, accumulating adjoints.
+5. Copy the parameter adjoints to the caller's gradient vector.
+
+Names, shapes, offsets, pointers, and kernel lookup are not rebuilt, and the
+executor allocates no memory in this loop. Some generic kernels and fallback
+paths may still allocate temporary storage; those cases are described below.
+
+## Why a memory pool does not make autodiff allocation free
+
+Reverse-mode autodiff first computes values and saves the local information
+needed for derivatives, then seeds the result with derivative 1 and applies
+the chain rule in reverse order. The saved record is usually called the
+autodiff tape.
+
+Stan Math does not normally call the general-purpose heap allocator for every
+scalar operation. A `var` refers to a reverse-mode object (a `vari`) in an
+arena that obtains memory in blocks and hands it out cheaply. After a gradient
+evaluation, `recover_memory()` resets the arena in bulk instead of freeing
+each object separately.
+
+This makes obtaining and reclaiming bytes cheap, but it does not preserve a
+constructed tape. Each gradient evaluation must still:
+
+- create and initialize records or callbacks;
+- store operand references and partial derivatives;
+- register the reverse work;
+- write and later read the records, using cache and memory bandwidth;
+- traverse the registered work in reverse; and
+- reset the tape for reuse.
+
+The pool reuses memory, but the runtime reconstructs and touches its contents
+at the next leapfrog step.
+
+Modern Stan Math reduces this cost substantially: a vectorized function can
+use one callback with arrays of partials, and `var_value` can represent a whole
+vector or matrix with one value/adjoint object. The record count therefore
+depends on the expression and the available overload. The comparison here is
+about repeated construction and metadata, not a claim that Stan Math always
+uses one tape object per observation.
+
+The two execution styles compare as follows:
+
+| stage | CmdStan with dynamic Stan Math reverse mode | stanli native graph path |
+| --- | --- | --- |
+| Before a call | Arena blocks and tape-vector capacity may be available for reuse. | Graph, contexts, and value, adjoint, and scratch buffers are already bound. |
+| Forward | Compute values while creating autodiff records or callback state. | Write values and partials to predetermined offsets. |
+| Reverse | Traverse the work registered during this evaluation and follow its operand references. | Walk a fixed reverse-op list over contiguous adjoint buffers. |
+| Cleanup | Rewind the tape and arena; the retained memory is empty again. | Keep the graph and storage; clear only the required adjoints before the next call. |
+
+### A concrete vector example
+
+For a vector of length `N`, consider:
+
+```stan
+theta = mu + tau * theta_tilde;
+y ~ normal(theta, sigma);
 ```
 
-Evaluating the log density means walking the list and calling each
-opcode's precompiled function. No machine code is specific to your
-model, in the same way a spreadsheet does not recompile Excel when you
-type a new formula. Two things make this more than a toy:
+With operator-overloaded reverse mode, the arithmetic creates autodiff
+intermediates, and the density records the operands and partials its reverse
+implementation needs. Vectorized Stan Math overloads make this much cheaper
+than a scalar tape, but the state is still produced during each evaluation and
+discarded when the arena is recovered.
 
-- **The compiler is the real compiler.** The official `stanc` (OCaml)
-  is linked into the library and runs in-process, so your model is
-  parsed, typechecked, and optimized by the same code CmdStan uses.
-- **The kernels are the real kernels.** The precompiled operations are
-  stan-math, the same library CmdStan calls, compiled with the same
-  floating point settings. That is why stanli agrees with CmdStan to
-  the last bit on 41 of the 120 posteriordb test models, and to within
-  2.6e-12 relative on the worst.
+In stanli, `scaled` and `theta` are length-`N` double buffers at fixed offsets.
+`MUL` and `ADD` each loop once over those buffers. The density writes its value
+and saved partials to assigned scratch space, and reverse kernels loop over
+the same arrays to update fixed adjoint buffers. The graph performs three
+dispatches, not `N` copies of three graph operations.
 
-Because nothing is compiled at model load, "compiling" takes
-milliseconds. In the current Eight Schools measurement, the complete first
-1,000-warmup, 1,000-draw run takes 0.03 s from source to CSV, versus 3.4 s to
-build and run with CmdStan.
+Several kernel paths sit behind this interface. Analytic kernels operate
+directly on double buffers, and many save the values needed by the reverse
+pass in fixed scratch. Generic probability kernels use a small recording
+scalar so the existing Stan Math template computes its usual partial
+derivatives; for a vector input that depends on parameters, this path
+currently creates a temporary Eigen array of partials before copying it to
+scratch, while specialized hot kernels avoid that temporary. See
+[`runtime/include/stanli/recorder.hpp`](../runtime/include/stanli/recorder.hpp).
 
-## Gradients without code generation
+Functions without an analytic or recorder path build a nested Stan Math tape
+inside that kernel. This preserves coverage and reference behavior but retains
+dynamic autodiff cost locally. See
+[`runtime/include/stanli/legacy.hpp`](../runtime/include/stanli/legacy.hpp).
+So preallocation applies to executor-owned arenas and declared op scratch, not
+to every temporary in every supported kernel.
 
-Stan gets gradients from reverse-mode automatic differentiation: run
-the computation forward, remember what you did, walk the record (the
-"tape") backward applying the chain rule. In CmdStan the tape is built
-dynamically: every scalar operation on a parameter creates a small heap
-object with a virtual method, and each gradient evaluation builds the
-tape, walks it, and tears it down. HMC evaluates the gradient once per
-leapfrog step, thousands of times per run.
+## Why operation-level interpretation is cheap enough
 
-stanli does not build a tape, because it already has one. The op list
-*is* the record of the computation: to differentiate, walk it backward
-and call each opcode's derivative function. The tape is constructed
-once, at model load, and steady-state gradient evaluation allocates no
-memory at all.
+Interpretation adds dispatch overhead; what matters is how much work each
+dispatch performs.
 
-## How an interpreter can win
+The microbenchmark in
+[`tools/bench_opcost.cpp`](../tools/bench_opcost.cpp) measures roughly 17--20
+ns for one scalar density op's complete forward and backward execution,
+including executor and recorder overhead. The density arithmetic alone takes
+about 0.9 ns on that machine. A graph with thousands of scalar ops will
+therefore be slow.
 
-Interpreters have a fixed overhead, some tens of nanoseconds per
-operation dispatched. The question is what that overhead is amortized
-over.
+A vector op changes the ratio. One `NORMAL_LPDF` op can process 1,000
+observations in compiled C++ while paying graph dispatch once. Its kernels
+loop over contiguous values and partials with no graph metadata per element,
+and contiguous storage reduces pointer chasing and improves cache behavior.
+Eigen or the compiler may vectorize some kernels, but stanli does not require
+SIMD: some kernels preserve a scalar reduction order for numerical agreement
+with Stan Math.
 
-**stanli pays per operation. CmdStan pays per scalar.** Executing
-`NORMAL_LPDF` over a thousand observations, stanli pays its dispatch
-overhead once, then runs precompiled vectorized code over a flat array;
-divided by a thousand elements the overhead vanishes, the same reason
-vectorized R and NumPy are fast. CmdStan has no dispatch overhead, but
-each observation allocates a tape node, and the backward pass walks a
-thousand heap objects through virtual calls, every leapfrog step. Its
-autodiff matrices also store pointers to tape nodes, so values sit
-scattered in memory, which defeats SIMD; stanli's values live in flat
-contiguous arrays. On vectorized models both effects point the same
-way, and stanli evaluates gradients two to six times faster, with the
-gap growing with data size.
+CmdStan has no interpreter dispatch, but its reverse-mode path still builds
+and traverses the autodiff state the expression requires. For models with many
+medium or large vector operations, that cost can exceed stanli's
+operation-level dispatch cost. If one large Cholesky factorization or matrix
+multiplication dominates a model, both runtimes spend most of their time in
+the same numerical kernel, so performance is usually similar.
 
-**The graph persists, so it can be optimized.** CmdStan's tape lives
-for one gradient evaluation; stanli's graph is built once and reused
-millions of times, so it is worth running compiler-style passes over
-it. A model written as an explicit loop,
+## Recovering vector operations from scalar loops
+
+Explicit loops are common in Stan and often clearer than manually vectorized
+code. When loop bounds and indexes are known from the data, stanli first
+expands the loop during lowering. For example:
 
 ```stan
 for (n in 1:N)
   y[n] ~ normal(alpha[county[n]], sigma);
 ```
 
-lowers to N copies of a few scalar operations, where the interpreter
-overhead really does hurt. But the copies sit in a list, visibly
-periodic, and a pass rewrites them: gathers become one vector index
-operation, N scalar densities become one summed vector density. One
-radon model drops from 27,670 operations to 8 and goes from slightly
-losing against CmdStan to beating it six-fold. The statistician did not
-vectorize the model; the runtime did, once, at load time. You can only
-do that to a computation that exists as an inspectable data structure.
+This initially produces repeated scalar lanes:
 
-## The three machines inside the runtime
+```text
+INDEX        alpha, county[1] -> a1
+NORMAL_LPDF  y[1], a1, sigma  -> lp1
 
-Everything above describes the main engine, but the runtime actually
-contains three, and the honest way to see why is one question: **how
-much do you know before the model runs?** The more you decide early,
-the faster you go. The less you assume, the more you can handle. Each
-engine sits at a different point on that line.
+INDEX        alpha, county[2] -> a2
+NORMAL_LPDF  y[2], a2, sigma  -> lp2
 
-**The MIR interpreter decides everything late.** It walks the
-compiler's syntax tree and looks variables up by name, every time.
-That is slow, and that is fine, because its jobs are the ones where
-speed cannot matter or early decisions are impossible: transformed
-data runs once at load; generated quantities can call a random number
-generator and branch on the draw, so there is nothing fixed to
-compile; and it is the safety net for anything the fast paths refuse.
-That last job carries a rule this codebase treats as law: **the
-fallback must always speak more of the language than the fast path**,
-because a refusal has to land somewhere that still works. If the
-fallback were ever narrower, a refusal would become a crash.
+...
+```
 
-**The op graph decides shapes and order early.** That is the engine
-this document is about: the fixed list is the tape, and vector-sized
-ops amortize the dispatch cost. Its two hard walls are structural. A
-fixed list cannot contain a decision, so `if (theta > 0)` -- which
-picks its branch anew every evaluation -- cannot become ops at all.
-And when a loop cannot be vectorized because step t needs step t-1's
-answer, the list holds thousands of one-number ops, each paying the
-per-op overhead that vector ops exist to amortize.
+Left in this form, the graph would pay interpreter overhead for each
+observation. The re-roll pass in
+[`runtime/src/reroll.cpp`](../runtime/src/reroll.cpp) finds repeated patterns,
+proves their lanes independent, and classifies their inputs:
 
-**The register machine also decides placement early.** Regions that
-hit the graph's walls -- a recurrence, a branch on a parameter, an ODE
-right-hand side the solver calls at times of its choosing -- compile
-one level further down, into a flat instruction list over numbered
-cells fixed at load time. No slot lookup, no descriptor: an
-instruction costs about a nanosecond. It may branch, because it runs
-entirely inside one graph op, so from the tape's point of view the
-branch never happened -- the same way a branch inside any kernel is
-invisible. Its gradient is a second instruction list, generated at
-compile time by reading the first one backward and replacing each
-instruction with its derivative rule, running over a parallel array of
-adjoints. Both lists are plain doubles; nothing allocates.
+- `sigma` refers to the same slot in every lane, so it remains scalar and
+  broadcasts.
+- `y[n]` is parameter-free. Constant folding removes the scalar reads, and
+  re-rolling collects the values into one load-time vector.
+- `alpha[county[n]]` uses data-known indexes, so its scalar reads become one
+  gather. Repeated county indexes are valid; the gather's reverse pass sums
+  their contributions into the corresponding `alpha` elements.
+- Values produced inside each lane become vector values consumed by the next
+  vector op.
 
-Where the mathematics lives differs by class, deliberately. The scalar
-continuous densities -- the `normal_lpdf` in an HMM's emission, the
-hottest instructions an island has -- go through one shared table that
-binds the arguments to a recording scalar and calls the unmodified
-Stan library, which computes the value and the partial derivatives
-itself. Everything else with a one-number result (a cdf, `pow`, a
-discrete density) is a `CALL`: the register machine invokes the graph
-op's own kernel, the identical code, partials, and backward the graph
-would have run. One instruction, rather than hundreds of ported rules,
-is what keeps the three vocabularies from drifting: the densities are
-special only in being hot enough to deserve a direct path, and narrow
-enough (plain scalar in, one scalar out) that the direct path is a
-single library call. Only the elementary arithmetic -- multiply,
-divide, `exp`, a couple dozen more -- has hand-written derivative
-rules, each transcribed from the Stan library's own reverse-mode
-source and pinned by tests that require bit-for-bit agreement with it.
+The rewritten graph is approximately:
 
-One mechanism ties the engines' gradients together: scratch. Every
-graph op may declare working space; at model load the executor sums
-the requests and hands each op a fixed slice of one flat arena. An
-op's forward stashes its partial derivatives there and its backward
-reads them, which is why a gradient allocates nothing and why the
-backward never needs to re-run the forward. An island is the same
-idea one level down: its scratch slice holds its whole register file,
-so the values its forward computed are still sitting there when its
-backward runs, and a CALL's kernel scratch is carved out of that same
-file. It is scratch all the way down, allocated once, addressed by
-offsets decided before the first gradient ever runs.
+```text
+GATHER       alpha, county[1:N] -> county_alpha
+NORMAL_LPDF  y, county_alpha, sigma -> target
+```
 
-All of this is concrete in
-[lowering-walkthrough.md](lowering-walkthrough.md): a tutorial that
-takes three ten-line models -- the normal vectorized path, a branch on
-a parameter, a recurrence -- and shows the real output of every layer,
-from the compiler's tree to the generated backward.
+This has the same vector granularity as a hand-vectorized Stan statement.
 
-## Where the compiled model still wins
+Re-rolling also recognizes slices, arbitrary gathers, repeated element
+writes, values shared by all lanes, and distinct data constants across lanes.
+In mixtures, it keeps per-observation log densities separate through
+`log_mix` or `log_sum_exp` and reduces only at the end; it does not sum
+early, which would change the model.
 
-ODE models run at 0.87-0.90x: the right-hand side must stay callable
-at solver-chosen times, and stanli runs it through the register
-machine where CmdStan runs native code. Sequential models used to
-lose the same way, until the islands' backward stopped replaying under
-CmdStan-style autodiff and became a generated program: the measured HMM
-gradients now run 1.20-1.55x faster than CmdStan. The targeted before/after
-results are in the tape-island section of
-[`OPTIMIZATIONS.md`](../runtime/src/OPTIMIZATIONS.md). What remains for both
-classes is the per-instruction cost of interpreting at all, which is the
-difference between a nanosecond of dispatch and code the C++ compiler inlined
-into the model binary.
+The pass declines a rewrite if one lane reads a parameter-dependent result
+from the previous lane, an intermediate escapes the region in an unsupported
+way, or an operation is unsupported or effectful. A recurrence is sequential
+work and must remain sequential.
 
-The other cost is size, the deliberate trade at the center of the
-design: the wheel is 10.8 MB because it carries the entire Stan compiler
-and every operation in the math library, whether your model uses them
-or not. In exchange, `pip install stanli` is the entire installation.
+### Partitioning loops using data
 
-## The one-paragraph version
+Some independent lanes are not adjacent because data selects different work
+for each observation. For example:
 
-Stan models are arrangements of a fixed library of operations, and an
-arrangement is data, not code. Ship the library precompiled, turn the
-model into a graph of operations over flat arrays, and the graph is
-simultaneously the program, the autodiff tape, and an optimizable
-artifact. Interpreting at vector granularity costs almost nothing;
-never rebuilding the tape saves what CmdStan spends every leapfrog
-step; and optimizing the persistent graph recovers the vectorization
-that loops in the source hide. That is how there is no compiler, and
-why its absence is sometimes a speedup.
+```stan
+for (n in 1:N) {
+  if (group[n] == 1)
+    y[n] ~ normal(mu_1, sigma_1);
+  else
+    y[n] ~ student_t(nu, mu_2, sigma_2);
+}
+```
+
+If `group` is data, every branch is known at model load. When the rewrite is
+safe and profitable, stanli groups observations that took the same computation
+shape and vectorizes each group separately. In this example, an interleaved
+sequence of scalar branches becomes one vectorized normal likelihood and one
+vectorized Student-t likelihood.
+
+This depends on the condition being data-only. If the branch depends on a
+parameter, its outcome can change at every gradient evaluation and must
+remain runtime control flow.
+
+### The graph passes that support loop recovery
+
+Several passes expose and preserve vector structure:
+
+| pass | purpose |
+| --- | --- |
+| Safe in-place updates | Avoid copying a whole vector for assignments such as `v[n] = x` when no later forward or reverse work needs the old value. This prevents `N` element assignments from causing quadratic copying. |
+| Store-to-load forwarding | Remove a write followed immediately by a read of the same element, exposing the arithmetic lane underneath. |
+| Constant folding | Evaluate graph regions that depend only on loaded data. |
+| Re-rolling | Combine adjacent, periodically repeated independent lanes. |
+| Lane partitioning | Combine equivalent independent lanes that are interleaved or out of phase. |
+| Common-subexpression elimination | Remove repeated work exposed by the structural rewrites. |
+| Islands | Combine profitable scalar regions that cannot become vector operations. |
+
+In-place cleanup repeats after re-rolling and partitioning to handle the
+slice and strided stores those passes create. Full-extent store cleanup
+removes writes that only rename a complete value. Islands run after the
+vector passes, and target terms are reduced only after all these rewrites.
+
+The passes and their safety conditions are documented in
+[`runtime/src/OPTIMIZATIONS.md`](../runtime/src/OPTIMIZATIONS.md); their exact
+order is implemented in [`runtime/src/lower.cpp`](../runtime/src/lower.cpp).
+Each listed pass has a diagnostic switch. The A/B harness compares the shipped
+graph with selected passes disabled, and focused pass tests compare results
+before and after transformation.
+
+Two models show the scale of the structural changes:
+
+- `radon_pooled` falls from 27,670 graph ops to 8. In the targeted re-roll A/B,
+  it moved from 0.91x to 6.18x CmdStan; the current full-corpus benchmark is
+  7.07x.
+- `election88_full` falls from 289,165 ops to 65. Its current benchmark is
+  3.52x CmdStan.
+
+The targeted A/B isolates one optimization. The current corpus rows in
+[benchmarks.md](benchmarks.md) report absolute performance for the complete
+system.
+
+Re-rolling can change the association order of floating-point reductions, so
+the optimized and scalar graphs may differ in their last few bits even though
+the mathematical expression is unchanged. Differential and cross-path tests
+check exact equality where expected and documented bounds otherwise; see
+[`TESTING.md`](../TESTING.md).
+
+## Scalar recurrences and generated reverse programs
+
+Not every loop is independent. An HMM forward recursion, for example, computes
+state at time `t` from state at time `t - 1`; evaluating all time steps as a
+vector would change the calculation.
+
+After the vector passes, stanli may combine a profitable scalar region into
+one *island*: a compact instruction list over numbered registers. Register
+locations and sizes are fixed at model load, so the forward pass runs on plain
+doubles without a graph-context lookup per scalar instruction. A
+generated-adjoint island keeps its forward values and checkpoints in
+preallocated scratch; its backward pass uses a reusable thread-local adjoint
+buffer that may resize on its first sufficiently large call. Replayed islands
+instead use reusable thread-local register storage.
+
+The main optimization is the island's reverse pass. An earlier implementation
+replayed each island under `stan::math::var` for every gradient. That reduced
+the outer graph's op count but built an inner autodiff tape, so most models
+did not improve and several became slower. For an eligible branch-free island,
+stanli now generates a second instruction list at model load that computes the
+pullback directly on doubles. See
+[`runtime/src/adjoint.cpp`](../runtime/src/adjoint.cpp).
+
+This gives a direct comparison with dynamic tape construction. In the targeted
+island A/B, `hmm_gaussian` falls from 42,926 graph ops to 11. Replaying the
+island with a nested Stan Math tape measured 0.92x the graph baseline; the
+generated reverse program measured 1.60x. Both modes used the same outer graph
+and mathematical derivative, but replay reran the forward calculation while
+building and traversing its nested tape, whereas the generated path ran only
+the derivative program.
+
+Islands still pay dispatch for each scalar instruction, so their likely gain
+is smaller than for vector operations. A cost model leaves regions with too
+little work or too much register traffic as ordinary graph ops.
+
+Parameter-dependent control flow uses a runtime region whose branch sequence
+may change between evaluations. The generated reverse pass does not apply
+there, so that path uses nested-autodiff replay.
+
+ODE right-hand sides accepted by the register compiler use a related program,
+because the solver calls them at times chosen during integration. The state
+solve runs on doubles; the Jacobian path uses Stan Math autodiff. Unsupported
+right-hand sides use the fallback described in the appendix. CmdStan remains
+faster on the measured ODEs because its right-hand side is inlined native
+code, whereas stanli pays register dispatch on every solver callback.
+
+## Measured behavior and limits
+
+The 2026-08-25 native benchmark snapshot contains 120 posteriordb models, 119
+with gradient measurements from both runtimes. It ran on an Apple M3 Ultra
+with both sides built at `-O3` and the same floating-point contraction
+setting. The median warmed-gradient speedup is 2.91x, and 116 of 119 models
+are at or above CmdStan. These are fixed-point gradient timings, not
+whole-sampler timings.
+
+Computation shape matters more than parameter count:
+
+- Vectorized statements and independent scalar loops that can be re-rolled
+  usually gain the most.
+- Large dense kernels are often near parity because both runtimes spend most
+  of the time in the same Stan Math implementation.
+- Sequential models are generally near parity or modestly faster after
+  generated island adjoints, but still pay scalar instruction dispatch.
+- The three ODE models in the snapshot run at 0.87x, 0.90x, and 0.90x CmdStan.
+  They are the only slower models in this snapshot.
+
+End-to-end latency is a separate measurement. For non-centered Eight Schools,
+a complete 1,000-warmup plus 1,000-draw run takes about 0.03 s from source to
+CSV in stanli, versus about 3.4 s for a CmdStan build and run: roughly 100x.
+Across the 117 models with complete runs from both engines, the median
+source-to-CSV speedup is about 6.8x, and 115 finish at least as fast in stanli.
+These compare complete jobs, not identical sampler trajectories, so they are
+less controlled than the fixed-point gradient measurements.
+
+Skipping model-specific compilation shifts work into the distributed runtime.
+The shared library contains stanc and the precompiled operation vocabulary, so
+it is larger than a runtime containing one model. The current size breakdown
+is in the [`README.md`](../README.md#binary-size).
+
+Performance is not the numerical oracle. The current snapshot verifies 118 of
+120 posteriordb models against CmdStan's log density and complete gradient; 41
+are bitwise identical at the primary test point, and the worst relative
+deviation among the verified models is 2.6e-12. Where available, the comparison
+also covers complete `write_array` output, including generated quantities.
+Cross-path tests compare graph, register-machine, and MIR/write-array
+interpreter configurations. Evidence and known limits are in
+[`TESTING.md`](../TESTING.md).
+
+## Appendix: where the MIR interpreter fits
+
+The general MIR interpreter provides language coverage; it is not the main
+reason gradient evaluation is fast.
+
+It walks stanc's intermediate representation (called MIR in the source) and
+stores variables in an environment instead of prebound graph slots. stanli
+uses it for transformed data at model load. The write-array path also has a
+whole-section MIR fallback for transformed-parameter and generated-quantity
+cases that its forward-only graph cannot lower. ODE right-hand sides and
+algebraic-system callbacks have their own register compiler with a MIR
+fallback.
+
+MIR is not a general fallback for every log-density lowering failure. If a
+graph optimization declines a rewrite, the original graph ops remain.
+Parameter-dependent log-density control uses a runtime region. An unsupported
+straight-line log-density construct can still raise a compile error. These
+details affect language coverage. Except for an ODE right-hand side or
+algebraic-system callback that falls back to MIR, these uses do not put the
+interpreter in the repeated gradient path.
+
+For a layer-by-layer example with the compiler representation and generated
+forward and reverse programs, see
+[lowering-walkthrough.md](lowering-walkthrough.md).
