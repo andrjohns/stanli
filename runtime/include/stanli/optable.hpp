@@ -50,6 +50,10 @@ namespace stanli {
   X(OP_GEMM)                        \
   X(OP_MDIVIDE_LEFT)                \
   X(OP_MDIVIDE_RIGHT)               \
+  X(OP_MDIVIDE_LEFT_SPD)            \
+  X(OP_MDIVIDE_RIGHT_SPD)           \
+  X(OP_MDIVIDE_LEFT_TRI_LOW)        \
+  X(OP_MDIVIDE_RIGHT_TRI_LOW)       \
   X(OP_LOG_SOFTMAX)                 \
   X(OP_CONSTRAIN_CHOL_CORR)         \
   X(OP_LKJ_CORR_CHOL_LPDF)          \

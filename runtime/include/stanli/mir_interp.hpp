@@ -1299,9 +1299,33 @@ class MirInterp {
     // `A \ v` and `rv / A` are linear solves. stanc spells them with the
     // ordinary division operators, so the divisor's type is what tells a
     // solve from elementwise division by a scalar; `./` is never a solve.
-    if (e.name == "LDivide__" ||
+    // The named spellings arrive with the same argument order the operators
+    // use, and pick a factorisation family with them: the plain solve, the
+    // LLT of a symmetric positive definite matrix, or a triangular solve
+    // that reads only the lower triangle.
+    enum class SolveKind { Plain, Spd, TriLow };
+    SolveKind kind = SolveKind::Plain;
+    bool named_left = false;
+    bool named_solve = false;
+    if (e.args.size() == 2 && e.name.rfind("mdivide_", 0) == 0) {
+      const std::string tail = e.name.substr(8);
+      if (tail.rfind("left", 0) == 0 || tail.rfind("right", 0) == 0) {
+        named_left = tail.rfind("left", 0) == 0;
+        const std::string family = tail.substr(named_left ? 4 : 5);
+        if (family.empty()) {
+          named_solve = true;
+        } else if (family == "_spd") {
+          named_solve = true;
+          kind = SolveKind::Spd;
+        } else if (family == "_tri_low") {
+          named_solve = true;
+          kind = SolveKind::TriLow;
+        }
+      }
+    }
+    if (named_solve || e.name == "LDivide__" ||
         (e.name == "Divide__" && e.args.at(1).type_ == "UMatrix")) {
-      const bool left = e.name == "LDivide__";
+      const bool left = named_solve ? named_left : e.name == "LDivide__";
       Value a = eval(e.args[0]), b = eval(e.args[1]);
       const Value& divisor = left ? a : b;
       const Value& dividend = left ? b : a;
@@ -1332,20 +1356,40 @@ class MirInterp {
       //
       // stan-math checks squareness and the shared extent, and throws the
       // std::invalid_argument CmdStan would.
+      const auto left_solve = [&](const auto& x) {
+        switch (kind) {
+          case SolveKind::Spd:
+            return Mat(stan::math::mdivide_left_spd(d, x));
+          case SolveKind::TriLow:
+            return Mat(stan::math::mdivide_left_tri_low(d, x));
+          default:
+            return Mat(stan::math::mdivide_left(d, x));
+        }
+      };
+      const auto right_solve = [&](const auto& x) {
+        switch (kind) {
+          case SolveKind::Spd:
+            return Mat(stan::math::mdivide_right_spd(x, d));
+          case SolveKind::TriLow:
+            return Mat(stan::math::mdivide_right_tri_low(x, d));
+          default:
+            return Mat(stan::math::mdivide_right(x, d));
+        }
+      };
       Mat out;
       if (dividend.dims.size() == 2) {
-        out = left ? stan::math::mdivide_left(d, shaped(dividend, left))
-                   : stan::math::mdivide_right(shaped(dividend, left), d);
+        out = left ? left_solve(shaped(dividend, left))
+                   : right_solve(shaped(dividend, left));
       } else if (left) {
         Eigen::Matrix<T, Eigen::Dynamic, 1> x(dividend.r.size());
         for (size_t i = 0; i < dividend.r.size(); ++i)
           x((Eigen::Index)i) = dividend.r[i];
-        out = stan::math::mdivide_left(d, x);
+        out = left_solve(x);
       } else {
         Eigen::Matrix<T, 1, Eigen::Dynamic> x(dividend.r.size());
         for (size_t i = 0; i < dividend.r.size(); ++i)
           x((Eigen::Index)i) = dividend.r[i];
-        out = stan::math::mdivide_right(x, d);
+        out = right_solve(x);
       }
       r.r.resize((size_t)(out.rows() * out.cols()));
       for (Eigen::Index j = 0; j < out.cols(); ++j)
