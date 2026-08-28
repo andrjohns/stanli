@@ -497,7 +497,8 @@ json write_sized_type(const mir::SizedType& value) {
   return {{"base", value.base},
           {"dims", write_array(value.dims, write_expr)},
           {"elem_base", value.elem_base},
-          {"raw", value.raw}};
+          {"raw", value.raw},
+          {"unsized", write_unsized(value.unsized)}};
 }
 
 const char* write_stmt_kind(mir::Stmt::Kind value) {
@@ -1214,7 +1215,7 @@ void check_structural_rejections() {
                        "known function arity");
   for (const char* name :
        {"pow", "std_normal_qf", "trigamma", "is_nan", "tcrossprod", "diagonal",
-        "map_rect", "algebra_solver"}) {
+        "matrix_exp", "append_array", "map_rect", "algebra_solver"}) {
     bad_call.name = name;
     bad_call.args.clear();
     expect_error(write_v2(target_program(bad_call)),
@@ -1261,6 +1262,49 @@ void check_structural_rejections() {
   expect_error(write_v2(bad_binding),
                "variable type disagrees with its binding",
                "variable binding type mismatch");
+
+  mir::Program unsized_assignment;
+  mir::Stmt unsized_declaration;
+  unsized_declaration.kind = mir::Stmt::Decl;
+  unsized_declaration.decl_id = "tmp";
+  unsized_declaration.decl_type.raw = "(Unsized (UArray UReal))";
+  unsized_assignment.log_prob.push_back(std::move(unsized_declaration));
+  mir::Stmt first_assignment;
+  first_assignment.kind = mir::Stmt::Assignment;
+  first_assignment.lhs = "tmp";
+  first_assignment.rhs.kind = mir::Expr::Unsupported;
+  first_assignment.rhs.type_ = "UArray";
+  first_assignment.rhs.unsized = {1, mir::UnsizedLeaf::Real};
+  unsized_assignment.log_prob.push_back(std::move(first_assignment));
+  const mir::Program restored_unsized =
+      decode_program(write_v2(unsized_assignment));
+  check(restored_unsized.log_prob[0].decl_type.unsized.depth == 1 &&
+            restored_unsized.log_prob[0].decl_type.unsized.leaf ==
+                mir::UnsizedLeaf::Real,
+        "portable decoder restores unsized declaration metadata");
+
+  mir::Program wrong_unsized_leaf = unsized_assignment;
+  wrong_unsized_leaf.log_prob[1].rhs.unsized.leaf = mir::UnsizedLeaf::Int;
+  expect_error(write_v2(wrong_unsized_leaf),
+               "assignment type disagrees with its binding",
+               "unsized first assignment leaf mismatch");
+  mir::Program wrong_unsized_rank = unsized_assignment;
+  wrong_unsized_rank.log_prob[1].rhs.unsized.depth = 2;
+  expect_error(write_v2(wrong_unsized_rank),
+               "assignment type disagrees with its binding",
+               "unsized first assignment rank mismatch");
+  mir::Program wrong_unsized_initializer;
+  mir::Stmt initialized_unsized = unsized_assignment.log_prob[0];
+  initialized_unsized.has_init = true;
+  initialized_unsized.init = wrong_unsized_leaf.log_prob[1].rhs;
+  wrong_unsized_initializer.log_prob.push_back(std::move(initialized_unsized));
+  expect_error(write_v2(wrong_unsized_initializer),
+               "declaration initializer type disagrees with its binding",
+               "unsized declaration initializer mismatch");
+  mir::Program malformed_unsized = unsized_assignment;
+  malformed_unsized.log_prob[0].decl_type.raw = "(Unsized (UArray UFuture))";
+  expect_error(write_v2(malformed_unsized), "unsized declaration type",
+               "malformed unsized declaration spelling");
 
   mir::Program bad_function;
   mir::FunDef function;

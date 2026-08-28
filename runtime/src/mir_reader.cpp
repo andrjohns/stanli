@@ -148,6 +148,7 @@ void validate_funapp_arity(const Expr& e) {
                 "diag_post_multiply",
                 "quad_form_diag",
                 "quad_form_sym",
+                "append_array",
                 "append_row",
                 "append_col",
                 "rep_vector",
@@ -196,6 +197,7 @@ void validate_funapp_arity(const Expr& e) {
                 "diag_matrix",
                 "diagonal",
                 "cholesky_decompose",
+                "matrix_exp",
                 "eigenvalues_sym",
                 "eigenvectors_sym",
                 "categorical_rng",
@@ -1028,6 +1030,8 @@ using Bindings = std::map<std::string, Binding>;
 using Functions = std::map<std::string, const FunDef*>;
 
 UnsizedView declared_view(const SizedType& type) {
+  if (type.unsized.leaf != UnsizedLeaf::Unknown) return type.unsized;
+
   const std::string& base = type.base == "SArray" ? type.elem_base : type.base;
   UnsizedView view;
   if (base == "SInt")
@@ -1187,8 +1191,28 @@ void validate_bindings(const Stmt& s, Bindings& bindings,
             "mir: FnCheck value type disagrees with its declaration");
     }
   }
+  if (strict_variable_metadata && s.kind == Stmt::Assignment &&
+      s.lhs_idx.empty()) {
+    const auto binding = bindings.find(s.lhs);
+    if (binding != bindings.end() &&
+        binding->second.view.leaf != UnsizedLeaf::Unknown &&
+        s.rhs.unsized.leaf != UnsizedLeaf::Unknown &&
+        (binding->second.view.depth != s.rhs.unsized.depth ||
+         binding->second.view.leaf != s.rhs.unsized.leaf))
+      throw std::runtime_error(
+          "mir: assignment type disagrees with its binding for " + s.lhs);
+  }
   if (s.kind == Stmt::Decl) {
-    bindings[s.decl_id] = Binding{declared_view(s.decl_type), s.decl_data_only};
+    const UnsizedView view = declared_view(s.decl_type);
+    if (strict_variable_metadata &&
+        s.decl_type.unsized.leaf != UnsizedLeaf::Unknown && s.has_init &&
+        s.init.unsized.leaf != UnsizedLeaf::Unknown &&
+        (view.depth != s.init.unsized.depth ||
+         view.leaf != s.init.unsized.leaf))
+      throw std::runtime_error(
+          "mir: declaration initializer type disagrees with its binding for " +
+          s.decl_id);
+    bindings[s.decl_id] = Binding{view, s.decl_data_only};
   }
   if (s.kind == Stmt::SList) {
     validate_bindings(s.body, bindings, functions, strict_variable_metadata);
@@ -1303,24 +1327,30 @@ void resolve_calls(Stmt& s, const Overloads& overloads) {
   for (Stmt& k : s.body) resolve_calls(k, overloads);
 }
 
-void restore_unsized_decls(Stmt& s) {
-  if (s.kind == Stmt::Decl && s.decl_type.base.empty() &&
-      s.decl_type.raw.size() > 10 &&
-      s.decl_type.raw.compare(0, 9, "(Unsized ") == 0 &&
-      s.decl_type.raw.back() == ')') {
-    const std::string_view spelling(s.decl_type.raw.data() + 9,
-                                    s.decl_type.raw.size() - 10);
-    parse_unsized_spelling(spelling, &s.decl_type.unsized);
+void restore_unsized_decls(Stmt& s, bool strict) {
+  if (s.kind == Stmt::Decl && s.decl_type.base.empty()) {
+    const std::string& raw = s.decl_type.raw;
+    const bool looks_unsized = raw.compare(0, 8, "(Unsized") == 0;
+    const bool wrapped = raw.size() > 10 &&
+                         raw.compare(0, 9, "(Unsized ") == 0 &&
+                         raw.back() == ')';
+    bool parsed = false;
+    if (wrapped) {
+      const std::string_view spelling(raw.data() + 9, raw.size() - 10);
+      parsed = parse_unsized_spelling(spelling, &s.decl_type.unsized);
+    }
+    if (strict && looks_unsized && !parsed)
+      malformed("unsized declaration type");
   }
-  for (Stmt& child : s.body) restore_unsized_decls(child);
+  for (Stmt& child : s.body) restore_unsized_decls(child, strict);
 }
 
-void restore_unsized_decls(Program& prog) {
+void restore_unsized_decls(Program& prog, bool strict) {
   for (auto* body :
        {&prog.prepare_data, &prog.log_prob, &prog.generate_quantities})
-    for (Stmt& s : *body) restore_unsized_decls(s);
+    for (Stmt& s : *body) restore_unsized_decls(s, strict);
   for (FunDef& f : prog.fun_defs)
-    for (Stmt& s : f.body) restore_unsized_decls(s);
+    for (Stmt& s : f.body) restore_unsized_decls(s, strict);
 }
 
 void resolve_overloads(Program& prog) {
@@ -1354,7 +1384,7 @@ void detail::validate_portable_program(const Program& prog) {
 }
 
 void detail::finalize_program(Program& prog, bool strict_variable_metadata) {
-  restore_unsized_decls(prog);
+  restore_unsized_decls(prog, strict_variable_metadata);
   resolve_overloads(prog);
   Functions functions;
   for (const auto& f : prog.fun_defs) {

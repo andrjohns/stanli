@@ -30,6 +30,7 @@
 
 #include <stan/math.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -1589,6 +1590,26 @@ class MirInterp {
                                      v.r.at((size_t)j);
       return o;
     }
+    if (e.name == "matrix_exp" && e.args.size() == 1) {
+      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+      Value a = eval(e.args[0]);
+      if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
+        fail("matrix_exp: needs a square matrix", e.raw);
+      const int64_t n = a.dims[0];
+      if (n < 0 || (n != 0 && n > std::numeric_limits<int64_t>::max() / n) ||
+          n * n != static_cast<int64_t>(a.r.size()))
+        fail("matrix_exp: matrix shape does not match storage", e.raw);
+      Mat A(n, n);
+      for (int64_t j = 0; j < n; ++j)
+        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r[(size_t)(j * n + i)];
+      const Mat c = stan::math::matrix_exp(A);
+      Value o;
+      o.dims = {n, n};
+      o.r.resize((size_t)(n * n));
+      for (int64_t j = 0; j < n; ++j)
+        for (int64_t i = 0; i < n; ++i) o.r[(size_t)(j * n + i)] = c(i, j);
+      return o;
+    }
     if (e.name == "quad_form_sym" && e.args.size() == 2) {
       // B' A B, symmetrised. Overload resolution on T reaches the same
       // stan-math call the graph kernel makes -- prim's B.dot(A * B) at
@@ -2300,6 +2321,71 @@ class MirInterp {
       r.dims = {n};
       r.r.assign(n, v.r.at(0));
       if (v.is_int) r.i.assign(n, v.i.at(0));
+      return r;
+    }
+    if (e.name == "append_array" && e.args.size() == 2) {
+      Value a = eval(e.args[0]), b = eval(e.args[1]);
+      if (a.dims.empty() || b.dims.empty() || a.dims.size() != b.dims.size())
+        fail("append_array: arguments must be arrays of the same rank", e.raw);
+      const int64_t a_outer = a.dims[0], b_outer = b.dims[0];
+      if (a_outer < 0 || b_outer < 0 ||
+          a_outer > std::numeric_limits<int64_t>::max() - b_outer)
+        fail("append_array: invalid or overflowing outer extent", e.raw);
+      if (a_outer != 0 && b_outer != 0 &&
+          !std::equal(a.dims.begin() + 1, a.dims.end(), b.dims.begin() + 1,
+                      b.dims.end()))
+        fail("append_array: element shapes must match", e.raw);
+
+      const auto checked_product = [&](const std::vector<int64_t>& dims,
+                                       size_t begin,
+                                       const char* what) -> int64_t {
+        int64_t n = 1;
+        for (size_t k = begin; k < dims.size(); ++k) {
+          const int64_t d = dims[k];
+          if (d < 0 || (d != 0 && n > std::numeric_limits<int64_t>::max() / d))
+            fail(std::string("append_array: invalid or overflowing ") + what,
+                 e.raw);
+          n *= d;
+        }
+        return n;
+      };
+      const int64_t a_count = checked_product(a.dims, 0, "left shape");
+      const int64_t b_count = checked_product(b.dims, 0, "right shape");
+      if (a_count != static_cast<int64_t>(a.r.size()) ||
+          b_count != static_cast<int64_t>(b.r.size()))
+        fail("append_array: argument shape does not match storage", e.raw);
+
+      r.dims = a_outer == 0 && b_outer != 0 ? b.dims : a.dims;
+      r.dims[0] = a_outer + b_outer;
+      const int64_t suffix_count = checked_product(r.dims, 1, "element shape");
+      if (a_count > std::numeric_limits<int64_t>::max() - b_count ||
+          (a_outer + b_outer != 0 &&
+           suffix_count >
+               std::numeric_limits<int64_t>::max() / (a_outer + b_outer)) ||
+          (a_outer + b_outer) * suffix_count != a_count + b_count)
+        fail("append_array: storage length overflows", e.raw);
+
+      const auto append_first_axis = [&](const auto& av, const auto& bv,
+                                         auto* out) {
+        using Size = typename std::decay_t<decltype(av)>::size_type;
+        const Size aw = static_cast<Size>(a_outer);
+        const Size bw = static_cast<Size>(b_outer);
+        out->reserve(av.size() + bv.size());
+        const int64_t lanes = a_outer + b_outer == 0 ? 0 : suffix_count;
+        for (int64_t lane = 0; lane < lanes; ++lane) {
+          const Size ai = static_cast<Size>(lane) * aw;
+          const Size bi = static_cast<Size>(lane) * bw;
+          out->insert(out->end(), av.begin() + ai, av.begin() + ai + aw);
+          out->insert(out->end(), bv.begin() + bi, bv.begin() + bi + bw);
+        }
+      };
+      append_first_axis(a.r, b.r, &r.r);
+      r.is_int = a.is_int && b.is_int;
+      if (r.is_int) {
+        if (a.i.size() != a.r.size() || b.i.size() != b.r.size())
+          fail("append_array: integer mirror does not match storage", e.raw);
+        append_first_axis(a.i, b.i, &r.i);
+      }
       return r;
     }
     if (e.name == "rep_matrix" && e.args.size() == 3) {

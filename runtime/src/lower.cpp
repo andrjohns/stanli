@@ -3291,18 +3291,28 @@ struct Lowering {
       const ArrayShape& ash = array_shape(a.si);
       const ArrayShape& bsh = array_shape(b.si);
       if (ash.dims.empty() || bsh.dims.empty() ||
-          ash.dims.size() != bsh.dims.size() || ash.leaf != bsh.leaf ||
+          ash.dims.size() != bsh.dims.size() || ash.leaf != bsh.leaf)
+        fail("append_array: element shapes must match", e.raw);
+      const int64_t a_outer = ash.dims[0], b_outer = bsh.dims[0];
+      // stan-math checks element geometry only when both sides contain an
+      // element. An empty side contributes no value whose shape could
+      // disagree, and the nonempty side supplies the result's suffix.
+      if (a_outer != 0 && b_outer != 0 &&
           !std::equal(ash.dims.begin() + 1, ash.dims.end(),
                       bsh.dims.begin() + 1, bsh.dims.end()))
         fail("append_array: element shapes must match", e.raw);
-      if (ash.dims[0] > std::numeric_limits<int64_t>::max() - bsh.dims[0])
+      if (a_outer > std::numeric_limits<int64_t>::max() - b_outer)
         fail("append_array: outer extent overflows", e.raw);
       const int64_t alen = g.slots[a.slot].len;
       const int64_t blen = g.slots[b.slot].len;
       if (alen > std::numeric_limits<int64_t>::max() - blen)
         fail("append_array: storage length overflows", e.raw);
-      std::vector<int64_t> dims = ash.dims;
-      dims[0] += bsh.dims[0];
+      std::vector<int64_t> dims =
+          a_outer == 0 && b_outer != 0 ? bsh.dims : ash.dims;
+      dims[0] = a_outer + b_outer;
+      const int64_t suffix_count =
+          checked_product(std::vector<int64_t>(dims.begin() + 1, dims.end()),
+                          "append_array element shape");
       SlotInfo si = array_view(std::move(dims), ash.leaf);
       Val joined = emit_value(OP_CONCAT2, {a, b}, alen + blen, si);
 
@@ -3314,11 +3324,26 @@ struct Lowering {
       if (ao && bo && ao->is_int == bo->is_int) {
         DataMap::Entry en;
         en.is_int = ao->is_int;
-        en.r = ao->r;
-        en.r.insert(en.r.end(), bo->r.begin(), bo->r.end());
+        en.r.reserve((size_t)(alen + blen));
+        // DataMap is first-index-fast, unlike the graph's outer-major array
+        // storage. Concatenation along dimension zero therefore interleaves
+        // the two outer-axis blocks once for every suffix coordinate.
+        const int64_t observation_lanes =
+            a_outer + b_outer == 0 ? 0 : suffix_count;
+        for (int64_t lane = 0; lane < observation_lanes; ++lane) {
+          const auto ab = ao->r.begin() + lane * a_outer;
+          const auto bb = bo->r.begin() + lane * b_outer;
+          en.r.insert(en.r.end(), ab, ab + a_outer);
+          en.r.insert(en.r.end(), bb, bb + b_outer);
+        }
         if (en.is_int) {
-          en.i = ao->i;
-          en.i.insert(en.i.end(), bo->i.begin(), bo->i.end());
+          en.i.reserve((size_t)(alen + blen));
+          for (int64_t lane = 0; lane < observation_lanes; ++lane) {
+            const auto ab = ao->i.begin() + lane * a_outer;
+            const auto bb = bo->i.begin() + lane * b_outer;
+            en.i.insert(en.i.end(), ab, ab + a_outer);
+            en.i.insert(en.i.end(), bb, bb + b_outer);
+          }
           set_int_initialized(joined);
           if (!en.i.empty()) {
             const auto bounds = std::minmax_element(en.i.begin(), en.i.end());

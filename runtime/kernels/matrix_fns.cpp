@@ -147,10 +147,12 @@ void matrix_exp_bwd(KernelCtx& ctx) {
 
 // ---- quad_form_sym(A, B) --------------------------------------------------
 // in = {A (n x n), B (n x m)}; idata = {n, m}. The output is the m x m
-// matrix 0.5 * (C + C') with C = B' A B, or the single scalar B' A B when B
-// is a vector -- there C is 1 x 1, where the symmetrisation is exact and so
-// does nothing. stan-math checks A for symmetry and throws what CmdStan
-// would when it is not.
+// matrix 0.5 * (C + C') with C = B' A B, or the single scalar extracted from
+// that 1 x 1 symmetrised matrix when B is a reverse-mode vector. The latter
+// still performs the add and multiply: although algebraically redundant,
+// those operations affect IEEE overflow and must match CmdStan exactly.
+// stan-math checks A for symmetry and throws what CmdStan would when it is
+// not.
 //
 // Variant bit 0 says the second operand is a vector; bit 1 says CmdStan
 // would have typed this expression `var`. Only the vector overload needs
@@ -173,7 +175,9 @@ void qfs_fwd(KernelCtx& ctx) {
   }
   stan::math::check_multiplicable("quad_form_sym", "A", a, "B", b);
   stan::math::check_symmetric("quad_form_sym", "A", a);
-  const MatD c = b.transpose() * a * b;
+  MatD c = b.transpose() * a * b;
+  const MatD sym = 0.5 * (c + c.transpose());
+  c = sym;
   ctx.out.data[0] = c(0, 0);
 }
 void qfs_bwd(KernelCtx& ctx) {
