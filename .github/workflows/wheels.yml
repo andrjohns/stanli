@@ -1,9 +1,9 @@
 # Build the platform wheels, and publish them to PyPI on a version tag.
 #
-# Pull requests build the representative manylinux target, run the full runtime
-# and corpus tests, and gate the bounded Windows compiler cross-build. Every
-# release target also builds after merge, nightly, and on version tags;
-# publishing is gated on the tag and all of those target builds.
+# Pull requests build the representative manylinux target, compile the runtime
+# for wasm32, run the full runtime and corpus tests, and gate the bounded Windows
+# compiler cross-build. Every release target also builds after merge, nightly,
+# and on version tags; publishing is gated on the tag and all of those builds.
 #
 # Not cibuildwheel: it exists to build one wheel per CPython version, and
 # stanli ships a ctypes-loaded shared library with no extension module, so
@@ -1129,14 +1129,12 @@ jobs:
           # a local run needs nothing.
           ASAN_OPTIONS: detect_leaks=0
 
-  # Not on pull requests: 265 s, of which 200 is emscripten linking the
-  # module, and ccache cannot touch a link. It is safe to run this after
-  # the merge because the Pages deploy needs it: a broken browser build
-  # fails here and the demo keeps serving its last good version rather
-  # than shipping the breakage.
+  # Pull requests compile the complete runtime for wasm32, catching portable
+  # ABI and type-width failures without paying for the final Emscripten link.
+  # Pushes and tags finish the module, run it, and publish the artifact used by
+  # the Pages and release jobs below.
   wasm:
     name: wasm (browser build)
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1151,18 +1149,24 @@ jobs:
           restore-keys: ccache-wasm-
       - name: Fetch pinned dependencies
         run: ./deps/fetch.sh
-      - name: Build stanli.wasm
+      - name: Build stanli for WebAssembly
         run: |
           which ccache || sudo apt-get install -y ccache
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
           emcmake cmake -B build-wasm -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build build-wasm -j4
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            cmake --build build-wasm -j4 --target stanli
+          else
+            cmake --build build-wasm -j4
+          fi
           ccache -s
       - name: Sample eight schools under Node
+        if: github.event_name != 'pull_request'
         run: node tests/test_wasm.cjs
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: wasm
           path: |
