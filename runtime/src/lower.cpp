@@ -2374,7 +2374,7 @@ struct Lowering {
     return {StaticProbeState::Known, out, {}};
   }
 
-  StaticProbe<long> try_static_shape_query(const mir::Expr& e) {
+  StaticProbe<int64_t> try_static_shape_query(const mir::Expr& e) {
     if (!is_shape_query(e)) return {};
     const auto view = try_static_view(e.args[0]);
     if (view.state != StaticProbeState::Known)
@@ -2428,7 +2428,7 @@ struct Lowering {
           fail("static shape query exceeds the Stan integer range", e->raw);
         mir::Expr literal;
         literal.kind = mir::Expr::LitInt;
-        literal.lit_i = value.value;
+        literal.lit_i = static_cast<long>(value.value);
         literal.type_ = "UInt";
         literal.unsized = {0, mir::UnsizedLeaf::Int};
         literal.data_only = true;
