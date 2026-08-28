@@ -223,6 +223,13 @@ static_assert(program_code_count() == static_cast<size_t>(Program::CALL) + 1,
 // new numbering along with the program.
 void compact_program(Program& p, std::vector<std::pair<int, int>>& seeded);
 
+// Explicitly gate producer-destination forwarding and report whether it
+// changed the program. The original entry point above remains the public
+// default (and preserves its ABI); islands use this helper to price their
+// established compacted form before optimizing an accepted region.
+bool compact_program_gated(Program& p, std::vector<std::pair<int, int>>& seeded,
+                           bool enable_destination_forwarding);
+
 // Assemble the forward context for `call` over the register file `reg`.
 // Backward-only fields are left null; run_adjoint fills its own.
 KernelCtx call_fwd_ctx(const Program::Call& call, double* reg);

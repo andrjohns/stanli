@@ -268,6 +268,112 @@ static void test_compact_range_copy() {
   expect_eq("range copy regs", p.n_regs, 5);
 }
 
+// A scalar producer per lane followed by three copies constructs one ranged
+// value. The ordinary source-alias pass must retain those copies because each
+// destination is an interior boundary; destination forwarding can instead
+// make the producers write the contiguous range directly.
+static void test_compact_forwards_producers_into_range() {
+  auto make = [] {
+    Program p;
+    p.n_regs = 13;
+    p.code = {{Program::ADD, 6, 0, 3},
+              {Program::MOV, 9, 6},
+              {Program::ADD, 7, 1, 4},
+              {Program::MOV, 10, 7},
+              {Program::ADD, 8, 2, 5},
+              {Program::MOV, 11, 8},
+              {Program::LSE_RANGE, 12, 9, 0, 0, 3}};
+    p.out_regs = {12};
+    return p;
+  };
+  std::vector<std::pair<int, int>> seeded{{0, 6}};
+
+  Program forwarded = make();
+  compact_program(forwarded, seeded);
+  expect_eq("destination forwarding code", opcodes(forwarded),
+            "ADD ADD ADD LSE_RANGE");
+
+  test_setenv("STANLI_NO_PROGRAM_DEST_FORWARD", "1", 1);
+  Program ordinary = make();
+  std::vector<std::pair<int, int>> ordinary_seeded{{0, 6}};
+  compact_program(ordinary, ordinary_seeded);
+  test_unsetenv("STANLI_NO_PROGRAM_DEST_FORWARD");
+  expect_eq("destination forwarding opt-out", opcodes(ordinary),
+            "ADD MOV ADD MOV ADD MOV LSE_RANGE");
+}
+
+static void test_compact_destination_forwarding_refuses_input_alias() {
+  Program p;
+  p.n_regs = 4;
+  p.code = {
+      {Program::ADD, 2, 0, 1}, {Program::MOV, 0, 2}, {Program::ADD, 3, 0, 1}};
+  p.out_regs = {3};
+  std::vector<std::pair<int, int>> seeded{{0, 2}};
+  compact_program(p, seeded);
+  expect_eq("destination forwarding input alias", opcodes(p), "ADD MOV ADD");
+}
+
+static void test_compact_destination_forwarding_refusals() {
+  {
+    Program p;
+    p.n_regs = 11;
+    p.code = {{Program::LOG_RANGE, 6, 0, 0, 0, 4},
+              {Program::MOVR, 2, 6, 0, 0, 4},
+              {Program::LSE_RANGE, 10, 2, 0, 0, 4}};
+    p.out_regs = {10};
+    std::vector<std::pair<int, int>> seeded{{0, 4}};
+    compact_program(p, seeded);
+    expect_eq("destination forwarding partial input overlap", opcodes(p),
+              "LOG_RANGE MOVR LSE_RANGE");
+  }
+  {
+    Program p;
+    p.n_regs = 6;
+    p.code = {
+        {Program::ADD, 4, 0, 1}, {Program::MOV, 2, 4}, {Program::ADD, 5, 4, 2}};
+    p.out_regs = {5};
+    std::vector<std::pair<int, int>> seeded{{0, 3}};
+    compact_program(p, seeded);
+    expect_eq("destination forwarding extra temporary read", opcodes(p),
+              "ADD MOV ADD");
+  }
+  {
+    Program p;
+    p.n_regs = 5;
+    p.code = {
+        {Program::ADD, 2, 0, 1}, {Program::MOV, 3, 2}, {Program::MUL, 4, 3, 1}};
+    p.out_regs = {4};
+    std::vector<std::pair<int, int>> seeded{{0, 4}};
+    compact_program(p, seeded);
+    expect_eq("destination forwarding seeded temporary", opcodes(p),
+              "ADD MOV MUL");
+  }
+  {
+    Program p;
+    p.n_regs = 6;
+    p.code = {
+        {Program::ADD, 4, 0, 1}, {Program::MOV, 2, 4}, {Program::MUL, 5, 2, 1}};
+    p.out_regs = {4, 5};
+    std::vector<std::pair<int, int>> seeded{{0, 3}};
+    compact_program(p, seeded);
+    expect_eq("destination forwarding live-out temporary", opcodes(p),
+              "ADD MOV MUL");
+  }
+  {
+    Program p;
+    p.n_regs = 6;
+    p.code = {{Program::ADD, 4, 0, 1},
+              {Program::MOV, 2, 4},
+              {Program::JZ, 3, 3},
+              {Program::ADD, 5, 2, 1}};
+    p.out_regs = {5};
+    std::vector<std::pair<int, int>> seeded{{0, 4}};
+    compact_program(p, seeded);
+    expect_eq("destination forwarding branch program", opcodes(p),
+              "ADD MOV JZ ADD");
+  }
+}
+
 // A read that spans two copies must not be split across their sources.
 static void test_compact_straddling_range_kept() {
   Program p;
@@ -412,9 +518,8 @@ static void test_unsupported_op_splits() {
 // the estimate still has to refuse once the backward stops building vars:
 // `bones_model` is it (36 ops behind 4,024 registers) and islands cost it
 // 19x replayed, 4x with a generated adjoint.
-static void test_wide_state_refused() {
+static Graph build_wide_state(Fills& fills, std::vector<int>& terms) {
   Graph g;
-  Fills fills;
   const int W = 64;
   int prev = g.add_slot(1, true);
   for (int t = 0; t < 12; ++t) {
@@ -431,11 +536,28 @@ static void test_wide_state_refused() {
   const int lp = g.add_slot(1, false);
   g.add_op(OP_ADD, {prev, prev}, lp);
   g.result_slot = lp;
-  std::vector<int> terms{lp};
+  terms = {lp};
+  return g;
+}
+
+static void test_wide_state_refused() {
+  Fills fills;
+  std::vector<int> terms;
+  Graph g = build_wide_state(fills, terms);
   const size_t before = g.ops.size();  // 36 in vocab, above kMinIslandOps
   const int carved = carve_islands(g, fills, terms, {});
   expect("wide none carved", carved == 0);
   expect("wide ops unchanged", g.ops.size() == before);
+
+  // Pin the override directly instead of relying on the cross-path fixture
+  // corpus to retain a model on exactly the losing side of the cost model.
+  Fills forced_fills;
+  std::vector<int> forced_terms;
+  Graph forced = build_wide_state(forced_fills, forced_terms);
+  test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);
+  expect("wide forced carve",
+         carve_islands(forced, forced_fills, forced_terms, {}) == 1);
+  test_unsetenv("STANLI_ISLAND_ALWAYS");
 }
 
 // The cost estimate, on the two shapes it has to tell apart. A wide
@@ -445,10 +567,26 @@ static void test_vector_copies_carved() {
   HmmGraph ref = build_hmm(8, 128);
   const std::vector<double> want = run_grad(std::move(ref.g), ref.fills);
 
+  HmmGraph ordinary = build_hmm(8, 128);
+  test_setenv("STANLI_NO_PROGRAM_DEST_FORWARD", "1", 1);
+  const int ordinary_carved =
+      carve_islands(ordinary.g, ordinary.fills, ordinary.terms, {});
+  test_unsetenv("STANLI_NO_PROGRAM_DEST_FORWARD");
+
   HmmGraph isl = build_hmm(8, 128);
   const int carved = carve_islands(isl.g, isl.fills, isl.terms, {});
   expect("copies carved==1", carved == 1);
+  expect("copies opt-out also carved==1", ordinary_carved == 1);
   expect("copies ops==4", isl.g.ops.size() == 4);
+  auto island_instructions = [](const Graph& g) {
+    size_t n = 0;
+    for (const Op& op : g.ops)
+      if (op.opcode == OP_ISLAND)
+        n += static_cast<const IslandProg*>(op.udata)->code.size();
+    return n;
+  };
+  expect("copies forwarding shrinks an already profitable island",
+         island_instructions(isl.g) < island_instructions(ordinary.g));
   const std::vector<double> got = run_grad_twice(std::move(isl.g), isl.fills);
   expect("copies sizes", got.size() == want.size());
   for (size_t i = 0; i < want.size() && i < got.size(); ++i)
@@ -1117,6 +1255,9 @@ int main() {
   test_compact_rewritten_source_kept();
   test_compact_second_writer_kept();
   test_compact_range_copy();
+  test_compact_forwards_producers_into_range();
+  test_compact_destination_forwarding_refuses_input_alias();
+  test_compact_destination_forwarding_refusals();
   test_compact_straddling_range_kept();
   test_compact_call_ranges();
   test_compact_env_disable();

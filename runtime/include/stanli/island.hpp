@@ -94,6 +94,10 @@ constexpr uint8_t kIslandSoftmax3Variant = 1;
 // STANLI_NO_ISLAND_COMPACT=1 disables this pass only.
 void compact_island(IslandProg& p);
 
+// Explicitly gate producer-destination forwarding and report whether it
+// changed the program. The one-argument entry point remains the public default.
+bool compact_island_gated(IslandProg& p, bool enable_destination_forwarding);
+
 // Generate p.adj, appending checkpoint saves to p's forward code. False
 // leaves p untouched and keeps the replay.
 bool gen_adjoint(IslandProg& p);
