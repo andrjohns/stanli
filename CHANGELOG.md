@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.6
+
 ### Sampling reports progress and problems
 
 The Python and R samplers now print CmdStan-style per-chain iteration updates,
