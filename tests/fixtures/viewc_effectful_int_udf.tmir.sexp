@@ -52,24 +52,35 @@
    ((pattern
      (Block
       (((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_noisy_return_sym3__)
+          (decl_type
+           (Sized
+            (SArray SInt
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+          (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (NRFunApp (CompilerInternal FnPrint)
+              (((pattern (Lit Str "int effect"))
+                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib bernoulli_lpmf (FnLpmf false) AoS)
+            (FunApp (StanLib bernoulli_logit_lpmf (FnLpmf false) AoS)
              (((pattern
                 (Indexed
-                 ((pattern
-                   (FunApp (UserDefined noisy FnPlain)
-                    (((pattern (Var x_i))
-                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                 ((pattern (Var x_i))
                   (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
                  ((Single
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-              ((pattern
-                (FunApp (StanLib inv_logit FnPlain AoS)
-                 (((pattern (Var q))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+              ((pattern (Var q))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>)))))
@@ -82,31 +93,42 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
    ((pattern
      (Block
       (((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_noisy_return_sym1__)
+          (decl_type
+           (Sized
+            (SArray SInt
+             ((pattern (Lit Int 0))
+              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+          (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (NRFunApp (CompilerInternal FnPrint)
+              (((pattern (Lit Str "int effect"))
+                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib bernoulli_lpmf (FnLpmf false) AoS)
+            (FunApp (StanLib bernoulli_logit_lpmf (FnLpmf false) SoA)
              (((pattern
                 (Indexed
-                 ((pattern
-                   (FunApp (UserDefined noisy FnPlain)
-                    (((pattern (Var x_i))
-                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                 ((pattern (Var x_i))
                   (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
                  ((Single
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-              ((pattern
-                (FunApp (StanLib inv_logit FnPlain AoS)
-                 (((pattern (Var q))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+              ((pattern (Var q))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>)))))
@@ -157,7 +179,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal
@@ -184,7 +206,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal

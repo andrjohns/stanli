@@ -7,7 +7,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id M) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable M) ()) UInt
@@ -174,7 +174,7 @@
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                ((pattern (Lit Int 1))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (dims ()) (mem_pattern AoS)))
+             (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -193,7 +193,7 @@
               (((pattern
                  (IfElse
                   ((pattern
-                    (FunApp (StanLib Greater__ FnPlain AoS)
+                    (FunApp (StanLib Greater__ FnPlain SoA)
                      (((pattern
                         (Indexed
                          ((pattern (Var s))
@@ -211,7 +211,7 @@
                      (((pattern
                         (TargetPE
                          ((pattern
-                           (FunApp (StanLib binomial_lpmf (FnLpmf false) AoS)
+                           (FunApp (StanLib binomial_lpmf (FnLpmf false) SoA)
                             (((pattern
                                (Indexed
                                 ((pattern (Var s))
@@ -236,7 +236,7 @@
                       (((pattern
                          (TargetPE
                           ((pattern
-                            (FunApp (StanLib bernoulli_lpmf (FnLpmf false) AoS)
+                            (FunApp (StanLib bernoulli_lpmf (FnLpmf false) SoA)
                              (((pattern (Lit Int 0))
                                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                               ((pattern (Var p))
@@ -302,7 +302,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id p) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable p) ()) UReal
@@ -335,7 +335,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id p) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable p) ()) UReal

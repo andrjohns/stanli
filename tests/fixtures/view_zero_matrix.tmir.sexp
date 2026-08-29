@@ -22,7 +22,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable Z) ()) UMatrix
@@ -48,11 +48,6 @@
           (initialize Default)))
         (meta <opaque>))
        ((pattern
-         (Assignment ((LVariable A) ()) UMatrix
-          ((pattern (Var Z))
-           (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))))
-        (meta <opaque>))
-       ((pattern
          (TargetPE
           ((pattern
             (FunApp (StanLib Plus__ FnPlain AoS)
@@ -60,7 +55,7 @@
                 (Promotion
                  ((pattern
                    (FunApp (StanLib cols FnPlain AoS)
-                    (((pattern (Var A))
+                    (((pattern (Var Z))
                       (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                  UReal DataOnly))
@@ -78,7 +73,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -88,17 +83,17 @@
          (Decl (decl_adtype AutoDiffable) (decl_id Z)
           (decl_type
            (Sized
-            (SMatrix AoS
+            (SMatrix SoA
              ((pattern (Lit Int 0))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable Z) ()) UMatrix
           ((pattern
-            (FunApp (StanLib rep_matrix FnPlain AoS)
+            (FunApp (StanLib rep_matrix FnPlain SoA)
              (((pattern (Lit Real 0.0))
                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
               ((pattern (Lit Int 0))
@@ -111,7 +106,7 @@
          (Decl (decl_adtype AutoDiffable) (decl_id A)
           (decl_type
            (Sized
-            (SMatrix AoS
+            (SMatrix SoA
              ((pattern (Lit Int 0))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
@@ -119,19 +114,14 @@
           (initialize Default)))
         (meta <opaque>))
        ((pattern
-         (Assignment ((LVariable A) ()) UMatrix
-          ((pattern (Var Z))
-           (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))))
-        (meta <opaque>))
-       ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
+            (FunApp (StanLib Plus__ FnPlain SoA)
              (((pattern
                 (Promotion
                  ((pattern
-                   (FunApp (StanLib cols FnPlain AoS)
-                    (((pattern (Var A))
+                   (FunApp (StanLib cols FnPlain SoA)
+                    (((pattern (Var Z))
                       (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                  UReal DataOnly))
@@ -187,7 +177,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal
@@ -214,7 +204,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal

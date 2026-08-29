@@ -176,7 +176,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -184,7 +184,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id N) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable N) ()) UInt
@@ -213,7 +213,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id K) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable K) ()) UInt
@@ -337,7 +337,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id flag) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable flag) ()) UInt
@@ -390,7 +390,7 @@
         (SMatrix AoS
          ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
          ((pattern (Var K)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable adj) ()) UMatrix
@@ -490,10 +490,7 @@
                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                  ((pattern (Lit Real 0.5))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
-                 ((pattern
-                   (FunApp (StanLib PMinus__ FnPlain AoS)
-                    (((pattern (Lit Real 0.5))
-                      (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                 ((pattern (Lit Real -0.5))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
               ((pattern
@@ -554,7 +551,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id beta)
       (decl_type
        (Sized
-        (SVector AoS
+        (SVector SoA
          ((pattern (Var K)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
@@ -565,7 +562,7 @@
              (dims
               (((pattern (Var K))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -574,7 +571,7 @@
       (((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf false) SoA)
              (((pattern (Var beta))
                (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -604,7 +601,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf false) SoA)
              (((pattern
                 (Indexed
                  ((pattern (Var beta))
@@ -618,14 +615,14 @@
                  ((pattern
                    (EOr
                     ((pattern
-                      (FunApp (StanLib Equals__ FnPlain AoS)
+                      (FunApp (StanLib Equals__ FnPlain SoA)
                        (((pattern (Var flag))
                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                         ((pattern (Lit Int 1))
                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                     ((pattern
-                      (FunApp (StanLib Greater__ FnPlain AoS)
+                      (FunApp (StanLib Greater__ FnPlain SoA)
                        (((pattern (Var K))
                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                         ((pattern (Lit Int 5))
@@ -634,10 +631,7 @@
                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                  ((pattern (Lit Real 0.5))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
-                 ((pattern
-                   (FunApp (StanLib PMinus__ FnPlain AoS)
-                    (((pattern (Lit Real 0.5))
-                      (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                 ((pattern (Lit Real -0.5))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
               ((pattern
@@ -651,7 +645,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf false) SoA)
              (((pattern
                 (Indexed
                  ((pattern (Var beta))
@@ -663,7 +657,7 @@
               ((pattern
                 (TernaryIf
                  ((pattern
-                   (FunApp (StanLib Equals__ FnPlain AoS)
+                   (FunApp (StanLib Equals__ FnPlain SoA)
                     (((pattern (Var flag))
                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                      ((pattern (Lit Int 1))
@@ -748,7 +742,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -835,7 +829,7 @@
        (Sized
         (SVector AoS
          ((pattern (Var K)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable beta) ()) UVector

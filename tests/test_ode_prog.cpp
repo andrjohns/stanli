@@ -12,6 +12,7 @@
 // still produce the right answer.
 #include <stanli/mir.hpp>
 #include <stanli/mir_interp.hpp>
+#include <stanli/island.hpp>
 #include <stanli/ode_prog.hpp>
 #include <stanli/sexp.hpp>
 
@@ -56,10 +57,135 @@ std::string slurp(const std::string& path) {
 // Deterministic, and spread over both sides of the branch condition.
 double probe(int i) { return 0.35 + 0.21 * std::sin(1.7 * i) + 0.05 * (i % 3); }
 
+void check_generated_local(const std::string& name, const stanli::RhsProgram& p,
+                           const stanli::IslandProg& generated, double t,
+                           const std::vector<double>& y,
+                           const std::vector<double>& theta,
+                           const std::vector<double>& x_r) {
+  using namespace stanli;
+  const size_t width = y.size() + theta.size();
+  std::vector<double> want_values(p.out_regs.size());
+  std::vector<double> want_jacobian(p.out_regs.size() * width);
+  {
+    stan::math::nested_rev_autodiff nested;
+    std::vector<stan::math::var> y_vars(y.begin(), y.end());
+    std::vector<stan::math::var> theta_vars(theta.begin(), theta.end());
+    std::vector<stan::math::var> outputs(p.out_regs.size());
+    run_rhs_into<stan::math::var>(p, t, y_vars.data(), theta_vars.data(),
+                                  theta_vars.size(), x_r.data(),
+                                  outputs.data());
+    for (size_t output = 0; output < outputs.size(); ++output)
+      want_values[output] = outputs[output].val();
+    for (size_t output = 0; output < outputs.size(); ++output) {
+      stan::math::grad(outputs[output].vi_);
+      for (size_t input = 0; input < y.size(); ++input)
+        want_jacobian[output * width + input] = y_vars[input].adj();
+      for (size_t input = 0; input < theta.size(); ++input)
+        want_jacobian[output * width + y.size() + input] =
+            theta_vars[input].adj();
+      if (output + 1 < outputs.size()) nested.set_zero_all_adjoints();
+    }
+  }
+
+  std::vector<double> values((size_t)generated.n_regs);
+  for (int i = 0; i < p.n_y; ++i) values[(size_t)(p.y0 + i)] = y[(size_t)i];
+  for (int i = 0; i < p.n_th; ++i)
+    values[(size_t)(p.th0 + i)] = theta[(size_t)i];
+  values[(size_t)p.t_reg] = t;
+  for (int i = 0; i < p.n_xr; ++i) values[(size_t)(p.xr0 + i)] = x_r[(size_t)i];
+  run_program(generated, values);
+
+  std::vector<double> got_values(p.out_regs.size());
+  std::vector<double> got_jacobian(p.out_regs.size() * width);
+  std::vector<double> adjoints((size_t)generated.adj.n_regs);
+  for (size_t output = 0; output < p.out_regs.size(); ++output) {
+    const int output_reg = generated.out_regs[output];
+    got_values[output] = values[(size_t)output_reg];
+    std::fill(adjoints.begin(), adjoints.end(), 0.0);
+    adjoints[(size_t)generated.adj.adj_reg[(size_t)output_reg]] = 1.0;
+    run_adjoint(generated, generated.adj, values.data(), adjoints.data());
+    for (int input = 0; input < p.n_y; ++input) {
+      const int reg = p.y0 + input;
+      got_jacobian[output * width + (size_t)input] =
+          adjoints[(size_t)generated.adj.adj_reg[(size_t)reg]];
+    }
+    for (int input = 0; input < p.n_th; ++input) {
+      const int reg = p.th0 + input;
+      got_jacobian[output * width + y.size() + (size_t)input] =
+          adjoints[(size_t)generated.adj.adj_reg[(size_t)reg]];
+    }
+  }
+
+  bool values_exact = got_values.size() == want_values.size();
+  for (size_t i = 0; i < got_values.size() && values_exact; ++i)
+    values_exact = bits(got_values[i]) == bits(want_values[i]);
+  bool jacobian_exact = got_jacobian.size() == want_jacobian.size();
+  for (size_t i = 0; i < got_jacobian.size() && jacobian_exact; ++i)
+    jacobian_exact = bits(got_jacobian[i]) == bits(want_jacobian[i]);
+  expect(name + ": generated local values are bitwise exact", values_exact);
+  expect(name + ": generated local Jacobian is bitwise exact", jacobian_exact);
+}
+
+void check_exact_opcode_contract() {
+  using namespace stanli;
+  RhsProgram p;
+  p.ok = true;
+  p.t_reg = 0;
+  p.y0 = 1;
+  p.n_y = 2;
+  p.th0 = 3;
+  p.n_th = 3;
+  p.xr0 = 6;
+  p.n_xr = 2;
+  p.n_regs = 8;
+  auto alloc = [&](int len = 1) {
+    const int reg = p.n_regs;
+    p.n_regs += len;
+    return reg;
+  };
+  auto emit = [&](Program::Code code, int a, int b = 0, int c = 0, int len = 0,
+                  int out_len = 1) {
+    const int dst = alloc(out_len);
+    p.code.push_back(Program::Instr{code, dst, a, b, c, len});
+    for (int i = 0; i < out_len; ++i) p.out_regs.push_back(dst + i);
+  };
+
+  p.pool = {0.375, -0.25, 1.5};
+  emit(Program::CONST, 0);
+  emit(Program::CONSTR, 1, 0, 0, 2, 2);
+  emit(Program::MOV, p.y0);
+  emit(Program::MOVR, p.y0, 0, 0, 2, 2);
+  for (Program::Code code :
+       {Program::ADD, Program::SUB, Program::MUL, Program::DIV, Program::POW})
+    emit(code, p.y0, p.th0);
+  for (Program::Code code :
+       {Program::NEG, Program::EXP, Program::LOG, Program::SQRT,
+        Program::SQUARE, Program::INV, Program::FABS, Program::INV_LOGIT,
+        Program::LOG1M, Program::LOG1P_EXP, Program::TANH})
+    emit(code, code == Program::LOG1M ? p.th0 : p.y0);
+  for (Program::Code code : {Program::GT, Program::GE, Program::LT, Program::LE,
+                             Program::EQ, Program::NE})
+    emit(code, p.y0, p.th0);
+  emit(Program::LOG_RANGE, p.y0, 0, 0, 2, 2);
+  emit(Program::EXP_RANGE, p.y0, 0, 0, 2, 2);
+  emit(Program::LSE2, p.y0, p.y0 + 1);
+  emit(Program::LOG_MIX, p.th0, p.y0, p.y0 + 1);
+  emit(Program::FMA, p.y0, p.th0, p.xr0);
+
+  std::string refusal;
+  const std::shared_ptr<const IslandProg> generated =
+      make_rhs_adjoint_program(p, &refusal);
+  expect("exact opcode contract is eligible", (bool)generated);
+  expect("exact opcode contract has no refusal", refusal.empty());
+  if (generated)
+    check_generated_local("exact opcode contract", p, *generated, 0.25,
+                          {0.7, 1.2}, {0.3, 0.8, 1.1}, {0.4, 0.6});
+}
+
 void check(const std::string& name, const stanli::mir::FunDef& f,
            const std::map<std::string, const stanli::mir::FunDef*>& funs,
            int n_y, int n_th, const std::vector<double>& x_r,
-           const std::vector<int>& x_i, bool want_ok) {
+           const std::vector<int>& x_i, bool want_ok, bool want_generated) {
   using namespace stanli;
   RhsProgram p = compile_rhs(f, funs, n_y, n_th, (int)x_r.size(), x_i);
   if (p.ok != want_ok) {
@@ -68,13 +194,39 @@ void check(const std::string& name, const stanli::mir::FunDef& f,
                 (int)p.ok, (int)want_ok, p.why.c_str());
     return;
   }
+  const int canonical_n_regs = p.n_regs;
+  const std::vector<Program::Instr> canonical_code = p.code;
+  std::string refusal;
+  const std::shared_ptr<const IslandProg> generated =
+      make_rhs_adjoint_program(p, &refusal);
+  bool canonical_unchanged =
+      p.n_regs == canonical_n_regs && p.code.size() == canonical_code.size();
+  for (size_t i = 0; i < p.code.size() && canonical_unchanged; ++i) {
+    const Program::Instr& got = p.code[i];
+    const Program::Instr& want = canonical_code[i];
+    canonical_unchanged = got.code == want.code && got.dst == want.dst &&
+                          got.a == want.a && got.b == want.b &&
+                          got.c == want.c && got.len == want.len;
+  }
+  expect(name + ": derivative builder preserves canonical bytecode",
+         canonical_unchanged);
   if (!want_ok) {
     if (p.why.empty()) {
       ++failures;
       std::printf("FAIL %s: refused without saying why\n", name.c_str());
     }
+    expect(name + ": compiler refusal has no derivative payload", !generated);
+    expect(name + ": compiler refusal is observable", !refusal.empty());
     return;  // the interpreter still serves it; the ODE kernel falls back
   }
+  expect(name + ": generated derivative eligibility",
+         (bool)generated == want_generated);
+  expect(name + ": generated derivative disposition is observable",
+         generated ? refusal.empty() : !refusal.empty());
+  if (!generated && (name == "f_branch" || name == "f_udf"))
+    expect(name + ": runtime control-flow refusal names JZ/JMP",
+           refusal.find("JZ") != std::string::npos ||
+               refusal.find("JMP") != std::string::npos);
 
   for (int trial = 0; trial < 12; ++trial) {
     const double t = probe(trial) * 2.0;  // straddles the t > 0.5 branch
@@ -111,6 +263,7 @@ void check(const std::string& name, const stanli::mir::FunDef& f,
         return;
       }
     }
+    if (generated) check_generated_local(name, p, *generated, t, y, th, x_r);
   }
 }
 
@@ -251,12 +404,13 @@ int main() {
     const char* name;
     int n_y, n_th;
     bool want_ok;
+    bool want_generated;
   };
   const Case cases[] = {
-      {"f_lin", 2, 4, true},
-      {"f_branch", 2, 4, true},
-      {"f_udf", 2, 4, true},
-      {"f_early", 2, 4, false},  // return out of a runtime branch
+      {"f_lin", 2, 4, true, true},
+      {"f_branch", 2, 4, true, false},  // JZ/JMP fail closed
+      {"f_udf", 2, 4, true, false},     // runtime ternary emits JZ/JMP
+      {"f_early", 2, 4, false, false},  // return from a runtime branch
   };
   for (const Case& c : cases) {
     auto it = funs.find(c.name);
@@ -265,8 +419,10 @@ int main() {
       std::printf("FAIL fixture has no function %s\n", c.name);
       continue;
     }
-    check(c.name, *it->second, funs, c.n_y, c.n_th, x_r, x_i, c.want_ok);
+    check(c.name, *it->second, funs, c.n_y, c.n_th, x_r, x_i, c.want_ok,
+          c.want_generated);
   }
+  check_exact_opcode_contract();
 
   // stan-math instantiates a var state whenever either side is active. The
   // data-y/active-theta case is included too: run_rhs is a generic boundary,
@@ -277,7 +433,7 @@ int main() {
     expect("mixed seed fixture compiles", p.ok);
     if (p.ok) {
       const bool compact =
-          p.code.size() == 7 &&
+          p.code.size() == 6 &&
           std::none_of(p.code.begin(), p.code.end(), [](const auto& i) {
             return i.code == Program::CONST || i.code == Program::MOV;
           });
@@ -292,6 +448,37 @@ int main() {
       check_mixed_seed<false, true>(p, "double/var");
       check_mixed_seed<true, true>(p, "var/var");
       check_mixed_seed<false, false>(p, "double/double");
+
+      // gen_adjoint can differentiate DOT, but its double packet reduction is
+      // not the var replay's scalar grouping. The ODE-specific exact whitelist
+      // must refuse it before generated-adjoint construction.
+      RhsProgram with_dot = p;
+      with_dot.code.push_back(Program::Instr{Program::DOT, with_dot.n_regs,
+                                             with_dot.y0, with_dot.y0, 0, 2});
+      ++with_dot.n_regs;
+      std::string refusal;
+      expect("direct RK refuses DOT value grouping",
+             !make_rhs_adjoint_program(with_dot, &refusal));
+      expect("direct RK DOT refusal is observable",
+             refusal.find("DOT") != std::string::npos);
+
+      // C99 fmax/fmin and Stan Math's var overload choose different operands
+      // for signed-zero ties. Even an otherwise unused occurrence makes the
+      // program ineligible until the double forward can mirror var exactly.
+      for (const Program::Code opcode : {Program::FMAX, Program::FMIN}) {
+        RhsProgram with_signed_zero_tie = p;
+        with_signed_zero_tie.code.push_back(Program::Instr{
+            opcode, with_signed_zero_tie.n_regs, with_signed_zero_tie.y0,
+            with_signed_zero_tie.y0 + 1, 0, 0});
+        ++with_signed_zero_tie.n_regs;
+        refusal.clear();
+        const char* name = program_code_spec(opcode).name;
+        expect(
+            std::string("direct RK refuses ") + name + " signed-zero grouping",
+            !make_rhs_adjoint_program(with_signed_zero_tie, &refusal));
+        expect(std::string("direct RK ") + name + " refusal is observable",
+               refusal.find(name) != std::string::npos);
+      }
     }
   }
 

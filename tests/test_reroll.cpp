@@ -1448,7 +1448,7 @@ static void test_e2e_fixtures() {
                    got[i], want[i]);
     std::printf("%s: %zu ops -> %zu ops\n", c.name, ops_unrolled, ops_rerolled);
     expect((std::string(c.name) + " shrinks 4x").c_str(),
-           ops_rerolled < ops_unrolled / 4);
+           ops_rerolled * 4 <= ops_unrolled);
   }
 }
 

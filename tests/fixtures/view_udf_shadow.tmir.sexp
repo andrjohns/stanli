@@ -53,10 +53,28 @@
    ((pattern
      (Block
       (((pattern
-         (TargetPE
-          ((pattern
-            (FunApp (UserDefined passthrough FnPlain)
-             (((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_passthrough_return_sym4__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_passthrough_z_sym5__)
+              (decl_type
+               (Sized
+                (SArray
+                 (SMatrix AoS
+                  ((pattern (Lit Int 2))
+                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern (Lit Int 2))
+                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                 ((pattern (Lit Int 2))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_passthrough_return_sym4__) ()) UReal
+              ((pattern
                 (Indexed
                  ((pattern (Var z))
                   (meta
@@ -68,7 +86,12 @@
                   (Single
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern (Var inline_passthrough_return_sym4__))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
        ((pattern
@@ -107,17 +130,35 @@
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                ((pattern (Lit Int 2))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ (UArray (UArray UReal))) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
    ((pattern
      (Block
       (((pattern
-         (TargetPE
-          ((pattern
-            (FunApp (UserDefined passthrough FnPlain)
-             (((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_passthrough_return_sym1__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Decl (decl_adtype AutoDiffable) (decl_id inline_passthrough_z_sym2__)
+              (decl_type
+               (Sized
+                (SArray
+                 (SMatrix SoA
+                  ((pattern (Lit Int 2))
+                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern (Lit Int 2))
+                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                 ((pattern (Lit Int 2))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Default)))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_passthrough_return_sym1__) ()) UReal
+              ((pattern
                 (Indexed
                  ((pattern (Var z))
                   (meta
@@ -129,7 +170,12 @@
                   (Single
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern (Var inline_passthrough_return_sym1__))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
        ((pattern
@@ -243,10 +289,6 @@
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
       (initialize Default)))
-    (meta <opaque>))
-   ((pattern
-     (Assignment ((LVariable pos__) ()) UInt
-      ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id z)

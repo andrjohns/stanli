@@ -73,13 +73,15 @@ int main(int argc, char** argv) {
   }
   check(theta_assign != nullptr, "theta assignment found");
   if (theta_assign) {
+    // O1 contracts `mu + tau * theta_tilde` into fma(tau, theta_tilde, mu).
     const mir::Expr& r = theta_assign->rhs;
-    check(r.kind == mir::Expr::FunApp && r.name == "Plus__", "theta rhs plus");
-    check(r.args.size() == 2 && r.args[1].kind == mir::Expr::FunApp &&
-              r.args[1].name == "Times__",
-          "theta rhs times");
-    check(r.args[0].kind == mir::Expr::Var && r.args[0].name == "mu" &&
-              !r.args[0].data_only,
+    check(r.kind == mir::Expr::FunApp && r.name == "fma", "theta rhs fma");
+    check(r.args.size() == 3 && r.args[0].kind == mir::Expr::Var &&
+              r.args[0].name == "tau" && r.args[1].kind == mir::Expr::Var &&
+              r.args[1].name == "theta_tilde",
+          "theta rhs fma operands");
+    check(r.args.size() == 3 && r.args[2].kind == mir::Expr::Var &&
+              r.args[2].name == "mu" && !r.args[2].data_only,
           "mu var autodiff");
   }
   check(n_target == 4, "4 TargetPE statements");

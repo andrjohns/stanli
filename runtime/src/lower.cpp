@@ -4784,6 +4784,26 @@ struct Lowering {
                    "stanli: ODE right-hand side %s falls back to the "
                    "interpreter: %s\n",
                    spec->rhs_name.c_str(), spec->prog.why.c_str());
+    if (spec->prog.ok &&
+        (spec->solver == OdeSpec::RK45 || spec->solver == OdeSpec::CKRK)) {
+      spec->direct_rk =
+          make_rhs_adjoint_program(spec->prog, &spec->direct_rk_why);
+      spec->direct_rk_enabled =
+          spec->direct_rk && !std::getenv("STANLI_NO_ODE_DIRECT_RK");
+    }
+    if (spec->prog.ok &&
+        (spec->solver == OdeSpec::RK45 || spec->solver == OdeSpec::CKRK) &&
+        std::getenv("STANLI_DEBUG_ODE")) {
+      if (spec->direct_rk)
+        std::fprintf(stderr,
+                     "stanli: ODE right-hand side %s is direct-RK eligible%s\n",
+                     spec->rhs_name.c_str(),
+                     spec->direct_rk_enabled ? "" : " (oracle selected)");
+      else
+        std::fprintf(stderr,
+                     "stanli: ODE right-hand side %s keeps the RK oracle: %s\n",
+                     spec->rhs_name.c_str(), spec->direct_rk_why.c_str());
+    }
     Val v = emit_value(OP_ODE, {z0, theta}, N * S, result_si, {(int)N, (int)S});
     // Bit 2 says the low bits explicitly describe the C++ scalar types
     // selected by stanc's adlevels: bit 0 for y0, bit 1 for theta. Runtime

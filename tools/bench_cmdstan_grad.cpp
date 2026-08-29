@@ -43,7 +43,16 @@ int main(int argc, char** argv) {
     stan::math::recover_memory();
   };
 
-  for (int i = 0; i < 200; ++i) one();
+  // Warm by elapsed time, as bench_grad does.  A fixed count is much too
+  // short for small ODE systems and makes fresh-process paired measurements
+  // depend on which arm happened to run first on a cold core.
+  {
+    auto warmup_start = std::chrono::steady_clock::now();
+    do {
+      one();
+    } while (std::chrono::steady_clock::now() - warmup_start <
+             std::chrono::milliseconds(200));
+  }
   auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < N; ++i) one();
   auto t1 = std::chrono::steady_clock::now();

@@ -66,7 +66,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id a)
       (decl_type
        (Sized
-        (SRowVector AoS
+        (SRowVector SoA
          ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
@@ -77,7 +77,7 @@
              (dims
               (((pattern (Lit Int 1))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ URowVector) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -85,7 +85,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id b)
       (decl_type
        (Sized
-        (SRowVector AoS
+        (SRowVector SoA
          ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
@@ -96,7 +96,7 @@
              (dims
               (((pattern (Lit Int 2))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ URowVector) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -105,9 +105,9 @@
       (((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib sum FnPlain AoS)
+            (FunApp (StanLib sum FnPlain SoA)
              (((pattern
-                (FunApp (StanLib Plus__ FnPlain AoS)
+                (FunApp (StanLib Plus__ FnPlain SoA)
                  (((pattern (Var a))
                    (meta ((type_ URowVector) (loc <opaque>) (adlevel AutoDiffable))))
                   ((pattern (Var b))
@@ -200,10 +200,6 @@
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
       (initialize Default)))
-    (meta <opaque>))
-   ((pattern
-     (Assignment ((LVariable pos__) ()) UInt
-      ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id a)
@@ -362,7 +358,7 @@
        (Sized
         (SRowVector AoS
          ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable a) ()) URowVector
@@ -386,7 +382,7 @@
        (Sized
         (SRowVector AoS
          ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable b) ()) URowVector

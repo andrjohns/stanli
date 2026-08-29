@@ -10,7 +10,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -18,7 +18,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id J) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable J) ()) UInt
@@ -268,21 +268,18 @@
        (Sized
         (SVector AoS
          ((pattern (Var J)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UVector
       ((pattern
-        (FunApp (StanLib Plus__ FnPlain AoS)
-         (((pattern (Var mu))
+        (FunApp (StanLib fma FnPlain AoS)
+         (((pattern (Var tau))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-          ((pattern
-            (FunApp (StanLib Times__ FnPlain AoS)
-             (((pattern (Var tau))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Var theta_tilde))
-               (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
-           (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
+          ((pattern (Var theta_tilde))
+           (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
+          ((pattern (Var mu))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
        (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))
     (meta <opaque>))
    ((pattern
@@ -368,7 +365,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -384,7 +381,7 @@
               (Lower
                ((pattern (Lit Int 0))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (dims ()) (mem_pattern AoS)))
+             (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -392,7 +389,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id theta_tilde)
       (decl_type
        (Sized
-        (SVector AoS
+        (SVector SoA
          ((pattern (Var J)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
@@ -403,7 +400,7 @@
              (dims
               (((pattern (Var J))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -411,23 +408,20 @@
      (Decl (decl_adtype AutoDiffable) (decl_id theta)
       (decl_type
        (Sized
-        (SVector AoS
+        (SVector SoA
          ((pattern (Var J)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UVector
       ((pattern
-        (FunApp (StanLib Plus__ FnPlain AoS)
-         (((pattern (Var mu))
+        (FunApp (StanLib fma FnPlain SoA)
+         (((pattern (Var tau))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-          ((pattern
-            (FunApp (StanLib Times__ FnPlain AoS)
-             (((pattern (Var tau))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Var theta_tilde))
-               (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
-           (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
+          ((pattern (Var theta_tilde))
+           (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
+          ((pattern (Var mu))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
        (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))
     (meta <opaque>))
    ((pattern
@@ -435,7 +429,7 @@
       (((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var mu))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -455,7 +449,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib cauchy_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib cauchy_lpdf (FnLpdf true) SoA)
              (((pattern (Var tau))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -475,7 +469,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var theta_tilde))
                (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -495,7 +489,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var y))
                (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly))))
               ((pattern (Var theta))
@@ -602,16 +596,13 @@
    ((pattern
      (Assignment ((LVariable theta) ()) UVector
       ((pattern
-        (FunApp (StanLib Plus__ FnPlain AoS)
-         (((pattern (Var mu))
+        (FunApp (StanLib fma FnPlain AoS)
+         (((pattern (Var tau))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-          ((pattern
-            (FunApp (StanLib Times__ FnPlain AoS)
-             (((pattern (Var tau))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Var theta_tilde))
-               (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
-           (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
+          ((pattern (Var theta_tilde))
+           (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
+          ((pattern (Var mu))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
        (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))
     (meta <opaque>))
    ((pattern
@@ -644,7 +635,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -652,7 +643,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal
@@ -678,7 +669,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id tau) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable tau) ()) UReal
@@ -783,7 +774,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal
@@ -800,7 +791,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id tau) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable tau) ()) UReal
@@ -825,7 +816,7 @@
        (Sized
         (SVector AoS
          ((pattern (Var J)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta_tilde) ()) UVector

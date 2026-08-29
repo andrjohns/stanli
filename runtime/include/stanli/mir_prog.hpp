@@ -46,10 +46,12 @@ struct Range {
   int64_t rows = 0;
   int64_t cols = 0;
   ViewKind kind = ViewKind::Flat;
-  // Complete logical extents for arrays. Scalar arrays are outer-major;
-  // arrays whose leaf is a vector append that vector width as the final
-  // extent, which has the same physical layout. Matrix leaves are refused.
+  // Complete logical extents for arrays: array extents outer-major, then the
+  // leaf's own extents. A matrix leaf occupies its two trailing extents
+  // column-major, so `leaf` is what distinguishes array[2] matrix[2,3] from
+  // array[2, 2] vector[3], which share both storage width and dims.
   std::vector<int64_t> dims;
+  ViewKind leaf = ViewKind::Flat;
 };
 
 // One UDF argument in source order. Compile-time integers live outside the
@@ -497,7 +499,8 @@ struct ProgramCompiler {
     if (a.kind == ViewKind::Flat) return a.len == 1 && b.len == 1;
     if (a.kind == ViewKind::Vector || a.kind == ViewKind::RowVector)
       return a.len == b.len;
-    if (a.kind == ViewKind::Array) return a.len == b.len && a.dims == b.dims;
+    if (a.kind == ViewKind::Array)
+      return a.len == b.len && a.dims == b.dims && a.leaf == b.leaf;
     return a.rows == b.rows && a.cols == b.cols;
   }
 
@@ -536,15 +539,32 @@ struct ProgramCompiler {
     return r;
   }
 
+  static ViewKind leaf_of(const std::string& base) {
+    if (base == "SVector") return ViewKind::Vector;
+    if (base == "SRowVector") return ViewKind::RowVector;
+    if (base == "SMatrix") return ViewKind::Matrix;
+    return ViewKind::Flat;
+  }
+
+  static size_t leaf_rank(ViewKind leaf) {
+    if (leaf == ViewKind::Matrix) return 2;
+    if (leaf == ViewKind::Vector || leaf == ViewKind::RowVector) return 1;
+    return 0;
+  }
+
   Range declared(Range r, const mir::SizedType& type) {
     if (type.base == "SArray") {
-      if (type.elem_base != "SReal" && type.elem_base != "SInt")
+      if (type.elem_base != "SReal" && type.elem_base != "SInt" &&
+          leaf_of(type.elem_base) == ViewKind::Flat)
         bail(
-            "only scalar-array declarations are supported by the register "
-            "program");
+            "only scalar-array and container-leaf declarations are supported "
+            "by the register program");
       r.kind = ViewKind::Array;
+      r.leaf = leaf_of(type.elem_base);
       r.dims.clear();
       for (const auto& d : type.dims) r.dims.push_back(cint(d));
+      if (r.dims.size() <= leaf_rank(r.leaf))
+        bail("array declaration lacks its leaf extents");
       return r;
     }
     if (type.base == "SVector")
@@ -736,14 +756,14 @@ struct ProgramCompiler {
         } else if (e.type_ == "URowVector") {
           out.kind = ViewKind::RowVector;
         } else if (e.type_ == "UMatrix") {
-          // Matrix leaves need a leaf tag as well as two extents to prove
-          // their column-major subrange. Range intentionally has no such tag,
-          // so retain the established fail-loud boundary.
-          bail(
-              "array-of-matrix indexing is unsupported by the register "
-              "program");
+          if (b.leaf != ViewKind::Matrix || dims.size() - n_idx != 2)
+            bail("matrix index form");
+          out.kind = ViewKind::Matrix;
+          out.rows = dims[n_idx];
+          out.cols = dims[n_idx + 1];
         } else {
           out.kind = ViewKind::Array;
+          out.leaf = b.leaf;
           out.dims.assign(dims.begin() + (long)n_idx, dims.end());
         }
         return out;
@@ -890,22 +910,43 @@ struct ProgramCompiler {
             bail("array literal needs too many registers");
           total += parts.back().len;
         }
+        // A matrix literal is rows of row-vectors, while a matrix register
+        // run is column-major, so this is the one literal that transposes
+        // rather than concatenating.
+        if (e.name == "FnMakeRowVec" && e.type_ == "UMatrix") {
+          if (parts.empty()) bail("matrix literal has no rows");
+          for (const Range& q : parts)
+            if (q.kind != ViewKind::RowVector || q.len != parts.front().len)
+              bail("matrix literal rows have different logical views");
+          const int64_t rows = (int64_t)parts.size();
+          const int64_t cols = parts.front().len;
+          const int r = alloc(total);
+          for (int64_t j = 0; j < cols; ++j)
+            for (int64_t i = 0; i < rows; ++i)
+              emit(Program::MOV, r + (int)(j * rows + i),
+                   parts[(size_t)i].reg + (int)j);
+          Range out{r, total};
+          out.kind = ViewKind::Matrix;
+          out.rows = rows;
+          out.cols = cols;
+          return out;
+        }
         ViewKind array_leaf = ViewKind::Flat;
-        int array_leaf_width = 1;
+        std::vector<int64_t> array_leaf_dims;
         if (e.name == "FnMakeArray") {
           if (!parts.empty() && !is_scalar(parts.front())) {
             array_leaf = parts.front().kind;
-            if (array_leaf != ViewKind::Vector &&
-                array_leaf != ViewKind::RowVector)
+            if (array_leaf == ViewKind::Array)
               bail(
                   "array literal element view is unsupported by the "
                   "register program");
-            if (e.type_ == "UMatrix")
-              bail("matrix literals are unsupported by the register program");
-            array_leaf_width = parts.front().len;
             for (const Range& q : parts)
               if (!same_view(q, parts.front()))
                 bail("array literal elements have different logical views");
+            if (array_leaf == ViewKind::Matrix)
+              array_leaf_dims = {parts.front().rows, parts.front().cols};
+            else
+              array_leaf_dims = {(int64_t)parts.front().len};
           } else {
             for (const Range& q : parts)
               if (!is_scalar(q))
@@ -922,8 +963,8 @@ struct ProgramCompiler {
             e.name == "FnMakeRowVec" ? ViewKind::RowVector : ViewKind::Array;
         if (e.name == "FnMakeArray") {
           out.dims = {(int64_t)e.args.size()};
-          if (array_leaf != ViewKind::Flat)
-            out.dims.push_back(array_leaf_width);
+          out.leaf = array_leaf;
+          for (int64_t d : array_leaf_dims) out.dims.push_back(d);
         }
         return out;
       }
