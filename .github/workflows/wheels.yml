@@ -351,7 +351,10 @@ jobs:
           # $PWD, not github.workspace: inside the manylinux containers the
           # workspace mounts at a different path than the expression gives.
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
-          export CCACHE_SLOPPINESS=pch_defines,time_macros
+          # The PCH is regenerated after every checkout. Ignore its file times
+          # while still hashing header contents, or every PCH consumer misses
+          # the restored cache even when its compile inputs are unchanged.
+          export CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
           ccache -z
           compiler_args=()
           if [ -n "${CC:-}" ] && [ -n "${CXX:-}" ]; then
@@ -1360,7 +1363,7 @@ jobs:
         run: |
           which ccache || sudo apt-get install -y ccache
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
-          export CCACHE_SLOPPINESS=pch_defines,time_macros
+          export CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
           ccache -z
           # -O1 -g1, and every number here was read off a failed run's
           # log rather than guessed. -O1: ASan's checks do not depend on
