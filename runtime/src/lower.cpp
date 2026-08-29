@@ -740,6 +740,31 @@ struct Lowering {
           return eval_int(e.args[0]) - eval_int(e.args[1]);
         if (e.name == "Times__")
           return eval_int(e.args[0]) * eval_int(e.args[1]);
+        if ((e.name == "Equals__" || e.name == "NEquals__" ||
+             e.name == "Greater__" || e.name == "Geq__" || e.name == "Less__" ||
+             e.name == "Leq__") &&
+            e.args.size() == 2) {
+          const auto scalar = [&](const mir::Expr& arg) -> double {
+            if (arg.type_ == "UInt") return (double)eval_int(arg);
+            if (auto evaluated = try_eval_pure(arg)) {
+              if (evaluated->r.size() == 1) return evaluated->r[0];
+            }
+            if (arg.kind == mir::Expr::Var) {
+              const auto it = scope.find(arg.name);
+              if (it != scope.end())
+                if (const DataMap::Entry* en = observation(it->second))
+                  if (en->r.size() == 1) return en->r[0];
+            }
+            fail("comparison operand is not known data", arg.raw);
+          };
+          const double lhs = scalar(e.args[0]), rhs = scalar(e.args[1]);
+          if (e.name == "Equals__") return lhs == rhs;
+          if (e.name == "NEquals__") return lhs != rhs;
+          if (e.name == "Greater__") return lhs > rhs;
+          if (e.name == "Geq__") return lhs >= rhs;
+          if (e.name == "Less__") return lhs < rhs;
+          return lhs <= rhs;
+        }
         // Shape queries on slot-bound values (e.g. rows(v) on an inlined
         // UDF's vector argument) answer from binding-owned metadata before
         // the interpreter, which cannot recover vector orientation.
@@ -1091,17 +1116,49 @@ struct Lowering {
 
   void sync_data_local(const std::string& name, const mir::Expr& rhs,
                        const Val& v) {
-    td.env().erase(name);
-    if (!v.si.param_free) return;
+    if (!v.si.param_free) {
+      td.env().erase(name);
+      return;
+    }
     if (const DataMap::Entry* en = observation(v)) {
       td.env()[name] = *en;
       return;
     }
-    if (auto evaluated = try_eval_pure(rhs)) {
+    // Evaluate before erasing the old binding: `x = x + data_step` reads the
+    // previous x, and data-only while loops depend on retaining that value for
+    // their next condition.
+    auto evaluated = try_eval_pure(rhs);
+    td.env().erase(name);
+    if (evaluated) {
       DataMap::Entry en = std::move(*evaluated);
       td.env()[name] = en;
       observe(v, std::move(en));
+    }
+  }
+
+  void sync_indexed_data_local(const std::string& name, const Val& v) {
+    td.env().erase(name);
+    if (!v.si.param_free) return;
+    if (const DataMap::Entry* en = observation(v)) td.env()[name] = *en;
+  }
+
+  void observe_indexed_rhs(const mir::Expr& rhs, const Val& v) {
+    if (observation(v) || !v.si.param_free) return;
+    if (auto evaluated = try_eval_pure(rhs)) {
+      observe(v, std::move(*evaluated));
       return;
+    }
+    if (rhs.type_ != "UInt" || g.slots[v.slot].len != 1) return;
+    try {
+      const long value = eval_int(rhs);
+      DataMap::Entry en;
+      en.is_int = true;
+      en.i = {static_cast<int>(value)};
+      en.r = {static_cast<double>(value)};
+      observe(v, std::move(en));
+    } catch (const CompileError&) {
+      // Observation is an optimization. Runtime integer expressions remain
+      // graph values and deliberately do not acquire a compile-time binding.
     }
   }
 
@@ -1515,28 +1572,6 @@ struct Lowering {
           return emit_value(OP_GATHER, {base},
                             (int64_t)rows.size() * base.si.cols, si, gather);
         }
-        // A two-axis matrix gather is the Cartesian selection M[rows, cols],
-        // not a pairwise zip. Preserve both index arrays' order and
-        // duplicates; column-major output means selected columns are outer
-        // and selected rows are inner in the flat gather list.
-        if (e.args.size() == 3 && is_matrix(base.si) &&
-            e.args[1].name == "IndexMulti" && e.args[2].name == "IndexMulti") {
-          const std::vector<int64_t> rows = index_positions(
-              e.args[1], base.si.rows, "matrix row gather", e.raw);
-          const std::vector<int64_t> cols = index_positions(
-              e.args[2], base.si.cols, "matrix column gather", e.raw);
-          std::vector<int> gather;
-          gather.reserve(rows.size() * cols.size());
-          for (int64_t j : cols)
-            for (int64_t i : rows)
-              gather.push_back(checked_immediate(j * base.si.rows + i,
-                                                 "matrix gather offset"));
-          SlotInfo si = matrix_view((int64_t)rows.size(), (int64_t)cols.size(),
-                                    base.si.param_free);
-          return emit_value(OP_GATHER, {base},
-                            (int64_t)rows.size() * (int64_t)cols.size(), si,
-                            gather);
-        }
         // A range over the outermost array dimension is contiguous because
         // graph storage keeps each whole outer element together. Preserve
         // the complete suffix shape even when its storage width is zero.
@@ -1665,6 +1700,38 @@ struct Lowering {
           const int64_t len = hi >= lo ? hi - lo + 1 : 0;
           return emit_value(OP_SLICE, {base}, len, view_of(e.type_),
                             {(int)(len ? (j - 1) * base.si.rows + lo - 1 : 0)});
+        }
+        // Any two-axis matrix selection the slices above leave is the
+        // Cartesian selection M[rows, cols], not a pairwise zip. Preserve
+        // index-array order and duplicates; column-major output means
+        // selected columns are outer and selected rows are inner in the flat
+        // gather list.
+        const auto is_matrix_selector = [](const mir::Expr& index) {
+          return index.name == "IndexAll" || index.name == "IndexSingle" ||
+                 index.name == "IndexBetween" || index.name == "IndexMulti";
+        };
+        if (e.args.size() == 3 && is_matrix(base.si) &&
+            is_matrix_selector(e.args[1]) && is_matrix_selector(e.args[2]) &&
+            (e.args[1].name != "IndexSingle" ||
+             e.args[2].name != "IndexSingle")) {
+          const std::vector<int64_t> rows = index_positions(
+              e.args[1], base.si.rows, "matrix row gather", e.raw);
+          const std::vector<int64_t> cols = index_positions(
+              e.args[2], base.si.cols, "matrix column gather", e.raw);
+          std::vector<int> gather;
+          gather.reserve(rows.size() * cols.size());
+          for (int64_t j : cols)
+            for (int64_t i : rows)
+              gather.push_back(checked_immediate(j * base.si.rows + i,
+                                                 "matrix gather offset"));
+          SlotInfo si = view_of(e.type_);
+          si.param_free = base.si.param_free;
+          if (e.type_ == "UMatrix")
+            si = matrix_view((int64_t)rows.size(), (int64_t)cols.size(),
+                             base.si.param_free);
+          return emit_value(OP_GATHER, {base},
+                            (int64_t)rows.size() * (int64_t)cols.size(), si,
+                            gather);
         }
         // Params/locals with recorded dims, laid out by flat_addr above.
         // Matrix views are col-major and never take this array-major path.
@@ -5210,6 +5277,7 @@ struct Lowering {
           const std::vector<int64_t>* dd =
               is_array(prev_v.si) ? &array_shape(prev_v.si).dims : nullptr;
           const Val rhs_v = lower_expr(s.rhs);
+          observe_indexed_rhs(s.rhs, rhs_v);
           const int rhs = rhs_v.slot;
           SlotInfo out_si = prev_v.si;
           // A one-index All spans the complete logical value. Keep this as
@@ -5227,7 +5295,7 @@ struct Lowering {
                                 g.slots[prev].len, out_si, {0});
             propagate_int_update(nv, prev_v, rhs_v, 0, 1);
             scope[s.lhs] = nv;
-            sync_data_local(s.lhs, s.rhs, nv);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Whole matrix row write M[i] = row_vector: one value per column,
@@ -5244,7 +5312,7 @@ struct Lowering {
                                 {(int)i, (int)prev_v.si.rows});
             propagate_int_update(nv, prev_v, rhs_v, i, prev_v.si.rows);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Between write w[a:b] = rhs (contiguous on 1-D values).
@@ -5269,7 +5337,7 @@ struct Lowering {
                                 g.slots[prev].len, out_si, {(int)start});
             propagate_int_update(nv, prev_v, rhs_v, start, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Scatter write x[idx] = rhs. The indices are data, so spell it as
@@ -5293,7 +5361,7 @@ struct Lowering {
               nv = next;
             }
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Column write M[:, j] = rhs (contiguous in col-major storage).
@@ -5309,7 +5377,7 @@ struct Lowering {
                            out_si, {(int)(j * prev_v.si.rows)});
             propagate_int_update(nv, prev_v, rhs_v, j * prev_v.si.rows, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Row-range column write M[a:b, j] = rhs (contiguous within the
@@ -5330,7 +5398,7 @@ struct Lowering {
                                 g.slots[prev].len, out_si, {(int)start});
             propagate_int_update(nv, prev_v, rhs_v, start, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Columns outermost, as CmdStan's assign walks them: a repeated
@@ -5356,7 +5424,7 @@ struct Lowering {
                 nv = next;
               }
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           if (all_single && dd && s.lhs_idx.size() <= dd->size() &&
@@ -5383,7 +5451,7 @@ struct Lowering {
                                         {(int)a.off}));
             propagate_int_update(nv, prev_v, rhs_v, a.off, a.stride);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           int64_t flat = 0;
@@ -5403,7 +5471,7 @@ struct Lowering {
                               out_si, {(int)flat});
           propagate_int_update(nv, prev_v, rhs_v, flat, 1);
           scope[s.lhs] = nv;
-          td.env().erase(s.lhs);
+          sync_indexed_data_local(s.lhs, nv);
           return;
         }
         {

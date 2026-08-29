@@ -606,9 +606,30 @@ int main() {
     lex.params_data()[0] = 0.1;
     double grad = 0;
     const double lp = lex.gradient(&grad);
-    const double sum = 1 + 2 + 3 + 4;  // N = 4 iterations
+    // N = 4 iterations in the integer loop, then ceil(N / 2) iterations in
+    // the real loop whose data-only update controls its next condition. The
+    // final four terms come from gathering two rows with an integer array
+    // populated by indexed assignments.
+    const double sum = 1 + 2 + 3 + 4 + 2 + 4;
     expect_eq("while lp", lp, -0.5 * 0.1 * 0.1 + sum * 0.1);
     expect_eq("while grad", grad, -0.1 + sum);
+  }
+
+  // An integer local can be assigned a comparison of data-only real locals.
+  // This takes lowering's integer evaluator because the surrounding ternary
+  // also controls compile-time state.
+  {
+    const DataMap d =
+        DataMap::from_json(slurp("tests/fixtures/int_real_compare.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/int_real_compare.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.1;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    expect_eq("int real compare lp", lp, -0.5 * 0.1 * 0.1 + 0.1);
+    expect_eq("int real compare grad", grad, -0.1 + 1.0);
   }
 
   // x[idx] = rhs with a repeated index: the last write to a position wins,
@@ -4082,9 +4103,11 @@ int main() {
       expect_ulp("tcrossprod: g" + std::to_string(i), gradient[i], a(i).adj());
   }
 
-  // Two IndexMulti selectors on a matrix form their Cartesian submatrix.
-  // Different reordered row/column lists pin column-major gather order and
-  // route each gathered cell's adjoint back to the source matrix.
+  // Two dimension-preserving selectors on a matrix form their Cartesian
+  // submatrix. Different reordered Multi lists pin column-major gather order,
+  // Between/Between covers matrix ranges, and the mixed Multi/Single and
+  // Single/Multi forms keep the surviving axis. All route each selected
+  // cell's adjoint back to the source matrix.
   {
     DataMap d;
     d.set_int_array("row_indices", {3, 1});
@@ -4097,13 +4120,14 @@ int main() {
     for (int i = 0; i < 9; ++i) gex.params_data()[i] = q[i];
     double gradient[9] = {};
     const double lp = gex.gradient(gradient);
-    const double want = 2.0 * q[5] + 2.0 * q[3] + 2.0 * q[8] + 2.0 * q[6];
-    expect_eq("matrix multi/multi: lp", lp, want);
-    for (int i = 0; i < 9; ++i) {
-      const bool selected = i == 3 || i == 5 || i == 6 || i == 8;
-      expect_eq("matrix multi/multi: g" + std::to_string(i), gradient[i],
-                selected ? 2.0 : 0.0);
-    }
+    const double want = 2.0 * (q[5] + q[3] + q[8] + q[6]) +
+                        2.0 * (q[3] + q[4] + q[6] + q[7]) +
+                        2.0 * (q[2] + q[0]) + 2.0 * (q[3] + q[6]);
+    expect_eq("matrix selectors: lp", lp, want);
+    const int times[9] = {1, 0, 1, 3, 1, 1, 3, 1, 1};
+    for (int i = 0; i < 9; ++i)
+      expect_eq("matrix selectors: g" + std::to_string(i), gradient[i],
+                2.0 * times[i]);
   }
 
   // O1 composes a scalar UDF index through a two-axis gather as a nested
