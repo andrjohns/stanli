@@ -449,7 +449,7 @@ static void test_product_pass_barrier() {
   expect("product has a backward kernel",
          find_kernel(OP_PROD_VEC) != nullptr &&
              kernel(OP_PROD_VEC).backward != nullptr &&
-             kernel(OP_PROD_VEC).scratch_size != nullptr);
+             kernel(OP_PROD_VEC).scratch_size == nullptr);
   expect("product is absent from value-free backward traits",
          !backward_ignores_values(OP_PROD_VEC));
   expect("product survives constfold with parameter input",

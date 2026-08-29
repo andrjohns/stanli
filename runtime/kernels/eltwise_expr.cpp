@@ -454,27 +454,26 @@ void dispersion_fwd(KernelCtx& ctx) {
   }
   using Vec = Eigen::Matrix<double, Eigen::Dynamic, 1>;
   const Eigen::Map<const Vec> input(ctx.in[0].data, n);
-  const auto owning_grouping =
-      input.unaryExpr(Eigen::internal::core_cast_op<double, double>());
-  const double mean = owning_grouping.mean();
-  double sum_of_squares = 0.0;
-  for (int64_t i = 0; i < n; ++i) {
-    ctx.scratch[i] = ctx.in[0].data[i] - mean;
-    sum_of_squares += ctx.scratch[i] * ctx.scratch[i];
-  }
-  const double variance = sum_of_squares / static_cast<double>(n - 1);
+  // The AoS rev overload first materializes values into an owning vector,
+  // then lets Eigen reduce both the mean and squared norm. Preserve those
+  // packet groupings rather than folding the squared differences by hand.
+  const Vec values = input;
+  const double mean = values.mean();
+  const Vec diff = values.array() - mean;
+  const double sum_of_squares = diff.squaredNorm();
+  const double size_m1 = static_cast<double>(n - 1);
+  const double variance = sum_of_squares / size_m1;
   ctx.out.data[0] = StdDev ? std::sqrt(variance) : variance;
   if constexpr (StdDev) {
     if (sum_of_squares < 1e-20) {
       const double partial = 1.0 / std::sqrt(static_cast<double>(n));
       for (int64_t i = 0; i < n; ++i) ctx.scratch[i] = partial;
     } else {
-      const double scale = 1.0 / (ctx.out.data[0] * (n - 1));
-      for (int64_t i = 0; i < n; ++i) ctx.scratch[i] *= scale;
+      const double denominator = ctx.out.data[0] * size_m1;
+      for (int64_t i = 0; i < n; ++i) ctx.scratch[i] = diff(i) / denominator;
     }
   } else {
-    const double scale = 2.0 / static_cast<double>(n - 1);
-    for (int64_t i = 0; i < n; ++i) ctx.scratch[i] *= scale;
+    for (int64_t i = 0; i < n; ++i) ctx.scratch[i] = 2.0 * diff(i) / size_m1;
   }
 }
 

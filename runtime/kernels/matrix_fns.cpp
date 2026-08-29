@@ -251,9 +251,15 @@ void add_diag_bwd(KernelCtx& ctx) {
         CMapM(ctx.out_adj_vec.data, rows, cols);
   if (!ctx.in_adj[1].data) return;
   const int64_t n = std::min(rows, cols);
-  for (int64_t i = 0; i < n; ++i)
-    ctx.in_adj[1].data[ctx.variant == 1 ? 0 : i] +=
-        ctx.out_adj_vec.data[i * rows + i];
+  if (ctx.variant == 1) {
+    // Eigen creates the diagonal scalar additions in increasing coefficient
+    // order; Stan's tape replays them in reverse.
+    for (int64_t i = n; i-- > 0;)
+      ctx.in_adj[1].data[0] += ctx.out_adj_vec.data[i * rows + i];
+  } else {
+    for (int64_t i = 0; i < n; ++i)
+      ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[i * rows + i];
+  }
 }
 
 // ---- quad_form_sym(A, B) --------------------------------------------------

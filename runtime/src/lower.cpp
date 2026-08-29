@@ -4268,7 +4268,9 @@ struct Lowering {
         fail("min/max needs one vector or row-vector argument", e.raw);
       Val result = emit_value(OP_EXTREMA_VEC, {a}, 1);
       if (in_write_array) result.autodiff = false;
-      g.ops.back().variant = kind == mir::ExtremaKind::Max ? 1u : 0u;
+      g.ops.back().variant =
+          static_cast<uint8_t>((kind == mir::ExtremaKind::Max ? 1u : 0u) |
+                               (result.autodiff ? 2u : 0u));
       return result;
     }
     if (e.name == "mean") {
@@ -4302,7 +4304,9 @@ struct Lowering {
       if (grouping == mir::ProdGrouping::Legacy)
         fail("prod expression grouping is not native", e.raw);
       Val result = emit_value(OP_PROD_VEC, {a}, 1);
-      g.ops.back().variant = grouping == mir::ProdGrouping::Scalar ? 1u : 0u;
+      g.ops.back().variant = static_cast<uint8_t>(
+          (grouping == mir::ProdGrouping::Scalar ? 1u : 0u) |
+          (result.autodiff ? 2u : 0u));
       return result;
     }
     if (e.name == "sd" || e.name == "variance") {

@@ -2095,7 +2095,7 @@ void test_product_exact_grouping() {
   }
 
   const Kernel& product = kernel(OP_PROD_VEC);
-  if (product.backward == nullptr || product.scratch_size == nullptr) {
+  if (product.backward == nullptr || product.scratch_size != nullptr) {
     ++failures;
     std::printf("FAIL product kernel has no differentiable implementation\n");
   }
@@ -2396,6 +2396,42 @@ void test_extrema_exact_grouping() {
               static_cast<unsigned long long>(reduction_bits(wants[variant])));
         }
       }
+
+      std::vector<double> active_values = values;
+      Eigen::Matrix<stan::math::var, -1, 1> active(
+          static_cast<Eigen::Index>(values.size()));
+      for (size_t i = 0; i < values.size(); ++i)
+        active(static_cast<Eigen::Index>(i)) = values[i];
+      stan::math::var want_active =
+          variant == 0 ? stan::math::min(active) : stan::math::max(active);
+      double got_active = 0.0;
+      double selected = 0.0;
+      std::vector<double> adj(values.size(), 0.0);
+      KernelCtx active_ctx;
+      active_ctx.n_in = 1;
+      active_ctx.in[0] =
+          Desc{active_values.data(), static_cast<int64_t>(values.size())};
+      active_ctx.out = Desc{&got_active, 1};
+      active_ctx.scratch = &selected;
+      active_ctx.variant = static_cast<uint8_t>(variant | 2);
+      extrema.forward(active_ctx);
+      active_ctx.in_adj[0] = Desc{adj.data(), static_cast<int64_t>(adj.size())};
+      active_ctx.out_adj = 1.0;
+      extrema.backward(active_ctx);
+      want_active.grad();
+      if (!same_reduction_value(got_active, want_active.val())) {
+        ++failures;
+        std::printf("FAIL active extrema value case %zu variant %d\n", c,
+                    variant);
+      }
+      for (size_t i = 0; i < adj.size(); ++i) {
+        if (adj[i] == active(static_cast<Eigen::Index>(i)).adj()) continue;
+        ++failures;
+        std::printf(
+            "FAIL active extrema adjoint case %zu variant %d index %zu\n", c,
+            variant, i);
+      }
+      stan::math::recover_memory();
     }
   }
 

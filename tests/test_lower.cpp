@@ -268,6 +268,9 @@ int main() {
         compile_model(slurp("tests/fixtures/a1_reductions.tmir.sexp"), d);
     check(count_opcode(reductions, OP_PROD_VEC) == 1,
           "A1 product opcode census");
+    for (const Op& op : reductions.graph.ops)
+      if (op.opcode == OP_PROD_VEC)
+        check(op.variant == 2, "A1 active product scalar grouping");
     check(count_opcode(reductions, OP_EXTREMA_VEC) == 2,
           "A1 extrema opcode census");
     check(count_opcode(reductions, OP_SD) == 2, "A1 sd opcode census");
@@ -355,6 +358,53 @@ int main() {
       expect_ulp("A2 matrix functions d" + std::to_string(i), gradient[4 + i],
                  diagonal(i).adj());
     stan::math::recover_memory();
+  }
+
+  // A scalar add_diag argument receives one contribution per diagonal entry.
+  // The additions are created from the first coefficient to the last, so the
+  // reverse tape accumulates a deliberately cancellation-sensitive seed in
+  // the opposite order.
+  {
+    const Kernel* add_diag = find_kernel(OP_ADD_DIAG);
+    check(add_diag && add_diag->forward && add_diag->backward,
+          "add_diag scalar kernel registration");
+    if (add_diag && add_diag->forward && add_diag->backward) {
+      constexpr int n = 3;
+      double a[n * n] = {};
+      double diagonal = 0.0;
+      double out[n * n] = {};
+      double out_adj[n * n] = {};
+      out_adj[0] = 1e16;
+      out_adj[4] = -1e16;
+      out_adj[8] = 1.0;
+      double diagonal_adj = 0.0;
+      const int dims[] = {n, n};
+      KernelCtx ctx;
+      ctx.in[0] = Desc{a, n * n};
+      ctx.in[1] = Desc{&diagonal, 1};
+      ctx.n_in = 2;
+      ctx.out = Desc{out, n * n};
+      ctx.variant = 1;
+      ctx.idata = dims;
+      ctx.n_idata = 2;
+      add_diag->forward(ctx);
+      ctx.in_adj[0] = Desc{nullptr, n * n};
+      ctx.in_adj[1] = Desc{&diagonal_adj, 1};
+      ctx.out_adj_vec = Desc{out_adj, n * n};
+      add_diag->backward(ctx);
+
+      Eigen::MatrixXd matrix = Eigen::MatrixXd::Zero(n, n);
+      Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(n, n);
+      seed(0, 0) = 1e16;
+      seed(1, 1) = -1e16;
+      seed(2, 2) = 1.0;
+      stan::math::var d_ref = 0.0;
+      stan::math::var reference = stan::math::sum(
+          stan::math::elt_multiply(stan::math::add_diag(matrix, d_ref), seed));
+      reference.grad();
+      expect_eq("add_diag scalar reverse order", diagonal_adj, d_ref.adj());
+      stan::math::recover_memory();
+    }
   }
 
   // Direct input preload must be an exact replacement for stanc's generated
