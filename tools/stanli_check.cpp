@@ -22,7 +22,8 @@
 #include <stanli/graph.hpp>
 #include <stanli/wa_interp.hpp>
 
-#include <array>
+#include "stanc_process.hpp"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -51,16 +52,7 @@ static double eval_point(int64_t i, int variant) {
 
 static std::string run_stanc(const std::string& stanc,
                              const std::string& model) {
-  const std::string cmd =
-      stanc + " --O1 --debug-optimized-mir '" + model + "' 2>/dev/null";
-  std::unique_ptr<FILE, int (*)(FILE*)> pipe(popen(cmd.c_str(), "r"), pclose);
-  if (!pipe) throw std::runtime_error("cannot run stanc");
-  std::string out;
-  std::array<char, 1 << 16> buf;
-  size_t n;
-  while ((n = fread(buf.data(), 1, buf.size(), pipe.get())) > 0)
-    out.append(buf.data(), n);
-  return out;
+  return stanli::tooling::run_stanc_process(stanc, model);
 }
 
 static std::string read_mir(const std::string& path) {
@@ -81,7 +73,11 @@ int main(int argc, char** argv) {
                  "[--draw-variant N] [--ledger PATH]]\n");
     return 2;
   }
+#ifdef _WIN32
+  std::string stanc = "deps/stanc3/stanc.exe";
+#else
   std::string stanc = "deps/stanc3/stanc";
+#endif
   std::string mir_path;
   bool stanc_arg = false;
   int variant = 0;

@@ -577,13 +577,17 @@ endfunction()
 # binary -- .stan in, CmdStan-shaped CSV out, no toolchain and no separate
 # stanc to find -- which is the whole point of an interpreter for a
 # language whose reference implementation compiles C++ per model.
+add_library(stanli_stanc_process STATIC tools/stanc_process.cpp)
 add_executable(stanli_run tools/stanli_run.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
-target_link_libraries(stanli_run PRIVATE stanli)
+target_link_libraries(stanli_run PRIVATE stanli stanli_stanc_process)
 stanli_embed_stanc(stanli_run)
 add_executable(stanli_check tools/stanli_check.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
-target_link_libraries(stanli_check PRIVATE stanli)
+target_link_libraries(stanli_check PRIVATE stanli stanli_stanc_process)
+add_executable(test_stanc_process tests/test_stanc_process.cpp)
+target_link_libraries(test_stanc_process PRIVATE stanli_stanc_process)
+add_test(NAME test_stanc_process COMMAND test_stanc_process)
 add_test(NAME test_check_precompiled_mir
          COMMAND stanli_check tests/fixtures/ar1.stan tests/fixtures/ar1.json
                  --mir tests/fixtures/ar1.tmir.sexp
@@ -738,11 +742,18 @@ if(Python3_Interpreter_FOUND)
       string(REGEX REPLACE "[^A-Za-z0-9_]" "_" STANLI_LIT_NAME
              "${STANLI_LIT_NAME}")
       set(STANLI_LIT_TEST "lit_${STANLI_LIT_NAME}")
+      if(WIN32)
+        set(STANLI_LIT_STANC
+            ${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc.exe)
+      else()
+        set(STANLI_LIT_STANC
+            ${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc)
+      endif()
       add_test(NAME ${STANLI_LIT_TEST}
                COMMAND ${Python3_EXECUTABLE} tests/lit/run.py
                        ${STANLI_LIT_CASE}
                        $<TARGET_FILE:stanli_check>
-                       ${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc
+                       ${STANLI_LIT_STANC}
                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
       set(STANLI_LIT_LABELS lit)
       if(STANLI_LIT_MARKER MATCHES "XFAIL$")
