@@ -4530,6 +4530,27 @@ struct Lowering {
       return emit_value(OP_MATRIX_EXP, {a}, g.slots[a.slot].len, a.si,
                         {checked_immediate(a.si.rows, "matrix_exp extent")});
     }
+    if ((e.name == "inverse" || e.name == "inverse_spd") &&
+        e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail(e.name + ": needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail(e.name + ": needs a square matrix", e.raw);
+      Val v = emit_value(e.name == "inverse" ? OP_INVERSE : OP_INVERSE_SPD, {a},
+                         g.slots[a.slot].len, a.si,
+                         {checked_immediate(a.si.rows, e.name + " extent")});
+      if (e.name == "inverse_spd") g.ops.back().variant = v.autodiff ? 1u : 0u;
+      return v;
+    }
+    if (e.name == "log_determinant" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail("log_determinant: needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail("log_determinant: needs a square matrix", e.raw);
+      return emit_value(
+          OP_LOG_DETERMINANT, {a}, 1, {},
+          {checked_immediate(a.si.rows, "log_determinant extent")});
+    }
 
     if ((e.name == "eigenvalues_sym" || e.name == "eigenvectors_sym") &&
         e.args.size() == 1) {
@@ -4591,6 +4612,48 @@ struct Lowering {
       // solves make, and for the same reason.
       g.ops.back().variant =
           (uint8_t)((b_matrix ? 0u : 1u) | (v.autodiff ? 2u : 0u));
+      return v;
+    }
+
+    if (e.name == "quad_form" && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      Val b = lower_expr(e.args[1]);
+      if (!is_matrix(a.si)) fail("quad_form: needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail("quad_form: needs a square matrix", e.raw);
+      const bool b_matrix = is_matrix(b.si);
+      if (!b_matrix && !is_vector(b.si))
+        fail("quad_form: second argument is not a matrix or vector", e.raw);
+      const int64_t n = a.si.rows;
+      const int64_t rb = b_matrix ? b.si.rows : g.slots[b.slot].len;
+      const int64_t m = b_matrix ? b.si.cols : 1;
+      if (rb != n)
+        fail("quad_form: inner dimension mismatch (" + std::to_string(n) + "x" +
+                 std::to_string(n) + " against " + std::to_string(rb) + ")",
+             e.raw);
+      const SlotInfo si = b_matrix ? matrix_view(m, m) : SlotInfo{};
+      Val v = emit_value(OP_QUAD_FORM, {a, b}, m * m, si,
+                         {checked_immediate(n, "quad_form extent"),
+                          checked_immediate(m, "quad_form extent")});
+      g.ops.back().variant =
+          (uint8_t)((b_matrix ? 0u : 1u) | (v.autodiff ? 2u : 0u));
+      return v;
+    }
+
+    if (e.name == "add_diag" && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      Val d = lower_expr(e.args[1]);
+      if (!is_matrix(a.si)) fail("add_diag: needs a matrix", e.raw);
+      const bool scalar = is_scalar(d);
+      const int64_t n = std::min(a.si.rows, a.si.cols);
+      if (!scalar && !is_vector(d.si) && !is_row_vector(d.si))
+        fail("add_diag: diagonal must be a scalar or vector", e.raw);
+      if (!scalar && g.slots[d.slot].len != n)
+        fail("add_diag: diagonal length mismatch", e.raw);
+      Val v = emit_value(OP_ADD_DIAG, {a, d}, g.slots[a.slot].len, a.si,
+                         {checked_immediate(a.si.rows, "add_diag rows"),
+                          checked_immediate(a.si.cols, "add_diag cols")});
+      g.ops.back().variant = scalar ? 1u : 0u;
       return v;
     }
 

@@ -1656,6 +1656,91 @@ class MirInterp {
         for (int64_t i = 0; i < n; ++i) o.r[(size_t)(j * n + i)] = c(i, j);
       return o;
     }
+    if ((e.name == "inverse" || e.name == "inverse_spd") &&
+        e.args.size() == 1) {
+      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+      Value a = eval(e.args[0]);
+      if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
+        fail(e.name + ": needs a square matrix", e.raw);
+      const int64_t n = a.dims[0];
+      Mat A(n, n);
+      for (int64_t j = 0; j < n; ++j)
+        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
+      const Mat c = e.name == "inverse" ? stan::math::inverse(A)
+                                        : stan::math::inverse_spd(A);
+      Value o;
+      o.dims = {n, n};
+      o.r.resize((size_t)(n * n));
+      for (int64_t j = 0; j < n; ++j)
+        for (int64_t i = 0; i < n; ++i) o.r[(size_t)(j * n + i)] = c(i, j);
+      return o;
+    }
+    if (e.name == "log_determinant" && e.args.size() == 1) {
+      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+      Value a = eval(e.args[0]);
+      if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
+        fail("log_determinant: needs a square matrix", e.raw);
+      const int64_t n = a.dims[0];
+      Mat A(n, n);
+      for (int64_t j = 0; j < n; ++j)
+        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
+      r.r = {stan::math::log_determinant(A)};
+      return r;
+    }
+    if (e.name == "quad_form" && e.args.size() == 2) {
+      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+      Value a = eval(e.args[0]);
+      Value b = eval(e.args[1]);
+      if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
+        fail("quad_form: needs a square matrix", e.raw);
+      const int64_t n = a.dims[0];
+      Mat A(n, n);
+      for (int64_t j = 0; j < n; ++j)
+        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
+      Value o;
+      if (b.dims.size() != 2) {
+        Eigen::Matrix<T, Eigen::Dynamic, 1> B((Eigen::Index)b.r.size());
+        for (size_t i = 0; i < b.r.size(); ++i) B((Eigen::Index)i) = b.r[i];
+        o.r = {stan::math::quad_form(A, B)};
+        return o;
+      }
+      const int64_t rb = b.dims[0], m = b.dims[1];
+      Mat B(rb, m);
+      for (int64_t j = 0; j < m; ++j)
+        for (int64_t i = 0; i < rb; ++i) B(i, j) = b.r.at((size_t)(j * rb + i));
+      const Mat c = stan::math::quad_form(A, B);
+      o.dims = {m, m};
+      o.r.resize((size_t)(m * m));
+      for (int64_t j = 0; j < m; ++j)
+        for (int64_t i = 0; i < m; ++i) o.r[(size_t)(j * m + i)] = c(i, j);
+      return o;
+    }
+    if (e.name == "add_diag" && e.args.size() == 2) {
+      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+      Value a = eval(e.args[0]);
+      Value d = eval(e.args[1]);
+      if (a.dims.size() != 2) fail("add_diag: needs a matrix", e.raw);
+      const int64_t rows = a.dims[0], cols = a.dims[1];
+      Mat A(rows, cols);
+      for (int64_t j = 0; j < cols; ++j)
+        for (int64_t i = 0; i < rows; ++i)
+          A(i, j) = a.r.at((size_t)(j * rows + i));
+      Mat c;
+      if (d.r.size() == 1 && d.dims.empty()) {
+        c = stan::math::add_diag(A, d.r[0]);
+      } else {
+        Eigen::Matrix<T, Eigen::Dynamic, 1> D((Eigen::Index)d.r.size());
+        for (size_t i = 0; i < d.r.size(); ++i) D((Eigen::Index)i) = d.r[i];
+        c = stan::math::add_diag(A, D);
+      }
+      Value o;
+      o.dims = {rows, cols};
+      o.r.resize((size_t)(rows * cols));
+      for (int64_t j = 0; j < cols; ++j)
+        for (int64_t i = 0; i < rows; ++i)
+          o.r[(size_t)(j * rows + i)] = c(i, j);
+      return o;
+    }
     if (e.name == "quad_form_sym" && e.args.size() == 2) {
       // B' A B, symmetrised. Overload resolution on T reaches the same
       // stan-math call the graph kernel makes -- prim's B.dot(A * B) at
