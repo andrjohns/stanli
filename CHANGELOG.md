@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Full-span reads lower
+
+`m[:, :]` and `v[:]` compile instead of failing with `unsupported index
+expression`. Upstream O1 folds a full-span read's `All` indices away and
+leaves an index-less `Indexed` node, which reached no lowering path.
+
 ### More matrix selections and compile-time locals lower
 
 Two-axis matrix selections now accept any combination of `:`, single indices,
