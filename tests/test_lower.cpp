@@ -258,6 +258,155 @@ int main() {
   stanli::set_packet_math(false);
   using namespace stanli;
 
+  // Section A1's five reductions must lower in the autodiff model graph, not
+  // merely in the generated-quantities graph. A zero product and tied maximum
+  // pin the non-generic reverse cases; singleton dispersion must remain a
+  // disconnected constant just as it is in Stan Math.
+  {
+    DataMap d;
+    CompiledModel reductions =
+        compile_model(slurp("tests/fixtures/a1_reductions.tmir.sexp"), d);
+    check(count_opcode(reductions, OP_PROD_VEC) == 1,
+          "A1 product opcode census");
+    for (const Op& op : reductions.graph.ops)
+      if (op.opcode == OP_PROD_VEC)
+        check(op.variant == 2, "A1 active product scalar grouping");
+    check(count_opcode(reductions, OP_EXTREMA_VEC) == 2,
+          "A1 extrema opcode census");
+    check(count_opcode(reductions, OP_SD) == 2, "A1 sd opcode census");
+    check(count_opcode(reductions, OP_VARIANCE) == 2,
+          "A1 variance opcode census");
+
+    Executor reduction_ex(std::move(reductions.graph));
+    reductions.bind(reduction_ex);
+    const double q[] = {0.25, 0.25, 0.0, 0.4};
+    std::copy(q, q + 4, reduction_ex.params_data());
+    double gradient[4];
+    const double lp = reduction_ex.gradient(gradient);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> y(3), singleton(1);
+    for (int i = 0; i < 3; ++i) y(i) = q[i];
+    singleton(0) = q[3];
+    var reference = stan::math::std_normal_lpdf<true>(y);
+    reference += stan::math::std_normal_lpdf<true>(singleton);
+    reference += stan::math::prod(y) + stan::math::min(y) + stan::math::max(y) +
+                 stan::math::sd(y) + stan::math::variance(y);
+    reference += stan::math::sd(singleton) + stan::math::variance(singleton);
+    reference.grad();
+
+    expect_ulp("A1 reductions lp", lp, reference.val());
+    for (int i = 0; i < 3; ++i)
+      expect_ulp("A1 reductions y" + std::to_string(i), gradient[i],
+                 y(i).adj());
+    expect_eq("A1 singleton gradient", gradient[3], singleton(0).adj());
+    stan::math::recover_memory();
+  }
+
+  // Section A2's matrix functions share shapes but not implementations:
+  // inverse_spd uses an LDLT, log_determinant a pivoted QR, and quad_form is
+  // deliberately not the symmetrising quad_form_sym operation. Pin all five
+  // as native opcodes and compare their composed reverse pass to Stan Math.
+  {
+    DataMap d;
+    CompiledModel matrix_functions =
+        compile_model(slurp("tests/fixtures/a2_matrix_functions.tmir.sexp"), d);
+    check(count_opcode(matrix_functions, OP_INVERSE) == 1,
+          "A2 inverse opcode census");
+    check(count_opcode(matrix_functions, OP_INVERSE_SPD) == 1,
+          "A2 inverse_spd opcode census");
+    check(count_opcode(matrix_functions, OP_LOG_DETERMINANT) == 1,
+          "A2 log determinant opcode census");
+    check(count_opcode(matrix_functions, OP_QUAD_FORM) == 1,
+          "A2 quad form opcode census");
+    check(count_opcode(matrix_functions, OP_ADD_DIAG) == 1,
+          "A2 add diag opcode census");
+
+    Executor matrix_ex(std::move(matrix_functions.graph));
+    matrix_functions.bind(matrix_ex);
+    const double q[] = {0.2, -0.3, 0.1, -0.2, 0.4, -0.1};
+    std::copy(q, q + 6, matrix_ex.params_data());
+    double gradient[6];
+    const double lp = matrix_ex.gradient(gradient);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> y(4), diagonal(2);
+    for (int i = 0; i < 4; ++i) y(i) = q[i];
+    for (int i = 0; i < 2; ++i) diagonal(i) = q[4 + i];
+    Eigen::Matrix<var, -1, -1> A(2, 2), S(2, 2);
+    A << stan::math::exp(y(0)), y(2), y(3), stan::math::exp(y(1));
+    S.setZero();
+    S(0, 0) = stan::math::exp(y(0));
+    S(1, 1) = stan::math::exp(y(1));
+    Eigen::VectorXd b(2);
+    b << 1.0, 2.0;
+
+    var reference = stan::math::std_normal_lpdf<true>(y);
+    reference += stan::math::std_normal_lpdf<true>(diagonal);
+    reference += stan::math::sum(stan::math::inverse(A));
+    reference += stan::math::sum(stan::math::inverse_spd(S));
+    reference += stan::math::log_determinant(A);
+    reference += stan::math::quad_form(A, b);
+    reference += stan::math::sum(stan::math::add_diag(A, diagonal));
+    reference.grad();
+
+    expect_ulp("A2 matrix functions lp", lp, reference.val());
+    for (int i = 0; i < 4; ++i)
+      expect_ulp("A2 matrix functions y" + std::to_string(i), gradient[i],
+                 y(i).adj());
+    for (int i = 0; i < 2; ++i)
+      expect_ulp("A2 matrix functions d" + std::to_string(i), gradient[4 + i],
+                 diagonal(i).adj());
+    stan::math::recover_memory();
+  }
+
+  // A scalar add_diag argument receives one contribution per diagonal entry.
+  // The additions are created from the first coefficient to the last, so the
+  // reverse tape accumulates a deliberately cancellation-sensitive seed in
+  // the opposite order.
+  {
+    const Kernel* add_diag = find_kernel(OP_ADD_DIAG);
+    check(add_diag && add_diag->forward && add_diag->backward,
+          "add_diag scalar kernel registration");
+    if (add_diag && add_diag->forward && add_diag->backward) {
+      constexpr int n = 3;
+      double a[n * n] = {};
+      double diagonal = 0.0;
+      double out[n * n] = {};
+      double out_adj[n * n] = {};
+      out_adj[0] = 1e16;
+      out_adj[4] = -1e16;
+      out_adj[8] = 1.0;
+      double diagonal_adj = 0.0;
+      const int dims[] = {n, n};
+      KernelCtx ctx;
+      ctx.in[0] = Desc{a, n * n};
+      ctx.in[1] = Desc{&diagonal, 1};
+      ctx.n_in = 2;
+      ctx.out = Desc{out, n * n};
+      ctx.variant = 1;
+      ctx.idata = dims;
+      ctx.n_idata = 2;
+      add_diag->forward(ctx);
+      ctx.in_adj[0] = Desc{nullptr, n * n};
+      ctx.in_adj[1] = Desc{&diagonal_adj, 1};
+      ctx.out_adj_vec = Desc{out_adj, n * n};
+      add_diag->backward(ctx);
+
+      Eigen::MatrixXd matrix = Eigen::MatrixXd::Zero(n, n);
+      Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(n, n);
+      seed(0, 0) = 1e16;
+      seed(1, 1) = -1e16;
+      seed(2, 2) = 1.0;
+      stan::math::var d_ref = 0.0;
+      stan::math::var reference = stan::math::sum(
+          stan::math::elt_multiply(stan::math::add_diag(matrix, d_ref), seed));
+      reference.grad();
+      expect_eq("add_diag scalar reverse order", diagonal_adj, d_ref.adj());
+      stan::math::recover_memory();
+    }
+  }
+
   // Direct input preload must be an exact replacement for stanc's generated
   // FnReadData reconstruction.  This one fixture covers a vector, a matrix,
   // and two array-of-vector inputs; y is deliberately written with integer

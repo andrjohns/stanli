@@ -28,6 +28,8 @@ namespace stanli {
   X(OP_BETA_BINOMIAL_LPMF)          \
   X(OP_LOGIT)                       \
   X(OP_MEAN)                        \
+  X(OP_SD)                          \
+  X(OP_VARIANCE)                    \
   X(OP_REP_VEC)                     \
   X(OP_INDEX)                       \
   X(OP_SET_INDEX)                   \
@@ -159,7 +161,12 @@ namespace stanli {
   X(OP_EXTREMA_VEC)                 \
   X(OP_DYNAMIC_SLICE)               \
   X(OP_MATRIX_EXP)                  \
-  X(OP_QUAD_FORM_SYM)
+  X(OP_QUAD_FORM_SYM)               \
+  X(OP_INVERSE)                     \
+  X(OP_INVERSE_SPD)                 \
+  X(OP_LOG_DETERMINANT)             \
+  X(OP_QUAD_FORM)                   \
+  X(OP_ADD_DIAG)
 
 // Scalar densities, one line each: this list generates the opcode, the
 // name, the kernel, its registration, and the lowering table entry

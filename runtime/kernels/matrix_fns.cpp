@@ -145,6 +145,123 @@ void matrix_exp_bwd(KernelCtx& ctx) {
   });
 }
 
+// ---- inverse / inverse_spd / log_determinant -----------------------------
+// All three use Stan Math itself in both sweeps. Inverse and log_determinant
+// have specialized rev overloads whose forward values are their double
+// implementations. inverse_spd is a scalar-templated LDLT, so its active
+// forward must run on Matrix<var> too: Eigen can otherwise choose different
+// packet arithmetic from the CmdStan expression.
+void inverse_fwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  MapM(ctx.out.data, n, n) = stan::math::inverse(CMapM(ctx.in[0].data, n, n));
+}
+void inverse_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  nary_bwd(ctx, [n](std::vector<VarV>& xs) {
+    Eigen::Map<VarM> a(xs[0].data(), n, n);
+    return stan::math::inverse(a);
+  });
+}
+
+void inverse_spd_fwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  if (ctx.variant == 0) {
+    MapM(ctx.out.data, n, n) =
+        stan::math::inverse_spd(CMapM(ctx.in[0].data, n, n));
+    return;
+  }
+  stan::math::nested_rev_autodiff nested;
+  VarM a(n, n);
+  for (int64_t i = 0; i < n * n; ++i) a.data()[i] = ctx.in[0].data[i];
+  MapM(ctx.out.data, n, n) = stan::math::value_of(stan::math::inverse_spd(a));
+}
+void inverse_spd_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  nary_bwd(ctx, [n](std::vector<VarV>& xs) {
+    Eigen::Map<VarM> a(xs[0].data(), n, n);
+    return stan::math::inverse_spd(a);
+  });
+}
+
+void log_det_fwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  ctx.out.data[0] = stan::math::log_determinant(CMapM(ctx.in[0].data, n, n));
+}
+void log_det_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0];
+  nary_bwd(ctx, [n](std::vector<VarV>& xs) {
+    Eigen::Map<VarM> a(xs[0].data(), n, n);
+    return stan::math::log_determinant(a);
+  });
+}
+
+// ---- quad_form(A, B) ------------------------------------------------------
+// in = {A (n x n), B (n x m)}; idata = {n, m}. Variant bits match the
+// quad_form_sym convention: bit 0 marks vector B and bit 1 marks an active
+// expression. The active vector overload associates B' * A * B, whereas the
+// primitive overload uses B.dot(A * B).
+void qf_fwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0], m = ctx.idata[1];
+  const CMapM a(ctx.in[0].data, n, n);
+  if (!(ctx.variant & 1u)) {
+    MapM(ctx.out.data, m, m) =
+        stan::math::quad_form(a, CMapM(ctx.in[1].data, n, m));
+    return;
+  }
+  const VecD b = CMapV(ctx.in[1].data, n);
+  if (!(ctx.variant & 2u)) {
+    ctx.out.data[0] = stan::math::quad_form(a, b);
+    return;
+  }
+  stan::math::check_square("quad_form", "A", a);
+  stan::math::check_multiplicable("quad_form", "A", a, "B", b);
+  const MatD c = b.transpose() * a * b;
+  ctx.out.data[0] = c(0, 0);
+}
+void qf_bwd(KernelCtx& ctx) {
+  const int64_t n = ctx.idata[0], m = ctx.idata[1];
+  if (ctx.variant & 1u) {
+    nary_bwd(ctx, [n](std::vector<VarV>& xs) {
+      Eigen::Map<VarM> a(xs[0].data(), n, n);
+      return stan::math::quad_form(a, xs[1]);
+    });
+    return;
+  }
+  nary_bwd(ctx, [n, m](std::vector<VarV>& xs) {
+    Eigen::Map<VarM> a(xs[0].data(), n, n);
+    Eigen::Map<VarM> b(xs[1].data(), n, m);
+    return stan::math::quad_form(a, b);
+  });
+}
+
+// ---- add_diag(A, d) -------------------------------------------------------
+// idata = {rows, cols}; variant 0 is a vector diagonal, 1 is a scalar.
+void add_diag_fwd(KernelCtx& ctx) {
+  const int64_t rows = ctx.idata[0], cols = ctx.idata[1];
+  MapM out(ctx.out.data, rows, cols);
+  out = CMapM(ctx.in[0].data, rows, cols);
+  const int64_t n = std::min(rows, cols);
+  for (int64_t i = 0; i < n; ++i)
+    out(i, i) += ctx.in[1].data[ctx.variant == 1 ? 0 : i];
+}
+void add_diag_bwd(KernelCtx& ctx) {
+  const int64_t rows = ctx.idata[0], cols = ctx.idata[1];
+  if (ctx.in_adj[0].data)
+    MapM(ctx.in_adj[0].data, rows, cols) +=
+        CMapM(ctx.out_adj_vec.data, rows, cols);
+  if (!ctx.in_adj[1].data) return;
+  const int64_t n = std::min(rows, cols);
+  if (ctx.variant == 1) {
+    // Eigen creates the diagonal scalar additions in increasing coefficient
+    // order; Stan's tape replays them in reverse.
+    for (int64_t i = n; i-- > 0;)
+      ctx.in_adj[1].data[0] += ctx.out_adj_vec.data[i * rows + i];
+  } else {
+    for (int64_t i = 0; i < n; ++i)
+      ctx.in_adj[1].data[i] += ctx.out_adj_vec.data[i * rows + i];
+  }
+}
+
 // ---- quad_form_sym(A, B) --------------------------------------------------
 // in = {A (n x n), B (n x m)}; idata = {n, m}. The output is the m x m
 // matrix 0.5 * (C + C') with C = B' A B, or the single scalar extracted from
@@ -1305,6 +1422,13 @@ void register_matrix_kernels() {
   register_kernel(OP_CHOLESKY, Kernel{chol_fwd, chol_bwd, nullptr});
   register_kernel(OP_MATRIX_EXP,
                   Kernel{matrix_exp_fwd, matrix_exp_bwd, nullptr});
+  register_kernel(OP_INVERSE, Kernel{inverse_fwd, inverse_bwd, nullptr});
+  register_kernel(OP_INVERSE_SPD,
+                  Kernel{inverse_spd_fwd, inverse_spd_bwd, nullptr});
+  register_kernel(OP_LOG_DETERMINANT,
+                  Kernel{log_det_fwd, log_det_bwd, nullptr});
+  register_kernel(OP_QUAD_FORM, Kernel{qf_fwd, qf_bwd, nullptr});
+  register_kernel(OP_ADD_DIAG, Kernel{add_diag_fwd, add_diag_bwd, nullptr});
   register_kernel(OP_QUAD_FORM_SYM, Kernel{qfs_fwd, qfs_bwd, nullptr});
   register_kernel(OP_MULTI_NORMAL_CHOL_LPDF,
                   Kernel{mnc_fwd, mnc_bwd, mnc_scratch});

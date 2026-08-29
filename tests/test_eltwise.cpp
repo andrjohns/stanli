@@ -3,7 +3,9 @@
 #include "graph_helpers.hpp"
 
 #include <stan/math.hpp>
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -201,6 +203,75 @@ int main() {
   // DOT
   check_case("dot", OP_DOT, 1, {A, B},
              [](auto& v) { return stan::math::dot_product(v[0], v[1]); });
+
+  // Reductions must preserve Stan Math's scalar/owning-Eigen grouping in the
+  // value sweep and its exact reverse expression. Short examples do not cross
+  // enough coefficients to distinguish prefix/suffix folds.
+  std::vector<double> product_values(62);
+  uint64_t reduction_state = 0x5052323535524544ULL;
+  for (size_t i = 0; i < product_values.size(); ++i) {
+    reduction_state =
+        reduction_state * 6364136223846793005ULL + 1442695040888963407ULL;
+    const double magnitude = 0.5 + static_cast<double>(reduction_state >> 11) /
+                                       static_cast<double>(uint64_t{1} << 53);
+    product_values[i] = i % 3 == 0 ? -magnitude : magnitude;
+  }
+  {
+    constexpr double seed = 0x1.4bc8f7f1101b4p-1;
+    Graph graph;
+    const int input = graph.add_slot((int64_t)product_values.size(), true);
+    const int product = graph.add_slot(1, false);
+    const int weight = graph.add_slot(1, false);
+    const int lp = graph.add_slot(1, false);
+    graph.add_op(OP_PROD_VEC, {input}, product);
+    graph.ops.back().variant = 2;
+    graph.add_op(OP_MUL, {product, weight}, lp);
+    graph.result_slot = lp;
+    Executor ex(std::move(graph));
+    std::copy(product_values.begin(), product_values.end(), ex.params_data());
+    ex.value_ptr(weight)[0] = seed;
+    std::vector<double> got(product_values.size());
+    const double got_lp = ex.gradient(got.data());
+
+    VecV reference((Eigen::Index)product_values.size());
+    for (size_t i = 0; i < product_values.size(); ++i)
+      reference((Eigen::Index)i) = product_values[i];
+    var want_lp = seed * stan::math::prod(reference);
+    want_lp.grad();
+    expect_eq("prod active reverse lp", got_lp, want_lp.val());
+    for (size_t i = 0; i < got.size(); ++i)
+      expect_eq("prod active reverse g" + std::to_string(i), got[i],
+                reference((Eigen::Index)i).adj());
+    stan::math::recover_memory();
+  }
+
+  const std::vector<double> dispersion_values = {
+      -0x1.eed17f1e56cfap-1, 0x1.d7236aa8481ap-3,   -0x1.5739d23914f38p-3,
+      0x1.f9947b4a8e84cp+0,  -0x1.939f5dd3c17fcp-2, 0x1.ac1c7d9bca5ap-3,
+      -0x1.bdaa1148dc42p-5,  -0x1.878a0e048d69ap-1, 0x1.cde266be7caf8p+0,
+      0x1.a516e5df7c134p-1,  0x1.fda3afe2a467p-3,   0x1.95f599d080ap-2,
+      -0x1.8c365ff5309e8p-2, -0x1.6cc56196b8368p-1};
+  check_case("sd packet reduction", OP_SD, 1, {dispersion_values},
+             [](auto& v) { return stan::math::sd(v[0]); });
+
+  const std::vector<double> variance_values = {
+      -0x1.a1113046c0eb4p+0, 0x1.2b06fc967f838p-1,  -0x1.f1da834a6269p-4,
+      0x1.1aff6118016c4p-1,  -0x1.0b5282797d2ep-1,  -0x1.4a8a06f6f264ap+0,
+      -0x1.4c8ac5f162b16p-1, 0x1.de0b55a45268p-3,   -0x1.cf3f6d897a2dcp-2,
+      -0x1.5e092e1d37172p+0, -0x1.481cade96bbd8p-1, -0x1.16dd852648f3cp-2,
+      -0x1.183b2f928f00bp+0, 0x1.74ea191bb084ap+0,  -0x1.524fc26f53946p+0,
+      0x1.2f60c1bb19678p-1,  -0x1.ea2fe6af70cbcp-1, 0x1.2ebd281cf3754p-1,
+      -0x1.b24b43e8d3206p-1, -0x1.444a2d87e964cp+0, 0x1.cda5412561c6cp-1,
+      0x1.367d5c0e9ebfap+0,  -0x1.07431f46256f8p+0, -0x1.99787f870601cp-1,
+      0x1.f2244bd31308p-1,   0x1.4b5c2aebb7fap+0,   0x1.1862475d31d1p-3,
+      -0x1.eb96cd19916d8p-3, 0x1.057f0309d7d18p-2,  -0x1.3c78760cc3ecp-4,
+      -0x1.baf4364aba14dp+0, -0x1.210b1a49ba46p-1,  -0x1.9ad3b4faaf06cp-1,
+      0x1.e59fc5c9cabb4p+0,  0x1.94c0e00da58fp-2,   -0x1.1c02689124baap-1,
+      -0x1.abb727a329779p+0, 0x1.da16b74b11b6p-3,   -0x1.2cee8b6a8b83p-4,
+      -0x1.6c530bf63304ep-1, 0x1.f20db2973a4fp-3,   0x1.6e9b7964687ecp-1,
+      -0x1.5464a2a1801ap-4,  0x1.5ee91b82af3a8p-1,  -0x1.1875cb52a1ab3p+0};
+  check_case("variance packet reduction", OP_VARIANCE, 1, {variance_values},
+             [](auto& v) { return stan::math::variance(v[0]); });
 
   if (failures == 0) std::printf("test_eltwise OK\n");
   return failures == 0 ? 0 : 1;

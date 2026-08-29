@@ -5,6 +5,7 @@
 #include <stan/math/prim/fun/prod.hpp>
 #include <stan/math/prim/fun/max.hpp>
 #include <stan/math/prim/fun/min.hpp>
+#include <stan/math/rev/core.hpp>
 
 #include <cassert>
 #include <cmath>
@@ -150,10 +151,11 @@ void sum_vec_bwd(KernelCtx& ctx) {
       ctx.in_adj[0].data[i] += ctx.out_adj;
 }
 
-// OP_PROD_VEC: generated-quantities-only product of a vector/row-vector.
-// Variant 1 preserves the ascending scalar reduction selected by Eigen when
-// the source expression contains a strided matrix row.  The lowering records
-// that fact before the expression is materialized into a contiguous slot.
+// OP_PROD_VEC: product of a vector/row-vector.
+// Bit 0 preserves the ascending scalar reduction selected by Eigen when the
+// source expression contains a strided matrix row. Bit 1 marks an active
+// expression: Matrix<var> has no double packet reducer, so its value follows
+// the same ascending scalar order even for a contiguous named vector.
 // Eigen's redux normally chooses its packet boundary from the input address.
 // Graph slots share one arena, so that would make the arithmetic grouping
 // depend on every slot laid out before this one.  The explicit same-type
@@ -162,41 +164,93 @@ void sum_vec_bwd(KernelCtx& ctx) {
 // CmdStan passes to stan::math::prod without allocating a copy here.
 void prod_vec_fwd(KernelCtx& ctx) {
   assert(ctx.in[0].len > 0);
-  if (ctx.variant == 1) {
+  assert(ctx.variant <= 3);
+  if (ctx.variant != 0) {
     double product = ctx.in[0].data[0];
     for (int64_t i = 1; i < ctx.in[0].len; ++i) product *= ctx.in[0].data[i];
     ctx.out.data[0] = product;
-    return;
+  } else {
+    using Vec = Eigen::Matrix<double, Eigen::Dynamic, 1>;
+    const Eigen::Map<const Vec> input(ctx.in[0].data, ctx.in[0].len);
+    ctx.out.data[0] = stan::math::prod(
+        input.unaryExpr(Eigen::internal::core_cast_op<double, double>()));
   }
-  assert(ctx.variant == 0);
-  using Vec = Eigen::Matrix<double, Eigen::Dynamic, 1>;
-  const Eigen::Map<const Vec> input(ctx.in[0].data, ctx.in[0].len);
-  ctx.out.data[0] = stan::math::prod(
-      input.unaryExpr(Eigen::internal::core_cast_op<double, double>()));
+}
+void prod_vec_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  stan::math::nested_rev_autodiff nested;
+  Eigen::Matrix<stan::math::var, Eigen::Dynamic, 1> input(ctx.in[0].len);
+  for (int64_t i = 0; i < ctx.in[0].len; ++i) input(i) = ctx.in[0].data[i];
+  stan::math::var product;
+  if (ctx.variant & 1u) {
+    // A strided row expression takes Eigen's ascending scalar reducer.
+    product = input(0);
+    for (int64_t i = 1; i < ctx.in[0].len; ++i) product *= input(i);
+  } else {
+    product = stan::math::prod(input);
+  }
+  stan::math::var seeded = product * ctx.out_adj;
+  stan::math::grad(seeded.vi_);
+  for (int64_t i = 0; i < ctx.in[0].len; ++i)
+    ctx.in_adj[0].data[i] += input(i).adj();
 }
 
-// OP_EXTREMA_VEC: generated-quantities-only min/max of a direct named
-// vector/row-vector (variant 0/1).  Stan Math defines extrema of an empty real
+// OP_EXTREMA_VEC: min/max of a direct named vector/row-vector. Bit 0 selects
+// max and bit 1 marks an active expression.
+// Stan Math defines extrema of an empty real
 // Eigen container as +/- infinity.  For nonempty inputs, the same-type unary
 // expression deliberately clears DirectAccessBit while retaining packet
 // access, so Eigen begins its packet reduction at lane zero just as it does
 // for CmdStan's aligned owning VectorXd.  A direct Map would instead make
 // signed-zero/NaN tie grouping depend on this slot's arena address.
 void extrema_vec_fwd(KernelCtx& ctx) {
-  assert(ctx.variant <= 1);
+  assert(ctx.variant <= 3);
+  const bool maximum = ctx.variant & 1u;
   if (ctx.in[0].len == 0) {
-    ctx.out.data[0] = ctx.variant == 0
-                          ? std::numeric_limits<double>::infinity()
-                          : -std::numeric_limits<double>::infinity();
+    ctx.out.data[0] = maximum ? -std::numeric_limits<double>::infinity()
+                              : std::numeric_limits<double>::infinity();
+    return;
+  }
+  if (ctx.variant & 2u) {
+    // Matrix<var> has no packet extrema reducer. Eigen retains coefficient
+    // zero, then replaces it only on a strict comparison while scanning in
+    // order. This distinction controls signed-zero bits, interior NaNs, and
+    // which tied coefficient receives the adjoint.
+    int64_t selected = 0;
+    double value = ctx.in[0].data[0];
+    for (int64_t i = 1; i < ctx.in[0].len; ++i) {
+      const double candidate = ctx.in[0].data[i];
+      if (maximum ? value < candidate : candidate < value) {
+        value = candidate;
+        selected = i;
+      }
+    }
+    ctx.out.data[0] = value;
+    if (ctx.scratch != nullptr) ctx.scratch[0] = static_cast<double>(selected);
     return;
   }
   using Vec = Eigen::Matrix<double, Eigen::Dynamic, 1>;
   const Eigen::Map<const Vec> input(ctx.in[0].data, ctx.in[0].len);
   const auto owning_grouping =
       input.unaryExpr(Eigen::internal::core_cast_op<double, double>());
-  ctx.out.data[0] = ctx.variant == 0 ? stan::math::min(owning_grouping)
-                                     : stan::math::max(owning_grouping);
+  Eigen::Index selected = 0;
+  // Keep Stan Math's exact value path. Eigen's index-returning overload can
+  // select a different packet evaluator for NaNs and signed-zero ties, so it
+  // is used only to remember the reverse destination.
+  ctx.out.data[0] = maximum ? stan::math::max(owning_grouping)
+                            : stan::math::min(owning_grouping);
+  if (!maximum)
+    (void)owning_grouping.minCoeff(&selected);
+  else
+    (void)owning_grouping.maxCoeff(&selected);
+  if (ctx.scratch != nullptr) ctx.scratch[0] = static_cast<double>(selected);
 }
+void extrema_vec_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data || ctx.in[0].len == 0) return;
+  ctx.in_adj[0].data[static_cast<int64_t>(ctx.scratch[0])] += ctx.out_adj;
+}
+
+int64_t scalar_scratch(const Op&, const Slot*) { return 1; }
 
 // OP_INDEX: scalar out = in[flat], idata = {flat}. Backward scatters.
 void index_fwd(KernelCtx& ctx) {
@@ -435,8 +489,9 @@ void register_elementwise_kernels() {
   register_kernel(OP_BCAST_FMA, Kernel{fma_fwd, fma_bwd, nullptr});
   register_kernel(OP_MATVEC, Kernel{matvec_fwd, matvec_bwd, nullptr});
   register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
-  register_kernel(OP_PROD_VEC, Kernel{prod_vec_fwd, nullptr, nullptr});
-  register_kernel(OP_EXTREMA_VEC, Kernel{extrema_vec_fwd, nullptr, nullptr});
+  register_kernel(OP_PROD_VEC, Kernel{prod_vec_fwd, prod_vec_bwd, nullptr});
+  register_kernel(OP_EXTREMA_VEC,
+                  Kernel{extrema_vec_fwd, extrema_vec_bwd, scalar_scratch});
   register_kernel(OP_INDEX, Kernel{index_fwd, index_bwd, nullptr});
   register_kernel(OP_SET_INDEX, Kernel{set_index_fwd, set_index_bwd, nullptr});
   register_kernel(OP_SET_INDEX_INPLACE, Kernel{set_index_inplace_fwd,

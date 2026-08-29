@@ -4254,7 +4254,7 @@ struct Lowering {
       Val a = lower_expr(e.args[0]);
       return emit_value(OP_LOGIT, {a}, g.slots[a.slot].len, a.si);
     }
-    if ((e.name == "min" || e.name == "max") && in_write_array) {
+    if (e.name == "min" || e.name == "max") {
       // Preserve the construction-time path for well-formed data-only
       // extrema, including the scalar two-argument overload.  Dynamic
       // lowering is deliberately much narrower.
@@ -4267,17 +4267,19 @@ struct Lowering {
       if ((!is_vector(a.si) && !is_row_vector(a.si)) || g.slots[a.slot].len < 0)
         fail("min/max needs one vector or row-vector argument", e.raw);
       Val result = emit_value(OP_EXTREMA_VEC, {a}, 1);
-      result.autodiff = false;
-      g.ops.back().variant = kind == mir::ExtremaKind::Max ? 1u : 0u;
+      if (in_write_array) result.autodiff = false;
+      g.ops.back().variant =
+          static_cast<uint8_t>((kind == mir::ExtremaKind::Max ? 1u : 0u) |
+                               (result.autodiff ? 2u : 0u));
       return result;
     }
     if (e.name == "mean") {
       Val a = lower_expr(e.args[0]);
       return emit_value(OP_MEAN, {a}, 1);
     }
-    if (e.name == "prod" && in_write_array) {
+    if (e.name == "prod") {
       // Preserve the pre-existing construction-time behavior for data-only
-      // products.  OP_PROD_VEC is only the dynamic write_array tranche.
+      // products. Dynamic products use OP_PROD_VEC in either graph.
       if (auto v = fold_const(e)) return *v;
       if (e.args.size() != 1 || e.type_ != "UReal" ||
           e.unsized.leaf != mir::UnsizedLeaf::Real || e.unsized.depth != 0)
@@ -4302,8 +4304,18 @@ struct Lowering {
       if (grouping == mir::ProdGrouping::Legacy)
         fail("prod expression grouping is not native", e.raw);
       Val result = emit_value(OP_PROD_VEC, {a}, 1);
-      g.ops.back().variant = grouping == mir::ProdGrouping::Scalar ? 1u : 0u;
+      g.ops.back().variant = static_cast<uint8_t>(
+          (grouping == mir::ProdGrouping::Scalar ? 1u : 0u) |
+          (result.autodiff ? 2u : 0u));
       return result;
+    }
+    if (e.name == "sd" || e.name == "variance") {
+      if (e.args.size() != 1)
+        fail(e.name + ": reduction needs exactly one argument", e.raw);
+      Val a = lower_expr(e.args[0]);
+      if (g.slots[a.slot].len <= 0)
+        fail(e.name + ": input must have a positive size", e.raw);
+      return emit_value(e.name == "sd" ? OP_SD : OP_VARIANCE, {a}, 1);
     }
     if (e.name == "rep_vector" || e.name == "rep_row_vector") {
       Val a = lower_expr(e.args[0]);
@@ -4522,6 +4534,27 @@ struct Lowering {
       return emit_value(OP_MATRIX_EXP, {a}, g.slots[a.slot].len, a.si,
                         {checked_immediate(a.si.rows, "matrix_exp extent")});
     }
+    if ((e.name == "inverse" || e.name == "inverse_spd") &&
+        e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail(e.name + ": needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail(e.name + ": needs a square matrix", e.raw);
+      Val v = emit_value(e.name == "inverse" ? OP_INVERSE : OP_INVERSE_SPD, {a},
+                         g.slots[a.slot].len, a.si,
+                         {checked_immediate(a.si.rows, e.name + " extent")});
+      if (e.name == "inverse_spd") g.ops.back().variant = v.autodiff ? 1u : 0u;
+      return v;
+    }
+    if (e.name == "log_determinant" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail("log_determinant: needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail("log_determinant: needs a square matrix", e.raw);
+      return emit_value(
+          OP_LOG_DETERMINANT, {a}, 1, {},
+          {checked_immediate(a.si.rows, "log_determinant extent")});
+    }
 
     if ((e.name == "eigenvalues_sym" || e.name == "eigenvectors_sym") &&
         e.args.size() == 1) {
@@ -4583,6 +4616,48 @@ struct Lowering {
       // solves make, and for the same reason.
       g.ops.back().variant =
           (uint8_t)((b_matrix ? 0u : 1u) | (v.autodiff ? 2u : 0u));
+      return v;
+    }
+
+    if (e.name == "quad_form" && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      Val b = lower_expr(e.args[1]);
+      if (!is_matrix(a.si)) fail("quad_form: needs a matrix", e.raw);
+      if (a.si.rows != a.si.cols)
+        fail("quad_form: needs a square matrix", e.raw);
+      const bool b_matrix = is_matrix(b.si);
+      if (!b_matrix && !is_vector(b.si))
+        fail("quad_form: second argument is not a matrix or vector", e.raw);
+      const int64_t n = a.si.rows;
+      const int64_t rb = b_matrix ? b.si.rows : g.slots[b.slot].len;
+      const int64_t m = b_matrix ? b.si.cols : 1;
+      if (rb != n)
+        fail("quad_form: inner dimension mismatch (" + std::to_string(n) + "x" +
+                 std::to_string(n) + " against " + std::to_string(rb) + ")",
+             e.raw);
+      const SlotInfo si = b_matrix ? matrix_view(m, m) : SlotInfo{};
+      Val v = emit_value(OP_QUAD_FORM, {a, b}, m * m, si,
+                         {checked_immediate(n, "quad_form extent"),
+                          checked_immediate(m, "quad_form extent")});
+      g.ops.back().variant =
+          (uint8_t)((b_matrix ? 0u : 1u) | (v.autodiff ? 2u : 0u));
+      return v;
+    }
+
+    if (e.name == "add_diag" && e.args.size() == 2) {
+      Val a = lower_expr(e.args[0]);
+      Val d = lower_expr(e.args[1]);
+      if (!is_matrix(a.si)) fail("add_diag: needs a matrix", e.raw);
+      const bool scalar = is_scalar(d);
+      const int64_t n = std::min(a.si.rows, a.si.cols);
+      if (!scalar && !is_vector(d.si) && !is_row_vector(d.si))
+        fail("add_diag: diagonal must be a scalar or vector", e.raw);
+      if (!scalar && g.slots[d.slot].len != n)
+        fail("add_diag: diagonal length mismatch", e.raw);
+      Val v = emit_value(OP_ADD_DIAG, {a, d}, g.slots[a.slot].len, a.si,
+                         {checked_immediate(a.si.rows, "add_diag rows"),
+                          checked_immediate(a.si.cols, "add_diag cols")});
+      g.ops.back().variant = scalar ? 1u : 0u;
       return v;
     }
 
