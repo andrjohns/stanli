@@ -62,14 +62,15 @@
   #note b { font-weight: 600; }
   #note .stats { opacity: .8; white-space: nowrap; }
   /* The side-by-side sampler comparison: NUTS's column left, WALNUTS's
-     right, each with its own trace, histogram, timing line, and summary
-     table. Clicking a parameter row in either table selects it in both. */
+     right, each with its own timing, summary table, trace, and histogram.
+     Clicking a parameter row in either table selects it in both. */
   .cmp { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-top: .6rem; }
   .cmp .col { flex: 1 1 440px; min-width: 0; }
   .cmp h3 { font-size: .95rem; margin: 0 0 .3rem;
             font-family: ui-monospace, monospace; }
   .cmp canvas { border: 1px solid #8883; border-radius: 6px;
                 max-width: 100%; display: block; margin-bottom: .5rem; }
+  .cmp .cplots { width: 100%; }
   .cmp table { width: 100%; }
   /* A wide summary table scrolls inside its own column instead of
      overlapping its neighbor. */
@@ -119,16 +120,17 @@
 </head>
 <body>
 <h1>stanli: The Stan Language Interpreter</h1>
-<p class="sub">No server, no C++ toolchain;
-everything below happens in this tab, runs in the browser, samples on your machine.
-stanc3 (OCaml&rarr;JS) compiles the model, stanli.wasm lowers it to an op graph and runs
-Stan-dard Dynamic HMC, <a href="https://arxiv.org/abs/2506.18746">WALNUTS</a>
-or <a href="https://arxiv.org/abs/2108.03782">Pathfinder</a>
-&mdash; or a pair of them at once, side by side.
-<p class="sub">And it's often <a href="https://github.com/seantalts/stanli/blob/main/docs/how-it-works.md">FASTER??</a> </p>
+<p class="sub">Run Stan locally in your browser&mdash;no server or C++ toolchain.
+stanc3 (OCaml&rarr;JS) compiles the model, then stanli.wasm lowers it to an op
+graph and runs Stan Dynamic HMC,
+<a href="https://arxiv.org/abs/2506.18746">WALNUTS</a>, or
+<a href="https://arxiv.org/abs/2108.03782">Pathfinder</a>.
+Compare methods side by side.</p>
+<p class="sub">And it's often <a href="https://github.com/seantalts/stanli/blob/main/docs/how-it-works.md">FASTER??</a></p>
+<div>
 <a href="https://github.com/seantalts/stanli">github.com/seantalts/stanli</a>
 &middot; <a href="https://www.npmjs.com/package/@seantalts/stanli">npm</a>
-&middot; <a href="https://pypi.org/project/stanli/">PyPI</a></p>
+&middot; <a href="https://pypi.org/project/stanli/">PyPI</a></div>
 
 <div class="cols">
   <div><label for="code">model.stan</label>
@@ -142,7 +144,7 @@ or <a href="https://arxiv.org/abs/2108.03782">Pathfinder</a>
   <label>sampler <select id="sampler">
     <option value="nuts">Stan-dard Dynamic HMC</option>
     <option value="walnuts">WALNUTS</option>
-    <option value="both">both, side by side</option>
+    <option value="both">Stan Dynamic HMC vs. WALNUTS</option>
     <option value="pathfinder">Pathfinder</option>
     <option value="nutspf">NUTS vs Pathfinder, side by side</option>
   </select></label>
@@ -509,6 +511,10 @@ let fit = null;
 // different panels from the same pair of fits.
 let cmpFits = null;
 let cmpMode = null;
+// Single-result views use their own selection state. Comparison views
+// share cmpSelName across their columns.
+let singleMode = null;
+let singleSelName = null;
 
 // Run nChains chains of one sampler from already-compiled MIR, streaming
 // live draws into `onLive(chain, msg)`. Returns {fit, ms}.
@@ -602,6 +608,8 @@ $("run").onclick = async () => {
   fit = null;
   cmpFits = null;
   cmpMode = null;
+  singleMode = null;
+  singleSelName = null;
   cmpSelName = null;
   pfView = null;
   const mode = samplerMode();
@@ -663,6 +671,7 @@ async function runSingle(mode, opts, nChains, seed, compiled, tWall) {
   const r = await runChains(mode, opts, nChains, seed,
                             liveHandler(live, progress, throttled(redraw)));
   fit = r.fit;
+  singleMode = mode;
   if (pathfinder) drawPath($("path"), live.path, r.selected, $("pathcap"));
   else liveTrace($("trace"), live, nChains, true, label);
   const ms = { stanc: compiled.ms.stanc, ...r.ms,
@@ -683,8 +692,10 @@ function cmpCol(which) {
   col.id = `col-${which}`;
   col.innerHTML =
       `<h3>${SAMPLER_LABEL[which]}</h3>` +
+      `<div class="cplots">` +
       `<canvas class="ctrace" width="540" height="170"></canvas>` +
       `<canvas class="chist" width="540" height="140" hidden></canvas>` +
+      `</div>` +
       `<div class="times"></div><div class="ctable"></div>`;
   return col;
 }
@@ -785,24 +796,31 @@ async function runCompare(opts, nChains, seed, compiled, tWall) {
   cmpSelect(cmpFits.nuts.names[0]);
 }
 
-// Arrow keys step the comparison's selected parameter, so flipping
-// through a model's parameters is one hand on the keyboard rather than
-// a click per row. Active only when a comparison is on screen and focus
-// is not in a form control (the model picker owns its own arrows).
+// Arrow keys step the selected parameter in every finished result view,
+// unless focus is in a form control (the model picker owns its own arrows).
 let cmpSelName = null;
 document.addEventListener("keydown", (e) => {
-  if (!cmpFits || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
   const t = e.target;
   if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
-  const names = cmpFits.nuts.names;
-  const at = Math.max(0, names.indexOf(cmpSelName));
-  const next = e.key === "ArrowDown"
+  const names = cmpFits ? cmpFits.nuts.names : fit ? fit.names : [];
+  if (!names.length) return;
+  const current = cmpFits ? cmpSelName : singleSelName;
+  const at = names.indexOf(current);
+  const next = at < 0
+      ? (e.key === "ArrowDown" ? 0 : names.length - 1)
+      : e.key === "ArrowDown"
       ? Math.min(names.length - 1, at + 1)
       : Math.max(0, at - 1);
-  if (names[next] === cmpSelName) return;
+  if (names[next] === current) return;
   e.preventDefault();
-  cmpSelect(names[next]);
-  document.querySelector(`#out tr[data-n="${CSS.escape(names[next])}"]`)
+  if (cmpFits) cmpSelect(names[next]);
+  else {
+    const tr = $("out").querySelector(
+        `tr[data-n="${CSS.escape(names[next])}"]`);
+    if (tr) showPlots(tr, singleMode, false);
+  }
+  $("out").querySelector(`tr[data-n="${CSS.escape(names[next])}"]`)
       ?.scrollIntoView({ block: "nearest" });
 });
 
@@ -823,6 +841,7 @@ function cmpSelect(name) {
     const col = $(`col-${w}`);
     const f = cmpFits[w];
     if (!(name in f.chains[0])) continue;
+    placeComparisonPlots(col, name);
     drawTrace(col.querySelector(".ctrace"), f, name,
               `${name}  ${SAMPLER_LABEL[w]}, ${f.chains.length} chains`,
               lo, hi);
@@ -832,6 +851,24 @@ function cmpSelect(name) {
     for (const tr of col.querySelectorAll("tr[data-n]"))
       tr.classList.toggle("selected", tr.dataset.n === name);
   }
+}
+
+// Once the comparison finishes, each sampler's plots live in a table row
+// directly beneath the parameter they describe. The canvases stay mounted
+// during moves, preserving their drawing contexts and live-run contents.
+function placeComparisonPlots(col, name) {
+  const plots = col.querySelector(".cplots");
+  const tr = Array.from(col.querySelectorAll("tr[data-n]"))
+      .find((row) => row.dataset.n === name);
+  if (!plots || !tr) return;
+  col.querySelector("tr.plotrow")?.remove();
+  const row = document.createElement("tr");
+  row.className = "plotrow";
+  const cell = document.createElement("td");
+  cell.colSpan = tr.cells.length;
+  cell.appendChild(plots);
+  row.appendChild(cell);
+  tr.after(row);
 }
 
 
@@ -1202,21 +1239,22 @@ function render(ms, nChains, mode) {
       (pathfinder ? "click a row for a histogram"
                   : "click a row for trace + histogram");
   for (const tr of $("out").querySelectorAll("tr[data-n]"))
-    tr.onclick = () => showPlots(tr, mode);
+    tr.onclick = () => showPlots(tr, mode, true);
 }
 
 // The plots follow the selection: one pair, parked above the table while
 // the sampler streams, then moved into a row of its own directly under
 // whichever parameter was clicked. Moving the node keeps the canvases and
 // their contexts alive, so nothing has to be redrawn to relocate them.
-function showPlots(tr, mode) {
+function showPlots(tr, mode, toggle) {
   const plots = $("plots");
   const prev = $("out").querySelector("tr.plotrow");
-  if (prev && prev.previousElementSibling === tr) {
+  if (toggle && prev && prev.previousElementSibling === tr) {
     // Clicking the same row again puts them back and clears the highlight.
     $("plotshome").appendChild(plots);
     prev.remove();
     tr.classList.remove("selected");
+    singleSelName = null;
     return;
   }
   if (prev) {
@@ -1232,6 +1270,7 @@ function showPlots(tr, mode) {
   tr.after(row);
   tr.classList.add("selected");
   const name = tr.dataset.n;
+  singleSelName = name;
   // Same reason as the live view: Pathfinder's draws have no serial
   // order, so the histogram is the whole of what there is to see.
   if (mode === "pathfinder") $("trace").hidden = true;
