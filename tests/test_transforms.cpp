@@ -6,6 +6,7 @@
 
 #include <stan/math.hpp>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 static int failures = 0;
@@ -234,6 +235,58 @@ int main() {
                    b1_1, b2_1, jacobian);
     run_bound_case("lu scalar" + j, stanli::OP_CONSTRAIN_LU, 1, x1, 1, b1_1,
                    b2_1, jacobian);
+  }
+
+  // Infinite bounds. Every *_constrain overload reads one as no bound at
+  // all and hands the element back untouched, adding no jacobian term; the
+  // kernels used to exponentiate through it and return inf, which reached
+  // lp as -inf. A constant bound is the `real<lower=negative_infinity()>`
+  // and `vector<lower=lb>[N]` declaration shape.
+  const double ninf = -std::numeric_limits<double>::infinity();
+  const double pinf = std::numeric_limits<double>::infinity();
+  run_case("lower ninf vec", stanli::OP_CONSTRAIN_LOWER, 3, xs, ninf, 0.0);
+  run_case("lower ninf scalar", stanli::OP_CONSTRAIN_LOWER, 1, x1, ninf, 0.0);
+  run_case("upper pinf vec", stanli::OP_CONSTRAIN_UPPER, 3, xs, pinf, 0.0);
+  run_case("upper pinf scalar", stanli::OP_CONSTRAIN_UPPER, 1, x1, pinf, 0.0);
+  // lub resolves per element: lower infinite alone is the upper transform,
+  // upper infinite alone the lower one, and both together the identity.
+  run_case("lu ninf lower", stanli::OP_CONSTRAIN_LU, 3, xs, ninf, 2.0);
+  run_case("lu pinf upper", stanli::OP_CONSTRAIN_LU, 3, xs, -1.0, pinf);
+  run_case("lu both inf", stanli::OP_CONSTRAIN_LU, 3, xs, ninf, pinf);
+  run_case("lu both inf scalar", stanli::OP_CONSTRAIN_LU, 1, x1, ninf, pinf);
+
+  // The same through parameter-valued bounds, where an infinite bound also
+  // has an adjoint lane: having taken no part in the value, it must collect
+  // nothing. The per-element vectors mix infinite and finite entries, which
+  // is what a `vector<lower=lb>[N]` with one negative_infinity() declares --
+  // the finite entries still have to transform.
+  const double x4[4] = {0.3, -1.2, 2.0, 0.45};
+  const double ninf_1[1] = {ninf};
+  const double pinf_1[1] = {pinf};
+  const double lo_inf3[3] = {ninf, 0.75, -2.0};
+  const double hi_inf3[3] = {3.25, pinf, 1.5};
+  // Lower-only infinite, upper-only infinite, both, neither -- all four
+  // element branches of lub in one call.
+  const double lo_mix4[4] = {ninf, -0.5, ninf, 0.75};
+  const double hi_mix4[4] = {3.25, pinf, pinf, 4.5};
+  for (bool jacobian : {true, false}) {
+    const std::string j = jacobian ? " jac" : " nojac";
+    run_bound_case("lower ninf shared" + j, stanli::OP_CONSTRAIN_LOWER, 3, xs,
+                   1, ninf_1, b2_1, jacobian);
+    run_bound_case("lower ninf per-element" + j, stanli::OP_CONSTRAIN_LOWER, 3,
+                   xs, 3, lo_inf3, b2_3, jacobian);
+    run_bound_case("upper pinf shared" + j, stanli::OP_CONSTRAIN_UPPER, 3, xs,
+                   1, pinf_1, b1_1, jacobian);
+    run_bound_case("upper pinf per-element" + j, stanli::OP_CONSTRAIN_UPPER, 3,
+                   xs, 3, hi_inf3, b1_3, jacobian);
+    run_bound_case("lu ninf shared" + j, stanli::OP_CONSTRAIN_LU, 3, xs, 1,
+                   ninf_1, b2_1, jacobian);
+    run_bound_case("lu pinf shared" + j, stanli::OP_CONSTRAIN_LU, 3, xs, 1,
+                   b1_1, pinf_1, jacobian);
+    run_bound_case("lu both inf shared" + j, stanli::OP_CONSTRAIN_LU, 3, xs, 1,
+                   ninf_1, pinf_1, jacobian);
+    run_bound_case("lu mixed inf" + j, stanli::OP_CONSTRAIN_LU, 4, x4, 4,
+                   lo_mix4, hi_mix4, jacobian);
   }
 
   if (failures == 0) std::printf("test_transforms OK\n");
