@@ -20,13 +20,16 @@ endif()
 
 project(stanli C CXX)
 
-# Clang is the supported frontend for the stanli runtime and its tests. This
-# does not require replacing the platform C++ runtime: Linux and MSYS2 UCRT64
-# builds deliberately continue to use their GNU libraries and linkers.
+# Clang is the supported frontend for native builds that gate pull requests.
+# Windows remains on the established UCRT64 GCC toolchain: that post-merge job
+# does not affect PR latency, and mixing Clang -O0 test objects with its GNU
+# runtime archive currently exposes MinGW COMDAT/linker failures. Keep that
+# unrelated migration out of the fast-test policy.
 foreach(_stanli_language IN ITEMS C CXX)
-  if(NOT CMAKE_${_stanli_language}_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
+  if(NOT WIN32 AND
+     NOT CMAKE_${_stanli_language}_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
     message(FATAL_ERROR
-      "stanli requires Clang for ${_stanli_language}; "
+      "stanli requires Clang for ${_stanli_language} on this platform; "
       "got ${CMAKE_${_stanli_language}_COMPILER_ID} "
       "(${CMAKE_${_stanli_language}_COMPILER}). "
       "Configure with CC=clang and CXX=clang++.")
@@ -533,6 +536,12 @@ endif()
 
 if(NOT EMSCRIPTEN)
 enable_testing()
+set(STANLI_FAST_TEST_TUS OFF)
+if(NOT WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
+  set(STANLI_FAST_TEST_TUS ON)
+endif()
+
+if(STANLI_FAST_TEST_TUS)
 # One precompiled header for the test targets, built once and reused.
 #
 # The reason to care is CI, not an ordinary cached build. A change to a widely
@@ -561,13 +570,16 @@ add_library(stanli_test_pch OBJECT tests/pch_anchor.cpp)
 target_link_libraries(stanli_test_pch PRIVATE stanli)
 target_compile_options(stanli_test_pch PRIVATE -O0)
 target_precompile_headers(stanli_test_pch PRIVATE ${STANLI_TEST_PCH})
+endif()
 
 # Single-threaded tests stub the one TBB symbol stan-math's rev core needs.
 function(stanli_add_test NAME)
   add_executable(${NAME} tests/${NAME}.cpp
     $<TARGET_OBJECTS:stanli_tbb_stub>)
   target_link_libraries(${NAME} PRIVATE stanli)
-  stanli_configure_test_tu(${NAME})
+  if(STANLI_FAST_TEST_TUS)
+    stanli_configure_test_tu(${NAME})
+  endif()
   # Tests run from the repo root so fixture paths are stable.
   add_test(NAME ${NAME} COMMAND ${NAME}
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -685,12 +697,14 @@ endforeach()
 
 # The C ABI lives only in the shared library. Test it through that shipped
 # boundary rather than compiling capi.cpp into the C++ unit-test library.
-# It still gets the test-only -O0 policy, but deliberately not the shared PCH:
-# force-including stan-math would pull TBB references across the C boundary this
-# executable is meant to verify in isolation.
+# Under the fast-test policy it still gets -O0, but deliberately not the shared
+# PCH: force-including stan-math would pull TBB references across the C boundary
+# this executable is meant to verify in isolation.
 add_executable(test_capi tests/test_capi.cpp)
 target_link_libraries(test_capi PRIVATE stanli_shared)
-target_compile_options(test_capi PRIVATE -O0)
+if(STANLI_FAST_TEST_TUS)
+  target_compile_options(test_capi PRIVATE -O0)
+endif()
 add_test(NAME test_capi COMMAND test_capi
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 

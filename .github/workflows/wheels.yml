@@ -1148,12 +1148,6 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
-    env:
-      # UCRT64 Clang uses the UCRT64 GCC toolchain's GNU libstdc++/libgcc.
-      # Keep this environment in UCRT64; CLANG64 would select a different
-      # runtime (and libc++ is neither needed nor shipped by this wheel).
-      CC: clang
-      CXX: clang++
     steps:
       - uses: actions/checkout@v4
 
@@ -1162,7 +1156,6 @@ jobs:
           msystem: UCRT64
           update: false
           install: >-
-            mingw-w64-ucrt-x86_64-clang
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
@@ -1174,10 +1167,10 @@ jobs:
             unzip
             curl
 
-      - name: Fingerprint the Clang C++ compiler
+      - name: Fingerprint the C++ compiler
         id: toolchain
         run: |
-          fingerprint=$("$CXX" --version | sha256sum | cut -d' ' -f1)
+          fingerprint=$(c++ --version | sha256sum | cut -d' ' -f1)
           echo "id=$fingerprint" >> "$GITHUB_OUTPUT"
 
       - name: Restore the compiler cache
@@ -1185,8 +1178,8 @@ jobs:
         with:
           path: .ccache
           key: >-
-            ccache-win_amd64-ucrt64-clang-release-v3-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
-          restore-keys: ccache-win_amd64-ucrt64-clang-release-v3-${{ steps.toolchain.outputs.id }}-
+            ccache-win_amd64-ucrt64-release-v2-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
+          restore-keys: ccache-win_amd64-ucrt64-release-v2-${{ steps.toolchain.outputs.id }}-
 
       - name: Fetch pinned dependencies
         run: ./deps/fetch.sh
@@ -1218,10 +1211,8 @@ jobs:
       - name: Configure, build, test
         run: |
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
-          export CCACHE_SLOPPINESS=pch_defines,time_macros
           ccache -z
           cmake -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build-rel -j4
