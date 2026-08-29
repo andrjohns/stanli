@@ -1,0 +1,188 @@
+# Populate the default-branch cache that pull-request C++ builds restore.
+#
+# GitHub scopes caches written by pull_request runs to the synthetic merge ref,
+# so a warm PR helps later pushes to that same PR but cannot help the next PR.
+# This trusted main-only build fills the identical Clang/Release cache without
+# running tests or producing artifacts. The normal wheels workflow remains the
+# authority for behavior, numerics, packaging, sanitizers, and shipped GCC
+# runtime performance.
+name: seed PR Clang ccache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - CMakeLists.txt
+      - deps/fetch.sh
+      - runtime/**
+      - tests/**/*.cpp
+      - tests/**/*.hpp
+      - tools/**/*.cpp
+      - tools/**/*.hpp
+      - .github/manylinux/**
+      - .github/workflows/clang-ccache-seed.yml
+      - .github/workflows/wheels.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+# Cache entries are immutable. Serialize trusted writers so two nearby main
+# pushes cannot race to become the first writer for the same exact key.
+concurrency:
+  group: clang-ccache-seed-main
+  cancel-in-progress: false
+
+env:
+  # Keep these pins and the cache keys below identical to wheels.yml.
+  STANC3_SRC_REPO: https://github.com/stan-dev/stanc3.git
+  STANC3_SRC_SHA: 5b824ee48c590fa229dcebf6b57457b2fd212aa8
+  OCAML_VERSION: 5.5.0
+  OPAM_VERSION: 2.5.2
+
+jobs:
+  seed:
+    name: manylinux x86_64 Clang cache
+    # A manual dispatch on another ref is useful for syntax inspection but
+    # must not publish a cache that looks like the trusted main seed.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/seantalts/stanli-manylinux:2_28-x86_64
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the PR compiler
+        run: manylinux-install-clang
+
+      - name: Fingerprint Clang
+        id: toolchain
+        shell: bash
+        run: |
+          fingerprint=$(clang++ --version | sha256sum | cut -d' ' -f1)
+          echo "id=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      # Use restore/save separately: only a complete successful build may
+      # publish the canonical main cache. A prefix hit still reuses unchanged
+      # objects after a source edit, then saves the new content-addressed key.
+      - name: Restore the PR compiler cache
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: >-
+            ccache-manylinux_2_28_x86_64-release-clang-v6-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', '.github/manylinux/**', '.github/workflows/clang-ccache-seed.yml', '.github/workflows/wheels.yml', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
+          restore-keys: >-
+            ccache-manylinux_2_28_x86_64-release-clang-v6-${{ steps.toolchain.outputs.id }}-
+
+      - name: Restore the vendored dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/math
+            deps/stan
+          key: deps-${{ runner.os }}-sources3-${{ hashFiles('deps/fetch.sh') }}
+
+      - name: Fetch pinned dependencies
+        run: |
+          setup_repo=$(sed -n 's/^STANC3_SRC_REPO=\([^ ]*\).*/\1/p' \
+                         tools/dev_setup.sh)
+          setup_pin=$(sed -n 's/^STANC3_SRC_SHA=\([0-9a-f]*\).*/\1/p' \
+                        tools/dev_setup.sh)
+          test "$setup_repo" = "$STANC3_SRC_REPO"
+          test "$setup_pin" = "$STANC3_SRC_SHA"
+          ./deps/fetch.sh
+
+      # Configure with the embedded object too, so stanc_embed_c.cpp gets the
+      # same definitions and include path it has in the consuming PR build.
+      - name: Restore the embedded stanc3 object
+        id: stanc-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/stanc3/stanc_embed.o
+            deps/stanc3/stanc_embed.o.stamp
+            deps/stanc3/stanc
+            deps/stanc3/stanc.src
+            deps/stanc3/stanli-vectorize-probe
+            deps/stanc3/stanli-vectorize-probe.stamp
+            deps/ocaml-include
+          key: >-
+            stanc-embed-v2-manylinux_2_28_x86_64-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-${{ hashFiles('compiler/native/**', 'compiler/ocaml/**', 'tools/stanc_embed/**') }}
+
+      - name: Install opam ${{ env.OPAM_VERSION }}
+        if: steps.stanc-cache.outputs.cache-hit != 'true'
+        run: |
+          url=https://github.com/ocaml/opam/releases/download
+          curl -fsSL -o /tmp/opam \
+            "$url/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-linux"
+          chmod +x /tmp/opam
+          sudo install -m 755 /tmp/opam /usr/local/bin/opam 2>/dev/null ||
+            install -m 755 /tmp/opam /usr/local/bin/opam
+          opam --version
+
+      - name: Build the embedded stanc3 object
+        if: steps.stanc-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -f deps/stanc3/stanc_embed.o deps/stanc3/stanc_embed.o.stamp \
+            deps/stanc3/stanc deps/stanc3/stanc.src \
+            deps/stanc3/stanli-vectorize-probe \
+            deps/stanc3/stanli-vectorize-probe.stamp
+          opam init --bare --disable-sandboxing --no-setup -y
+          ./tools/dev_setup.sh --embed --no-build
+          mkdir -p deps/ocaml-include
+          cp -R "$(opam var lib --switch=stanc3-55)/ocaml/caml" \
+                deps/ocaml-include/
+        env:
+          OPAMYES: '1'
+
+      - name: Validate the embedded stanc3 object
+        shell: bash
+        run: |
+          source tools/stanc_embed/provenance.sh
+          stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
+            "$STANC3_SRC_SHA" stanc3-55
+          test -x deps/stanc3/stanli-vectorize-probe
+          stanc_embed_artifact_matches \
+            deps/stanc3/stanli-vectorize-probe \
+            "$STANC3_SRC_SHA" stanc3-55
+          for symbol in caml_c_thread_register caml_c_thread_unregister; do
+            nm -g deps/stanc3/stanc_embed.o | awk -v wanted="$symbol" '
+              ($NF == wanted || $NF == "_" wanted) &&
+                  $(NF - 1) ~ /^[Tt]$/ { found = 1 }
+              END { exit found ? 0 : 1 }
+            ' || {
+              echo "embedded compiler lacks ${symbol}" >&2
+              exit 1
+            }
+          done
+
+      - name: Compile the PR target graph
+        shell: bash
+        run: |
+          export CC=clang CXX=clang++
+          export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
+          export CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
+          ccache -z
+          cmake -B build-rel -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSTANLI_STANC_EMBED_OBJ="$PWD/deps/stanc3/stanc_embed.o" \
+            -DSTANLI_OCAML_STDLIB="$PWD/deps/ocaml-include"
+          cmake --build build-rel -j2
+          ccache -s
+
+      - name: Save the completed PR compiler cache
+        if: steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}

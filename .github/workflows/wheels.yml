@@ -204,13 +204,16 @@ jobs:
       # translation units dominate the wall clock. Keying on compile inputs
       # instead of the commit lets a docs-only PR exact-hit main's cache and
       # avoids writing another ~500 MB archive to the PR-only cache scope.
+      # Keep the Clang namespace and hash inputs in sync with
+      # clang-ccache-seed.yml: that trusted main-only workflow is what makes
+      # the first build of a brand-new PR warm.
       - name: Restore the compiler cache
         uses: actions/cache@v4
         with:
           path: .ccache
           key: >-
-            ccache-${{ matrix.plat }}-${{ github.event_name == 'pull_request' && 'release-clang-v5' || 'release-v4' }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
-          restore-keys: ccache-${{ matrix.plat }}-${{ github.event_name == 'pull_request' && 'release-clang-v5' || 'release-v4' }}-${{ steps.toolchain.outputs.id }}-
+            ccache-${{ matrix.plat }}-${{ github.event_name == 'pull_request' && 'release-clang-v6' || 'release-v4' }}-${{ steps.toolchain.outputs.id }}-${{ github.event_name == 'pull_request' && hashFiles('CMakeLists.txt', '.github/manylinux/**', '.github/workflows/clang-ccache-seed.yml', '.github/workflows/wheels.yml', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') || hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
+          restore-keys: ccache-${{ matrix.plat }}-${{ github.event_name == 'pull_request' && 'release-clang-v6' || 'release-v4' }}-${{ steps.toolchain.outputs.id }}-
 
       - name: System packages (macOS)
         if: matrix.container == ''
