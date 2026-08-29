@@ -164,6 +164,21 @@ void test_append_mixed_contract() {
           "append_row(row_vector,wrong matrix columns) refuses");
 }
 
+// A break promotes the loop to a runtime-control region, so the register
+// program compiles the array-of-matrix local rather than refusing it. Reading
+// x[2][2, 1] = 10 would pick a different cell under a row-major leaf.
+void test_region_array_matrix() {
+  stanli::DataMap data;
+  auto model = stanli::compile_model(
+      slurp("tests/fixtures/viewc_region_array_matrix.tmir.sexp"), data);
+  stanli::Executor ex(std::move(model.graph));
+  model.bind(ex);
+  ex.params_data()[0] = 0.25;
+  double grad[1] = {};
+  eq("region array-of-matrix lp", ex.gradient(grad), 2.5);
+  eq("region array-of-matrix grad", grad[0], 10.0);
+}
+
 void test_effectful_data_udf() {
   stanli::DataMap data;
   data.set_real("x", 2.5);
@@ -285,6 +300,7 @@ int main() {
   run_case("effectful int UDF", test_effectful_int_udf_is_not_observed);
   run_case("local array-matrix observation",
            test_local_array_matrix_observation);
+  run_case("region array-of-matrix", test_region_array_matrix);
   run_case("zero row ternary", test_zero_row_ternary);
   run_case("UDF array-matrix order", test_udf_array_matrix_order);
   if (failures == 0) std::printf("test_lower_view_contract OK\n");
