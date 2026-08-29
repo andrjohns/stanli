@@ -520,11 +520,54 @@ endif()
 
 if(NOT EMSCRIPTEN)
 enable_testing()
+# Pull-request validation uses Clang so its cheap test translation units can
+# link to the optimized runtime objects below. Shipped platform builds may use
+# their established compiler; this switch changes test scaffolding only when
+# the frontend supports the shared-PCH policy we validate in CI.
+set(STANLI_FAST_TEST_TUS OFF)
+if(NOT WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
+  set(STANLI_FAST_TEST_TUS ON)
+endif()
+
+if(STANLI_FAST_TEST_TUS)
+# One precompiled header for the test targets, built once and reused.
+#
+# The reason to care is CI, not an ordinary cached build. A change to a widely
+# included header invalidates most test objects, and roughly 3.6 seconds of
+# every test translation unit is otherwise spent re-reading <stan/math.hpp>.
+# CMake's default per-target PCH would build one copy for every executable, so
+# REUSE_FROM is essential here.
+#
+# recorder.hpp must come first. stan-math's prim value_of calls value_of
+# unqualified from inside a template, so stanli's rvar overload must be
+# declared before that template is defined.
+set(STANLI_TEST_PCH <stanli/recorder.hpp> <stan/math.hpp>)
+
+# REUSE_FROM requires identical compiler flags between the PCH owner and its
+# consumers. Both therefore compile at -O0. These flags affect only the test
+# scaffolding; the linked stanli runtime object library remains a Release build.
+function(stanli_configure_test_tu NAME)
+  target_compile_options(${NAME} PRIVATE -O0)
+  target_precompile_headers(${NAME} REUSE_FROM stanli_test_pch)
+endfunction()
+
+# The owner exists only to produce the shared PCH. Do not use tbb_stub.cpp as
+# its source: force-including stan-math would collide with the class definition
+# in the stub's non-Apple branch.
+add_library(stanli_test_pch OBJECT tests/pch_anchor.cpp)
+target_link_libraries(stanli_test_pch PRIVATE stanli)
+target_compile_options(stanli_test_pch PRIVATE -O0)
+target_precompile_headers(stanli_test_pch PRIVATE ${STANLI_TEST_PCH})
+endif()
+
 # Single-threaded tests stub the one TBB symbol stan-math's rev core needs.
 function(stanli_add_test NAME)
   add_executable(${NAME} tests/${NAME}.cpp
     $<TARGET_OBJECTS:stanli_tbb_stub>)
   target_link_libraries(${NAME} PRIVATE stanli)
+  if(STANLI_FAST_TEST_TUS)
+    stanli_configure_test_tu(${NAME})
+  endif()
   # Tests run from the repo root so fixture paths are stable.
   add_test(NAME ${NAME} COMMAND ${NAME}
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
@@ -642,8 +685,14 @@ endforeach()
 
 # The C ABI lives only in the shared library. Test it through that shipped
 # boundary rather than compiling capi.cpp into the C++ unit-test library.
+# Under the fast-test policy it still gets -O0, but deliberately not the shared
+# PCH: force-including stan-math would pull TBB references across the C boundary
+# this executable is meant to verify in isolation.
 add_executable(test_capi tests/test_capi.cpp)
 target_link_libraries(test_capi PRIVATE stanli_shared)
+if(STANLI_FAST_TEST_TUS)
+  target_compile_options(test_capi PRIVATE -O0)
+endif()
 add_test(NAME test_capi COMMAND test_capi
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 

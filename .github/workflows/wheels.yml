@@ -1,9 +1,11 @@
 # Build the platform wheels, and publish them to PyPI on a version tag.
 #
-# Pull requests build the representative manylinux target, compile the runtime
-# for wasm32, run the full runtime and corpus tests, and gate the bounded Windows
-# compiler cross-build. Every release target also builds after merge, nightly,
-# and on version tags; publishing is gated on the tag and all of those builds.
+# Pull requests build the representative manylinux target with Clang, compile
+# the runtime for wasm32, run the full runtime and corpus tests, and gate the
+# bounded Windows compiler cross-build. Shipped Linux and Windows builds retain
+# their established GCC toolchains. Every release target also builds after
+# merge, nightly, and on version tags; publishing is gated on the tag and all
+# of those builds.
 #
 # Not cibuildwheel: it exists to build one wheel per CPython version, and
 # stanli ships a ctypes-loaded shared library with no extension module, so
@@ -176,14 +178,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fingerprint the C++ compiler
+      - name: Clang frontend (pull requests)
+        if: matrix.container != '' && github.event_name == 'pull_request'
+        run: |
+          # The custom manylinux image already contains every fixed build
+          # package. Only PR validation adds Clang's frontend; release,
+          # scheduled, and manual builds retain the image's GCC frontend.
+          manylinux-install-clang
+          echo 'CC=clang' >> "$GITHUB_ENV"
+          echo 'CXX=clang++' >> "$GITHUB_ENV"
+
+      - name: Fingerprint the selected C++ compiler
         id: toolchain
         shell: bash
         run: |
+          compiler="${CXX:-c++}"
           if command -v sha256sum >/dev/null; then
-            fingerprint=$(c++ --version | sha256sum | cut -d' ' -f1)
+            fingerprint=$("$compiler" --version | sha256sum | cut -d' ' -f1)
           else
-            fingerprint=$(c++ --version | shasum -a 256 | cut -d' ' -f1)
+            fingerprint=$("$compiler" --version | shasum -a 256 | cut -d' ' -f1)
           fi
           echo "id=$fingerprint" >> "$GITHUB_OUTPUT"
 
@@ -196,8 +209,8 @@ jobs:
         with:
           path: .ccache
           key: >-
-            ccache-${{ matrix.plat }}-release-v4-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
-          restore-keys: ccache-${{ matrix.plat }}-release-v4-${{ steps.toolchain.outputs.id }}-
+            ccache-${{ matrix.plat }}-${{ github.event_name == 'pull_request' && 'release-clang-v5' || 'release-v4' }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
+          restore-keys: ccache-${{ matrix.plat }}-${{ github.event_name == 'pull_request' && 'release-clang-v5' || 'release-v4' }}-${{ steps.toolchain.outputs.id }}-
 
       - name: System packages (macOS)
         if: matrix.container == ''
@@ -328,8 +341,17 @@ jobs:
           # $PWD, not github.workspace: inside the manylinux containers the
           # workspace mounts at a different path than the expression gives.
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
+          # The PCH is regenerated after every checkout. Ignore its file times
+          # while still hashing header contents, or every PCH consumer misses
+          # the restored cache even when its compile inputs are unchanged.
+          export CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
           ccache -z
+          compiler_args=()
+          if [ -n "${CC:-}" ] && [ -n "${CXX:-}" ]; then
+            compiler_args+=("-DCMAKE_C_COMPILER=$CC" "-DCMAKE_CXX_COMPILER=$CXX")
+          fi
           cmake -B build-rel -DCMAKE_BUILD_TYPE=Release \
+            "${compiler_args[@]}" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSTANLI_STANC_EMBED_OBJ="$PWD/deps/stanc3/stanc_embed.o" \
@@ -1266,19 +1288,28 @@ jobs:
       github.event_name != 'pull_request' &&
       startsWith(github.ref, 'refs/tags/') == false
     runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
     # The first shipped configuration could not finish: gcc at
     # RelWithDebInfo (-O2 -g) with ASan took 8+ minutes per densities
     # shard -- 18% built after half an hour, runner reclaimed before the
     # end, and since the cache saved only on success, every subsequent
     # run started cold again. The ceiling exists so a stuck build fails
     # in bounded time instead of holding the concurrency queue.
+    # Clang is selected below, but its memory profile is not measured yet;
+    # retain these limits until a complete Clang run remeasures them.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - name: Fingerprint the C++ compiler
+      - name: Install the Clang C/C++ compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Fingerprint the Clang C++ compiler
         id: toolchain
         run: |
-          fingerprint=$(c++ --version | sha256sum | cut -d' ' -f1)
+          fingerprint=$("$CXX" --version | sha256sum | cut -d' ' -f1)
           echo "id=$fingerprint" >> "$GITHUB_OUTPUT"
       - name: Restore the compiler cache
         id: asan-cache
@@ -1288,8 +1319,8 @@ jobs:
           # never be handed to, or taken from, the wheel build's cache.
           path: .ccache
           key: >-
-            ccache-asan-gcc-o1-g1-v2-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
-          restore-keys: ccache-asan-gcc-o1-g1-v2-${{ steps.toolchain.outputs.id }}-
+            ccache-asan-clang-o1-g1-v3-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
+          restore-keys: ccache-asan-clang-o1-g1-v3-${{ steps.toolchain.outputs.id }}-
       - name: Fetch pinned dependencies
         run: ./deps/fetch.sh
       # Both fatal runs of this job died at the same place -- the density
@@ -1322,6 +1353,7 @@ jobs:
         run: |
           which ccache || sudo apt-get install -y ccache
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
+          export CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
           ccache -z
           # -O1 -g1, and every number here was read off a failed run's
           # log rather than guessed. -O1: ASan's checks do not depend on
@@ -1339,6 +1371,7 @@ jobs:
           cmake -B build-asan -DCMAKE_BUILD_TYPE=None \
             -DCMAKE_C_FLAGS="-O1 -g1" -DCMAKE_CXX_FLAGS="-O1 -g1" \
             -DSTANLI_SANITIZE=address \
+            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           # Peak of the largest single compile, the wheel build's own
