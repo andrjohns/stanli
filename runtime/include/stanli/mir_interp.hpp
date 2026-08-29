@@ -1596,6 +1596,8 @@ class MirInterp {
       return un([](const T& x) { return stan::math::log(x); });
     if (e.name == "sqrt")
       return un([](const T& x) { return stan::math::sqrt(x); });
+    if (e.name == "ceil")
+      return un([](const T& x) { return stan::math::ceil(x); });
     if (e.name == "square")
       return un([](const T& x) { return stan::math::square(x); });
     if (e.name == "inv_logit")

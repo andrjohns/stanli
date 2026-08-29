@@ -1091,17 +1091,25 @@ struct Lowering {
 
   void sync_data_local(const std::string& name, const mir::Expr& rhs,
                        const Val& v) {
-    td.env().erase(name);
-    if (!v.si.param_free) return;
-    if (const DataMap::Entry* en = observation(v)) {
-      td.env()[name] = *en;
+    if (!v.si.param_free) {
+      td.env().erase(name);
       return;
     }
-    if (auto evaluated = try_eval_pure(rhs)) {
+    if (const DataMap::Entry* en = observation(v)) {
+      DataMap::Entry copy = *en;
+      td.env().erase(name);
+      td.env()[name] = std::move(copy);
+      return;
+    }
+    // Evaluate before erasing the old binding: `x = x + data_step` reads the
+    // previous x, and data-only while loops depend on retaining that value for
+    // their next condition.
+    auto evaluated = try_eval_pure(rhs);
+    td.env().erase(name);
+    if (evaluated) {
       DataMap::Entry en = std::move(*evaluated);
       td.env()[name] = en;
       observe(v, std::move(en));
-      return;
     }
   }
 
