@@ -721,6 +721,11 @@ if(Python3_Interpreter_FOUND)
   # stanc, so these skip there, while compiler-bearing CI runs them all.
   file(GLOB_RECURSE STANLI_LIT_CANDIDATES CONFIGURE_DEPENDS
        "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.stan")
+  # The PASS/XFAIL marker controls the broken label below, so changing a
+  # source's status must re-run configuration even though the file set did
+  # not change.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+               ${STANLI_LIT_CANDIDATES})
   foreach(STANLI_LIT_CASE IN LISTS STANLI_LIT_CANDIDATES)
     file(STRINGS "${STANLI_LIT_CASE}" STANLI_LIT_MARKER LIMIT_COUNT 1
          REGEX "^// STANLI-LIT: (PASS|XFAIL)$")
