@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Infinite declaration bounds are identities
+
+Parameter declarations whose lower bound is negative infinity or whose upper
+bound is positive infinity now pass those elements through unchanged and add no
+Jacobian term, matching Stan Math. This also works elementwise when a vector of
+bounds mixes finite and infinite entries (#250).
+
 ### More matrix selections and compile-time locals lower
 
 Two-axis matrix selections now accept any combination of `:`, single indices,

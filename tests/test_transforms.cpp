@@ -176,6 +176,84 @@ static void run_bound_case(const std::string& tag, uint16_t opcode, int n,
   stan::math::recover_memory();
 }
 
+// lub with one shared and one per-element bound. Besides covering the two
+// mixed-shape overloads, `reuse_shared` gives the scalar bound an adjoint
+// before the constrain callback runs. Stan Math reduces the constrain terms
+// first and adds that reduction once; adding them directly to a nonzero lane
+// rounds differently at adversarial points.
+static void run_mixed_lu_case(const std::string& tag, int n, const double* x0,
+                              int nlb, const double* lbv, int nub,
+                              const double* ubv, bool jacobian,
+                              bool reuse_shared) {
+  using namespace stanli;
+  using stan::math::var;
+
+  Graph g;
+  const int x = g.add_slot(n, true);
+  const int lb = g.add_slot(nlb, true);
+  const int ub = g.add_slot(nub, true);
+  const int con = g.add_slot(n, false);
+  const int jac = g.add_slot(1, false);
+  const int s = g.add_slot(1, false);
+  const int lp = g.add_slot(1, false);
+  {
+    Op op;
+    op.opcode = OP_CONSTRAIN_LU;
+    op.out = con;
+    op.out2 = jac;
+    op.n_in = 3;
+    op.in[0] = x;
+    op.in[1] = lb;
+    op.in[2] = ub;
+    g.ops.push_back(op);
+  }
+  g.add_op(OP_SUM_VEC, {con}, s);
+  const int shared = nlb == 1 ? lb : ub;
+  if (jacobian && reuse_shared)
+    g.add_op(OP_ADD_N, {s, jac, shared}, lp);
+  else if (jacobian)
+    g.add_op(OP_ADD_N, {s, jac}, lp);
+  else if (reuse_shared)
+    g.add_op(OP_ADD_N, {s, shared}, lp);
+  else
+    g.add_op(OP_ADD_N, {s}, lp);
+  g.result_slot = lp;
+
+  Executor ex(std::move(g));
+  for (int i = 0; i < n; ++i) ex.param_ptr(x)[i] = x0[i];
+  for (int i = 0; i < nlb; ++i) ex.param_ptr(lb)[i] = lbv[i];
+  for (int i = 0; i < nub; ++i) ex.param_ptr(ub)[i] = ubv[i];
+  std::vector<double> grad(n + nlb + nub);
+  const double got = ex.gradient(grad.data());
+
+  Eigen::Matrix<var, -1, 1> vx(n), vlb(nlb), vub(nub);
+  for (int i = 0; i < n; ++i) vx(i) = x0[i];
+  for (int i = 0; i < nlb; ++i) vlb(i) = lbv[i];
+  for (int i = 0; i < nub; ++i) vub(i) = ubv[i];
+  var vjac = 0.0;
+  Eigen::Matrix<var, -1, 1> vcon;
+  if (nlb == 1)
+    vcon = jacobian ? stan::math::lub_constrain<true>(vx, vlb(0), vub, vjac)
+                    : stan::math::lub_constrain(vx, vlb(0), vub);
+  else
+    vcon = jacobian ? stan::math::lub_constrain<true>(vx, vlb, vub(0), vjac)
+                    : stan::math::lub_constrain(vx, vlb, vub(0));
+  var vlp = stan::math::sum(vcon);
+  if (jacobian) vlp += vjac;
+  if (reuse_shared) vlp += nlb == 1 ? vlb(0) : vub(0);
+  vlp.grad();
+
+  expect_eq(tag + " lp", got, vlp.val());
+  for (int i = 0; i < n; ++i)
+    expect_eq(tag + " gx" + std::to_string(i), grad[i], vx(i).adj());
+  for (int i = 0; i < nlb; ++i)
+    expect_eq(tag + " glb" + std::to_string(i), grad[n + i], vlb(i).adj());
+  for (int i = 0; i < nub; ++i)
+    expect_eq(tag + " gub" + std::to_string(i), grad[n + nlb + i],
+              vub(i).adj());
+  stan::math::recover_memory();
+}
+
 static void test_out2_is_result() {
   using namespace stanli;
   Graph g;
@@ -287,6 +365,24 @@ int main() {
                    ninf_1, pinf_1, jacobian);
     run_bound_case("lu mixed inf" + j, stanli::OP_CONSTRAIN_LU, 4, x4, 4,
                    lo_mix4, hi_mix4, jacobian);
+  }
+
+  // One scalar bound and one vector bound dispatch different Stan Math
+  // overloads from the both-scalar and both-vector cases above. Reusing the
+  // scalar in the objective makes its preexisting adjoint nonzero and pins
+  // the overload's reduce-then-add rounding order.
+  const double xr[3] = {-21.218105551082793, 7.4625322261737495,
+                        -24.25541517136952};
+  const double lo_shared[1] = {-0.5};
+  const double hi_mixed[3] = {pinf, 4.5, 1.5};
+  const double lo_mixed[3] = {ninf, 0.75, -2.0};
+  const double hi_shared[1] = {3.25};
+  for (bool jacobian : {true, false}) {
+    const std::string j = jacobian ? " jac" : " nojac";
+    run_mixed_lu_case("lu scalar lower mixed inf" + j, 3, xr, 1, lo_shared, 3,
+                      hi_mixed, jacobian, true);
+    run_mixed_lu_case("lu scalar upper mixed inf" + j, 3, xr, 3, lo_mixed, 1,
+                      hi_shared, jacobian, true);
   }
 
   if (failures == 0) std::printf("test_transforms OK\n");

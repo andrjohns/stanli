@@ -91,16 +91,27 @@ inline double masked_sum(const double* x, const double* bound, int64_t n,
   return s;
 }
 
-// A bound adjoint lands per element when the bound varies and in one shared
-// lane when it does not -- the split add_bound_adj makes, reached one element
-// at a time because the mixed-infinity paths below build their terms inline.
+// A bound adjoint lands per element when the bound varies. A shared bound
+// first reduces all terms from zero and then adds that reduction once, which
+// preserves stan-math's `.sum()` callback rounding even when the lane already
+// has an adjoint from another use.
 struct BoundAdj {
   double* p;
   bool varies;
+  double lane = 0.0;
+  bool touched = false;
   BoundAdj(KernelCtx& ctx, int k)
       : p(ctx.in_adj[k].data), varies(Bound(ctx.in[k]).varies()) {}
-  void add(int64_t i, double v) const {
-    if (p) p[varies ? i : 0] += v;
+  void add(int64_t i, double v) {
+    if (!p) return;
+    touched = true;
+    if (varies)
+      p[i] += v;
+    else
+      lane += v;
+  }
+  void commit() {
+    if (p && !varies && touched) p[0] += lane;
   }
 };
 
@@ -160,9 +171,9 @@ void clower_bwd(KernelCtx& ctx) {
               lb[i] == kNegInf ? dout[i] : dout[i] * exp_x[i] + ctx.out2_adj;
     }
     if (lb.varies()) {
-      const BoundAdj lba(ctx, 1);
+      BoundAdj lba(ctx, 1);
       for (int64_t i = 0; i < n; ++i)
-        lba.add(i, lb[i] == kNegInf ? 0.0 : dout[i]);
+        if (lb[i] != kNegInf) lba.add(i, dout[i]);
     }
     return;
   }
@@ -225,9 +236,9 @@ void cupper_bwd(KernelCtx& ctx) {
               ub[i] == kPosInf ? dout[i] : -dout[i] * exp_x[i] + ctx.out2_adj;
     }
     if (ub.varies()) {
-      const BoundAdj uba(ctx, 1);
+      BoundAdj uba(ctx, 1);
       for (int64_t i = 0; i < n; ++i)
-        uba.add(i, ub[i] == kPosInf ? 0.0 : dout[i]);
+        if (ub[i] != kPosInf) uba.add(i, dout[i]);
     }
     return;
   }
@@ -291,23 +302,23 @@ void clu_bwd_inf(KernelCtx& ctx, int64_t n, const double* x, const double* il,
                  const Bound& lb, const Bound& ub) {
   const double* dout = ctx.out_adj_vec.data;
   const double lp_adj = ctx.out2_adj;
-  const BoundAdj lba(ctx, 1), uba(ctx, 2);
+  BoundAdj lba(ctx, 1), uba(ctx, 2);
   for (int64_t i = 0; i < n; ++i) {
     const bool li = lb[i] == kNegInf, ui = ub[i] == kPosInf;
     const double diff = ub[i] - lb[i];
     if (ctx.in_adj[0].data)
       ctx.in_adj[0].data[i] += li && ui ? dout[i]
                                : li     ? -dout[i] * std::exp(x[i]) + lp_adj
-                               : ui     ? dout[i] * std::exp(x[i]) + lp_adj
+                               : ui ? dout[i] * std::exp(x[i]) + lp_adj
                                     : dout[i] * diff * il[i] * (1.0 - il[i]) +
                                           lp_adj * (1.0 - 2.0 * il[i]);
-    lba.add(i, li   ? 0.0
-               : ui ? dout[i]
-                    : dout[i] * (1.0 - il[i]) - (1.0 / diff) * lp_adj);
-    uba.add(i, ui   ? 0.0
-               : li ? dout[i]
-                    : dout[i] * il[i] + (1.0 / diff) * lp_adj);
+    if (!li)
+      lba.add(i,
+              ui ? dout[i] : dout[i] * (1.0 - il[i]) - (1.0 / diff) * lp_adj);
+    if (!ui) uba.add(i, li ? dout[i] : dout[i] * il[i] + (1.0 / diff) * lp_adj);
   }
+  lba.commit();
+  uba.commit();
 }
 
 // rev lub_constrain(matrix, scalar, scalar, lp):
