@@ -13,3 +13,7 @@ model {
   }
   target += q + size(values);
 }
+
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: assignment logical view mismatch for values
+// STANLI-LIT-DATA: {"empty": []}

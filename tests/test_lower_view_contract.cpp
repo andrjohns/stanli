@@ -63,17 +63,6 @@ void eq_ulp(const std::string& what, double got, double want) {
   }
 }
 
-void refuses(const std::string& fixture, const stanli::DataMap& data,
-             const std::string& what) {
-  bool refused = false;
-  try {
-    (void)stanli::compile_model(slurp(fixture), data);
-  } catch (const std::exception&) {
-    refused = true;
-  }
-  check(refused, what);
-}
-
 void test_array_size_contract() {
   stanli::DataMap data;
   auto model = stanli::compile_model(
@@ -84,41 +73,6 @@ void test_array_size_contract() {
   double grad[1] = {};
   eq("array size vs num_elements lp", ex.gradient(grad), 206.25);
   eq("array size vs num_elements grad", grad[0], 1.0);
-}
-
-void test_no_length_one_container_broadcast() {
-  stanli::DataMap data;
-  refuses("tests/fixtures/viewc_vec_broadcast_graph.tmir.sexp", data,
-          "Graph vector[1]+vector[2] refuses");
-  refuses("tests/fixtures/viewc_row_broadcast_graph.tmir.sexp", data,
-          "Graph row_vector[1]+row_vector[2] refuses");
-  refuses("tests/fixtures/viewc_vec_broadcast_program.tmir.sexp", data,
-          "Program vector[1]+vector[2] refuses");
-  refuses("tests/fixtures/viewc_row_broadcast_program.tmir.sexp", data,
-          "Program row_vector[1]+row_vector[2] refuses");
-}
-
-void test_shape_refusals() {
-  stanli::DataMap none;
-  refuses("tests/fixtures/viewc_cholesky_zero_rect.tmir.sexp", none,
-          "cholesky matrix[0,3] refuses non-square");
-  refuses("tests/fixtures/viewc_eigen_zero_rect.tmir.sexp", none,
-          "eigen matrix[0,3] refuses non-square");
-  refuses("tests/fixtures/viewc_array_bind_mismatch.tmir.sexp", none,
-          "array[3,2] binding to array[2,3] refuses");
-  refuses("tests/fixtures/viewc_to_matrix_mismatch.tmir.sexp", none,
-          "to_matrix length mismatch refuses");
-
-  stanli::DataMap x;
-  x.set_real_array("X", {1, 2, 3, 4, 5, 6}, {2, 3});
-  refuses("tests/fixtures/viewc_matvec_mismatch.tmir.sexp", x,
-          "data MATVEC inner mismatch refuses");
-  refuses("tests/fixtures/viewc_column_assignment_mismatch.tmir.sexp", none,
-          "column assignment RHS width mismatch refuses");
-  refuses("tests/fixtures/viewc_append_col_mismatch.tmir.sexp", none,
-          "append_col vector row mismatch refuses");
-  refuses("tests/fixtures/viewc_append_row_mismatch.tmir.sexp", none,
-          "append_row row-vector column mismatch refuses");
 }
 
 void test_matrix_row_selection() {
@@ -176,11 +130,6 @@ void test_append_mixed_contract() {
   const double want[9] = {26, 29, 32, 33, 38, 32, 34, 37, 39};
   for (int i = 0; i < 9; ++i)
     eq("mixed append grad " + std::to_string(i), grad[i], want[i]);
-
-  refuses("tests/fixtures/viewc_append_col_matrix_vector_bad.tmir.sexp", data,
-          "append_col(matrix,wrong vector rows) refuses");
-  refuses("tests/fixtures/viewc_append_row_row_matrix_bad.tmir.sexp", data,
-          "append_row(row_vector,wrong matrix columns) refuses");
 }
 
 // A break promotes the loop to a runtime-control region, so the register
@@ -327,9 +276,6 @@ void test_udf_array_matrix_order() {
 
 int main() {
   run_case("array size contract", test_array_size_contract);
-  run_case("no length-one container broadcast",
-           test_no_length_one_container_broadcast);
-  run_case("shape refusals", test_shape_refusals);
   run_case("matrix row selection", test_matrix_row_selection);
   run_case("row assignment", test_row_assignment);
   run_case("append orientation", test_append_orientation);

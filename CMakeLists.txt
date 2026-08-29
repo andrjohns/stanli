@@ -714,6 +714,66 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME test_vectorize_ab
            COMMAND ${Python3_EXECUTABLE} tests/test_vectorize_ab.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  # Source-level lit cases are one marked .stan file each. CMake discovers
+  # both the dedicated tests/lit tree and existing fixtures that opt in, then
+  # gives every case its own CTest entry. Adding coverage needs no build-system
+  # edit and no new C++ target. The core developer setup deliberately has no
+  # stanc, so these skip there, while compiler-bearing CI runs them all.
+  file(GLOB_RECURSE STANLI_LIT_CANDIDATES CONFIGURE_DEPENDS
+       "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.stan")
+  # The PASS/XFAIL marker controls the broken label below, so changing a
+  # source's status must re-run configuration even though the file set did
+  # not change.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+               ${STANLI_LIT_CANDIDATES})
+  foreach(STANLI_LIT_CASE IN LISTS STANLI_LIT_CANDIDATES)
+    file(STRINGS "${STANLI_LIT_CASE}" STANLI_LIT_MARKER LIMIT_COUNT 1
+         REGEX "^// STANLI-LIT: (PASS|XFAIL)$")
+    if(STANLI_LIT_MARKER)
+      file(RELATIVE_PATH STANLI_LIT_REL
+           "${CMAKE_CURRENT_SOURCE_DIR}/tests" "${STANLI_LIT_CASE}")
+      string(REGEX REPLACE "^lit/" "" STANLI_LIT_REL "${STANLI_LIT_REL}")
+      string(REGEX REPLACE "\\.stan$" "" STANLI_LIT_NAME
+             "${STANLI_LIT_REL}")
+      string(REGEX REPLACE "[^A-Za-z0-9_]" "_" STANLI_LIT_NAME
+             "${STANLI_LIT_NAME}")
+      set(STANLI_LIT_TEST "lit_${STANLI_LIT_NAME}")
+      add_test(NAME ${STANLI_LIT_TEST}
+               COMMAND ${Python3_EXECUTABLE} tests/lit/run.py
+                       ${STANLI_LIT_CASE}
+                       $<TARGET_FILE:stanli_check>
+                       ${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc
+               WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+      set(STANLI_LIT_LABELS lit)
+      if(STANLI_LIT_MARKER MATCHES "XFAIL$")
+        list(APPEND STANLI_LIT_LABELS broken)
+      endif()
+      set_tests_properties(${STANLI_LIT_TEST} PROPERTIES
+        LABELS "${STANLI_LIT_LABELS}"
+        SKIP_RETURN_CODE 77)
+    endif()
+  endforeach()
+  # Friendly local entry points. These deliberately invoke CTest rather than
+  # duplicating discovery in a shell script, so a developer runs exactly the
+  # same per-file tests and labels as CI. STANLI_LIT_JOBS is a cache setting
+  # for smaller machines; the repository default matches the j24 developer
+  # workflow used for the native build.
+  set(STANLI_LIT_JOBS "24" CACHE STRING
+      "Parallel jobs used by the lit and lit-broken targets")
+  add_custom_target(lit
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+            --parallel ${STANLI_LIT_JOBS} -L lit
+    DEPENDS stanli_check
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+    COMMENT "Running source-level Stan lit tests")
+  add_custom_target(lit-broken
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+            --parallel ${STANLI_LIT_JOBS} -L broken
+    DEPENDS stanli_check
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+    COMMENT "Running known-broken Stan lit tests")
   # The model census's coverage ratchet, over synthetic rows plus the
   # checked-in baseline. The census itself needs deps/stanc3-src, a stanc
   # and a CmdStan and so runs by hand; what runs here is the gate it grew,

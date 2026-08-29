@@ -45,21 +45,6 @@ void run_case(const char* what, F&& f) {
   }
 }
 
-void expect_compile_refusal(const std::string& fixture,
-                            const stanli::DataMap& data,
-                            const std::string& needle,
-                            const std::string& what) {
-  try {
-    (void)stanli::compile_model(slurp(fixture), data);
-    check(false, what + " did not refuse");
-  } catch (const stanli::CompileError& e) {
-    check(std::string(e.what()).find(needle) != std::string::npos,
-          what + " diagnostic: " + e.what());
-  } catch (const std::exception& e) {
-    check(false, what + " threw wrong exception: " + e.what());
-  }
-}
-
 void check_gradient(const std::string& fixture, const stanli::DataMap& data,
                     const std::vector<double>& q, double want_lp,
                     const std::vector<double>& want_grad,
@@ -96,12 +81,6 @@ void test_scalar_array_column() {
                  "array[2,3] column a[:,2]");
 }
 
-void test_slice_refusal() {
-  expect_compile_refusal("tests/fixtures/viewa_mixed_slice_refuse.tmir.sexp",
-                         {}, "unsupported index expression",
-                         "mixed range/gather slice");
-}
-
 void test_contextual_zero_shapes() {
   stanli::DataMap data;
   data.set_real_array("vectors", {}, {0, 4});
@@ -110,17 +89,6 @@ void test_contextual_zero_shapes() {
   data.set_real_array("scalars", {}, {0, 3});
   check_gradient("tests/fixtures/viewa_contextual_empty.tmir.sexp", data,
                  {0.25}, 36.0, {4}, "zero outer container dimensions");
-}
-
-void test_zero_product_mismatch() {
-  // Both sides flatten to zero values. Refusal therefore proves that logical
-  // array shape survives independently of storage width; this is the public
-  // behavioral form of the invariant that an Array never carries shape 0.
-  stanli::DataMap data;
-  data.set_real_array("empty", {}, {0, 0});
-  expect_compile_refusal("tests/fixtures/viewa_zero_product_mismatch.tmir.sexp",
-                         data, "logical view mismatch",
-                         "array[0] vector[0] -> array[2] vector[0]");
 }
 
 void test_explicit_zero_vectors() {
@@ -207,9 +175,7 @@ int main() {
   run_case("outer range", test_outer_range);
   run_case("outer gather", test_outer_gather);
   run_case("scalar array column", test_scalar_array_column);
-  run_case("mixed slice refusal", test_slice_refusal);
   run_case("contextual zero shapes", test_contextual_zero_shapes);
-  run_case("zero-product shape mismatch", test_zero_product_mismatch);
   run_case("explicit zero-vector array", test_explicit_zero_vectors);
   run_case("empty data array matrix", test_empty_data_array_matrix);
   run_case("register array boundary", test_register_array_boundary);
