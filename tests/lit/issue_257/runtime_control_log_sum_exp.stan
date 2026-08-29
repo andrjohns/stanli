@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: runtime-control region: function log_sum_exp
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 parameters { vector[2] y; }
 model {
   y ~ std_normal();

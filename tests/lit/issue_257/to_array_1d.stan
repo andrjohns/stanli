@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: unsupported function to_array_1d
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 parameters { vector[3] y; }
 model {
   array[3] real a = to_array_1d(y);

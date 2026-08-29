@@ -1,4 +1,4 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: runtime-control region: internal function FnNegInf
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 parameters { real sigma; }
 model { sigma ~ normal(0, 1) T[-1, 1]; }

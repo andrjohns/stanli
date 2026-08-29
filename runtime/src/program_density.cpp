@@ -1,5 +1,5 @@
-// The one switch over STANLI_SCALAR_DENSITY_LIST for the non-kernel
-// callers (program_density.hpp says why there is only one list now).
+// The one switch over the scalar continuous probability functions for the
+// non-kernel callers (program_density.hpp says why there is only one list).
 //
 // Everything here is generated from that list, so a density added to it
 // reaches the register machine's forward, the generated adjoint and the
@@ -25,6 +25,7 @@ namespace {
 enum : int {
 #define STANLI_PD_ENUM(opc, fn, arity, tier) kId_##fn,
   STANLI_SCALAR_DENSITY_LIST(STANLI_PD_ENUM)
+      STANLI_SCALAR_CDF_LIST(STANLI_PD_ENUM)
 #undef STANLI_PD_ENUM
 };
 
@@ -37,6 +38,7 @@ struct Entry {
 constexpr Entry kDensities[] = {
 #define STANLI_PD_ENTRY(opc, fn, arity, tier) {#fn, opc, arity},
     STANLI_SCALAR_DENSITY_LIST(STANLI_PD_ENTRY)
+        STANLI_SCALAR_CDF_LIST(STANLI_PD_ENTRY)
 #undef STANLI_PD_ENTRY
 };
 constexpr int kCount = (int)(sizeof(kDensities) / sizeof(kDensities[0]));
@@ -156,6 +158,12 @@ T program_density(int id, const T* args) {
         [](const auto&... x) { return stan::math::fn<false>(x...); }, args);
     STANLI_SCALAR_DENSITY_LIST(STANLI_PD_CASE)
 #undef STANLI_PD_CASE
+#define STANLI_PCDF_CASE(opc, fn, arity, tier) \
+  case kId_##fn:                               \
+    return call_with<arity>(                   \
+        [](const auto&... x) { return stan::math::fn(x...); }, args);
+    STANLI_SCALAR_CDF_LIST(STANLI_PCDF_CASE)
+#undef STANLI_PCDF_CASE
     default:
       return T(0.0);
   }
@@ -187,6 +195,17 @@ bool program_density_partials(int id, unsigned mask, const double* args,
     break;
     STANLI_SCALAR_DENSITY_LIST(STANLI_PD_PARTIALS)
 #undef STANLI_PD_PARTIALS
+#define STANLI_PCDF_PARTIALS(opc, fn, arity, tier)                        \
+  case kId_##fn:                                                          \
+    with_mask<arity, density_tier(tier)>(mask, [&](auto m) {              \
+      record_probability_call([&] {                                       \
+        return call_rvar<arity, m.value>(                                 \
+            [](const auto&... x) { return stan::math::fn(x...); }, args); \
+      });                                                                 \
+    });                                                                   \
+    break;
+    STANLI_SCALAR_CDF_LIST(STANLI_PCDF_PARTIALS)
+#undef STANLI_PCDF_PARTIALS
     default:
       break;
   }

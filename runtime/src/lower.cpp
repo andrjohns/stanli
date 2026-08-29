@@ -690,6 +690,9 @@ struct Lowering {
         fail("size expression needs unknown int " + e.name);
       }
       case mir::Expr::Indexed: {
+        // O1 can leave an empty Indexed wrapper around a fully composed
+        // integer access, just as it does for real-valued expressions.
+        if (e.args.size() == 1) return eval_int(e.args[0]);
         DataMap::Entry* en = e.args[0].kind == mir::Expr::Var
                                  ? td.find(e.args[0].name)
                                  : nullptr;
@@ -1691,8 +1694,10 @@ struct Lowering {
         }
         // Row range of the same layout: A[i, lo:hi] is contiguous.
         if (e.args.size() == 3 && is_array(base.si) && bdims &&
-            array_shape(base.si).leaf == ViewKind::Flat && bdims->size() == 2 &&
-            e.args[1].name == "IndexSingle" &&
+            (array_shape(base.si).leaf == ViewKind::Flat ||
+             array_shape(base.si).leaf == ViewKind::Vector ||
+             array_shape(base.si).leaf == ViewKind::RowVector) &&
+            bdims->size() == 2 && e.args[1].name == "IndexSingle" &&
             e.args[2].name == "IndexBetween") {
           const int64_t i = eval_int(e.args[1].args[0]);
           const int64_t lo = eval_int(e.args[2].args[0]);
@@ -1701,9 +1706,25 @@ struct Lowering {
           check_index(i, (*bdims)[0], "array index", e.raw);
           check_range(lo, hi, S, "array range", e.raw);
           const int64_t len = hi >= lo ? hi - lo + 1 : 0;
-          return emit_value(OP_SLICE, {base}, len,
-                            array_view({len}, ViewKind::Flat),
+          SlotInfo si = array_shape(base.si).leaf == ViewKind::Flat
+                            ? array_view({len}, ViewKind::Flat)
+                            : view_of(e.type_);
+          return emit_value(OP_SLICE, {base}, len, si,
                             {(int)(len ? (i - 1) * S + lo - 1 : 0)});
+        }
+        // A whole vector leaf selected from array[N] vector[S]. The explicit
+        // trailing All survives O1 for this spelling and addresses the same
+        // contiguous outer-element block as the range directly above.
+        if (e.args.size() == 3 && is_array(base.si) && bdims &&
+            (array_shape(base.si).leaf == ViewKind::Vector ||
+             array_shape(base.si).leaf == ViewKind::RowVector) &&
+            bdims->size() == 2 && e.args[1].name == "IndexSingle" &&
+            e.args[2].name == "IndexAll") {
+          const int64_t i = eval_int(e.args[1].args[0]);
+          const int64_t count = (*bdims)[0], width = (*bdims)[1];
+          check_index(i, count, "array index", e.raw);
+          return emit_value(OP_SLICE, {base}, width, view_of(e.type_),
+                            {(int)((i - 1) * width)});
         }
         // Row-range column read M[a:b, j] (contiguous within the column).
         if (e.args.size() == 3 && is_matrix(base.si) &&
@@ -4000,7 +4021,63 @@ struct Lowering {
           fail(e.name + " needs a matrix argument", e.raw);
         }
         const int64_t K = shapes[last].rows;
-        idata = {(int)K, (int)(g.slots[ins[0]].len / K)};
+        if (K < 0 || shapes[last].cols != K)
+          fail(e.name + ": matrix argument must be square", e.raw);
+
+        // The native kernels accept one vector/row-vector location and a
+        // vector or array of vectors on the left. Derive repetitions from
+        // the logical view, not a division by K: that remains defined for
+        // legal zero-dimensional vectors and catches short flat storage
+        // before a kernel can read past it. multi_student_t has nu between
+        // y and mu; the multi_normal forms do not.
+        const auto vector_repetitions = [&](size_t arg, const char* role) {
+          const SlotInfo& si = shapes[arg];
+          const int64_t len = g.slots[ins[arg]].len;
+          if (is_vector(si) || is_row_vector(si)) {
+            if (len != K) {
+              if (arg == 0)
+                fail(e.name + ": random variable length " +
+                         std::to_string(len) +
+                         " is not a positive multiple of matrix size " +
+                         std::to_string(K),
+                     e.raw);
+              fail(e.name + ": " + role + " length " + std::to_string(len) +
+                       " does not match matrix size " + std::to_string(K),
+                   e.raw);
+            }
+            return int64_t{1};
+          }
+          if (is_array(si)) {
+            const ArrayShape& array = array_shape(si);
+            if ((array.leaf != ViewKind::Vector &&
+                 array.leaf != ViewKind::RowVector) ||
+                array.dims.empty() || array.dims.back() != K)
+              fail(e.name + ": " + role +
+                       " must be a vector or an array of vectors",
+                   e.raw);
+            std::vector<int64_t> outer(array.dims.begin(),
+                                       array.dims.end() - 1);
+            const int64_t repetitions =
+                checked_product(outer, e.name + ": " + role + " shape");
+            if (checked_product({repetitions, K},
+                                e.name + ": " + role + " storage") != len)
+              fail(e.name + ": " + role +
+                       " logical shape does not match storage length",
+                   e.raw);
+            return repetitions;
+          }
+          fail(
+              e.name + ": " + role + " must be a vector or an array of vectors",
+              e.raw);
+        };
+        const int64_t repetitions = vector_repetitions(0, "random variable");
+        if (repetitions == 0)
+          fail(e.name + ": an empty array of random variables is unsupported",
+               e.raw);
+        const size_t location = e.name.rfind("multi_student_t", 0) == 0 ? 2 : 1;
+        if (vector_repetitions(location, "location") != 1)
+          fail(e.name + ": an array-valued location is unsupported", e.raw);
+        idata = {(int)K, (int)repetitions};
       }
       Val dv =
           emit_raw(spec.opcode, ins, 1, result_si, idata, -1, result_autodiff);
@@ -4260,7 +4337,10 @@ struct Lowering {
                    " times " + std::to_string(rb) + "x" + std::to_string(cb) +
                    ")",
                e.raw);
-        SlotInfo si = cb == 1 ? view_of("UVector") : matrix_view(a.si.rows, cb);
+        SlotInfo si =
+            e.type_ == "UMatrix"
+                ? matrix_view(a.si.rows, cb)
+                : (cb == 1 ? view_of("UVector") : matrix_view(a.si.rows, cb));
         Val v = emit_value(OP_GEMM, {a, b}, a.si.rows * cb, si,
                            {(int)a.si.rows, (int)a.si.cols, (int)cb});
         return v;
@@ -4500,6 +4580,86 @@ struct Lowering {
       return emit_value(OP_DOT, {a, a}, 1);
     }
 
+    if ((e.name == "columns_dot_product" || e.name == "rows_dot_product" ||
+         e.name == "columns_dot_self" || e.name == "rows_dot_self") &&
+        (e.args.size() == 1 || e.args.size() == 2)) {
+      Val a = lower_expr(e.args[0]);
+      Val b = e.args.size() == 2 ? lower_expr(e.args[1]) : a;
+      if (!is_matrix(a.si) || !is_matrix(b.si) || a.si.rows != b.si.rows ||
+          a.si.cols != b.si.cols)
+        fail(e.name + ": arguments must be matrices of the same size", e.raw);
+      SlotInfo product_si =
+          matrix_view(a.si.rows, a.si.cols, a.si.param_free && b.si.param_free);
+      Val product = emit_value(OP_MUL, {a, b}, g.slots[a.slot].len, product_si);
+      const bool by_columns = e.name.rfind("columns_", 0) == 0;
+      const int64_t ones_len = by_columns ? a.si.rows : a.si.cols;
+      const int ones_slot = add_slot(ones_len, false);
+      out.fills.emplace_back(ones_slot, std::vector<double>(ones_len, 1.0));
+      SlotInfo ones_si = view_of(by_columns ? "URowVector" : "UVector");
+      ones_si.param_free = true;
+      Val ones{ones_slot, false, ones_si};
+      if (by_columns)
+        return emit_value(OP_GEMM, {ones, product}, a.si.cols,
+                          view_of("URowVector"),
+                          {1, (int)a.si.rows, (int)a.si.cols});
+      return emit_value(OP_GEMM, {product, ones}, a.si.rows, view_of("UVector"),
+                        {(int)a.si.rows, (int)a.si.cols, 1});
+    }
+
+    if (e.name == "csr_matrix_times_vector" && e.args.size() == 6) {
+      const int64_t rows = eval_int(e.args[0]);
+      const int64_t cols = eval_int(e.args[1]);
+      if (rows <= 0 || cols <= 0)
+        fail(e.name + ": row and column counts must be positive", e.raw);
+      Val weights = lower_expr(e.args[2]);
+      Val vector = lower_expr(e.args[5]);
+      if (!is_vector(weights.si) || !is_vector(vector.si))
+        fail(e.name + ": w and b must be vectors", e.raw);
+      if (g.slots[vector.slot].len != cols)
+        fail(e.name + ": column count does not match vector size", e.raw);
+      const std::vector<int> columns = const_ints(e.args[3]);
+      const std::vector<int> starts = const_ints(e.args[4]);
+      const int64_t nnz = g.slots[weights.slot].len;
+      if ((int64_t)columns.size() != nnz)
+        fail(e.name + ": w and v sizes differ", e.raw);
+      if ((int64_t)starts.size() != rows + 1 || starts.front() != 1 ||
+          starts.back() != nnz + 1)
+        fail(e.name + ": u does not describe the requested rows", e.raw);
+      for (int column : columns)
+        if (column < 1 || column > cols)
+          fail(e.name + ": v contains an out-of-range column", e.raw);
+
+      Val result{-1, false, {}};
+      for (int64_t row = 0; row < rows; ++row) {
+        const int64_t begin = starts[(size_t)row] - 1;
+        const int64_t end = starts[(size_t)row + 1] - 1;
+        if (begin < 0 || end < begin || end > nnz)
+          fail(e.name + ": u is not monotone or is out of range", e.raw);
+        Val row_sum;
+        if (begin == end) {
+          row_sum = constant(0.0);
+        } else {
+          const int64_t len = end - begin;
+          Val row_weights = emit_value(OP_SLICE, {weights}, len,
+                                       view_of("UVector"), {(int)begin});
+          std::vector<int> gather;
+          gather.reserve((size_t)len);
+          for (int64_t k = begin; k < end; ++k)
+            gather.push_back(columns[(size_t)k] - 1);
+          Val row_vector =
+              emit_value(OP_GATHER, {vector}, len, view_of("UVector"), gather);
+          Val products = emit_value(OP_MUL, {row_weights, row_vector}, len,
+                                    view_of("UVector"));
+          row_sum = emit_value(OP_SUM_VEC, {products}, 1);
+        }
+        result = row == 0 ? row_sum
+                          : emit_value(OP_CONCAT2, {result, row_sum}, row + 1,
+                                       view_of("UVector"));
+      }
+      result.si = view_of("UVector");
+      return result;
+    }
+
     // squared_distance(x, y) = dot_self(x - y). Two graph kernels that
     // already carry native adjoints, so no new opcode. It does not go
     // through shape_of: the language pairs a vector with a row_vector
@@ -4599,6 +4759,12 @@ struct Lowering {
         return Val{a.slot, a.autodiff, si};
       }
       if (is_matrix(a.si)) return Val{a.slot, a.autodiff, a.si};
+      if (is_vector(a.si))
+        return Val{a.slot, a.autodiff,
+                   matrix_view(g.slots[a.slot].len, 1, a.si.param_free)};
+      if (is_row_vector(a.si))
+        return Val{a.slot, a.autodiff,
+                   matrix_view(1, g.slots[a.slot].len, a.si.param_free)};
       std::vector<int64_t> dims;
       if (is_array(a.si)) dims = array_shape(a.si).dims;
       if (dims.size() != 2) fail("to_matrix: unknown source shape", e.raw);
@@ -4612,10 +4778,14 @@ struct Lowering {
         e.args.size() == 1) {
       // Col-major flattening is the identity on our storage.
       Val a = lower_expr(e.args[0]);
-      SlotInfo si = a.si;
-      si.rows = 0;
-      si.cols = 0;
-      stamp_kind(&si, e.type_);
+      SlotInfo si = view_of(e.type_);
+      si.param_free = a.si.param_free;
+      return Val{a.slot, a.autodiff, si};
+    }
+    if (e.name == "to_array_1d" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      SlotInfo si =
+          array_view({g.slots[a.slot].len}, ViewKind::Flat, a.si.param_free);
       return Val{a.slot, a.autodiff, si};
     }
     if (e.name == "rep_matrix") {
@@ -5671,6 +5841,26 @@ struct Lowering {
             sync_indexed_data_local(s.lhs, nv);
             return;
           }
+          // Whole vector leaf write A[i, :] = rhs for array[N] vector[S].
+          // Graph array storage keeps each outer element contiguous, so this
+          // is the assignment mirror of the read path above.
+          if (s.lhs_idx.size() == 2 && s.lhs_idx[0].name == "IndexSingle" &&
+              s.lhs_idx[1].name == "IndexAll" && dd && dd->size() == 2 &&
+              (array_shape(prev_v.si).leaf == ViewKind::Vector ||
+               array_shape(prev_v.si).leaf == ViewKind::RowVector)) {
+            const int64_t i = eval_int(s.lhs_idx[0].args[0]);
+            const int64_t width = (*dd)[1];
+            check_index(i, (*dd)[0], "array assignment index", s.raw);
+            SlotInfo expected = indexed_view(prev_v.si, 1, width, s.rhs.type_);
+            require_binding(rhs_v, width, expected, s.lhs, s.raw);
+            const int64_t start = (i - 1) * width;
+            Val nv = emit_value(OP_SET_SLICE, {prev_v, rhs_v},
+                                g.slots[prev].len, out_si, {(int)start});
+            propagate_int_update(nv, prev_v, rhs_v, start, 1);
+            scope[s.lhs] = nv;
+            sync_indexed_data_local(s.lhs, nv);
+            return;
+          }
           // Between write w[a:b] = rhs (contiguous on 1-D values).
           if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexBetween") {
             const bool flat_1d_array =
@@ -5847,7 +6037,11 @@ struct Lowering {
                 dl->second.len = g.slots[rhs.slot].len;
                 dl->second.si = rhs.si;
                 dl->second.deferred_shape = false;
-              } else if (dl->second.len == 0 && g.slots[rhs.slot].len != 0) {
+              } else if (dl->second.len == 0 &&
+                         (g.slots[rhs.slot].len != 0 ||
+                          (is_matrix(dl->second.si) && is_matrix(rhs.si) &&
+                           (dl->second.si.rows != rhs.si.rows ||
+                            dl->second.si.cols != rhs.si.cols)))) {
                 // stanc3's --O1 inliner declares a function's return
                 // variable zero-length (`array[real, 0]`, `vector[0]`)
                 // because the returned size is the callee's business, and

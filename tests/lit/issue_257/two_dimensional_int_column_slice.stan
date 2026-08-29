@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: unsupported int index expression
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 // STANLI-LIT-DATA: {"winner": [[1, 2], [3, 4], [2, 1]]}
 functions {
   real f(vector v, array[] int idx) {

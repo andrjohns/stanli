@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: assignment logical view mismatch for inline_pick_return_sym8__
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 // STANLI-LIT-DATA: {"K": 2, "g": [2, 2, 2]}
 functions {
   matrix pick(matrix y, int k, array[] int ref, int value) {

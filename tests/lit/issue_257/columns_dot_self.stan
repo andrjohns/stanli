@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: unsupported function columns_dot_self
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 parameters { vector[4] y; }
 model {
   y ~ std_normal();

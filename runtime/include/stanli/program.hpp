@@ -101,6 +101,7 @@ enum ProgramOpFlag : uint16_t {
   X(LSE_RANGE, kProgramRangeA | kProgramSaveA | kProgramSaveOut)             \
   X(SOFTMAX, kProgramRangeA | kProgramSaveOut | kProgramRangeOutput)         \
   X(LSE2, kProgramReadB | kProgramSaveA | kProgramSaveB)                     \
+  X(LOG_DIFF_EXP, kProgramReadB | kProgramSaveA | kProgramSaveB)             \
   X(LOG_MIX, kProgramReadB | kProgramReadC | kProgramSaveA | kProgramSaveB | \
                  kProgramSaveC)                                              \
   X(FMA, kProgramReadB | kProgramReadC | kProgramSaveA | kProgramSaveB)      \
@@ -124,8 +125,8 @@ struct Program {
     // CONST/CONSTR, MOV/MOVR, arithmetic, comparisons, jumps, ranged
     // arithmetic, densities, and CALL appear above in that order. Their
     // exact execution semantics live in run_program below.
-    // Any scalar continuous density: `len` selects which
-    // (program_density.hpp). One opcode rather than one per density is
+    // Any scalar continuous density or distribution function: `len` selects
+    // which (program_density.hpp). One opcode rather than one per function is
     // what lets the machine speak the runtime's whole list instead of a
     // hand-picked subset of it.
     //
@@ -411,6 +412,9 @@ void run_program(const Program& p, T* reg) {
       case Program::LSE2:
         d() = stan::math::log_sum_exp(ra(), rb());
         break;
+      case Program::LOG_DIFF_EXP:
+        d() = stan::math::log_diff_exp(ra(), rb());
+        break;
       case Program::LOG_MIX:
         d() = stan::math::log_mix(ra(), rb(), reg[(size_t)I.c]);
         break;
@@ -499,10 +503,10 @@ void run_program(const Program& p, T* reg) {
         }
         break;
       }
-        // One call for every scalar continuous density the runtime has;
-      // program_density.cpp holds the switch, so the 27 instantiations
-      // are paid in one translation unit instead of in every one that
-      // runs a program.
+      // One call for every scalar continuous probability function the runtime
+      // has; program_density.cpp holds the switch, so the instantiations are
+      // paid in one translation unit instead of in every one that runs a
+      // program.
       case Program::CALL:
         if constexpr (std::is_same_v<T, double>) {
           run_call(p.calls[(size_t)I.a], reg);

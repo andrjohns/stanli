@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli prepare_data: unsupported function rows_dot_self
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 transformed data {
   matrix[2, 2] A = [[1, 2], [3, 4]];
   vector[2] r = rows_dot_self(A);
