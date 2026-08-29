@@ -70,10 +70,56 @@ static stanli::CompiledModel compile_without_optional_islands(
   }
 }
 
+static stanli::CompiledModel compile_without_graph_passes(
+    const std::string& mir, const stanli::DataMap& data) {
+  static const char* flags[] = {"STANLI_NO_REROLL",  "STANLI_NO_PARTITION",
+                                "STANLI_NO_INPLACE", "STANLI_NO_CONSTFOLD",
+                                "STANLI_NO_CSE",     "STANLI_NO_ISLAND"};
+  for (const char* flag : flags) test_setenv(flag, "1", 1);
+  try {
+    stanli::CompiledModel cm = stanli::compile_model(mir, data);
+    for (const char* flag : flags) test_unsetenv(flag);
+    return cm;
+  } catch (...) {
+    for (const char* flag : flags) test_unsetenv(flag);
+    throw;
+  }
+}
+
 static int count_opcode(const stanli::CompiledModel& cm, uint16_t opcode) {
   return static_cast<int>(
       std::count_if(cm.graph.ops.begin(), cm.graph.ops.end(),
                     [=](const stanli::Op& op) { return op.opcode == opcode; }));
+}
+
+static bool same_graph_structure(const stanli::CompiledModel& a,
+                                 const stanli::CompiledModel& b) {
+  if (a.graph.result_slot != b.graph.result_slot ||
+      a.graph.slots.size() != b.graph.slots.size() ||
+      a.graph.ops.size() != b.graph.ops.size() ||
+      a.fills.size() != b.fills.size())
+    return false;
+  for (size_t i = 0; i < a.graph.slots.size(); ++i)
+    if (a.graph.slots[i].len != b.graph.slots[i].len ||
+        a.graph.slots[i].is_param != b.graph.slots[i].is_param)
+      return false;
+  for (size_t i = 0; i < a.fills.size(); ++i)
+    if (a.fills[i].first != b.fills[i].first ||
+        a.fills[i].second.size() != b.fills[i].second.size())
+      return false;
+  for (size_t i = 0; i < a.graph.ops.size(); ++i) {
+    const stanli::Op& x = a.graph.ops[i];
+    const stanli::Op& y = b.graph.ops[i];
+    if (x.opcode != y.opcode || x.variant != y.variant || x.out != y.out ||
+        x.out2 != y.out2 || x.n_in != y.n_in || x.n_idata != y.n_idata ||
+        (x.udata == nullptr) != (y.udata == nullptr))
+      return false;
+    for (int k = 0; k < x.n_in; ++k)
+      if (x.in[k] != y.in[k]) return false;
+    for (int64_t k = 0; k < x.n_idata; ++k)
+      if (x.idata[k] != y.idata[k]) return false;
+  }
+  return true;
 }
 
 static stanli::DataMap bound_check_data(double raw = 0.0, int N = 1, int M = 1,
@@ -328,6 +374,97 @@ int main() {
     acc.grad();
     expect_eq("loopy lp", lp, acc.val());
     expect_eq("loopy dmu", g, mu.adj());
+    stan::math::recover_memory();
+  }
+
+  // A target-only loop whose body does not read its iterator is one density
+  // multiplied by the trip count. Disable every optional graph pass here:
+  // the bounded graph must come directly from lowering, before CSE or
+  // re-rolling could hide an unroll. The nested form accumulates N*M into
+  // the same one multiply rather than leaving a chain of scalar scales.
+  {
+    const std::string mir =
+        slurp("tests/fixtures/invariant_target_loop.tmir.sexp");
+    const auto compile_loop = [&](int mode, int N, int M = 1) {
+      DataMap d;
+      d.set_int("N", N);
+      d.set_int("M", M);
+      d.set_int("mode", mode);
+      return compile_without_graph_passes(mir, d);
+    };
+
+    CompiledModel ten = compile_loop(0, 10);
+    CompiledModel many = compile_loop(0, 10000);
+    check(same_graph_structure(ten, many),
+          "invariant loop graph identical modulo N constant");
+    check(count_opcode(ten, OP_NORMAL_LPDF) == 1 &&
+              count_opcode(ten, OP_MUL) == 1 &&
+              count_opcode(ten, OP_ADD_N) == 0,
+          "invariant loop is one density times N");
+
+    CompiledModel zero = compile_loop(0, 0);
+    check(count_opcode(zero, OP_NORMAL_LPDF) == 0 &&
+              count_opcode(zero, OP_MUL) == 0,
+          "zero-trip invariant loop does not lower its body");
+    CompiledModel one = compile_loop(0, 1);
+    check(count_opcode(one, OP_NORMAL_LPDF) == 1 &&
+              count_opcode(one, OP_MUL) == 0,
+          "one-trip invariant loop keeps the ordinary path");
+
+    CompiledModel nested = compile_loop(5, 20, 30);
+    check(count_opcode(nested, OP_NORMAL_LPDF) == 1 &&
+              count_opcode(nested, OP_MUL) == 1 &&
+              count_opcode(nested, OP_ADD_N) == 0,
+          "nested invariant loop is one density times N*M");
+
+    CompiledModel iterator = compile_loop(1, 4);
+    check(count_opcode(iterator, OP_NORMAL_LPDF) == 4,
+          "loop iterator use refuses invariant collapse");
+    CompiledModel assignment = compile_loop(2, 4);
+    check(count_opcode(assignment, OP_NORMAL_LPDF) == 4,
+          "outer assignment refuses invariant collapse");
+    CompiledModel printing = compile_loop(3, 4);
+    check(count_opcode(printing, OP_PRINT) == 4 &&
+              count_opcode(printing, OP_NORMAL_LPDF) == 4,
+          "print refuses invariant collapse");
+    CompiledModel rejecting = compile_loop(4, 4);
+    check(count_opcode(rejecting, OP_REJECT) == 4 &&
+              count_opcode(rejecting, OP_NORMAL_LPDF) == 4,
+          "reject refuses invariant collapse");
+    CompiledModel local_iterator = compile_loop(6, 4);
+    check(count_opcode(local_iterator, OP_NORMAL_LPDF) == 4,
+          "iterator use through a local refuses invariant collapse");
+
+    CompiledModel local_terms = compile_loop(7, 10);
+    CompiledModel many_local_terms = compile_loop(7, 10000);
+    check(same_graph_structure(local_terms, many_local_terms),
+          "invariant local and multiple terms graph identical modulo N");
+
+    Executor lex(std::move(ten.graph));
+    ten.bind(lex);
+    lex.params_data()[0] = 0.4;
+    double grad = 0.0;
+    const double lp = lex.gradient(&grad);
+    using stan::math::var;
+    var x = 0.4;
+    var reference = 10.0 * stan::math::normal_lpdf<true>(x, 0.0, 1.0);
+    reference.grad();
+    expect_eq("invariant loop lp", lp, reference.val());
+    expect_eq("invariant loop grad", grad, x.adj());
+    stan::math::recover_memory();
+
+    Executor local_ex(std::move(local_terms.graph));
+    local_terms.bind(local_ex);
+    local_ex.params_data()[0] = 0.4;
+    grad = 0.0;
+    const double local_lp = local_ex.gradient(&grad);
+    x = 0.4;
+    var twice_x = 2.0 * x;
+    reference = 10.0 * stan::math::normal_lpdf<true>(twice_x, 0.0, 1.0) +
+                10.0 * 0.25 * x;
+    reference.grad();
+    expect_eq("invariant local terms lp", local_lp, reference.val());
+    expect_eq("invariant local terms grad", grad, x.adj());
     stan::math::recover_memory();
   }
 

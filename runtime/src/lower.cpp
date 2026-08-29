@@ -431,6 +431,10 @@ struct Lowering {
   // density inside an inlined user function is unnormalized only if the
   // call that reached it was.
   bool propto_ctx = true;
+  // A loop-invariant target-only body is lowered once under the product of
+  // its collapsed trip counts. TargetPE consumes the product at the edge,
+  // so nested invariant loops still emit one scale rather than a MUL chain.
+  double target_scale = 1.0;
   // OR of the actual real/container scalar types for the current inlined
   // UDF. Generic AutoDiffable locals and returns instantiate to this type.
   bool udf_autodiff_ctx = false;
@@ -2146,6 +2150,12 @@ struct Lowering {
     }
   }
 
+  void push_target_term(int slot) {
+    if (target_scale != 1.0)
+      slot = emit_raw(OP_MUL, {slot, const_slot(target_scale)}, 1, {}).slot;
+    target_terms.push_back(slot);
+  }
+
   // `if (<not known while building the graph>) ... else ...`
   void lower_runtime_ifelse(const mir::Stmt& s) {
     IslandRegion reg;
@@ -2200,7 +2210,7 @@ struct Lowering {
       si.param_free = false;
       scope[name] = Val{out_slots[k], scalar_autodiff(), si};
     }
-    if (reg.has_target) target_terms.push_back(out_slots.back());
+    if (reg.has_target) push_target_term(out_slots.back());
   }
 
   // `<not known while building the graph> ? a : b`
@@ -2297,6 +2307,110 @@ struct Lowering {
     for (const auto& k : s.body)
       if (stmt_effectful(k)) return true;
     return false;
+  }
+
+  static bool expr_references(const mir::Expr& e, const std::string& name) {
+    if (e.kind == mir::Expr::Var && e.name == name) return true;
+    for (const auto& a : e.args)
+      if (expr_references(a, name)) return true;
+    return false;
+  }
+
+  // Repeating an expression fewer times is observable for more than RNGs:
+  // target() reads the accumulator, compiler-internal calls may validate or
+  // emit, and the callback families can hide effects in another function.
+  // Admit the ordinary Stan-library expression grammar and explicitly keep
+  // those effect-capable seams out. User functions are refused wholesale;
+  // proving a UDF repeatable needs its own interprocedural effect summary.
+  bool repeatable_target_expr(const mir::Expr& e, const std::string& loopvar) {
+    if (e.kind == mir::Expr::Unsupported || expr_references(e, loopvar))
+      return false;
+    if (e.kind == mir::Expr::FunApp) {
+      if (e.fn_lib != mir::Expr::Lib::StanLib) return false;
+      const std::string& name = e.name;
+      const bool rng =
+          name.size() >= 4 && name.compare(name.size() - 4, 4, "_rng") == 0;
+      const bool ode = name.compare(0, 4, "ode_") == 0 ||
+                       name.compare(0, 14, "integrate_ode_") == 0 ||
+                       name.compare(0, 13, "integrate_dae") == 0;
+      const bool callback = name == "map_rect" || name == "reduce_sum" ||
+                            name == "integrate_1d" ||
+                            name == "algebra_solver" ||
+                            name.compare(0, 13, "solve_newton") == 0 ||
+                            name.compare(0, 13, "solve_powell") == 0;
+      if (rng || ode || callback || name == "target") return false;
+    }
+    for (const auto& a : e.args)
+      if (!repeatable_target_expr(a, loopvar)) return false;
+    return true;
+  }
+
+  static void collect_loop_locals(const mir::Stmt& s,
+                                  std::set<std::string>* locals) {
+    if (s.kind == mir::Stmt::Decl) locals->insert(s.decl_id);
+    for (const auto& child : s.body) collect_loop_locals(child, locals);
+  }
+
+  // Conservative statement whitelist for a loop whose only externally
+  // visible effect is adding iterator-independent terms to target. Locals
+  // declared under the loop may be initialized and updated; any assignment
+  // to a name from the enclosing scope refuses the rewrite.
+  bool repeatable_target_stmt(const mir::Stmt& s, const std::string& loopvar,
+                              const std::set<std::string>& locals,
+                              bool* has_target) {
+    const auto expression_ok = [&](const mir::Expr& e) {
+      return repeatable_target_expr(e, loopvar);
+    };
+    switch (s.kind) {
+      case mir::Stmt::Block:
+      case mir::Stmt::SList:
+        for (const auto& child : s.body)
+          if (!repeatable_target_stmt(child, loopvar, locals, has_target))
+            return false;
+        return true;
+      case mir::Stmt::TargetPE:
+        if (!expression_ok(s.target)) return false;
+        *has_target = true;
+        return true;
+      case mir::Stmt::Decl:
+        if (s.read_transform) return false;
+        for (const auto& dim : s.decl_type.dims)
+          if (!expression_ok(dim)) return false;
+        return !s.has_init || expression_ok(s.init);
+      case mir::Stmt::Assignment:
+        if (!locals.count(s.lhs) || !expression_ok(s.rhs)) return false;
+        for (const auto& index : s.lhs_idx)
+          if (!expression_ok(index)) return false;
+        return true;
+      case mir::Stmt::For:
+        if (!expression_ok(s.lower) || !expression_ok(s.upper)) return false;
+        for (const auto& child : s.body)
+          if (!repeatable_target_stmt(child, loopvar, locals, has_target))
+            return false;
+        return true;
+      case mir::Stmt::IfElse:
+        if (!expression_ok(s.cond)) return false;
+        for (const auto& arm : s.body)
+          if (!repeatable_target_stmt(arm, loopvar, locals, has_target))
+            return false;
+        return true;
+      case mir::Stmt::Skip:
+        return true;
+      default:
+        // Checks, print/reject, while/control transfer, returns, and new
+        // statement kinds all keep the ordinary per-iteration path.
+        return false;
+    }
+  }
+
+  bool repeatable_target_body(const mir::Stmt& loop) {
+    std::set<std::string> locals;
+    for (const auto& child : loop.body) collect_loop_locals(child, &locals);
+    bool has_target = false;
+    for (const auto& child : loop.body)
+      if (!repeatable_target_stmt(child, loop.loopvar, locals, &has_target))
+        return false;
+    return has_target;
   }
 
   bool fun_effectful(const std::string& name) {
@@ -5545,7 +5659,7 @@ struct Lowering {
         // contribute element zero alone.
         Val t = lower_expr(s.target);
         if (g.slots[t.slot].len != 1) t = emit_value(OP_SUM_VEC, {t}, 1);
-        target_terms.push_back(t.slot);
+        push_target_term(t.slot);
         return;
       }
       case mir::Stmt::Block:
@@ -5769,6 +5883,26 @@ struct Lowering {
             return;
           }
         const long lo = eval_int(s.lower), hi = eval_int(s.upper);
+        if (lo > hi) {
+          int_env.erase(s.loopvar);
+          return;
+        }
+        if (lo != hi && repeatable_target_body(s)) {
+          const double old_scale = target_scale;
+          target_scale *=
+              static_cast<double>(hi) - static_cast<double>(lo) + 1.0;
+          int_env[s.loopvar] = lo;
+          try {
+            for (const auto& child : s.body) lower_stmt(child);
+          } catch (...) {
+            target_scale = old_scale;
+            int_env.erase(s.loopvar);
+            throw;
+          }
+          target_scale = old_scale;
+          int_env.erase(s.loopvar);
+          return;
+        }
         for (long v = lo; v <= hi; ++v) {
           int_env[s.loopvar] = v;
           try {

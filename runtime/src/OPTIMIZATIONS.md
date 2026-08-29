@@ -30,6 +30,36 @@ the JSON happened to spell a real matrix with integer tokens. Set
 `STANLI_NO_DATA_PRELOAD=1` to replay the generated hydration as a correctness
 oracle.
 
+## Loop-invariant target collapse (`lower.cpp`)
+
+Before unrolling a `for` loop, lowering checks whether its only externally
+visible effect is adding iterator-independent terms to `target`. Such a loop
+is lowered once and each target term is multiplied by its data-computed trip
+count. Nested invariant loops accumulate their counts before the target edge,
+so `N` repetitions of `M` repetitions emit one scale by `N*M`, not two
+multiplications or `N*M` density ops.
+
+The proof is deliberately syntactic and fail-closed. Every expression in the
+body must be independent of the iterator, assignments may name only locals
+declared under the loop, and the statement whitelist admits only local
+declarations/assignments, target increments, blocks, `for`, `if`, and `skip`.
+Checks, print/reject, RNGs, `target()`, ODE/solver/callback calls, UDFs, loop
+control, and unknown statement or expression kinds retain the ordinary
+per-iteration path. A zero-trip loop does not lower its body; a one-trip loop
+uses the old path unchanged.
+
+On the issue #248 reproducers, both `N = 10,000,000` and nested
+`N = 4,000, M = 1,440` now finish log-prob lowering with two ops (one density,
+one multiply). On an M3, the former's log-prob lowering takes about 0.05 ms and
+the full log-prob preparation about 0.09 ms, with the check process at about
+4.7 MB maximum RSS. The previous unroll took 34.8 s and 4.38 GB at ten million
+iterations; the nested case took 19.2 s and 2.0 GB.
+
+As with re-rolling, this intentionally changes last-bit numerics: multiplying
+one density value rounds once instead of adding identical values through the
+six-way target tree. The mathematical result and gradient are the same, and
+the corpus oracle remains inside its existing per-model gates.
+
 ## Background: why op count matters
 
 stanli turns a Stan model into a list of operations ("ops"). Each op
