@@ -10,7 +10,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -18,7 +18,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id N) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable N) ()) UInt
@@ -307,16 +307,13 @@
        ((pattern
          (Assignment ((LVariable mu) ()) UVector
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
-             (((pattern (Var alpha))
+            (FunApp (StanLib fma FnPlain AoS)
+             (((pattern (Var beta))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern
-                (FunApp (StanLib Times__ FnPlain AoS)
-                 (((pattern (Var beta))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-                  ((pattern (Var x))
-                   (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly)))))))
-               (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
+              ((pattern (Var x))
+               (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly))))
+              ((pattern (Var alpha))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
        ((pattern
@@ -364,7 +361,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -375,7 +372,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -391,7 +388,7 @@
               (Lower
                ((pattern (Lit Int 0))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (dims ()) (mem_pattern AoS)))
+             (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -416,7 +413,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var sigma))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -436,7 +433,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var alpha))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -456,7 +453,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var beta))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -476,16 +473,13 @@
        ((pattern
          (Assignment ((LVariable mu) ()) UVector
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
-             (((pattern (Var alpha))
+            (FunApp (StanLib fma FnPlain AoS)
+             (((pattern (Var beta))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern
-                (FunApp (StanLib Times__ FnPlain AoS)
-                 (((pattern (Var beta))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-                  ((pattern (Var x))
-                   (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly)))))))
-               (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
+              ((pattern (Var x))
+               (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly))))
+              ((pattern (Var alpha))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
        ((pattern
@@ -501,7 +495,7 @@
               (((pattern
                  (TargetPE
                   ((pattern
-                    (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+                    (FunApp (StanLib normal_lpdf (FnLpdf false) SoA)
                      (((pattern
                         (Indexed
                          ((pattern (Var y))
@@ -614,7 +608,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id alpha) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable alpha) ()) UReal
@@ -640,7 +634,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id beta) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable beta) ()) UReal
@@ -666,7 +660,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id sigma) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable sigma) ()) UReal
@@ -697,7 +691,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id alpha) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable alpha) ()) UReal
@@ -714,7 +708,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id beta) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable beta) ()) UReal
@@ -731,7 +725,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id sigma) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable sigma) ()) UReal

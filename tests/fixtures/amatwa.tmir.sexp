@@ -9,7 +9,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -192,7 +192,7 @@
       (decl_type
        (Sized
         (SArray
-         (SMatrix AoS
+         (SMatrix SoA
           ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
           ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
          ((pattern (Lit Int 2)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
@@ -209,7 +209,7 @@
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                ((pattern (Lit Int 3))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ (UArray UMatrix)) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -218,9 +218,9 @@
       (((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
+            (FunApp (StanLib Plus__ FnPlain SoA)
              (((pattern
-                (FunApp (StanLib sum FnPlain AoS)
+                (FunApp (StanLib sum FnPlain SoA)
                  (((pattern
                     (Indexed
                      ((pattern (Var m))
@@ -232,7 +232,7 @@
                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
-                (FunApp (StanLib sum FnPlain AoS)
+                (FunApp (StanLib sum FnPlain SoA)
                  (((pattern
                     (Indexed
                      ((pattern (Var m))
@@ -436,17 +436,12 @@
                                  ((pattern
                                    (FunApp (StanLib Plus__ FnPlain AoS)
                                     (((pattern
-                                       (FunApp (StanLib Plus__ FnPlain AoS)
-                                        (((pattern
-                                           (FunApp (StanLib Times__ FnPlain AoS)
-                                            (((pattern (Lit Int 100))
-                                              (meta
-                                               ((type_ UInt) (loc <opaque>)
-                                                (adlevel DataOnly))))
-                                             ((pattern (Var k))
-                                              (meta
-                                               ((type_ UInt) (loc <opaque>)
-                                                (adlevel DataOnly)))))))
+                                       (FunApp (StanLib fma FnPlain AoS)
+                                        (((pattern (Lit Int 100))
+                                          (meta
+                                           ((type_ UInt) (loc <opaque>)
+                                            (adlevel DataOnly))))
+                                         ((pattern (Var k))
                                           (meta
                                            ((type_ UInt) (loc <opaque>)
                                             (adlevel DataOnly))))
@@ -609,7 +604,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt

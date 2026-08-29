@@ -7,7 +7,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id N) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable N) ()) UInt
@@ -36,7 +36,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id K) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable K) ()) UInt
@@ -216,7 +216,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id lambda)
       (decl_type
        (Sized
-        (SVector AoS
+        (SVector SoA
          ((pattern (Var N)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
@@ -227,7 +227,7 @@
              (dims
               (((pattern (Var N))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -235,7 +235,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id c)
       (decl_type
        (Sized
-        (SVector AoS
+        (SVector SoA
          ((pattern (Var c_1dim__))
           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
@@ -247,7 +247,7 @@
              (dims
               (((pattern (Var c_1dim__))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -256,7 +256,7 @@
       (((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var lambda))
                (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
@@ -276,7 +276,7 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib ordered_logistic_lpmf (FnLpmf true) AoS)
+            (FunApp (StanLib ordered_logistic_lpmf (FnLpmf true) SoA)
              (((pattern (Var y))
                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
               ((pattern (Var lambda))
@@ -370,10 +370,6 @@
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
       (initialize Default)))
-    (meta <opaque>))
-   ((pattern
-     (Assignment ((LVariable pos__) ()) UInt
-      ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id lambda)
@@ -531,7 +527,7 @@
        (Sized
         (SVector AoS
          ((pattern (Var N)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable lambda) ()) UVector
@@ -556,7 +552,7 @@
         (SVector AoS
          ((pattern (Var c_1dim__))
           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable c) ()) UVector

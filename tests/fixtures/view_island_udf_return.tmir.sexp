@@ -47,24 +47,60 @@
           ((pattern
             (Block
              (((pattern
+                (Decl (decl_adtype AutoDiffable) (decl_id inline_twice_return_sym7__)
+                 (decl_type (Sized SReal)) (initialize Uninit)))
+               (meta <opaque>))
+              ((pattern
+                (Block
+                 (((pattern
+                    (Assignment ((LVariable inline_twice_return_sym7__) ()) UReal
+                     ((pattern
+                       (FunApp (StanLib Times__ FnPlain AoS)
+                        (((pattern
+                           (Promotion
+                            ((pattern (Lit Int 2))
+                             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                            UReal DataOnly))
+                          (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                         ((pattern (Var q))
+                          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                   (meta <opaque>)))))
+               (meta <opaque>))
+              ((pattern
                 (TargetPE
-                 ((pattern
-                   (FunApp (UserDefined twice FnPlain)
-                    (((pattern (Var q))
-                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                 ((pattern (Var inline_twice_return_sym7__))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
                (meta <opaque>)))))
            (meta <opaque>))
           (((pattern
              (Block
               (((pattern
+                 (Decl (decl_adtype AutoDiffable) (decl_id inline_twice_return_sym5__)
+                  (decl_type (Sized SReal)) (initialize Uninit)))
+                (meta <opaque>))
+               ((pattern
+                 (Block
+                  (((pattern
+                     (Assignment ((LVariable inline_twice_return_sym5__) ()) UReal
+                      ((pattern
+                        (FunApp (StanLib Times__ FnPlain AoS)
+                         (((pattern
+                            (Promotion
+                             ((pattern (Lit Int 2))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                             UReal DataOnly))
+                           (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                          ((pattern (Var q))
+                           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                    (meta <opaque>)))))
+                (meta <opaque>))
+               ((pattern
                  (TargetPE
                   ((pattern
                     (FunApp (StanLib PMinus__ FnPlain AoS)
-                     (((pattern
-                        (FunApp (UserDefined twice FnPlain)
-                         (((pattern (Var q))
-                           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                     (((pattern (Var inline_twice_return_sym5__))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
                 (meta <opaque>)))))
@@ -79,7 +115,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -88,7 +124,7 @@
       (((pattern
          (IfElse
           ((pattern
-            (FunApp (StanLib Greater__ FnPlain AoS)
+            (FunApp (StanLib Greater__ FnPlain SoA)
              (((pattern (Var q))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern (Lit Int 0))
@@ -97,24 +133,60 @@
           ((pattern
             (Block
              (((pattern
+                (Decl (decl_adtype AutoDiffable) (decl_id inline_twice_return_sym3__)
+                 (decl_type (Sized SReal)) (initialize Uninit)))
+               (meta <opaque>))
+              ((pattern
+                (Block
+                 (((pattern
+                    (Assignment ((LVariable inline_twice_return_sym3__) ()) UReal
+                     ((pattern
+                       (FunApp (StanLib Times__ FnPlain SoA)
+                        (((pattern
+                           (Promotion
+                            ((pattern (Lit Int 2))
+                             (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                            UReal DataOnly))
+                          (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                         ((pattern (Var q))
+                          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                   (meta <opaque>)))))
+               (meta <opaque>))
+              ((pattern
                 (TargetPE
-                 ((pattern
-                   (FunApp (UserDefined twice FnPlain)
-                    (((pattern (Var q))
-                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                 ((pattern (Var inline_twice_return_sym3__))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
                (meta <opaque>)))))
            (meta <opaque>))
           (((pattern
              (Block
               (((pattern
+                 (Decl (decl_adtype AutoDiffable) (decl_id inline_twice_return_sym1__)
+                  (decl_type (Sized SReal)) (initialize Uninit)))
+                (meta <opaque>))
+               ((pattern
+                 (Block
+                  (((pattern
+                     (Assignment ((LVariable inline_twice_return_sym1__) ()) UReal
+                      ((pattern
+                        (FunApp (StanLib Times__ FnPlain SoA)
+                         (((pattern
+                            (Promotion
+                             ((pattern (Lit Int 2))
+                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                             UReal DataOnly))
+                           (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                          ((pattern (Var q))
+                           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                    (meta <opaque>)))))
+                (meta <opaque>))
+               ((pattern
                  (TargetPE
                   ((pattern
-                    (FunApp (StanLib PMinus__ FnPlain AoS)
-                     (((pattern
-                        (FunApp (UserDefined twice FnPlain)
-                         (((pattern (Var q))
-                           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                    (FunApp (StanLib PMinus__ FnPlain SoA)
+                     (((pattern (Var inline_twice_return_sym1__))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
                 (meta <opaque>)))))
@@ -167,7 +239,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal
@@ -194,7 +266,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal

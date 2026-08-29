@@ -23,7 +23,7 @@
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable A) ()) (UArray (UArray UReal))
@@ -104,7 +104,7 @@
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable B) ()) (UArray (UArray UReal))
@@ -188,7 +188,7 @@
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable C) ()) (UArray (UArray UReal))
@@ -233,7 +233,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -249,7 +249,7 @@
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable A) ()) (UArray (UArray UReal))
@@ -260,7 +260,7 @@
                  (((pattern (Var q))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                   ((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -271,7 +271,7 @@
                        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                   ((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -285,7 +285,7 @@
               ((pattern
                 (FunApp (CompilerInternal FnMakeArray)
                  (((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -296,7 +296,7 @@
                        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                   ((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -307,7 +307,7 @@
                        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                   ((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -330,7 +330,7 @@
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable B) ()) (UArray (UArray UReal))
@@ -341,7 +341,7 @@
                  (((pattern (Var q))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                   ((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -355,7 +355,7 @@
               ((pattern
                 (FunApp (CompilerInternal FnMakeArray)
                  (((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -366,7 +366,7 @@
                        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                   ((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -380,7 +380,7 @@
               ((pattern
                 (FunApp (CompilerInternal FnMakeArray)
                  (((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -391,7 +391,7 @@
                        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                   ((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern (Var q))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                       ((pattern
@@ -414,14 +414,14 @@
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable C) ()) (UArray (UArray UReal))
           ((pattern
             (TernaryIf
              ((pattern
-               (FunApp (StanLib Greater__ FnPlain AoS)
+               (FunApp (StanLib Greater__ FnPlain SoA)
                 (((pattern (Var q))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
                  ((pattern (Lit Int 0))
@@ -497,7 +497,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal
@@ -524,7 +524,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal

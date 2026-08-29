@@ -20,7 +20,7 @@
             (SVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable v) ()) UVector
@@ -39,7 +39,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable r) ()) URowVector
@@ -56,7 +56,7 @@
             (SVector AoS
              ((pattern (Lit Int 0))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable v0) ()) UVector
@@ -75,7 +75,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 0))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable r0) ()) URowVector
@@ -269,7 +269,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -282,7 +282,7 @@
             (SVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable v) ()) UVector
@@ -301,7 +301,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable r) ()) URowVector
@@ -318,7 +318,7 @@
             (SVector AoS
              ((pattern (Lit Int 0))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable v0) ()) UVector
@@ -337,7 +337,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 0))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable r0) ()) URowVector
@@ -350,21 +350,21 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
+            (FunApp (StanLib Plus__ FnPlain SoA)
              (((pattern
-                (FunApp (StanLib Plus__ FnPlain AoS)
+                (FunApp (StanLib Plus__ FnPlain SoA)
                  (((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern
-                        (FunApp (StanLib Plus__ FnPlain AoS)
+                        (FunApp (StanLib Plus__ FnPlain SoA)
                          (((pattern
-                            (FunApp (StanLib Plus__ FnPlain AoS)
+                            (FunApp (StanLib Plus__ FnPlain SoA)
                              (((pattern
-                                (FunApp (StanLib Plus__ FnPlain AoS)
+                                (FunApp (StanLib Plus__ FnPlain SoA)
                                  (((pattern
-                                    (FunApp (StanLib Plus__ FnPlain AoS)
+                                    (FunApp (StanLib Plus__ FnPlain SoA)
                                      (((pattern
-                                        (FunApp (StanLib Plus__ FnPlain AoS)
+                                        (FunApp (StanLib Plus__ FnPlain SoA)
                                          (((pattern (Var q))
                                            (meta
                                             ((type_ UReal) (loc <opaque>)
@@ -390,7 +390,7 @@
                                       ((pattern
                                         (Promotion
                                          ((pattern
-                                           (FunApp (StanLib Times__ FnPlain AoS)
+                                           (FunApp (StanLib Times__ FnPlain SoA)
                                             (((pattern (Lit Int 10))
                                               (meta
                                                ((type_ UInt) (loc <opaque>)
@@ -415,7 +415,7 @@
                                   ((pattern
                                     (Promotion
                                      ((pattern
-                                       (FunApp (StanLib Times__ FnPlain AoS)
+                                       (FunApp (StanLib Times__ FnPlain SoA)
                                         (((pattern (Lit Int 100))
                                           (meta
                                            ((type_ UInt) (loc <opaque>)
@@ -439,7 +439,7 @@
                               ((pattern
                                 (Promotion
                                  ((pattern
-                                   (FunApp (StanLib Times__ FnPlain AoS)
+                                   (FunApp (StanLib Times__ FnPlain SoA)
                                     (((pattern (Lit Int 1000))
                                       (meta
                                        ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
@@ -458,7 +458,7 @@
                           ((pattern
                             (Promotion
                              ((pattern
-                               (FunApp (StanLib Times__ FnPlain AoS)
+                               (FunApp (StanLib Times__ FnPlain SoA)
                                 (((pattern (Lit Int 10000))
                                   (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                                  ((pattern
@@ -475,7 +475,7 @@
                       ((pattern
                         (Promotion
                          ((pattern
-                           (FunApp (StanLib Times__ FnPlain AoS)
+                           (FunApp (StanLib Times__ FnPlain SoA)
                             (((pattern (Lit Int 100000))
                               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                              ((pattern
@@ -492,7 +492,7 @@
                   ((pattern
                     (Promotion
                      ((pattern
-                       (FunApp (StanLib Times__ FnPlain AoS)
+                       (FunApp (StanLib Times__ FnPlain SoA)
                         (((pattern (Lit Int 1000000))
                           (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                          ((pattern
@@ -508,7 +508,7 @@
               ((pattern
                 (Promotion
                  ((pattern
-                   (FunApp (StanLib Times__ FnPlain AoS)
+                   (FunApp (StanLib Times__ FnPlain SoA)
                     (((pattern (Lit Int 10000000))
                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                      ((pattern
@@ -569,7 +569,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal
@@ -596,7 +596,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal

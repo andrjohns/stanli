@@ -917,7 +917,7 @@
                                             (Indexed
                                              ((pattern (Var transition))
                                               (meta
-                                               ((type_ (UArray UVector))
+                                               ((type_ (UArray UVector)) 
                                                 (loc <opaque>) (adlevel DataOnly))))
                                              ((Single
                                                ((pattern (Var j))

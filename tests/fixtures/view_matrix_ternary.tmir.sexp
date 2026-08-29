@@ -30,7 +30,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable A) ()) UMatrix
@@ -53,7 +53,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable B) ()) UMatrix
@@ -79,7 +79,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable M) ()) UMatrix
@@ -107,8 +107,25 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
+            (FunApp (StanLib fma FnPlain AoS)
              (((pattern
+                (Promotion
+                 ((pattern (Lit Int 2))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                 UReal DataOnly))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+              ((pattern
+                (Indexed
+                 ((pattern (Var M))
+                  (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
+                 ((Single
+                   ((pattern (Lit Int 2))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (Single
+                   ((pattern (Lit Int 3))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+              ((pattern
                 (Indexed
                  ((pattern (Var M))
                   (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
@@ -118,26 +135,6 @@
                   (Single
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern
-                (FunApp (StanLib Times__ FnPlain AoS)
-                 (((pattern
-                    (Promotion
-                     ((pattern (Lit Int 2))
-                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                     UReal DataOnly))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
-                  ((pattern
-                    (Indexed
-                     ((pattern (Var M))
-                      (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
-                     ((Single
-                       ((pattern (Lit Int 2))
-                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
-                      (Single
-                       ((pattern (Lit Int 3))
-                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
@@ -238,7 +235,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable A) ()) UMatrix
@@ -261,7 +258,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable B) ()) UMatrix
@@ -287,7 +284,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable M) ()) UMatrix
@@ -315,8 +312,25 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
+            (FunApp (StanLib fma FnPlain SoA)
              (((pattern
+                (Promotion
+                 ((pattern (Lit Int 2))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                 UReal DataOnly))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+              ((pattern
+                (Indexed
+                 ((pattern (Var M))
+                  (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
+                 ((Single
+                   ((pattern (Lit Int 2))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (Single
+                   ((pattern (Lit Int 3))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+              ((pattern
                 (Indexed
                  ((pattern (Var M))
                   (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
@@ -326,26 +340,6 @@
                   (Single
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern
-                (FunApp (StanLib Times__ FnPlain AoS)
-                 (((pattern
-                    (Promotion
-                     ((pattern (Lit Int 2))
-                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                     UReal DataOnly))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
-                  ((pattern
-                    (Indexed
-                     ((pattern (Var M))
-                      (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
-                     ((Single
-                       ((pattern (Lit Int 2))
-                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
-                      (Single
-                       ((pattern (Lit Int 3))
-                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
@@ -472,10 +466,6 @@
       (initialize Default)))
     (meta <opaque>))
    ((pattern
-     (Assignment ((LVariable pos__) ()) UInt
-      ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-    (meta <opaque>))
-   ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q)
       (decl_type
        (Sized
@@ -556,7 +546,7 @@
        (Sized
         (SVector AoS
          ((pattern (Lit Int 6)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UVector

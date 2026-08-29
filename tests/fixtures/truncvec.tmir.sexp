@@ -7,7 +7,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -15,7 +15,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id N) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable N) ()) UInt
@@ -348,15 +348,6 @@
                           (decl_type (Unsized UReal)) (initialize Default)))
                         (meta <opaque>))
                        ((pattern
-                         (Assignment ((LVariable sym1__) ()) UReal
-                          ((pattern
-                            (Promotion
-                             ((pattern (Lit Int 1))
-                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                             UReal DataOnly))
-                           (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))))
-                        (meta <opaque>))
-                       ((pattern
                          (For (loopvar sym3__)
                           (lower
                            ((pattern (Lit Int 1))
@@ -403,7 +394,13 @@
                                                (meta
                                                 ((type_ UReal) (loc <opaque>)
                                                  (adlevel AutoDiffable))))
-                                              ((pattern (Var sym1__))
+                                              ((pattern
+                                                (Promotion
+                                                 ((pattern (Lit Int 1))
+                                                  (meta
+                                                   ((type_ UInt) (loc <opaque>)
+                                                    (adlevel DataOnly))))
+                                                 UReal DataOnly))
                                                (meta
                                                 ((type_ UReal) (loc <opaque>)
                                                  (adlevel DataOnly)))))))
@@ -436,7 +433,13 @@
                                                (meta
                                                 ((type_ UReal) (loc <opaque>)
                                                  (adlevel AutoDiffable))))
-                                              ((pattern (Var sym1__))
+                                              ((pattern
+                                                (Promotion
+                                                 ((pattern (Lit Int 1))
+                                                  (meta
+                                                   ((type_ UInt) (loc <opaque>)
+                                                    (adlevel DataOnly))))
+                                                 UReal DataOnly))
                                                (meta
                                                 ((type_ UReal) (loc <opaque>)
                                                  (adlevel DataOnly)))))))
@@ -463,7 +466,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -498,7 +501,7 @@
               (Lower
                ((pattern (Lit Int 0))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (dims ()) (mem_pattern AoS)))
+             (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -507,7 +510,7 @@
       (((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
              (((pattern (Var y))
                (meta ((type_ UVector) (loc <opaque>) (adlevel DataOnly))))
               ((pattern (Var mu))
@@ -519,7 +522,7 @@
        ((pattern
          (IfElse
           ((pattern
-            (FunApp (StanLib Less__ FnPlain AoS)
+            (FunApp (StanLib Less__ FnPlain SoA)
              (((pattern
                 (FunApp (StanLib min FnPlain AoS)
                  (((pattern (Var y))
@@ -541,7 +544,7 @@
               (((pattern
                  (IfElse
                   ((pattern
-                    (FunApp (StanLib Greater__ FnPlain AoS)
+                    (FunApp (StanLib Greater__ FnPlain SoA)
                      (((pattern
                         (FunApp (StanLib max FnPlain AoS)
                          (((pattern (Var y))
@@ -563,9 +566,9 @@
                       (((pattern
                          (TargetPE
                           ((pattern
-                            (FunApp (StanLib PMinus__ FnPlain AoS)
+                            (FunApp (StanLib PMinus__ FnPlain SoA)
                              (((pattern
-                                (FunApp (StanLib Times__ FnPlain AoS)
+                                (FunApp (StanLib Times__ FnPlain SoA)
                                  (((pattern
                                     (FunApp (StanLib log_diff_exp FnPlain AoS)
                                      (((pattern
@@ -648,7 +651,7 @@
        ((pattern
          (IfElse
           ((pattern
-            (FunApp (StanLib Less__ FnPlain AoS)
+            (FunApp (StanLib Less__ FnPlain SoA)
              (((pattern
                 (FunApp (StanLib min FnPlain AoS)
                  (((pattern (Var y))
@@ -670,7 +673,7 @@
               (((pattern
                  (IfElse
                   ((pattern
-                    (FunApp (StanLib Greater__ FnPlain AoS)
+                    (FunApp (StanLib Greater__ FnPlain SoA)
                      (((pattern
                         (FunApp (StanLib max FnPlain AoS)
                          (((pattern (Var y))
@@ -694,15 +697,6 @@
                           (decl_type (Unsized UReal)) (initialize Default)))
                         (meta <opaque>))
                        ((pattern
-                         (Assignment ((LVariable sym1__) ()) UReal
-                          ((pattern
-                            (Promotion
-                             ((pattern (Lit Int 1))
-                              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                             UReal DataOnly))
-                           (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))))
-                        (meta <opaque>))
-                       ((pattern
                          (For (loopvar sym3__)
                           (lower
                            ((pattern (Lit Int 1))
@@ -720,7 +714,7 @@
                               (((pattern
                                  (TargetPE
                                   ((pattern
-                                    (FunApp (StanLib PMinus__ FnPlain AoS)
+                                    (FunApp (StanLib PMinus__ FnPlain SoA)
                                      (((pattern
                                         (FunApp (StanLib log_diff_exp FnPlain AoS)
                                          (((pattern
@@ -749,7 +743,13 @@
                                                (meta
                                                 ((type_ UReal) (loc <opaque>)
                                                  (adlevel AutoDiffable))))
-                                              ((pattern (Var sym1__))
+                                              ((pattern
+                                                (Promotion
+                                                 ((pattern (Lit Int 1))
+                                                  (meta
+                                                   ((type_ UInt) (loc <opaque>)
+                                                    (adlevel DataOnly))))
+                                                 UReal DataOnly))
                                                (meta
                                                 ((type_ UReal) (loc <opaque>)
                                                  (adlevel DataOnly)))))))
@@ -782,7 +782,13 @@
                                                (meta
                                                 ((type_ UReal) (loc <opaque>)
                                                  (adlevel AutoDiffable))))
-                                              ((pattern (Var sym1__))
+                                              ((pattern
+                                                (Promotion
+                                                 ((pattern (Lit Int 1))
+                                                  (meta
+                                                   ((type_ UInt) (loc <opaque>)
+                                                    (adlevel DataOnly))))
+                                                 UReal DataOnly))
                                                (meta
                                                 ((type_ UReal) (loc <opaque>)
                                                  (adlevel DataOnly)))))))
@@ -899,7 +905,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -907,7 +913,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal
@@ -1007,7 +1013,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id sigma) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable sigma) ()) UReal
@@ -1038,7 +1044,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal
@@ -1059,7 +1065,7 @@
        (Sized
         (SVector AoS
          ((pattern (Var N)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UVector
@@ -1079,7 +1085,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id sigma) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable sigma) ()) UReal

@@ -9,7 +9,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -17,7 +17,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id M) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable M) ()) UInt
@@ -46,7 +46,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype DataOnly) (decl_id T) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable T) ()) UInt
@@ -265,7 +265,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id p)
       (decl_type
        (Sized
-        (SVector AoS
+        (SVector SoA
          ((pattern (Var T)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
@@ -282,7 +282,7 @@
              (dims
               (((pattern (Var T))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -301,7 +301,7 @@
               (((pattern
                  (TargetPE
                   ((pattern
-                    (FunApp (StanLib bernoulli_lpmf (FnLpmf false) AoS)
+                    (FunApp (StanLib bernoulli_lpmf (FnLpmf false) SoA)
                      (((pattern
                         (Indexed
                          ((pattern (Var y))
@@ -379,7 +379,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable pos__) ()) UInt
@@ -471,7 +471,7 @@
        (Sized
         (SVector AoS
          ((pattern (Var T)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable p) ()) UVector

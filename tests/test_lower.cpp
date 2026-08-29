@@ -184,9 +184,8 @@ static void reference(const double* q, double* lp_out, double* grad_out) {
   var jac = 0.0;
   var tau = stan::math::lb_constrain<true>(log_tau, 0.0, jac);
 
-  // theta = mu + tau * tilde, lowered as MUL(s,v) then ADD(s,v).
-  Eigen::Matrix<var, -1, 1> theta =
-      stan::math::add(mu, stan::math::multiply(tau, tilde));
+  // theta = mu + tau * tilde, which O1 contracts to fma(tau, tilde, mu).
+  Eigen::Matrix<var, -1, 1> theta = stan::math::fma(tau, tilde, mu);
 
   // ~ statements lower propto=true with activity from MIR adlevels: exactly
   // the instantiations CmdStan's generated C++ uses (data args stay double).
@@ -302,8 +301,10 @@ int main() {
     reference(qs[c], &lp_ref, grad_ref);
     const std::string tag = "case" + std::to_string(c);
     expect_eq(tag + " lp", lp, lp_ref);
+    // mu's adjoint sums eight contributions; the graph and the reference
+    // reverse pass reach it in different orders.
     for (int i = 0; i < 10; ++i)
-      expect_eq(tag + " g" + std::to_string(i), grad[i], grad_ref[i]);
+      expect_ulp(tag + " g" + std::to_string(i), grad[i], grad_ref[i]);
   }
 
   // For loops unroll: scalar-loop normal model vs per-term var reference.

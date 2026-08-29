@@ -15,6 +15,27 @@
                (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
            (meta <opaque>)))))
        (meta <opaque>))))
+    (fdloc <opaque>))
+   ((fdrt (ReturnType UInt)) (fdname pick) (fdsuffix FnPlain)
+    (fdargs ((DataOnly x (UArray UInt))))
+    (fdbody
+     (((pattern
+        (Block
+         (((pattern
+            (Return
+             (((pattern
+                (Indexed
+                 ((pattern
+                   (FunApp (UserDefined noisy FnPlain)
+                    (((pattern (Var x))
+                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                  (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
+                 ((Single
+                   ((pattern (Lit Int 1))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+           (meta <opaque>)))))
+       (meta <opaque>))))
     (fdloc <opaque>))))
  (input_vars
   ((x_i <opaque>
@@ -52,34 +73,47 @@
    ((pattern
      (Block
       (((pattern
-         (Decl (decl_adtype AutoDiffable) (decl_id inline_noisy_return_sym3__)
-          (decl_type
-           (Sized
-            (SArray SInt
-             ((pattern (Lit Int 0))
-              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Uninit)))
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_pick_return_sym8__)
+          (decl_type (Sized SInt)) (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Block
           (((pattern
-             (NRFunApp (CompilerInternal FnPrint)
-              (((pattern (Lit Str "int effect"))
-                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
-            (meta <opaque>)))))
-        (meta <opaque>))
-       ((pattern
-         (TargetPE
-          ((pattern
-            (FunApp (StanLib bernoulli_logit_lpmf (FnLpmf false) AoS)
-             (((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_pick_inline_noisy_return_sym3___sym9__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern (Lit Int 0))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Block
+              (((pattern
+                 (NRFunApp (CompilerInternal FnPrint)
+                  (((pattern (Lit Str "int effect"))
+                    (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_pick_return_sym8__) ()) UInt
+              ((pattern
                 (Indexed
                  ((pattern (Var x_i))
                   (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
                  ((Single
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern
+            (FunApp (StanLib bernoulli_logit_lpmf (FnLpmf false) AoS)
+             (((pattern (Var inline_pick_return_sym8__))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern (Var q))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
@@ -100,34 +134,47 @@
    ((pattern
      (Block
       (((pattern
-         (Decl (decl_adtype AutoDiffable) (decl_id inline_noisy_return_sym1__)
-          (decl_type
-           (Sized
-            (SArray SInt
-             ((pattern (Lit Int 0))
-              (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Uninit)))
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_pick_return_sym5__)
+          (decl_type (Sized SInt)) (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Block
           (((pattern
-             (NRFunApp (CompilerInternal FnPrint)
-              (((pattern (Lit Str "int effect"))
-                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
-            (meta <opaque>)))))
-        (meta <opaque>))
-       ((pattern
-         (TargetPE
-          ((pattern
-            (FunApp (StanLib bernoulli_logit_lpmf (FnLpmf false) SoA)
-             (((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_pick_inline_noisy_return_sym3___sym6__)
+              (decl_type
+               (Sized
+                (SArray SInt
+                 ((pattern (Lit Int 0))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+              (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Block
+              (((pattern
+                 (NRFunApp (CompilerInternal FnPrint)
+                  (((pattern (Lit Str "int effect"))
+                    (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_pick_return_sym5__) ()) UInt
+              ((pattern
                 (Indexed
                  ((pattern (Var x_i))
                   (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
                  ((Single
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern
+            (FunApp (StanLib bernoulli_logit_lpmf (FnLpmf false) SoA)
+             (((pattern (Var inline_pick_return_sym5__))
+               (meta ((type_ UInt) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern (Var q))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
@@ -225,5 +272,5 @@
   ((q <opaque>
     ((out_unconstrained_st SReal) (out_constrained_st SReal) (out_block Parameters)
      (out_trans Identity)))))
- (prog_name viewc_effectful_int_udf_model)
- (prog_path tests/fixtures/viewc_effectful_int_udf.stan))
+ (prog_name viewc_effectful_int_udf_nested_model)
+ (prog_path tests/fixtures/viewc_effectful_int_udf_nested.stan))
