@@ -1515,12 +1515,16 @@ struct Lowering {
           return emit_value(OP_GATHER, {base},
                             (int64_t)rows.size() * base.si.cols, si, gather);
         }
-        // A two-axis matrix gather is the Cartesian selection M[rows, cols],
-        // not a pairwise zip. Preserve both index arrays' order and
+        // A two-axis matrix gather/range is the Cartesian selection
+        // M[rows, cols], not a pairwise zip. Preserve index-array order and
         // duplicates; column-major output means selected columns are outer
         // and selected rows are inner in the flat gather list.
+        const auto is_matrix_selector = [](const mir::Expr& index) {
+          return index.name == "IndexAll" || index.name == "IndexBetween" ||
+                 index.name == "IndexMulti";
+        };
         if (e.args.size() == 3 && is_matrix(base.si) &&
-            e.args[1].name == "IndexMulti" && e.args[2].name == "IndexMulti") {
+            is_matrix_selector(e.args[1]) && is_matrix_selector(e.args[2])) {
           const std::vector<int64_t> rows = index_positions(
               e.args[1], base.si.rows, "matrix row gather", e.raw);
           const std::vector<int64_t> cols = index_positions(
