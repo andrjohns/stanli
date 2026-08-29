@@ -178,25 +178,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: System packages (manylinux)
-        if: matrix.container != ''
+      - name: Clang frontend (pull requests)
+        if: matrix.container != '' && github.event_name == 'pull_request'
         run: |
-          # PR validation uses Clang's frontend with this image's existing GNU
-          # libstdc++/libgcc runtime. Release, scheduled, and manual builds keep
-          # the established GCC frontend so changing the validation compiler
-          # cannot change shipped runtime performance.
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            manylinux-install-clang
-            echo 'CC=clang' >> "$GITHUB_ENV"
-            echo 'CXX=clang++' >> "$GITHUB_ENV"
-          fi
-          # OCaml's complete-object mode uses `ld -r`, which resolves its C
-          # runtime dependencies from static archives during the partial link.
-          dnf install -y unzip which diffutils patch rsync glibc-static
-          dnf install -y epel-release && dnf install -y ccache time
-          # The manylinux image keeps its interpreters out of PATH; pick one
-          # explicitly rather than inheriting AlmaLinux's system python3.
-          echo /opt/python/cp312-cp312/bin >> "$GITHUB_PATH"
+          # The custom manylinux image already contains every fixed build
+          # package. Only PR validation adds Clang's frontend; release,
+          # scheduled, and manual builds retain the image's GCC frontend.
+          manylinux-install-clang
+          echo 'CC=clang' >> "$GITHUB_ENV"
+          echo 'CXX=clang++' >> "$GITHUB_ENV"
 
       - name: Fingerprint the selected C++ compiler
         id: toolchain
