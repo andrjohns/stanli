@@ -660,6 +660,14 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
         adj[I.a] += t * stan::math::inv_logit(val[I.va] - val[I.vb]);
         adj[I.b] += t * stan::math::inv_logit(val[I.vb] - val[I.va]);
         break;
+      case Program::LOG_DIFF_EXP:
+        adj[I.dst] = 0.0;
+        // Match rev/fun/log_diff_exp.hpp exactly. Besides being stable when
+        // the arguments are close, expm1 has observably different rounding
+        // from spelling either denominator with exp.
+        adj[I.a] -= t / stan::math::expm1(val[I.vb] - val[I.va]);
+        adj[I.b] -= t / stan::math::expm1(val[I.va] - val[I.vb]);
+        break;
       case Program::LOG_MIX: {
         adj[I.dst] = 0.0;
         // rev/fun/log_mix.hpp: partials through the helper, with the arms

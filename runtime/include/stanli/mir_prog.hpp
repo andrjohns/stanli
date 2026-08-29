@@ -1673,6 +1673,8 @@ struct ProgramCompiler {
         }
         return out;
       }
+      if (e.name == "FnNegInf" && e.args.empty())
+        return {konst(-std::numeric_limits<double>::infinity()), 1};
       bail("internal function " + e.name);
     }
     if (e.args.empty() && e.name == "negative_infinity")
@@ -2055,6 +2057,10 @@ struct ProgramCompiler {
         c = Program::FMAX;
       else if (e.name == "fmin")
         c = Program::FMIN;
+      else if (e.name == "log_sum_exp")
+        c = Program::LSE2;
+      else if (e.name == "log_diff_exp")
+        c = Program::LOG_DIFF_EXP;
       else if (e.name == "Greater__")
         c = Program::GT;
       else if (e.name == "Geq__")
@@ -2085,6 +2091,14 @@ struct ProgramCompiler {
     }
     if (e.args.size() == 1) {
       const Range a = expr(e.args[0]);
+      if (e.name == "log_sum_exp") {
+        if (a.len == 0)
+          return {konst(-std::numeric_limits<double>::infinity()), 1};
+        const int r = alloc(1);
+        p.code.push_back(
+            Program::Instr{Program::LSE_RANGE, r, a.reg, 0, 0, a.len});
+        return {r, 1};
+      }
       if (e.name == "sum") {
         if (a.len == 0) return {konst(0.0), 1};
         const int r = alloc(1);
@@ -2095,12 +2109,23 @@ struct ProgramCompiler {
       // Predicates, spelled on the comparison opcodes rather than opcodes of
       // their own: both read through value_of, so neither carries an adjoint
       // edge, which is what a 0/1 answer wants. x != x holds for NaN alone.
-      if (e.name == "is_nan" || e.name == "PNot__") {
+      if (e.name == "is_nan" || e.name == "is_inf" || e.name == "PNot__") {
         const int rhs = e.name == "is_nan" ? -1 : konst(0.0);
         const Program::Code c = e.name == "is_nan" ? Program::NE : Program::EQ;
         const int r = alloc(a.len);
-        for (int i = 0; i < a.len; ++i)
-          emit(c, r + i, a.reg + i, rhs < 0 ? a.reg + i : rhs);
+        if (e.name == "is_inf") {
+          const int pos = konst(std::numeric_limits<double>::infinity());
+          const int neg = konst(-std::numeric_limits<double>::infinity());
+          const int eq_pos = alloc(a.len), eq_neg = alloc(a.len);
+          for (int i = 0; i < a.len; ++i) {
+            emit(Program::EQ, eq_pos + i, a.reg + i, pos);
+            emit(Program::EQ, eq_neg + i, a.reg + i, neg);
+            emit(Program::ADD, r + i, eq_pos + i, eq_neg + i);
+          }
+        } else {
+          for (int i = 0; i < a.len; ++i)
+            emit(c, r + i, a.reg + i, rhs < 0 ? a.reg + i : rhs);
+        }
         Range out = a;
         out.reg = r;
         return typed(out, e.type_);

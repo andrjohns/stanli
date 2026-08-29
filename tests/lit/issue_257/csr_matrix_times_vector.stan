@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: unsupported function csr_matrix_times_vector
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 // STANLI-LIT-DATA: {"N": 2, "w": [1, 2, 3], "v": [1, 2, 1], "u": [1, 3, 4]}
 data {
   int N;

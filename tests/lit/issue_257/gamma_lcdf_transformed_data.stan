@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli prepare_data: unsupported function gamma_lcdf
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 transformed data { real c = gamma_lcdf(1.0 | 2.0, 3.0); }
 parameters { real y; }
 model { y ~ normal(c, 1); }

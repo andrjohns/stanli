@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: unsupported index expression: base=eta [IndexSingle] [IndexBetween] type=UVector
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 // STANLI-LIT-DATA: {"K": 2, "TT": 4}
 data { int K; int TT; }
 parameters { array[K] vector[TT] eta; }

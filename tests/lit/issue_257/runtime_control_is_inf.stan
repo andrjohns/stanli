@@ -1,5 +1,5 @@
-// STANLI-LIT: XFAIL
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: runtime-control region: function is_inf
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: OK
 parameters { real y; }
 model {
   y ~ std_normal();

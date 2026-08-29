@@ -675,6 +675,16 @@ class MirInterp {
             st.fn_name == "FnValidateSizePositive" ||
             st.fn_name == "check_greater_or_equal")
           return;
+        if (st.fn_name == "FnValidateSizeUnitVector") {
+          if (st.fn_args.size() != 3 ||
+              st.fn_args[0].kind != mir::Expr::LitStr ||
+              st.fn_args[1].kind != mir::Expr::LitStr)
+            fail("malformed FnValidateSizeUnitVector", st.raw);
+          stan::math::validate_unit_vector_index(
+              st.fn_args[0].lit_s.c_str(), st.fn_args[1].lit_s.c_str(),
+              static_cast<int>(as_int(st.fn_args[2])));
+          return;
+        }
         fail("unsupported statement function " + st.fn_name, st.raw);
       case mir::Stmt::Skip:
         return;  // constraint checks are not executed here
@@ -1337,6 +1347,18 @@ class MirInterp {
         const int64_t Rb = b_mat ? b.dims[0] : (int64_t)b.r.size();
         const int64_t Cb = b_mat ? b.dims[1] : 1;
         if (Ca != Rb) fail(e.name + ": inner dimension mismatch", e.raw);
+        // Matrix * matrix must use Eigen's product evaluator, just as the
+        // graph GEMM and generated Stan do. A hand-written scalar loop has
+        // a measurably different association for a one-column product.
+        if (a_mat && b_mat) {
+          using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+          r.r.resize((size_t)(Ra * Cb));
+          Eigen::Map<const Mat> am(a.r.data(), Ra, Ca);
+          Eigen::Map<const Mat> bm(b.r.data(), Rb, Cb);
+          Eigen::Map<Mat>(r.r.data(), Ra, Cb) = am * bm;
+          r.dims = {Ra, Cb};
+          return r;
+        }
         // Col-major storage on both sides.
         r.r.assign((size_t)(Ra * Cb), T(0.0));
         for (int64_t j = 0; j < Cb; ++j)
@@ -1934,9 +1956,17 @@ class MirInterp {
     }
     if (e.name == "sum") {
       Value a = eval(e.args[0]);
-      T m = T(0.0);
-      for (const T& v : a.r) m += v;
-      r.r = {m};
+      if (a.is_int && a.i.size() == a.r.size()) {
+        int total = 0;
+        for (int x : a.i) total += x;
+        r.is_int = true;
+        r.i = {total};
+        r.r = {T((double)total)};
+      } else {
+        T total = T(0.0);
+        for (const T& x : a.r) total += x;
+        r.r = {total};
+      }
       return r;
     }
     // The matrix slice family, all on col-major storage.
@@ -2139,6 +2169,42 @@ class MirInterp {
       const Eigen::Map<const Vec> input(a.r.data(), a.r.size());
       r.r = {stan::math::prod(
           input.unaryExpr(Eigen::internal::core_cast_op<T, T>()))};
+      return r;
+    }
+    if ((e.name == "columns_dot_product" || e.name == "rows_dot_product") &&
+        e.args.size() == 2) {
+      Value a = eval(e.args[0]), b = eval(e.args[1]);
+      if (a.dims.size() != 2 || a.dims != b.dims || a.r.size() != b.r.size())
+        fail(e.name + ": arguments must be matrices of the same size", e.raw);
+      const int64_t rows = a.dims[0], cols = a.dims[1];
+      const bool by_columns = e.name == "columns_dot_product";
+      const int64_t groups = by_columns ? cols : rows;
+      const int64_t width = by_columns ? rows : cols;
+      r.dims = {groups};
+      r.r.assign((size_t)groups, T(0.0));
+      for (int64_t group = 0; group < groups; ++group)
+        for (int64_t k = 0; k < width; ++k) {
+          const int64_t at = by_columns ? group * rows + k : k * rows + group;
+          r.r[(size_t)group] += a.r.at((size_t)at) * b.r.at((size_t)at);
+        }
+      return r;
+    }
+    if ((e.name == "columns_dot_self" || e.name == "rows_dot_self") &&
+        e.args.size() == 1) {
+      Value a = eval(e.args[0]);
+      if (a.dims.size() != 2)
+        fail(e.name + ": argument must be a matrix", e.raw);
+      const int64_t rows = a.dims[0], cols = a.dims[1];
+      const bool by_columns = e.name == "columns_dot_self";
+      const int64_t groups = by_columns ? cols : rows;
+      const int64_t width = by_columns ? rows : cols;
+      r.dims = {groups};
+      r.r.assign((size_t)groups, T(0.0));
+      for (int64_t group = 0; group < groups; ++group)
+        for (int64_t k = 0; k < width; ++k) {
+          const int64_t at = by_columns ? group * rows + k : k * rows + group;
+          r.r[(size_t)group] += a.r.at((size_t)at) * a.r.at((size_t)at);
+        }
       return r;
     }
     // Two arguments is the elementwise form, which Stan vectorizes over
@@ -2651,8 +2717,8 @@ class MirInterp {
       for (size_t i = 0; i < n; ++i) {
         // The continuous ones go through the shared dispatch, so this
         // cannot be narrower than what the register machine accepts and
-        // costs one instantiation of 27 densities rather than one per
-        // translation unit that interprets MIR.
+        // costs one shared set of probability-function instantiations rather
+        // than one set per translation unit that interprets MIR.
         if (shared_id >= 0) {
           T argbuf[kMaxDensityArgs];
           const int arity = program_density_arity(shared_id);
@@ -2693,6 +2759,18 @@ class MirInterp {
       r.dims = {n};
       r.r.assign(n, v.r.at(0));
       if (v.is_int) r.i.assign(n, v.i.at(0));
+      return r;
+    }
+    if (e.name == "csr_extract_w" && e.args.size() == 1) {
+      Value a = eval(e.args[0]);
+      if (a.dims.size() != 2)
+        fail("csr_extract_w: argument must be a matrix", e.raw);
+      const int64_t rows = a.dims[0], cols = a.dims[1];
+      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+      Eigen::Map<const Mat> matrix(a.r.data(), rows, cols);
+      const auto weights = stan::math::csr_extract_w(matrix);
+      r.r.assign(weights.data(), weights.data() + weights.size());
+      r.dims = {(int64_t)r.r.size()};
       return r;
     }
     if (e.name == "append_array" && e.args.size() == 2) {

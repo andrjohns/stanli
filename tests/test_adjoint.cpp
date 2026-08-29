@@ -811,6 +811,11 @@ static void test_reductions() {
     const int d = b.emit(Program::LSE2, 0, 1);
     check("lse2", b.done({d}, {1.9}));
   }
+  {
+    Build b({1.1, 0.3});
+    const int d = b.emit(Program::LOG_DIFF_EXP, 0, 1);
+    check("log_diff_exp", b.done({d}, {1.9}));
+  }
   // Long enough that Eigen vectorizes the reductions. A short vector hides
   // any disagreement between the double pass's redux over the register file
   // and whatever the var pass reduces.
@@ -908,16 +913,17 @@ static void test_nan_operands() {
   }
 }
 
-// ---- densities ---------------------------------------------------------
+// ---- scalar probability functions -------------------------------------
 
 static void test_densities() {
-  // EVERY density the register machine speaks, discovered from the shared
-  // table rather than listed here, so one added to the runtime is covered
-  // the day it arrives instead of the day someone remembers this file.
+  // EVERY scalar density/CDF the register machine speaks, discovered from
+  // the shared table rather than listed here, so one added to the runtime is
+  // covered the day it arrives instead of the day someone remembers this
+  // file.
   //
-  // Each has its own support, so rather than curate a point per density
-  // the loop tries a few tuples and keeps the first the density accepts
-  // (a finite value). A density that accepts none of them is a failure,
+  // Each has its own support, so rather than curate a point per function the
+  // loop tries a few tuples and keeps the first one it accepts (a finite
+  // value). A function that accepts none of them is a failure,
   // not a skip -- silently testing nothing is the thing to avoid.
   static const double kPoints[][kMaxDensityArgs] = {
       {0.63, 0.4, 1.7, 0.5}, {0.63, 1.4, 2.2, 0.25}, {2.5, 3.0, 1.0, 0.75},
