@@ -829,16 +829,42 @@ jobs:
       github.event_name != 'pull_request' ||
       needs.changes.outputs.heavy == 'true'
     runs-on: ubuntu-24.04
+    env:
+      WINDOWS_DUNE_VERSION: 3.24.2
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check the Windows compiler source pin
+        run: |
+          setup_repo=$(sed -n 's/^STANC3_SRC_REPO=\([^ ]*\).*/\1/p' \
+                         tools/dev_setup.sh)
+          setup_pin=$(sed -n 's/^STANC3_SRC_SHA=\([0-9a-f]*\).*/\1/p' \
+                        tools/dev_setup.sh)
+          test "$setup_repo" = "$STANC3_SRC_REPO"
+          test "$setup_pin" = "$STANC3_SRC_SHA"
+
+      # On a warm setup-ocaml cache this job still spent 73 seconds in setup
+      # and 187 seconds cloning, installing 68 cross packages, and building.
+      # Cache the complete 20 MB product instead. The key deliberately covers
+      # every local input checked by the provenance stamp; the version prefix
+      # owns the fixed Windows target, Dune context, profile, and subst recipe.
+      - name: Restore the cross-built Windows compilers
+        id: windows-compilers-cache
+        uses: actions/cache@v4
+        with:
+          path: windows-compilers/
+          key: >-
+            windows-compilers-v1-${{ env.STANC3_SRC_REPO }}-${{ env.STANC3_SRC_SHA }}-ocaml${{ env.OCAML_VERSION }}-dune${{ env.WINDOWS_DUNE_VERSION }}-${{ hashFiles('.gitattributes', 'compiler/ocaml/**', 'compiler/js/**', 'tools/stanc_embed/**') }}
+
       - name: Cross-compiler
+        if: steps.windows-compilers-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y file gcc-mingw-w64-x86-64 \
             gcc-mingw-w64-i686
 
       - name: OCaml ${{ env.OCAML_VERSION }} for Windows
+        if: steps.windows-compilers-cache.outputs.cache-hit != 'true'
         uses: ocaml/setup-ocaml@v3
         with:
           cache-prefix: stanli-windows-${{ env.STANC3_SRC_SHA }}
@@ -848,14 +874,13 @@ jobs:
             windows: http://github.com/ocaml-cross/opam-cross-windows.git
             default: https://github.com/ocaml/opam-repository.git
 
+      - name: Dune ${{ env.WINDOWS_DUNE_VERSION }}
+        if: steps.windows-compilers-cache.outputs.cache-hit != 'true'
+        run: opam install -y "dune.$WINDOWS_DUNE_VERSION"
+
       - name: Build the pinned compilers
+        if: steps.windows-compilers-cache.outputs.cache-hit != 'true'
         run: |
-          setup_repo=$(sed -n 's/^STANC3_SRC_REPO=\([^ ]*\).*/\1/p' \
-                         tools/dev_setup.sh)
-          setup_pin=$(sed -n 's/^STANC3_SRC_SHA=\([0-9a-f]*\).*/\1/p' \
-                        tools/dev_setup.sh)
-          test "$setup_repo" = "$STANC3_SRC_REPO"
-          test "$setup_pin" = "$STANC3_SRC_SHA"
           bash tests/test_windows_provenance.sh
           git clone "$STANC3_SRC_REPO" deps/stanc3-src
           git -C deps/stanc3-src checkout -q --detach "$STANC3_SRC_SHA"
@@ -887,17 +912,33 @@ jobs:
           stanli_windows_cli_expected_stamp \
             "$STANC3_SRC_REPO" "$STANC3_SRC_SHA" \
             > windows-compilers/stanli-compile.stamp
+
+      # Validate a restored product just as strictly as a newly built one.
+      # On a cache hit there is no opam switch, so the helper checks every
+      # source-derived field plus the configured OCaml version and target.
+      - name: Validate the cross-built Windows compilers
+        run: |
+          test "$(cat windows-compilers/stanc.src)" = "$STANC3_SRC_SHA"
+          source tools/stanc_embed/provenance.sh
           stanli_windows_cli_artifact_matches \
             windows-compilers/stanli-compile \
             "$STANC3_SRC_REPO" "$STANC3_SRC_SHA"
+          test "$(_stanc_embed_stamp_value \
+            windows-compilers/stanli-compile.stamp dune_version)" = \
+            "$WINDOWS_DUNE_VERSION"
           compiler_types=$(file \
             windows-compilers/stanc windows-compilers/stanli-compile)
           printf '%s\n' "$compiler_types"
           test "$(printf '%s\n' "$compiler_types" | \
             grep -c 'PE32+ executable.*x86-64')" -eq 2
-          x86_64-w64-mingw32-objdump -f \
-            windows-compilers/stanli-compile | \
-            grep -F 'file format pei-x86-64'
+          if command -v x86_64-w64-mingw32-objdump >/dev/null 2>&1; then
+            x86_64-w64-mingw32-objdump -f \
+              windows-compilers/stanli-compile | \
+              grep -E 'file format (pei|coff)-x86-64'
+          else
+            objdump -f windows-compilers/stanli-compile | \
+              grep -E 'file format (pei|coff)-x86-64'
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
