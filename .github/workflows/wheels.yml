@@ -1227,7 +1227,8 @@ jobs:
             deps/stanc3/stanli-compile \
             "$STANC3_SRC_REPO" "$STANC3_SRC_SHA"
           chmod +x deps/stanc3/stanc deps/stanc3/stanli-compile
-          ./deps/stanc3/stanc --version
+          cp deps/stanc3/stanc deps/stanc3/stanc.exe
+          ./deps/stanc3/stanc.exe --version
 
       - name: Configure, build, test
         run: |

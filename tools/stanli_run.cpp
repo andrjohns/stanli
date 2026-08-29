@@ -27,6 +27,8 @@
 #include <stanli/nuts.hpp>
 #include <stanli/wa_interp.hpp>
 
+#include "stanc_process.hpp"
+
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -64,15 +66,7 @@ static std::string embedded_stanc(const std::string& model) {
 
 static std::string run_stanc(const std::string& stanc,
                              const std::string& model) {
-  const std::string cmd =
-      stanc + " --O1 --debug-optimized-mir '" + model + "' 2>/dev/null";
-  std::unique_ptr<FILE, int (*)(FILE*)> pipe(popen(cmd.c_str(), "r"), pclose);
-  if (!pipe) throw std::runtime_error("cannot run stanc: " + cmd);
-  std::string out;
-  std::array<char, 1 << 16> buf;
-  size_t n;
-  while ((n = fread(buf.data(), 1, buf.size(), pipe.get())) > 0)
-    out.append(buf.data(), n);
+  std::string out = stanli::tooling::run_stanc_process(stanc, model);
   if (out.empty())
     throw std::runtime_error("stanc produced no MIR (compile error?)");
   return out;
@@ -89,7 +83,11 @@ int main(int argc, char** argv) {
     return 2;
   }
   std::string model = argv[1], datafile = argv[2];
+#ifdef _WIN32
+  std::string stanc = "deps/stanc3/stanc.exe";
+#else
   std::string stanc = "deps/stanc3/stanc";
+#endif
   bool stanc_explicit = false;
   stanli::NutsConfig cfg;
   cfg.seed = 1;
