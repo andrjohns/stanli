@@ -28,8 +28,29 @@ pinned stanc, because stanc writes a sibling `.hpp` even when MIR is sent to
 stdout. If the core developer setup has no stanc, the cases report a CTest
 skip. Compiler-bearing CI runs all of them.
 
-Run the complete source-lit suite with:
+After configuring the ordinary native build, run the complete source-lit
+suite with the local build target:
 
 ```sh
-ctest --test-dir build --parallel 24 --output-on-failure -L lit
+cmake --build build --target lit -j24
+```
+
+Run just the annotated known gaps with:
+
+```sh
+cmake --build build --target lit-broken -j24
+```
+
+The targets default to 24 parallel CTest jobs. A smaller machine can choose a
+different value at configure time with `-DSTANLI_LIT_JOBS=8`.
+
+For a single case, invoke the runner directly; `--discover` prints the current
+result without enforcing the checked-in expectation:
+
+```sh
+tests/lit/run.py tests/lit/issue_257/to_array_1d.stan \
+  build/stanli_check deps/stanc3/stanc
+
+tests/lit/run.py --discover tests/lit/issue_257/to_array_1d.stan \
+  build/stanli_check deps/stanc3/stanc
 ```

@@ -748,6 +748,27 @@ if(Python3_Interpreter_FOUND)
         SKIP_RETURN_CODE 77)
     endif()
   endforeach()
+  # Friendly local entry points. These deliberately invoke CTest rather than
+  # duplicating discovery in a shell script, so a developer runs exactly the
+  # same per-file tests and labels as CI. STANLI_LIT_JOBS is a cache setting
+  # for smaller machines; the repository default matches the j24 developer
+  # workflow used for the native build.
+  set(STANLI_LIT_JOBS "24" CACHE STRING
+      "Parallel jobs used by the lit and lit-broken targets")
+  add_custom_target(lit
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+            --parallel ${STANLI_LIT_JOBS} -L lit
+    DEPENDS stanli_check
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+    COMMENT "Running source-level Stan lit tests")
+  add_custom_target(lit-broken
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+            --parallel ${STANLI_LIT_JOBS} -L broken
+    DEPENDS stanli_check
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+    COMMENT "Running known-broken Stan lit tests")
   # The model census's coverage ratchet, over synthetic rows plus the
   # checked-in baseline. The census itself needs deps/stanc3-src, a stanc
   # and a CmdStan and so runs by hand; what runs here is the gate it grew,
