@@ -72,6 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       heavy: ${{ steps.scope.outputs.heavy }}
+      vectorize: ${{ steps.scope.outputs.vectorize }}
     steps:
       - uses: actions/checkout@v4
       - name: Select the validation scope
@@ -81,12 +82,14 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           heavy=true
+          vectorize=true
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             git fetch --no-tags --depth=1 origin "$BASE_SHA"
             changed_files="$RUNNER_TEMP/stanli-changed-files"
             git diff --no-renames --name-only "$BASE_SHA" HEAD \
               > "$changed_files"
             heavy=false
+            vectorize=false
             while IFS= read -r path; do
               case "$path" in
                 README.md|TESTING.md|CHANGELOG.md|THIRD_PARTY_LICENSES.md|LICENSE|docs/*.md|web/index.html)
@@ -95,9 +98,18 @@ jobs:
                   heavy=true
                   ;;
               esac
+              # Gate the MIR vectorization A/B check on compiler/runtime/harness changes.
+              # It must run whenever anything that could affect lowering or the MIR
+              # output might have changed, to catch silent semantic drift.
+              case "$path" in
+                compiler/**|runtime/**|harnesses/vectorize_ab.py|tools/stanc_embed/**|tools/dev_setup.sh|CMakeLists.txt|deps/fetch.sh|.github/workflows/wheels.yml)
+                  vectorize=true
+                  ;;
+              esac
             done < "$changed_files"
           fi
           echo "heavy=$heavy" | tee -a "$GITHUB_OUTPUT"
+          echo "vectorize=$vectorize" | tee -a "$GITHUB_OUTPUT"
 
   # This is intentionally independent of the compiled runtime. In particular,
   # generated prose and the web index should not need a 30-minute C++ build to
@@ -451,8 +463,16 @@ jobs:
       # saved portable MIR directly so every point reuses the exact bytes.
       # Semantic/reference parity gates the job; graph sizes, re-roll
       # dispositions, and preparation timings are published as measurements.
+      #
+      # Gated on compiler/runtime/harness changes to avoid 79s overhead on every
+      # PR, especially docs-only ones. The check catches silent semantic drift
+      # from lowering and source-pass changes, so it must run on anything that
+      # could alter MIR or the compiled output; see changes.vectorize for paths.
       - name: Bounded MIR vectorization A/B
-        if: matrix.runtime == 'linux-x86_64'
+        if: >-
+          matrix.runtime == 'linux-x86_64' &&
+          (github.event_name != 'pull_request' ||
+           needs.changes.outputs.vectorize == 'true')
         timeout-minutes: 15
         shell: bash
         run: |
