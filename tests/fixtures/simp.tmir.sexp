@@ -2,7 +2,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id K) (decl_type (Sized SInt))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable K) ()) UInt
@@ -79,7 +79,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id theta)
       (decl_type
        (Sized
-        (SVector AoS
+        (SVector SoA
          ((pattern (Var K)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
        (Assign
@@ -90,7 +90,7 @@
              (dims
               (((pattern (Var K))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -99,11 +99,11 @@
       (((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib dirichlet_lpdf (FnLpdf true) AoS)
+            (FunApp (StanLib dirichlet_lpdf (FnLpdf true) SoA)
              (((pattern (Var theta))
                (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
-                (FunApp (StanLib rep_vector FnPlain AoS)
+                (FunApp (StanLib rep_vector FnPlain SoA)
                  (((pattern (Lit Real 2.0))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
                   ((pattern (Var K))
@@ -168,10 +168,6 @@
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
       (initialize Default)))
-    (meta <opaque>))
-   ((pattern
-     (Assignment ((LVariable pos__) ()) UInt
-      ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id theta)
@@ -254,7 +250,7 @@
        (Sized
         (SVector AoS
          ((pattern (Var K)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable theta) ()) UVector

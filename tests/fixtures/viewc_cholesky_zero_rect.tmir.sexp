@@ -11,7 +11,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable M) ()) UMatrix
@@ -44,17 +44,17 @@
          (Decl (decl_adtype AutoDiffable) (decl_id M)
           (decl_type
            (Sized
-            (SMatrix AoS
+            (SMatrix SoA
              ((pattern (Lit Int 0))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable M) ()) UMatrix
           ((pattern
-            (FunApp (StanLib rep_matrix FnPlain AoS)
+            (FunApp (StanLib rep_matrix FnPlain SoA)
              (((pattern (Lit Real 0.0))
                (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
               ((pattern (Lit Int 0))
@@ -66,9 +66,9 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib sum FnPlain AoS)
+            (FunApp (StanLib sum FnPlain SoA)
              (((pattern
-                (FunApp (StanLib cholesky_decompose FnPlain AoS)
+                (FunApp (StanLib cholesky_decompose FnPlain SoA)
                  (((pattern (Var M))
                    (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))

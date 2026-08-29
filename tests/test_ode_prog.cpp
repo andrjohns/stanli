@@ -277,7 +277,7 @@ int main() {
     expect("mixed seed fixture compiles", p.ok);
     if (p.ok) {
       const bool compact =
-          p.code.size() == 7 &&
+          p.code.size() == 6 &&
           std::none_of(p.code.begin(), p.code.end(), [](const auto& i) {
             return i.code == Program::CONST || i.code == Program::MOV;
           });

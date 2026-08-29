@@ -2,7 +2,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id y) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable y) ()) UReal
@@ -136,7 +136,7 @@
               (Lower
                ((pattern (Lit Int 0))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (dims ()) (mem_pattern AoS)))
+             (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -147,7 +147,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -156,7 +156,7 @@
       (((pattern
          (IfElse
           ((pattern
-            (FunApp (StanLib Greater__ FnPlain AoS)
+            (FunApp (StanLib Greater__ FnPlain SoA)
              (((pattern (Var mu))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern (Lit Int 0))
@@ -167,7 +167,7 @@
              (((pattern
                 (TargetPE
                  ((pattern
-                   (FunApp (StanLib chi_square_lpdf (FnLpdf false) AoS)
+                   (FunApp (StanLib chi_square_lpdf (FnLpdf false) SoA)
                     (((pattern (Var y))
                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
                      ((pattern (Var nu))
@@ -177,7 +177,7 @@
               ((pattern
                 (TargetPE
                  ((pattern
-                   (FunApp (StanLib student_t_lpdf (FnLpdf false) AoS)
+                   (FunApp (StanLib student_t_lpdf (FnLpdf false) SoA)
                     (((pattern (Var y))
                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
                      ((pattern (Var nu))
@@ -194,7 +194,7 @@
               (((pattern
                  (TargetPE
                   ((pattern
-                    (FunApp (StanLib gumbel_lpdf (FnLpdf false) AoS)
+                    (FunApp (StanLib gumbel_lpdf (FnLpdf false) SoA)
                      (((pattern (Var y))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
                       ((pattern (Var mu))
@@ -206,7 +206,7 @@
                ((pattern
                  (TargetPE
                   ((pattern
-                    (FunApp (StanLib rayleigh_lpdf (FnLpdf false) AoS)
+                    (FunApp (StanLib rayleigh_lpdf (FnLpdf false) SoA)
                      (((pattern (Var y))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
                       ((pattern (Var nu))
@@ -286,7 +286,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id nu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable nu) ()) UReal
@@ -316,7 +316,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal
@@ -343,7 +343,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id nu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable nu) ()) UReal
@@ -364,7 +364,7 @@
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal

@@ -23,7 +23,7 @@
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable A) ()) (UArray (UArray UReal))
@@ -85,9 +85,24 @@
           (initialize Default)))
         (meta <opaque>))
        ((pattern
-         (Assignment ((LVariable B) ()) (UArray (UArray UReal))
-          ((pattern (Var A))
-           (meta ((type_ (UArray (UArray UReal))) (loc <opaque>) (adlevel AutoDiffable))))))
+         (For (loopvar i)
+          (lower
+           ((pattern (Lit Int 1))
+            (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+          (upper
+           ((pattern (Lit Int 2))
+            (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+          (body
+           ((pattern
+             (Block
+              (((pattern
+                 (Assignment ((LVariable B) ()) (UArray (UArray UReal))
+                  ((pattern (Var A))
+                   (meta
+                    ((type_ (UArray (UArray UReal))) (loc <opaque>)
+                     (adlevel AutoDiffable))))))
+                (meta <opaque>)))))
+            (meta <opaque>)))))
         (meta <opaque>))
        ((pattern
          (TargetPE
@@ -113,7 +128,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -129,7 +144,7 @@
                (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable A) ()) (UArray (UArray UReal))
@@ -191,9 +206,24 @@
           (initialize Default)))
         (meta <opaque>))
        ((pattern
-         (Assignment ((LVariable B) ()) (UArray (UArray UReal))
-          ((pattern (Var A))
-           (meta ((type_ (UArray (UArray UReal))) (loc <opaque>) (adlevel AutoDiffable))))))
+         (For (loopvar i)
+          (lower
+           ((pattern (Lit Int 1))
+            (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+          (upper
+           ((pattern (Lit Int 2))
+            (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+          (body
+           ((pattern
+             (Block
+              (((pattern
+                 (Assignment ((LVariable B) ()) (UArray (UArray UReal))
+                  ((pattern (Var A))
+                   (meta
+                    ((type_ (UArray (UArray UReal))) (loc <opaque>)
+                     (adlevel AutoDiffable))))))
+                (meta <opaque>)))))
+            (meta <opaque>)))))
         (meta <opaque>))
        ((pattern
          (TargetPE
@@ -257,7 +287,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal
@@ -284,7 +314,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UReal

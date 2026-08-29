@@ -23,7 +23,7 @@
      (Block
       (((pattern
          (Decl (decl_adtype AutoDiffable) (decl_id s) (decl_type (Sized SReal))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable s) ()) UReal
@@ -43,7 +43,7 @@
             (SVector AoS
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable v) ()) UVector
@@ -65,7 +65,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable r) ()) URowVector
@@ -92,7 +92,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable M) ()) UMatrix
@@ -121,7 +121,7 @@
             (SVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable ar1) ()) UVector
@@ -140,7 +140,7 @@
             (SVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable ar2) ()) UVector
@@ -159,7 +159,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable ac1) ()) URowVector
@@ -178,7 +178,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable ac2) ()) URowVector
@@ -199,7 +199,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable mr) ()) UMatrix
@@ -220,7 +220,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable mv) ()) UMatrix
@@ -548,7 +548,7 @@
      (Block
       (((pattern
          (Decl (decl_adtype AutoDiffable) (decl_id s) (decl_type (Sized SReal))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable s) ()) UReal
@@ -568,7 +568,7 @@
             (SVector AoS
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable v) ()) UVector
@@ -590,7 +590,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable r) ()) URowVector
@@ -617,7 +617,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable M) ()) UMatrix
@@ -646,7 +646,7 @@
             (SVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable ar1) ()) UVector
@@ -665,7 +665,7 @@
             (SVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable ar2) ()) UVector
@@ -684,7 +684,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable ac1) ()) URowVector
@@ -703,7 +703,7 @@
             (SRowVector AoS
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable ac2) ()) URowVector
@@ -724,7 +724,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 2))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable mr) ()) UMatrix
@@ -745,7 +745,7 @@
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable mv) ()) UMatrix
@@ -760,15 +760,15 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
+            (FunApp (StanLib Plus__ FnPlain SoA)
              (((pattern
-                (FunApp (StanLib Plus__ FnPlain AoS)
+                (FunApp (StanLib Plus__ FnPlain SoA)
                  (((pattern
-                    (FunApp (StanLib Plus__ FnPlain AoS)
+                    (FunApp (StanLib Plus__ FnPlain SoA)
                      (((pattern
-                        (FunApp (StanLib Plus__ FnPlain AoS)
+                        (FunApp (StanLib Plus__ FnPlain SoA)
                          (((pattern
-                            (FunApp (StanLib Plus__ FnPlain AoS)
+                            (FunApp (StanLib Plus__ FnPlain SoA)
                              (((pattern
                                 (FunApp (StanLib dot_product FnPlain AoS)
                                  (((pattern (Var ar1))
@@ -1106,10 +1106,6 @@
       (initialize Default)))
     (meta <opaque>))
    ((pattern
-     (Assignment ((LVariable pos__) ()) UInt
-      ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-    (meta <opaque>))
-   ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id q)
       (decl_type
        (Sized
@@ -1190,7 +1186,7 @@
        (Sized
         (SVector AoS
          ((pattern (Lit Int 9)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable q) ()) UVector

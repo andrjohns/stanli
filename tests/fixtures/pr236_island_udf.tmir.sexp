@@ -72,25 +72,49 @@
           ((pattern
             (Block
              (((pattern
+                (Decl (decl_adtype AutoDiffable) (decl_id inline_pick_return_sym3__)
+                 (decl_type (Sized SReal)) (initialize Uninit)))
+               (meta <opaque>))
+              ((pattern
+                (Block
+                 (((pattern
+                    (Assignment ((LVariable inline_pick_return_sym3__) ()) UReal
+                     ((pattern
+                       (FunApp (StanLib sum FnPlain AoS)
+                        (((pattern
+                           (Indexed
+                            ((pattern (Var m))
+                             (meta
+                              ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
+                            ((MultiIndex
+                              ((pattern
+                                (FunApp (CompilerInternal FnMakeArray)
+                                 (((pattern (Lit Int 3))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                  ((pattern (Lit Int 1))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                               (meta
+                                ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))
+                             (MultiIndex
+                              ((pattern
+                                (FunApp (CompilerInternal FnMakeArray)
+                                 (((pattern (Lit Int 2))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                  ((pattern (Lit Int 3))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                               (meta
+                                ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))))
+                          (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                   (meta <opaque>)))))
+               (meta <opaque>))
+              ((pattern
                 (TargetPE
-                 ((pattern
-                   (FunApp (UserDefined pick FnPlain)
-                    (((pattern (Var m))
-                      (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
-                     ((pattern
-                       (FunApp (CompilerInternal FnMakeArray)
-                        (((pattern (Lit Int 3))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                         ((pattern (Lit Int 1))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
-                     ((pattern
-                       (FunApp (CompilerInternal FnMakeArray)
-                        (((pattern (Lit Int 2))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                         ((pattern (Lit Int 3))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                 ((pattern (Var inline_pick_return_sym3__))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
                (meta <opaque>)))))
            (meta <opaque>))
@@ -102,7 +126,7 @@
      (Decl (decl_adtype AutoDiffable) (decl_id m)
       (decl_type
        (Sized
-        (SMatrix AoS
+        (SMatrix SoA
          ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
          ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
       (initialize
@@ -116,7 +140,7 @@
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                ((pattern (Lit Int 3))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -125,7 +149,7 @@
       (((pattern
          (IfElse
           ((pattern
-            (FunApp (StanLib Greater__ FnPlain AoS)
+            (FunApp (StanLib Greater__ FnPlain SoA)
              (((pattern
                 (Indexed
                  ((pattern (Var m))
@@ -143,25 +167,49 @@
           ((pattern
             (Block
              (((pattern
+                (Decl (decl_adtype AutoDiffable) (decl_id inline_pick_return_sym1__)
+                 (decl_type (Sized SReal)) (initialize Uninit)))
+               (meta <opaque>))
+              ((pattern
+                (Block
+                 (((pattern
+                    (Assignment ((LVariable inline_pick_return_sym1__) ()) UReal
+                     ((pattern
+                       (FunApp (StanLib sum FnPlain SoA)
+                        (((pattern
+                           (Indexed
+                            ((pattern (Var m))
+                             (meta
+                              ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
+                            ((MultiIndex
+                              ((pattern
+                                (FunApp (CompilerInternal FnMakeArray)
+                                 (((pattern (Lit Int 3))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                  ((pattern (Lit Int 1))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                               (meta
+                                ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))
+                             (MultiIndex
+                              ((pattern
+                                (FunApp (CompilerInternal FnMakeArray)
+                                 (((pattern (Lit Int 2))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                                  ((pattern (Lit Int 3))
+                                   (meta
+                                    ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
+                               (meta
+                                ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))))
+                          (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable)))))))
+                      (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                   (meta <opaque>)))))
+               (meta <opaque>))
+              ((pattern
                 (TargetPE
-                 ((pattern
-                   (FunApp (UserDefined pick FnPlain)
-                    (((pattern (Var m))
-                      (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
-                     ((pattern
-                       (FunApp (CompilerInternal FnMakeArray)
-                        (((pattern (Lit Int 3))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                         ((pattern (Lit Int 1))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))
-                     ((pattern
-                       (FunApp (CompilerInternal FnMakeArray)
-                        (((pattern (Lit Int 2))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                         ((pattern (Lit Int 3))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-                      (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly)))))))
+                 ((pattern (Var inline_pick_return_sym1__))
                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
                (meta <opaque>)))))
            (meta <opaque>))
@@ -226,10 +274,6 @@
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id pos__) (decl_type (Sized SInt))
       (initialize Default)))
-    (meta <opaque>))
-   ((pattern
-     (Assignment ((LVariable pos__) ()) UInt
-      ((pattern (Lit Int 1)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
     (meta <opaque>))
    ((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id m)
@@ -331,7 +375,7 @@
         (SMatrix AoS
          ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
          ((pattern (Lit Int 3)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable m) ()) UMatrix

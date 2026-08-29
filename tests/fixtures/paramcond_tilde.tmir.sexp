@@ -2,7 +2,7 @@
  (prepare_data
   (((pattern
      (Decl (decl_adtype DataOnly) (decl_id y) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable y) ()) UReal
@@ -92,7 +92,7 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -101,7 +101,7 @@
       (((pattern
          (IfElse
           ((pattern
-            (FunApp (StanLib Greater__ FnPlain AoS)
+            (FunApp (StanLib Greater__ FnPlain SoA)
              (((pattern (Var mu))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern (Lit Int 0))
@@ -112,7 +112,7 @@
              (((pattern
                 (TargetPE
                  ((pattern
-                   (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+                   (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
                     (((pattern (Var y))
                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
                      ((pattern (Var mu))
@@ -131,11 +131,11 @@
               (((pattern
                  (TargetPE
                   ((pattern
-                    (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+                    (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
                      (((pattern (Var y))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
                       ((pattern
-                        (FunApp (StanLib PMinus__ FnPlain AoS)
+                        (FunApp (StanLib PMinus__ FnPlain SoA)
                          (((pattern (Var mu))
                            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                        (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
@@ -196,7 +196,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal
@@ -223,7 +223,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal

@@ -55,41 +55,130 @@
    ((pattern
      (Block
       (((pattern
-         (TargetPE
-          ((pattern
-            (FunApp (UserDefined f_lpdf (FnLpdf false))
-             (((pattern (Var mu))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Lit Real 1.0))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
-           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_f_lpdf_return_sym18__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Assignment ((LVariable inline_f_lpdf_return_sym18__) ()) UReal
+              ((pattern
+                (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+                 (((pattern (Var mu))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                  ((pattern (Lit Real 1.0))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern
+                    (Promotion
+                     ((pattern (Lit Int 1))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                     UReal DataOnly))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
         (meta <opaque>))
        ((pattern
          (TargetPE
-          ((pattern
-            (FunApp (UserDefined g_lpdf (FnLpdf false))
-             (((pattern (Var mu))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+          ((pattern (Var inline_f_lpdf_return_sym18__))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
        ((pattern
-         (TargetPE
-          ((pattern
-            (FunApp (UserDefined f_lpdf (FnLpdf true))
-             (((pattern (Var mu))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Lit Real 2.0))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
-           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_g_lpdf_return_sym20__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_g_lpdf_inline_f_lpdf_return_sym5___sym21__)
+              (decl_type (Sized SReal)) (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Block
+              (((pattern
+                 (Assignment
+                  ((LVariable inline_g_lpdf_inline_f_lpdf_return_sym5___sym21__) ())
+                  UReal
+                  ((pattern
+                    (FunApp (StanLib normal_lpdf (FnLpdf false) AoS)
+                     (((pattern (Var mu))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                      ((pattern (Lit Real 0.5))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                      ((pattern
+                        (Promotion
+                         ((pattern (Lit Int 1))
+                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                         UReal DataOnly))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_g_lpdf_return_sym20__) ()) UReal
+              ((pattern (Var inline_g_lpdf_inline_f_lpdf_return_sym5___sym21__))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
         (meta <opaque>))
        ((pattern
          (TargetPE
-          ((pattern
-            (FunApp (UserDefined f_lpdf (FnLpdf true))
-             (((pattern (Var mu))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Lit Real 3.0))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+          ((pattern (Var inline_g_lpdf_return_sym20__))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+        (meta <opaque>))
+       ((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_f_lpdf_return_sym23__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Assignment ((LVariable inline_f_lpdf_return_sym23__) ()) UReal
+              ((pattern
+                (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+                 (((pattern (Var mu))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                  ((pattern (Lit Real 2.0))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern
+                    (Promotion
+                     ((pattern (Lit Int 1))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                     UReal DataOnly))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern (Var inline_f_lpdf_return_sym23__))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+        (meta <opaque>))
+       ((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_f_lpdf_return_sym25__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Assignment ((LVariable inline_f_lpdf_return_sym25__) ()) UReal
+              ((pattern
+                (FunApp (StanLib normal_lpdf (FnLpdf true) AoS)
+                 (((pattern (Var mu))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                  ((pattern (Lit Real 3.0))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern
+                    (Promotion
+                     ((pattern (Lit Int 1))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                     UReal DataOnly))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern (Var inline_f_lpdf_return_sym25__))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>)))))
     (meta <opaque>))))
@@ -101,48 +190,137 @@
         ((pattern
           (FunApp
            (CompilerInternal
-            (FnReadParam (constrain Identity) (dims ()) (mem_pattern AoS)))
+            (FnReadParam (constrain Identity) (dims ()) (mem_pattern SoA)))
            ()))
          (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
    ((pattern
      (Block
       (((pattern
-         (TargetPE
-          ((pattern
-            (FunApp (UserDefined f_lpdf (FnLpdf false))
-             (((pattern (Var mu))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Lit Real 1.0))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
-           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_f_lpdf_return_sym9__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Assignment ((LVariable inline_f_lpdf_return_sym9__) ()) UReal
+              ((pattern
+                (FunApp (StanLib normal_lpdf (FnLpdf false) SoA)
+                 (((pattern (Var mu))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                  ((pattern (Lit Real 1.0))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern
+                    (Promotion
+                     ((pattern (Lit Int 1))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                     UReal DataOnly))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
         (meta <opaque>))
        ((pattern
          (TargetPE
-          ((pattern
-            (FunApp (UserDefined g_lpdf (FnLpdf false))
-             (((pattern (Var mu))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+          ((pattern (Var inline_f_lpdf_return_sym9__))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>))
        ((pattern
-         (TargetPE
-          ((pattern
-            (FunApp (UserDefined f_lpdf (FnLpdf true))
-             (((pattern (Var mu))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Lit Real 2.0))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
-           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_g_lpdf_return_sym11__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Decl (decl_adtype AutoDiffable)
+              (decl_id inline_g_lpdf_inline_f_lpdf_return_sym5___sym12__)
+              (decl_type (Sized SReal)) (initialize Uninit)))
+            (meta <opaque>))
+           ((pattern
+             (Block
+              (((pattern
+                 (Assignment
+                  ((LVariable inline_g_lpdf_inline_f_lpdf_return_sym5___sym12__) ())
+                  UReal
+                  ((pattern
+                    (FunApp (StanLib normal_lpdf (FnLpdf false) SoA)
+                     (((pattern (Var mu))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                      ((pattern (Lit Real 0.5))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                      ((pattern
+                        (Promotion
+                         ((pattern (Lit Int 1))
+                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                         UReal DataOnly))
+                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+                (meta <opaque>)))))
+            (meta <opaque>))
+           ((pattern
+             (Assignment ((LVariable inline_g_lpdf_return_sym11__) ()) UReal
+              ((pattern (Var inline_g_lpdf_inline_f_lpdf_return_sym5___sym12__))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
         (meta <opaque>))
        ((pattern
          (TargetPE
-          ((pattern
-            (FunApp (UserDefined f_lpdf (FnLpdf true))
-             (((pattern (Var mu))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-              ((pattern (Lit Real 3.0))
-               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+          ((pattern (Var inline_g_lpdf_return_sym11__))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+        (meta <opaque>))
+       ((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_f_lpdf_return_sym14__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Assignment ((LVariable inline_f_lpdf_return_sym14__) ()) UReal
+              ((pattern
+                (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
+                 (((pattern (Var mu))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                  ((pattern (Lit Real 2.0))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern
+                    (Promotion
+                     ((pattern (Lit Int 1))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                     UReal DataOnly))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern (Var inline_f_lpdf_return_sym14__))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+        (meta <opaque>))
+       ((pattern
+         (Decl (decl_adtype AutoDiffable) (decl_id inline_f_lpdf_return_sym16__)
+          (decl_type (Sized SReal)) (initialize Uninit)))
+        (meta <opaque>))
+       ((pattern
+         (Block
+          (((pattern
+             (Assignment ((LVariable inline_f_lpdf_return_sym16__) ()) UReal
+              ((pattern
+                (FunApp (StanLib normal_lpdf (FnLpdf true) SoA)
+                 (((pattern (Var mu))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                  ((pattern (Lit Real 3.0))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+                  ((pattern
+                    (Promotion
+                     ((pattern (Lit Int 1))
+                      (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                     UReal DataOnly))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly)))))))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+            (meta <opaque>)))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern (Var inline_f_lpdf_return_sym16__))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>)))))
     (meta <opaque>))))
@@ -192,7 +370,7 @@
  (transform_inits
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal
@@ -219,7 +397,7 @@
  (unconstrain_array
   (((pattern
      (Decl (decl_adtype AutoDiffable) (decl_id mu) (decl_type (Sized SReal))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable mu) ()) UReal

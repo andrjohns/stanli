@@ -3,7 +3,11 @@
 
 #include "stdout_capture.hpp"
 
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -41,6 +45,21 @@ void eq(const std::string& what, double got, double want) {
   if (got != want) {
     ++failures;
     std::printf("FAIL %-34s got %.17g want %.17g\n", what.c_str(), got, want);
+  }
+}
+
+int64_t ulp_key(double d) {
+  int64_t i;
+  std::memcpy(&i, &d, sizeof(i));
+  return i < 0 ? std::numeric_limits<int64_t>::min() - i : i;
+}
+// Project parity budget: up to 2 ULP vs references is acceptable.
+void eq_ulp(const std::string& what, double got, double want) {
+  const int64_t d = std::llabs(ulp_key(got) - ulp_key(want));
+  if (d > 2) {
+    ++failures;
+    std::printf("FAIL %-34s got %.17g want %.17g (%lld ulp)\n", what.c_str(),
+                got, want, (long long)d);
   }
 }
 
@@ -202,20 +221,39 @@ void test_effectful_data_udf() {
   eq("effectful data UDF grad", grad[0], 1.0);
 }
 
-void test_effectful_int_udf_is_not_observed() {
+void effectful_int_udf(const std::string& fixture, const std::string& what) {
   stanli::DataMap data;
   data.set_int_array("x_i", {1});
-  bool refused = false;
-  stanli_test::StdoutCapture captured;
-  try {
-    (void)stanli::compile_model(
-        slurp("tests/fixtures/viewc_effectful_int_udf.tmir.sexp"), data);
-  } catch (const std::exception&) {
-    refused = true;
+  std::optional<stanli::CompiledModel> model;
+  {
+    stanli_test::StdoutCapture captured;
+    model = stanli::compile_model(slurp(fixture), data);
+    check(captured.finish().empty(),
+          what + " is not evaluated while compiling");
   }
-  check(captured.finish().empty(),
-        "effectful int UDF is not evaluated while compiling");
-  check(refused, "effectful compile-time int demand refuses");
+  stanli::Executor ex(std::move(model->graph));
+  model->bind(ex);
+  ex.params_data()[0] = 0.25;
+  double grad[1] = {};
+  for (int i = 0; i < 2; ++i) {
+    stanli_test::StdoutCapture captured;
+    eq_ulp(what + " lp " + std::to_string(i), ex.gradient(grad),
+           -std::log1p(std::exp(-0.25)));
+    check(captured.finish() == "int effect\n",
+          what + " prints once per evaluation " + std::to_string(i));
+  }
+  eq_ulp(what + " grad", grad[0], 1.0 / (1.0 + std::exp(0.25)));
+}
+
+// O1 inlines the direct call, so the effect arrives as a print statement;
+// routing it through a second UDF keeps it a UserDefined call that lowering
+// meets as a compile-time int demand. Neither may run the effect while
+// compiling.
+void test_effectful_int_udf_is_not_observed() {
+  effectful_int_udf("tests/fixtures/viewc_effectful_int_udf.tmir.sexp",
+                    "inlined effectful int UDF");
+  effectful_int_udf("tests/fixtures/viewc_effectful_int_udf_nested.tmir.sexp",
+                    "uninlined effectful int UDF");
 }
 
 void test_local_array_matrix_observation() {

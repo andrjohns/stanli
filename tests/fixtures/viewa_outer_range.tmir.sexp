@@ -28,7 +28,7 @@
             (SArray SReal
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable picked) ()) (UArray UReal)
@@ -46,42 +46,26 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
+            (FunApp (StanLib fma FnPlain AoS)
              (((pattern
-                (FunApp (StanLib Plus__ FnPlain AoS)
-                 (((pattern
-                    (Indexed
-                     ((pattern (Var picked))
-                      (meta
-                       ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
-                     ((Single
-                       ((pattern (Lit Int 1))
-                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-                  ((pattern
-                    (FunApp (StanLib Times__ FnPlain AoS)
-                     (((pattern
-                        (Promotion
-                         ((pattern (Lit Int 10))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                         UReal DataOnly))
-                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
-                      ((pattern
-                        (Indexed
-                         ((pattern (Var picked))
-                          (meta
-                           ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
-                         ((Single
-                           ((pattern (Lit Int 2))
-                            (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                (Promotion
+                 ((pattern (Lit Int 100))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                 UReal DataOnly))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+              ((pattern
+                (Indexed
+                 ((pattern (Var picked))
+                  (meta ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
+                 ((Single
+                   ((pattern (Lit Int 3))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
-                (FunApp (StanLib Times__ FnPlain AoS)
+                (FunApp (StanLib fma FnPlain AoS)
                  (((pattern
                     (Promotion
-                     ((pattern (Lit Int 100))
+                     ((pattern (Lit Int 10))
                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                      UReal DataOnly))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
@@ -91,7 +75,16 @@
                       (meta
                        ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
                      ((Single
-                       ((pattern (Lit Int 3))
+                       ((pattern (Lit Int 2))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                  ((pattern
+                    (Indexed
+                     ((pattern (Var picked))
+                      (meta
+                       ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
+                     ((Single
+                       ((pattern (Lit Int 1))
                         (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
@@ -114,7 +107,7 @@
              (dims
               (((pattern (Lit Int 5))
                 (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))
-             (mem_pattern AoS)))
+             (mem_pattern SoA)))
            ()))
          (meta ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))))))
     (meta <opaque>))
@@ -127,7 +120,7 @@
             (SArray SReal
              ((pattern (Lit Int 3))
               (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-          (initialize Default)))
+          (initialize Uninit)))
         (meta <opaque>))
        ((pattern
          (Assignment ((LVariable picked) ()) (UArray UReal)
@@ -145,42 +138,26 @@
        ((pattern
          (TargetPE
           ((pattern
-            (FunApp (StanLib Plus__ FnPlain AoS)
+            (FunApp (StanLib fma FnPlain SoA)
              (((pattern
-                (FunApp (StanLib Plus__ FnPlain AoS)
-                 (((pattern
-                    (Indexed
-                     ((pattern (Var picked))
-                      (meta
-                       ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
-                     ((Single
-                       ((pattern (Lit Int 1))
-                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
-                  ((pattern
-                    (FunApp (StanLib Times__ FnPlain AoS)
-                     (((pattern
-                        (Promotion
-                         ((pattern (Lit Int 10))
-                          (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
-                         UReal DataOnly))
-                       (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
-                      ((pattern
-                        (Indexed
-                         ((pattern (Var picked))
-                          (meta
-                           ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
-                         ((Single
-                           ((pattern (Lit Int 2))
-                            (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
-                       (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
-                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
+                (Promotion
+                 ((pattern (Lit Int 100))
+                  (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
+                 UReal DataOnly))
+               (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
+              ((pattern
+                (Indexed
+                 ((pattern (Var picked))
+                  (meta ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
+                 ((Single
+                   ((pattern (Lit Int 3))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
               ((pattern
-                (FunApp (StanLib Times__ FnPlain AoS)
+                (FunApp (StanLib fma FnPlain SoA)
                  (((pattern
                     (Promotion
-                     ((pattern (Lit Int 100))
+                     ((pattern (Lit Int 10))
                       (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))
                      UReal DataOnly))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel DataOnly))))
@@ -190,7 +167,16 @@
                       (meta
                        ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
                      ((Single
-                       ((pattern (Lit Int 3))
+                       ((pattern (Lit Int 2))
+                        (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
+                   (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))
+                  ((pattern
+                    (Indexed
+                     ((pattern (Var picked))
+                      (meta
+                       ((type_ (UArray UReal)) (loc <opaque>) (adlevel AutoDiffable))))
+                     ((Single
+                       ((pattern (Lit Int 1))
                         (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
                    (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
                (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable)))))))
@@ -282,7 +268,7 @@
        (Sized
         (SArray SReal
          ((pattern (Lit Int 5)) (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))))
-      (initialize Default)))
+      (initialize Uninit)))
     (meta <opaque>))
    ((pattern
      (Assignment ((LVariable a) ()) (UArray UReal)
