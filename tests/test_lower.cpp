@@ -4088,8 +4088,9 @@ int main() {
 
   // Two dimension-preserving selectors on a matrix form their Cartesian
   // submatrix. Different reordered Multi lists pin column-major gather order;
-  // the Between/Between expression covers matrix ranges. Both route each
-  // selected cell's adjoint back to the source matrix.
+  // the Between/Between expression covers matrix ranges, and Multi/Single
+  // covers a gathered row set from one column. All route each selected
+  // cell's adjoint back to the source matrix.
   {
     DataMap d;
     d.set_int_array("row_indices", {3, 1});
@@ -4102,11 +4103,12 @@ int main() {
     for (int i = 0; i < 9; ++i) gex.params_data()[i] = q[i];
     double gradient[9] = {};
     const double lp = gex.gradient(gradient);
-    const double want =
-        2.0 * (q[5] + q[3] + q[8] + q[6]) + 2.0 * (q[3] + q[4] + q[6] + q[7]);
+    const double want = 2.0 * (q[5] + q[3] + q[8] + q[6]) +
+                        2.0 * (q[3] + q[4] + q[6] + q[7]) + 2.0 * (q[2] + q[0]);
     expect_eq("matrix selectors: lp", lp, want);
     for (int i = 0; i < 9; ++i) {
-      const bool selected_once = i == 4 || i == 5 || i == 7 || i == 8;
+      const bool selected_once =
+          i == 0 || i == 2 || i == 4 || i == 5 || i == 7 || i == 8;
       const bool selected_twice = i == 3 || i == 6;
       expect_eq("matrix selectors: g" + std::to_string(i), gradient[i],
                 selected_twice ? 4.0 : (selected_once ? 2.0 : 0.0));

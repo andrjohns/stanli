@@ -12,4 +12,5 @@ model {
   matrix[3, 3] computed = 2.0 * m;
   target += sum(computed[row_indices, column_indices]);
   target += sum(computed[1:2, 2:3]);
+  target += sum(computed[row_indices, 1]);
 }
