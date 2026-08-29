@@ -68,7 +68,7 @@ repeatedly below.
 ```
 model.stan + data.json
   |  stanc3 parse/typecheck/Stan-Math transform (upstream OCaml)
-  v  stanli-owned O1 + vectorize_loops policy (typed OCaml)
+  v  stanli-owned budgeted O1 + vectorize_loops policy (typed OCaml)
 compiler/ocaml/stanli_pipeline.ml + portable_mir.ml
   |  canonical compact portable MIR v2
   v
@@ -95,7 +95,13 @@ Step by step:
    compiler parses and typechecks with the same code CmdStan uses.
    [`stanli_pipeline.ml`](../compiler/ocaml/stanli_pipeline.ml) owns stanli's
    optimization policy: upstream O1 plus the separately selected upstream
-   `vectorize_loops` pass. It passes the resulting typed MIR value to
+   `vectorize_loops` pass. Before O1's dataflow passes, it isolates function
+   inlining and measures the maximum statement-depth cost of any procedure.
+   A cost over 20,000 uses the untouched transformed O0 MIR and emits a
+   diagnostic; `STANLI_NO_O1_FALLBACK=1` restores unconditional O1 for an A/B
+   compiler run. This avoids known pathological O1 behavior without a timeout,
+   compiler-thread cancellation, or partial-output recovery. It passes the
+   selected typed MIR value to
    [`portable_mir.ml`](../compiler/ocaml/portable_mir.ml), which encodes the
    runtime's consumed slice. [`compiler/native/`](../compiler/native/) is the
    callback linked into native libraries; [`compiler/js/`](../compiler/js/)

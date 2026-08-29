@@ -6,6 +6,10 @@
 let compile_tmir (code : string) : string =
   let compilation =
     Stanli_pipeline.compile_portable ~model_name:"embedded_model" code in
+  List.iter
+    (fun diagnostic ->
+      prerr_endline (Stanli_pipeline.diagnostic_message diagnostic))
+    compilation.diagnostics;
   match compilation.result with
   | Error (Stanli_pipeline.Internal_error message) -> "ERR" ^ message
   | Error (Stanli_pipeline.Frontend_error error) ->

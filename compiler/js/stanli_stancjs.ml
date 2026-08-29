@@ -54,7 +54,9 @@ let compile_portable name code includes : stancReturn Js.t =
         @ List.map compilation.warnings ~f:(fun warning ->
               str_color ~color_output "%a"
                 (Warnings.pp ?printed_filename:driver_flags.filename_in_msg)
-                warning) in
+                warning)
+        @ List.map compilation.diagnostics
+            ~f:Stanli_pipeline.diagnostic_message in
       (match compilation.result with
       | Ok encoded ->
           wrap_result ?printed_filename:driver_flags.filename_in_msg ~code

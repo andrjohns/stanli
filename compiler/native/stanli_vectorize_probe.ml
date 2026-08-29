@@ -63,7 +63,8 @@ let () =
     Stanli_pipeline.compile_mir_with_passes
       ~passes:
         { vectorize_loops= vectorize
-        ; distribute_same_lane_density_loops= distribute }
+        ; distribute_same_lane_density_loops= distribute
+        ; max_o1_statement_depth_cost= None }
       ~model_name:"embedded_model" code
       ~include_source:
         (Frontend.Include_files.FileSystemPaths [Filename.dirname model]) in
