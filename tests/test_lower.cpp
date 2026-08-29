@@ -615,6 +615,23 @@ int main() {
     expect_eq("while grad", grad, -0.1 + sum);
   }
 
+  // An integer local can be assigned a comparison of data-only real locals.
+  // This takes lowering's integer evaluator because the surrounding ternary
+  // also controls compile-time state.
+  {
+    const DataMap d =
+        DataMap::from_json(slurp("tests/fixtures/int_real_compare.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/int_real_compare.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.1;
+    double grad = 0;
+    const double lp = lex.gradient(&grad);
+    expect_eq("int real compare lp", lp, -0.5 * 0.1 * 0.1 + 0.1);
+    expect_eq("int real compare grad", grad, -0.1 + 1.0);
+  }
+
   // x[idx] = rhs with a repeated index: the last write to a position wins,
   // so a scatter must be ordered element writes, not one fused store.
   {

@@ -740,6 +740,31 @@ struct Lowering {
           return eval_int(e.args[0]) - eval_int(e.args[1]);
         if (e.name == "Times__")
           return eval_int(e.args[0]) * eval_int(e.args[1]);
+        if ((e.name == "Equals__" || e.name == "NEquals__" ||
+             e.name == "Greater__" || e.name == "Geq__" || e.name == "Less__" ||
+             e.name == "Leq__") &&
+            e.args.size() == 2) {
+          const auto scalar = [&](const mir::Expr& arg) -> double {
+            if (arg.type_ == "UInt") return (double)eval_int(arg);
+            if (auto evaluated = try_eval_pure(arg)) {
+              if (evaluated->r.size() == 1) return evaluated->r[0];
+            }
+            if (arg.kind == mir::Expr::Var) {
+              const auto it = scope.find(arg.name);
+              if (it != scope.end())
+                if (const DataMap::Entry* en = observation(it->second))
+                  if (en->r.size() == 1) return en->r[0];
+            }
+            fail("comparison operand is not known data", arg.raw);
+          };
+          const double lhs = scalar(e.args[0]), rhs = scalar(e.args[1]);
+          if (e.name == "Equals__") return lhs == rhs;
+          if (e.name == "NEquals__") return lhs != rhs;
+          if (e.name == "Greater__") return lhs > rhs;
+          if (e.name == "Geq__") return lhs >= rhs;
+          if (e.name == "Less__") return lhs < rhs;
+          return lhs <= rhs;
+        }
         // Shape queries on slot-bound values (e.g. rows(v) on an inlined
         // UDF's vector argument) answer from binding-owned metadata before
         // the interpreter, which cannot recover vector orientation.
