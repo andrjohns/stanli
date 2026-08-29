@@ -55,6 +55,7 @@ __pycache__/
 *.py[cod]
 tests/fixtures/*_model.so
 tests/fixtures/*.hpp
+tests/fixtures/*.o
 conformance-cache/
 
 # harnesses/model_census.py run artifacts: the invented data and CmdStan

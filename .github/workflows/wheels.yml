@@ -621,10 +621,96 @@ jobs:
       # it looks for are in stanli's semantics, which do not vary by
       # platform; the numeric agreement that does vary is already covered
       # per-platform by the corpus oracle.
-      - name: Conformance against reference BridgeStan
+      #
+      # bridgestan is intentionally unpinned here (see below), so the two
+      # cache steps that follow key on the RESOLVED version captured by
+      # this step's output, never on a version string written in this
+      # file -- a hardcoded key would silently keep serving a stale cache
+      # after PyPI resolves a new bridgestan release.
+      - name: Install reference BridgeStan
+        id: bs-pkg
         if: matrix.plat == 'manylinux_2_28_x86_64'
         run: |
           /tmp/wheeltest/bin/pip install bridgestan
+          version=$(/tmp/wheeltest/bin/python \
+            -c 'import bridgestan; print(bridgestan.__version__)')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # bridgestan.download.get_bridgestan_src() always unpacks to
+      # ~/.bridgestan/bridgestan-<version> -- it ignores $BRIDGESTAN,
+      # which only steers where the *compiler* looks, not the download --
+      # so that is what gets cached. The directory holds the vendored
+      # stan-math source tree and, after the first model compile below,
+      # BridgeStan's own bridge objects and its built TBB/sundials
+      # libraries: infrastructure shared by all four models and rebuilt
+      # from scratch every run today. Keyed on the resolved version only
+      # -- this is BridgeStan's OWN vendored stan-math (a released
+      # tarball, pinned by BridgeStan, not by this repo), so it must never
+      # key on deps/math: the two stan-maths are unrelated checkouts, and
+      # a deps/math bump here would just evict a cache entry that was
+      # never invalidated in the first place.
+      - name: Restore BridgeStan sources and shared build objects
+        if: matrix.plat == 'manylinux_2_28_x86_64'
+        uses: actions/cache@v4
+        with:
+          path: ~/.bridgestan
+          key: >-
+            bridgestan-src-${{ runner.os }}-${{ steps.bs-pkg.outputs.version }}
+
+      # The per-model outputs of BridgeStan's own Makefile: the stanc-
+      # generated .hpp, the compiled .o, and the linked _model.so, all
+      # written next to the .stan file (see
+      # bridgestan.compile.generate_so_name). All three are gitignored
+      # (tests/fixtures/*.hpp, *.o, *_model.so) and all three need to
+      # land together, or `make` finds a prerequisite missing and rebuilds
+      # it -- and whatever depends on it -- right along with it. Keyed on
+      # the four fixtures' own contents plus the resolved version and
+      # platform; deps/math never enters this compile either, for the
+      # same reason as the cache above.
+      - name: Restore compiled BridgeStan conformance models
+        id: bs-models
+        if: matrix.plat == 'manylinux_2_28_x86_64'
+        uses: actions/cache@v4
+        with:
+          path: |
+            tests/fixtures/es.hpp
+            tests/fixtures/es.o
+            tests/fixtures/es_model.so
+            tests/fixtures/simp.hpp
+            tests/fixtures/simp.o
+            tests/fixtures/simp_model.so
+            tests/fixtures/newtrans.hpp
+            tests/fixtures/newtrans.o
+            tests/fixtures/newtrans_model.so
+            tests/fixtures/conj.hpp
+            tests/fixtures/conj.o
+            tests/fixtures/conj_model.so
+          key: >-
+            bridgestan-models-${{ matrix.plat }}-${{ steps.bs-pkg.outputs.version }}-${{ hashFiles('tests/fixtures/es.stan', 'tests/fixtures/simp.stan', 'tests/fixtures/newtrans.stan', 'tests/fixtures/conj.stan') }}
+
+      # actions/cache extracts with the mtimes the archive was saved with,
+      # not the extraction time -- so a restored .hpp/.o/.so trio carries
+      # LAST run's timestamps, while checkout just gave the .stan files
+      # THIS run's. Left alone, make sees the source as newer than
+      # everything downstream of it and rebuilds the whole per-model
+      # chain anyway: a cache that "hits" in the log and saves nothing,
+      # which is exactly the failure mode that looks identical to success
+      # on a single run. Touch the restored trio forward, oldest
+      # dependency first, only on an exact hit -- a bare touch on a miss
+      # would create empty files in place of the real build inputs.
+      - name: Advance restored model timestamps past their sources
+        if: matrix.plat == 'manylinux_2_28_x86_64' && steps.bs-models.outputs.cache-hit == 'true'
+        run: |
+          touch tests/fixtures/es.hpp tests/fixtures/simp.hpp \
+            tests/fixtures/newtrans.hpp tests/fixtures/conj.hpp
+          touch tests/fixtures/es.o tests/fixtures/simp.o \
+            tests/fixtures/newtrans.o tests/fixtures/conj.o
+          touch tests/fixtures/es_model.so tests/fixtures/simp_model.so \
+            tests/fixtures/newtrans_model.so tests/fixtures/conj_model.so
+
+      - name: Conformance against reference BridgeStan
+        if: matrix.plat == 'manylinux_2_28_x86_64'
+        run: |
           # bridgestan downloads its own C++ sources from github the first
           # time a model is compiled, inside the first conformance run. A
           # 503 from that download surfaces as a conformance failure, which
@@ -634,10 +720,23 @@ jobs:
           # real outage says so in its own words. bridgestan retries the
           # download itself, but only a URLError: it calls every HTTPError
           # unrecoverable, and a 503 is an HTTPError.
+          #
+          # get_bridgestan_src() re-downloads and re-extracts unconditionally
+          # -- it has no idea the cache step above may have just restored
+          # the exact same tree -- so verify what it would unpack first,
+          # the same way bridgestan's own compile_model() does, and only
+          # call it when that verification fails. The retry loop still
+          # wraps the real download: a cache miss (a bridgestan release, a
+          # first run, a cold cache scope) still takes that path.
           for try in 1 2 3 4 5; do
-            /tmp/wheeltest/bin/python \
-              -c 'import bridgestan.download as d; d.get_bridgestan_src()' &&
-              break
+            /tmp/wheeltest/bin/python <<'PY' && break
+          import bridgestan.compile as c
+          import bridgestan.download as d
+          try:
+              c.verify_bridgestan_path(str(d.CURRENT_BRIDGESTAN))
+          except ValueError:
+              d.get_bridgestan_src()
+          PY
             echo "bridgestan source download failed (attempt $try of 5)"
             [ "$try" = 5 ] && exit 1
             sleep $((try * 20))
