@@ -12,6 +12,10 @@ let () =
     (fun warning ->
       Fmt.epr "%a@." (Frontend.Warnings.pp ?printed_filename:None) warning)
     compilation.warnings;
+  List.iter
+    (fun diagnostic ->
+      prerr_endline (Stanli_pipeline.diagnostic_message diagnostic))
+    compilation.diagnostics;
   match compilation.result with
   | Ok encoded -> print_string encoded
   | Error (Stanli_pipeline.Internal_error message) ->

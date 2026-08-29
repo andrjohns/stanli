@@ -11,6 +11,14 @@ let compile ?(passes = Stanli_pipeline.default_pass_selection) code =
 let passes vectorize_loops =
   {Stanli_pipeline.default_pass_selection with vectorize_loops}
 
+let budget max_statement_depth_cost =
+  { Stanli_pipeline.default_pass_selection with
+    max_o1_statement_depth_cost= Some max_statement_depth_cost }
+
+let no_budget =
+  { Stanli_pipeline.default_pass_selection with
+    max_o1_statement_depth_cost= None }
+
 let compile_portable code =
   match
     Stanli_pipeline.compile_portable ~model_name:"pass_selection_test" code
@@ -39,6 +47,10 @@ let compile_upstream_o0 code =
   | Error _ -> failwith "Stan source did not compile"
 
 let encode mir = Portable_mir.encode mir
+
+let compile_result ~passes code =
+  Stanli_pipeline.compile_mir_with_passes ~passes
+    ~model_name:"pass_selection_test" code
 
 let rec count_for_stmt (stmt : Stmt.Located.t) =
   let current = match stmt.pattern with Stmt.Pattern.For _ -> 1 | _ -> 0 in
@@ -290,6 +302,53 @@ let () =
         (String.equal production_bytes pass_on_bytes)
         ("production output differs from O1 plus vectorize_loops for " ^ name))
     o1_equivalence_models;
+
+  (* The structural guard is decided after isolated inlining but before any
+     dataflow optimization.  A deliberately tiny budget makes this ordinary
+     model exercise the fallback without putting a pathological compiler case
+     in the unit suite. *)
+  let fallback = compile_result ~passes:(budget 0) matching_loop in
+  let fallback_mir =
+    match fallback.result with
+    | Ok mir -> mir
+    | Error _ -> failwith "budgeted fallback model did not compile" in
+  require
+    (String.equal (encode fallback_mir)
+       (encode (compile_upstream_o0 matching_loop)))
+    "budgeted fallback did not return untouched transformed O0 MIR";
+  require
+    (match fallback.diagnostics with
+    | [Stanli_pipeline.O1_budget_exceeded {cost; budget= 0; _}] -> cost > 0
+    | _ -> false)
+    "budgeted fallback did not report its structural cost and budget";
+
+  let guarded_o1 =
+    compile_result ~passes:(budget Stdlib.max_int) matching_loop in
+  let unguarded_o1 = compile_result ~passes:no_budget matching_loop in
+  let require_o1 result label =
+    match result.Stanli_pipeline.result with
+    | Ok mir ->
+        require
+          (String.equal (encode mir)
+             (encode (compile ~passes:(passes true) matching_loop)))
+          (label ^ " changed ordinary O1 output");
+        require
+          (List.is_empty result.diagnostics)
+          (label ^ " emitted a fallback diagnostic")
+    | Error _ -> failwith (label ^ " did not compile") in
+  require_o1 guarded_o1 "feature-on under-budget path";
+  require_o1 unguarded_o1 "feature-off path";
+
+  let malformed =
+    compile_result ~passes:(budget 0) "parameters { real x } model { }" in
+  require
+    (match malformed.result with
+    | Error (Stanli_pipeline.Frontend_error _) -> true
+    | _ -> false)
+    "the O1 fallback accepted malformed Stan source";
+  require
+    (List.is_empty malformed.diagnostics)
+    "malformed Stan source was mislabeled as an O1 fallback";
 
   let off = compile ~passes:(passes false) matching_loop in
   let on = compile ~passes:(passes true) matching_loop in

@@ -2,17 +2,29 @@ type error =
   | Frontend_error of Frontend.Errors.t
   | Internal_error of string
 
+type diagnostic =
+  | O1_budget_exceeded of
+      { cost: int
+      ; budget: int
+      ; statements: int
+      ; max_control_depth: int }
+
+val diagnostic_message : diagnostic -> string
+
 type 'a compilation =
   { result: ('a, error) result
-  ; warnings: Frontend.Warnings.t list }
+  ; warnings: Frontend.Warnings.t list
+  ; diagnostics: diagnostic list }
 
 (** Source-level MIR passes that stanli may add to upstream's O1 policy. *)
 type pass_selection =
   { vectorize_loops: bool
-  ; distribute_same_lane_density_loops: bool }
+  ; distribute_same_lane_density_loops: bool
+  ; max_o1_statement_depth_cost: int option }
 
 val default_pass_selection : pass_selection
-(** The shipping selection: upstream O1 plus loop vectorization. *)
+(** The shipping selection: upstream O1 plus loop vectorization, guarded by a
+    deterministic pre-dataflow structural budget. *)
 
 val compile_mir :
      ?include_source:Frontend.Include_files.t
