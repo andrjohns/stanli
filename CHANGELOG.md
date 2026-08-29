@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### More matrix selections and compile-time locals lower
+
+Two-axis matrix selections now accept any combination of `:`, single indices,
+ranges, and integer arrays, so `M[1:2, 2:3]`, `M[idx, 1]`, and `M[1, idx]`
+lower with the shapes CmdStan gives them. Lowering also folds `ceil()` and
+scalar comparisons of data-only reals, keeps compile-time values across
+self-referential assignments such as `position += step`, and retains the
+bindings of containers filled through indexed assignment, which together let
+data-only `while` loops and gathers by locally built index arrays compile
+(#247).
+
 ## 0.9.6
 
 ### Sampling reports progress and problems
