@@ -3617,6 +3617,99 @@ int main() {
     }
   }
 
+  // tests/fixtures/infbounds.stan: infinite bounds on the declarations
+  // themselves. An infinite bound is no bound -- the element is the
+  // identity and adds no jacobian term -- and the kernels used to
+  // exponentiate through it, so every one of these landed on inf and lp
+  // came out -inf. The vector bounds mix infinite and finite entries, so
+  // the elements that do transform are checked in the same pass.
+  {
+    CompiledModel im =
+        compile_model(slurp("tests/fixtures/infbounds.tmir.sexp"), DataMap());
+    Executor iex(std::move(im.graph));
+    im.bind(iex);
+    // Declaration order: a[4], b[4], c[4], d, e.
+    check(iex.n_params() == 14, "infbounds unconstrained size is 14");
+    const double pts[2][14] = {{0.4, -0.7, 1.25, -0.2, 0.9, -1.1, 0.35, 2.0,
+                                -0.45, 0.6, 1.8, -1.6, 0.7, -0.9},
+                               {-0.3, 0.9, -0.45, 1.4, 0.15, 0.5, -2.1, 0.8,
+                                1.05, -0.75, 0.25, 1.9, -0.55, 0.3}};
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 14; ++i) iex.params_data()[i] = pts[c][i];
+      double grad[14] = {0};
+      const double lp = iex.gradient(grad);
+
+      using stan::math::var;
+      using Vec = Eigen::Matrix<var, -1, 1>;
+      const double ninf = -std::numeric_limits<double>::infinity();
+      const double pinf = std::numeric_limits<double>::infinity();
+      Eigen::VectorXd lo(4), hi(4);
+      lo << ninf, -0.5, ninf, 0.75;
+      hi << 3.25, pinf, pinf, 4.5;
+      Vec a(4), b(4), cc(4);
+      for (int i = 0; i < 4; ++i) {
+        a(i) = pts[c][i];
+        b(i) = pts[c][4 + i];
+        cc(i) = pts[c][8 + i];
+      }
+      var d = pts[c][12], e = pts[c][13];
+      // Each `sum` is one ascending reduction over its own result, and
+      // OP_SUM_VEC accumulates the same way.
+      const auto vsum = [](const auto& v) {
+        var t = 0;
+        for (int i = 0; i < v.size(); ++i) t += v(i);
+        return t;
+      };
+      var jac = 0;
+      var acc = 0;
+      acc += vsum(stan::math::lb_constrain<true>(a, lo, jac));
+      acc += vsum(stan::math::ub_constrain<true>(b, hi, jac));
+      acc += vsum(stan::math::lub_constrain<true>(cc, lo, hi, jac));
+      acc += stan::math::lb_constrain<true>(d, ninf, jac);
+      acc += stan::math::ub_constrain<true>(e, pinf, jac);
+      acc += jac;
+      acc.grad();
+
+      check(std::isfinite(lp), "infbounds: lp is finite");
+      for (int i = 0; i < 4; ++i)
+        expect_ulp("infbounds a grad", grad[i], a(i).adj());
+      for (int i = 0; i < 4; ++i)
+        expect_ulp("infbounds b grad", grad[4 + i], b(i).adj());
+      for (int i = 0; i < 4; ++i)
+        expect_ulp("infbounds c grad", grad[8 + i], cc(i).adj());
+      expect_ulp("infbounds d grad", grad[12], d.adj());
+      expect_ulp("infbounds e grad", grad[13], e.adj());
+      const double tol = 8 * 2.220446049250313e-16 * std::abs(acc.val());
+      check(std::abs(lp - acc.val()) <= tol,
+            "infbounds: lp matches the var path");
+      stan::math::recover_memory();
+    }
+    // The identity elements have to reach write_array untransformed too:
+    // an unbounded declaration writes its unconstrained value straight out.
+    check(im.write_array && im.write_array->truncated.empty(),
+          "infbounds write_array compiled");
+    if (im.write_array && im.write_array->truncated.empty()) {
+      Executor wex(std::move(im.write_array->graph));
+      im.write_array->bind(wex);
+      for (int i = 0; i < 14; ++i) wex.params_data()[i] = pts[0][i];
+      wex.run_forward_only();
+      int found = 0;
+      for (const auto& col : im.write_array->columns) {
+        // a[1] and a[3] carry the -inf lower bound, d the shared one.
+        if (col.name == "a") {
+          ++found;
+          expect_ulp("infbounds wa a1", wex.value_ptr(col.slot)[0], pts[0][0]);
+          expect_ulp("infbounds wa a3", wex.value_ptr(col.slot)[2], pts[0][2]);
+        }
+        if (col.name == "d") {
+          ++found;
+          expect_ulp("infbounds wa d", *wex.value_ptr(col.slot), pts[0][12]);
+        }
+      }
+      check(found == 2, "infbounds write_array has a and d");
+    }
+  }
+
   // array[N] vector[K] data into a vectorized multivariate density. See
   // tests/fixtures/mnarr.stan: the data path stores this shape the way it
   // stores a matrix, and the kernel wants each element contiguous, so the
