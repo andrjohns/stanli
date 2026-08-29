@@ -1476,8 +1476,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions-cache-folder is not just a download cache: it pins WHERE emsdk
+      # lands. Without it the action installs to
+      # /home/runner/work/_temp/<random-uuid>/emsdk-main, a different uuid
+      # every run, and emcc bakes that path into the -isystem flags of every
+      # compile -- so ccache hashes a different command line each run and
+      # misses everything. Measured on this repo: the two Emscripten jobs sat
+      # at 0/84 and 2/86 hits while the AddressSanitizer job, whose clang
+      # lives at a stable /usr/bin path, hit 119/152.
+      # actions-cache-folder only chooses WHERE setup-emsdk puts its downloads;
+      # nothing persists that folder between runs on its own, so the action
+      # re-downloaded every time and logged "No cached files found at path
+      # .../emsdk-cache". This is the step that makes the input mean anything.
+      # It does NOT pin the install path -- emsdk is still unpacked under
+      # $RUNNER_TEMP/<uuid> -- which is what CCACHE_BASEDIR above is for.
+      - name: Cache the emsdk download
+        uses: actions/cache@v4
+        with:
+          path: emsdk-cache
+          key: emsdk-${{ runner.os }}-${{ runner.arch }}-6.0.6-v1
       - uses: mymindstorm/setup-emsdk@v14
         with:
+          actions-cache-folder: emsdk-cache
           version: 6.0.6
       - name: Fingerprint the Emscripten compiler
         id: toolchain
@@ -1493,14 +1513,20 @@ jobs:
           # whose -fPIC objects cannot satisfy this browser build; after every
           # main run a PR therefore restored the wrong ~500 MB cache first.
           key: >-
-            ccache-wasm-browser-emsdk6.0.6-v2-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/tbb_stub.cpp', 'deps/fetch.sh') }}
-          restore-keys: ccache-wasm-browser-emsdk6.0.6-v2-${{ steps.toolchain.outputs.id }}-
+            ccache-wasm-browser-emsdk6.0.6-v4-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/tbb_stub.cpp', 'deps/fetch.sh') }}
+          restore-keys: ccache-wasm-browser-emsdk6.0.6-v4-${{ steps.toolchain.outputs.id }}-
       - name: Fetch pinned dependencies
         run: ./deps/fetch.sh
       - name: Build stanli for WebAssembly
         run: |
           which ccache || sudo apt-get install -y ccache
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
+          # /home/runner/work, NOT $GITHUB_WORKSPACE. setup-emsdk unpacks to
+          # $RUNNER_TEMP (/home/runner/work/_temp/<uuid>/emsdk-main), which is a
+          # SIBLING of the workspace, not inside it -- so a basedir of the
+          # workspace leaves exactly the paths that vary untouched. Measured:
+          # with the workspace as basedir the hit rate stayed at 1/84.
+          export CCACHE_BASEDIR="$(dirname "$RUNNER_TEMP")"
           ccache -z
           emcmake cmake -B build-wasm -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -1542,8 +1568,28 @@ jobs:
         with:
           name: browser-compilers
           path: browser-compilers
+      # actions-cache-folder is not just a download cache: it pins WHERE emsdk
+      # lands. Without it the action installs to
+      # /home/runner/work/_temp/<random-uuid>/emsdk-main, a different uuid
+      # every run, and emcc bakes that path into the -isystem flags of every
+      # compile -- so ccache hashes a different command line each run and
+      # misses everything. Measured on this repo: the two Emscripten jobs sat
+      # at 0/84 and 2/86 hits while the AddressSanitizer job, whose clang
+      # lives at a stable /usr/bin path, hit 119/152.
+      # actions-cache-folder only chooses WHERE setup-emsdk puts its downloads;
+      # nothing persists that folder between runs on its own, so the action
+      # re-downloaded every time and logged "No cached files found at path
+      # .../emsdk-cache". This is the step that makes the input mean anything.
+      # It does NOT pin the install path -- emsdk is still unpacked under
+      # $RUNNER_TEMP/<uuid> -- which is what CCACHE_BASEDIR above is for.
+      - name: Cache the emsdk download
+        uses: actions/cache@v4
+        with:
+          path: emsdk-cache
+          key: emsdk-${{ runner.os }}-${{ runner.arch }}-4.0.8-v1
       - uses: mymindstorm/setup-emsdk@v14
         with:
+          actions-cache-folder: emsdk-cache
           version: 4.0.8
       - name: Fingerprint the Emscripten compiler
         id: toolchain
@@ -1555,14 +1601,20 @@ jobs:
         with:
           path: .ccache
           key: >-
-            ccache-wasm-webr-emsdk4.0.8-side-v2-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/tbb_stub.cpp', 'deps/fetch.sh') }}
-          restore-keys: ccache-wasm-webr-emsdk4.0.8-side-v2-${{ steps.toolchain.outputs.id }}-
+            ccache-wasm-webr-emsdk4.0.8-side-v4-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/tbb_stub.cpp', 'deps/fetch.sh') }}
+          restore-keys: ccache-wasm-webr-emsdk4.0.8-side-v4-${{ steps.toolchain.outputs.id }}-
       - name: Fetch pinned dependencies
         run: ./deps/fetch.sh
       - name: Build the side module
         run: |
           which ccache || sudo apt-get install -y ccache
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
+          # /home/runner/work, NOT $GITHUB_WORKSPACE. setup-emsdk unpacks to
+          # $RUNNER_TEMP (/home/runner/work/_temp/<uuid>/emsdk-main), which is a
+          # SIBLING of the workspace, not inside it -- so a basedir of the
+          # workspace leaves exactly the paths that vary untouched. Measured:
+          # with the workspace as basedir the hit rate stayed at 1/84.
+          export CCACHE_BASEDIR="$(dirname "$RUNNER_TEMP")"
           ccache -z
           emcmake cmake -B build-wasm-side -DCMAKE_BUILD_TYPE=Release \
             -DSTANLI_WASM_SIDE=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
