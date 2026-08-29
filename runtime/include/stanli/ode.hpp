@@ -9,6 +9,7 @@
 #include <stanli/ode_prog.hpp>
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,15 @@ struct OdeSpec {
   // The right-hand side, compiled. Falls back to the MIR interpreter when
   // `prog.ok` is false; `prog.why` says what stopped it.
   RhsProgram prog;
+  // Branchless double-forward/generated-reverse derivative payload for the
+  // direct coupled RK45/CKRK path. Null is an ordinary structural refusal;
+  // `prog` remains the exact nested-autodiff oracle and fallback.
+  std::shared_ptr<const IslandProg> direct_rk;
+  std::string direct_rk_why;
+  // Selection is fixed at lowering so the repeated kernel does no environment
+  // lookup. STANLI_NO_ODE_DIRECT_RK leaves the payload present for a clean
+  // same-binary oracle comparison while disabling its use.
+  bool direct_rk_enabled = false;
 };
 
 }  // namespace stanli

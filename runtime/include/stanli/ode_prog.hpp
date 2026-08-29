@@ -26,10 +26,13 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace stanli {
+
+struct IslandProg;
 
 struct RhsProgram : Program {
   // Where run_rhs deposits the call arguments.
@@ -69,6 +72,14 @@ RhsProgram compile_rhs(const mir::FunDef& f,
                        int n_y, int n_theta, int n_x_r,
                        const std::vector<int>& x_i);
 
+// Build an immutable double-forward/generated-reverse derivative payload from
+// a compiled RHS. The canonical RhsProgram is copied before checkpoint saves
+// are inserted, so callers always retain it as the exact var-replay oracle.
+// Programs with runtime control flow or another unsupported derivative opcode
+// return null and keep that oracle path.
+std::shared_ptr<const IslandProg> make_rhs_adjoint_program(
+    const RhsProgram& rhs, std::string* refusal = nullptr);
+
 // Evaluate. The register file is reused between calls (one per result scalar
 // type), which keeps the register-machine body allocation-free after first
 // use; the compiler guarantees every register is written before it is read,
@@ -90,10 +101,9 @@ std::vector<T>& rhs_regs() {
 namespace detail {
 
 template <typename T, typename T_time, typename T_y, typename T_theta>
-std::vector<T>& eval_rhs_regs(const RhsProgram& p, const T_time& t,
-                              const T_y* y, const T_theta* th,
-                              size_t n_th_source, const double* xr) {
-  std::vector<T>& reg = rhs_regs<T>();
+void seed_rhs_regs(const RhsProgram& p, const T_time& t, const T_y* y,
+                   const T_theta* th, size_t n_th_source, const double* xr,
+                   std::vector<T>& reg) {
   if ((int)reg.size() < p.n_regs) reg.resize((size_t)p.n_regs);
   for (int i = 0; i < p.n_y; ++i) reg[(size_t)(p.y0 + i)] = T(y[i]);
   for (int i = 0; i < p.n_th; ++i) reg[(size_t)(p.th0 + i)] = T(th[i]);
@@ -102,6 +112,14 @@ std::vector<T>& eval_rhs_regs(const RhsProgram& p, const T_time& t,
   }
   reg[(size_t)p.t_reg] = T(t);
   for (int i = 0; i < p.n_xr; ++i) reg[(size_t)(p.xr0 + i)] = T(xr[i]);
+}
+
+template <typename T, typename T_time, typename T_y, typename T_theta>
+std::vector<T>& eval_rhs_regs(const RhsProgram& p, const T_time& t,
+                              const T_y* y, const T_theta* th,
+                              size_t n_th_source, const double* xr) {
+  std::vector<T>& reg = rhs_regs<T>();
+  seed_rhs_regs<T>(p, t, y, th, n_th_source, xr, reg);
 
   run_program(p, reg);
   return reg;

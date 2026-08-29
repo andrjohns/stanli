@@ -175,8 +175,8 @@ ones through every stage, op list and register programs included.
 | [`runtime/src/mir_decode.cpp`](../runtime/src/mir_decode.cpp), [`portable_mir_v2_reader.cpp`](../runtime/src/portable_mir_v2_reader.cpp), [`mir_reader.cpp`](../runtime/src/mir_reader.cpp) | Dispatches compact portable MIR or legacy s-expressions into one MIR representation and runs their shared finalization. |
 | [`runtime/src/inplace.cpp`](../runtime/src/inplace.cpp), [`constfold.cpp`](../runtime/src/constfold.cpp), [`reroll.cpp`](../runtime/src/reroll.cpp), [`island.cpp`](../runtime/src/island.cpp) | The graph passes, in pipeline order. |
 | [`runtime/src/executor.cpp`](../runtime/src/executor.cpp) | Runs the op list. `STANLI_PROFILE=1` prints per-opcode time accounting. |
-| [`runtime/kernels/`](../runtime/kernels/) | The kernels: [`densities.cpp`](../runtime/kernels/densities.cpp), [`elementwise.cpp`](../runtime/kernels/elementwise.cpp), [`constrain.cpp`](../runtime/kernels/constrain.cpp), and friends. [`matrix_fns.cpp`](../runtime/kernels/matrix_fns.cpp) and [`legacy_fns.cpp`](../runtime/kernels/legacy_fns.cpp) wrap stan-math functions that have no native kernel yet. |
-| [`runtime/include/stanli/mir_interp.hpp`](../runtime/include/stanli/mir_interp.hpp) | The MIR interpreter: runs MIR directly, without lowering to ops. Used where the op graph cannot go: transformed data at load time, ODE right-hand sides, interpreted `write_array`. |
+| [`runtime/kernels/`](../runtime/kernels/) | The kernels: [`densities.cpp`](../runtime/kernels/densities.cpp), [`elementwise.cpp`](../runtime/kernels/elementwise.cpp), [`constrain.cpp`](../runtime/kernels/constrain.cpp), and friends. [`ode.cpp`](../runtime/kernels/ode.cpp) owns the canonical Stan Math solves and the direct all-double coupled RK path. [`matrix_fns.cpp`](../runtime/kernels/matrix_fns.cpp) and [`legacy_fns.cpp`](../runtime/kernels/legacy_fns.cpp) wrap stan-math functions that have no native kernel yet. |
+| [`runtime/include/stanli/mir_interp.hpp`](../runtime/include/stanli/mir_interp.hpp) | The MIR interpreter: runs MIR directly, without lowering to ops. Used where the op graph cannot go: transformed data at load time, unsupported ODE right-hand-side fallbacks, interpreted `write_array`. |
 | [`runtime/src/wa_interp.cpp`](../runtime/src/wa_interp.cpp) | Interpreted per-draw generated quantities for unsupported/container-result RNGs and dynamic geometry. Fixed-shape draw-dependent branches, checked one-level runtime indexing, and Viterbi backtracking compile; all 119 compiling corpus models currently have graph-backed write arrays. |
 | [`runtime/include/stanli/program.hpp`](../runtime/include/stanli/program.hpp), [`mir_prog.hpp`](../runtime/include/stanli/mir_prog.hpp) | The register machine and its MIR front end. Its `DENSITY` instruction covers the 27 scalar continuous densities through [`program_density.hpp`](../runtime/include/stanli/program_density.hpp), one table shared with the MIR interpreter; its `CALL` instruction runs a graph kernel over a range of registers. |
 | [`runtime/src/adjoint.cpp`](../runtime/src/adjoint.cpp) | `gen_adjoint`: differentiates a register program into a second register program, so an island's backward is a second cheap pass rather than a replay under stan-math's `var`. Owns the checkpoint analysis (save a register before a later write destroys a value a derivative rule needs). `STANLI_NO_NATIVE_ADJ=1` restores the replay, which is the oracle it is tested against ([`test_adjoint.cpp`](../tests/test_adjoint.cpp)). |
@@ -339,9 +339,8 @@ runs the graph's own kernel over a range of registers. A register
 program can therefore say anything the graph can say about scalars,
 and one unsupported function no longer splits a region in half.
 
-Derivatives come in two ways. Parameter-dependent control flow and ODE
-right-hand sides use the `var` replay described above. Islands instead
-get a *generated* backward: `gen_adjoint`
+Parameter-dependent control flow uses the `var` replay described above.
+Islands instead get a *generated* backward: `gen_adjoint`
 ([`adjoint.cpp`](../runtime/src/adjoint.cpp)) reads the forward
 instruction list once, at load, and writes a second instruction list
 that computes the derivatives directly, on plain doubles, allocating
@@ -353,6 +352,39 @@ against ([`test_adjoint.cpp`](../tests/test_adjoint.cpp)). One
 exception: an island that branches on a parameter keeps the replay,
 because reversing a branch needs the if/else shape the flat
 instruction list has already thrown away.
+
+ODE right-hand sides use both mechanisms. For active sensitivities, the
+canonical path still replays the compiled RHS under stan-math's `var`, and its
+Stan Math solve remains the oracle for every solver and shape. A narrower,
+default-on RK45/CKRK path clones a branchless compiled RHS and generates a
+backward for that clone. At each solver callback
+it computes `f`, `J_y`, and `J_theta` on doubles, then advances one coupled
+state containing the primal system and the active initial-state and parameter
+sensitivity lanes. The coupled vector uses the same Boost tableau, controller,
+error norm, observation schedule, and scalar accumulation order as the pinned
+Stan Math implementation. Its observer writes values and the complete solution
+Jacobian directly into the ODE op's output and scratch; the graph backward is
+unchanged.
+
+This ODE path fails closed. Only an explicit exact-grouping opcode whitelist is
+eligible; runtime branches, `DOT`, signed-zero-sensitive `FMAX`/`FMIN`, calls,
+and any unfamiliar instruction retain the canonical solve. BDF, Adams,
+data-only solves, and malformed runtime shapes do too. The canonical program
+is not modified when the derivative clone receives checkpoint saves.
+`STANLI_NO_ODE_DIRECT_RK=1`, set before the model is loaded, selects the oracle
+without suppressing payload construction or eligibility diagnostics. Selection
+is recorded in the ODE specification at lowering, so gradient evaluation does
+not read the environment.
+
+Do not confuse this with the rejected Phase 0 callback bridge. That experiment
+wrapped generated rows in `precomputed_gradients_vari` callback results and
+failed its speed gate. The direct RK path creates no callback vars or
+precomputed-gradient nodes: generated reverse is only a local-Jacobian provider
+inside an all-double coupled solve. The bridge remains stopped. Admission was
+based on exact macOS arm64 model and synthetic results plus integrated 1.86x
+and 1.80x oracle/direct gains on Lotka--Volterra and soil. Linux x86-64 exact
+default/oracle agreement and the focused ODE tests remain a merge gate; do not
+turn an architecture disagreement into a tolerance.
 
 ## The sampler
 
