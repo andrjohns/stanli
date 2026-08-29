@@ -1505,6 +1505,9 @@ struct Lowering {
         }
         // All-Single indices with compile-time values -> element read.
         Val base = lower_expr(e.args[0]);
+        // O1 drops a full-span read's All indices, so `m[:, :]` arrives as an
+        // Indexed node with none left.
+        if (e.args.size() == 1) return base;
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
         if (in_write_array && e.args.size() == 2 &&
             e.args[1].name == "IndexSingle" &&

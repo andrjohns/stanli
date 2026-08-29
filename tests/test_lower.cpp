@@ -4223,6 +4223,29 @@ int main() {
                 2.0 * times[i]);
   }
 
+  // O1 folds a full-span read's All indices away and leaves an Indexed node
+  // with no indices, on matrices and vectors alike.
+  {
+    const DataMap d;
+    CompiledModel gm =
+        compile_model(slurp("tests/fixtures/full_span_read.tmir.sexp"), d);
+    Executor gex(std::move(gm.graph));
+    gm.bind(gex);
+    // Dyadic values, so no summation order can round differently.
+    const double q[10] = {0.5,   -0.25, 0.75, 0.125,  -0.375,
+                          0.875, 0.5,   1.0,  -0.625, 0.25};
+    for (int i = 0; i < 10; ++i) gex.params_data()[i] = q[i];
+    double gradient[10] = {};
+    const double lp = gex.gradient(gradient);
+    double want = 0;
+    for (int i = 0; i < 6; ++i) want += q[i];
+    for (int i = 6; i < 10; ++i) want += 2.0 * q[i];
+    expect_eq("full span read: lp", lp, want);
+    for (int i = 0; i < 10; ++i)
+      expect_eq("full span read: g" + std::to_string(i), gradient[i],
+                i < 6 ? 1.0 : 2.0);
+  }
+
   // O1 composes a scalar UDF index through a two-axis gather as a nested
   // Indexed node whose empty outer layer carries UReal. The selected cell is
   // row_indices[1], column_indices[2] = source (3,3).

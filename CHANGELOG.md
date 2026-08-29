@@ -9,6 +9,12 @@ bound is positive infinity now pass those elements through unchanged and add no
 Jacobian term, matching Stan Math. This also works elementwise when a vector of
 bounds mixes finite and infinite entries (#250).
 
+### Full-span reads lower
+
+`m[:, :]` and `v[:]` compile instead of failing with `unsupported index
+expression`. Upstream O1 folds a full-span read's `All` indices away and
+leaves an index-less `Indexed` node, which reached no lowering path.
+
 ### More matrix selections and compile-time locals lower
 
 Two-axis matrix selections now accept any combination of `:`, single indices,
