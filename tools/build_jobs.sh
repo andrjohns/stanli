@@ -173,9 +173,10 @@ stanli_detect_build_jobs() {
   fi
 
   memory_bytes=""
-  # Apple clang peaked at 2.75 GiB in the clean-build benchmark. Linux GCC's
-  # largest native shard has reached about 3.9 GiB, so Linux/unknown hosts get
-  # a wider safety margin. Windows CI has validated four jobs in 16 GiB.
+  # Apple clang peaked at 2.75 GiB in the clean-build benchmark. The wider
+  # Linux/unknown margin comes from the previous GCC build's 3.9 GiB peak;
+  # retain it until a Linux Clang cold build supplies a replacement number.
+  # Windows CI has validated four jobs in 16 GiB with the prior toolchain.
   bytes_per_job=6442450944
   case "$os" in
     Darwin)

@@ -34,8 +34,18 @@ jobs:
 
   inventory:
     runs-on: ubuntu-24.04
+    env:
+      # Use Clang's frontend with Ubuntu's GNU libstdc++/libgcc runtime.
+      # The conformance artifact must match the native release runtime ABI.
+      CC: clang
+      CXX: clang++
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install the Clang C/C++ compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
 
       # dev_setup.sh is in the key: the stanc pin (STANC3_SRC_SHA)
       # lives there, so advancing it rolls this cache.
@@ -70,7 +80,8 @@ jobs:
 
       - name: Build the public stanli Python runtime
         run: |
-          cmake -B build-rel -DCMAKE_BUILD_TYPE=Release
+          cmake -B build-rel -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX"
           cmake --build build-rel --target stanli_shared -j2
           mkdir -p python/stanli/_bin
           cp build-rel/libstanli.so python/stanli/_bin/

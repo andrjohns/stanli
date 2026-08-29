@@ -301,6 +301,10 @@ python3 -m http.server -d web     # then open http://localhost:8000
 
 ## Build
 
+Developer C/C++ builds require a C++17 Clang toolchain (`clang` and
+`clang++`). GCC and other GNU libraries/tools may remain installed for other
+workflows; they are not selected for the stanli C/C++ build.
+
 One-shot setup (fetches pinned deps, builds, runs tests):
 
 ```
@@ -320,14 +324,15 @@ Or manually:
 ```
 ./deps/fetch.sh
 build_jobs=$(tools/build_jobs.sh)
-cmake -B build
+cmake -B build -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 cmake --build build --parallel "$build_jobs"
 ctest --test-dir build --parallel "$build_jobs"
 ```
 
-The helper caps parallelism by both CPU count and usable RAM. It budgets 4 GiB
-per concurrent Stan Math compile on macOS/Windows and 6 GiB elsewhere; Linux
-needs the wider margin for GCC's largest shards and honors container limits.
+The helper caps parallelism by both CPU count and usable RAM. Its current
+starting-point budget is 4 GiB per concurrent Stan Math compile on macOS/Windows
+and 6 GiB elsewhere, with container limits honored; these figures should be
+remeasured for Clang as build workloads evolve.
 Override the result with `STANLI_JOBS=12 ./tools/dev_setup.sh`, or raise the
 per-job budget for a heavier toolchain with `STANLI_JOB_MEMORY_GIB` (the local
 AddressSanitizer recipe uses 12 GiB).

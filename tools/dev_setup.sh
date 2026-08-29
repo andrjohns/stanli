@@ -9,7 +9,7 @@
 #   tools/dev_setup.sh --all         everything
 #   tools/dev_setup.sh --no-build    stop before cmake (CI builds separately)
 #
-# Core needs: git, curl, cmake, a C++17 clang, python3.
+# Core needs: git, curl, cmake, C++17 clang and clang++, python3.
 # --embed and --corpus add opam (OCaml 5.5.0 switch built automatically).
 # --corpus adds: ~2 GB of checkouts under deps/ and a CmdStan build.
 # --conformance adds: opam, the pinned CmdStan/BridgeStan pair, and a venv
@@ -59,11 +59,32 @@ CONFORMANCE_VENV=${CONFORMANCE_VENV:-.venv-conformance}
 step() { printf '\n== %s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# CMake must use Clang for the stanli C/C++ build. Allow callers to select a
+# versioned or otherwise explicitly located Clang, but do not silently accept
+# GCC through CC/CXX: that would leave a misleadingly configured build tree.
+is_clang() {
+  have "$1" && "$1" --version 2>/dev/null | grep -qi clang
+}
+
+if [ -n "${CC+x}" ] && ! is_clang "$CC"; then
+  echo "CC must name a Clang compiler (for example clang or clang-18)" >&2
+  exit 1
+fi
+if [ -n "${CXX+x}" ] && ! is_clang "$CXX"; then
+  echo "CXX must name a Clang compiler (for example clang++ or clang++-18)" >&2
+  exit 1
+fi
+CLANG_C=${CC:-clang}
+CLANG_CXX=${CXX:-clang++}
+
 # --- host prerequisites ----------------------------------------------------
 step "checking prerequisites"
 missing=()
-for tool in git curl cmake python3; do have "$tool" || missing+=("$tool"); done
-if ! have clang++ && ! have g++; then missing+=("clang++ (Xcode CLT or clang)"); fi
+for tool in git curl cmake python3; do
+  have "$tool" || missing+=("$tool")
+done
+is_clang "$CLANG_C" || missing+=("$CLANG_C (Clang C compiler)")
+is_clang "$CLANG_CXX" || missing+=("$CLANG_CXX (Clang C++ compiler)")
 if [ "$WANT_EMBED" = 1 ] || [ "$WANT_CORPUS" = 1 ] ||
    [ "$WANT_CONFORMANCE" = 1 ]; then
   have opam || missing+=(opam)
@@ -83,7 +104,11 @@ if [ ${#missing[@]} -gt 0 ]; then
     exit 1
   fi
 fi
-echo "ok: git curl cmake python3 and a C++ compiler present"
+if ! is_clang "$CLANG_C" || ! is_clang "$CLANG_CXX"; then
+  echo "clang and clang++ are required for stanli C/C++ builds" >&2
+  exit 1
+fi
+echo "ok: git curl cmake python3 and Clang C/C++ compilers present"
 
 # --- vendored headers -------------------------------------------------------
 step "fetching pinned deps (Stan Math and Stan)"
@@ -143,9 +168,11 @@ if [ "$WANT_BUILD" = 1 ]; then
     echo "ignoring embedded object with absent or mismatched provenance" >&2
   fi
   cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_C_COMPILER="$CLANG_C" -DCMAKE_CXX_COMPILER="$CLANG_CXX" \
     ${EMBED_FLAGS[@]+"${EMBED_FLAGS[@]}"}
   cmake --build build --parallel "$BUILD_JOBS"
-  cmake -B build-rel -DCMAKE_BUILD_TYPE=Release
+  cmake -B build-rel -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="$CLANG_C" -DCMAKE_CXX_COMPILER="$CLANG_CXX"
   cmake --build build-rel --parallel "$BUILD_JOBS" \
     --target bench_grad stanli_run
 
