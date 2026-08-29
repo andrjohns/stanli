@@ -1,0 +1,83 @@
+# Publish the official PyPA manylinux environment with stanli's fixed build
+# packages already installed. Wheel jobs used to spend 26--37 seconds in dnf
+# on every run, in addition to the 30--41-second container initialization.
+name: manylinux build images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/manylinux/**
+      - .github/workflows/manylinux-images.yml
+  schedule:
+    # Refresh the mutable upstream image and RPMs monthly. This work is off the
+    # wheel critical path; package-list changes rebuild immediately on main.
+    - cron: '30 7 1 * *'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: manylinux-build-images
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish (${{ matrix.tag }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux/amd64
+            base: quay.io/pypa/manylinux_2_28_x86_64
+            tag: 2_28-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux/arm64
+            base: quay.io/pypa/manylinux_2_28_aarch64
+            tag: 2_28-aarch64
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Native runners avoid QEMU and preserve the architecture-specific PyPA
+      # base exactly. pull/no-cache makes a scheduled run consume a new base
+      # digest and current RPMs even though the Dockerfile did not change.
+      - name: Build and publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .github/manylinux
+          file: .github/manylinux/Dockerfile
+          build-args: MANYLINUX_IMAGE=${{ matrix.base }}
+          platforms: ${{ matrix.platform }}
+          pull: true
+          no-cache: true
+          push: true
+          tags: ghcr.io/seantalts/stanli-manylinux:${{ matrix.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/seantalts/stanli
+            org.opencontainers.image.description=PyPA manylinux_2_28 with stanli build packages
+
+      # Pull the registry copy rather than trusting BuildKit's local layers.
+      # This proves both that the job token can read the package and that the
+      # image exposes every tool the wheel job previously installed at runtime.
+      - name: Verify the published image
+        run: |
+          image=ghcr.io/seantalts/stanli-manylinux:${{ matrix.tag }}
+          docker run --rm "$image" sh -euc '
+            rpm -q unzip which diffutils patch rsync glibc-static ccache time
+            command -v ccache
+            command -v rsync
+            command -v python3
+            python3 -c "import sys; assert sys.version_info[:2] == (3, 12)"
+          '
