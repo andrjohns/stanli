@@ -607,8 +607,10 @@ int main() {
     double grad = 0;
     const double lp = lex.gradient(&grad);
     // N = 4 iterations in the integer loop, then ceil(N / 2) iterations in
-    // the real loop whose data-only update controls its next condition.
-    const double sum = 1 + 2 + 3 + 4 + 2;
+    // the real loop whose data-only update controls its next condition. The
+    // final four terms come from gathering two rows with an integer array
+    // populated by indexed assignments.
+    const double sum = 1 + 2 + 3 + 4 + 2 + 4;
     expect_eq("while lp", lp, -0.5 * 0.1 * 0.1 + sum * 0.1);
     expect_eq("while grad", grad, -0.1 + sum);
   }

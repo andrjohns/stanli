@@ -1113,6 +1113,32 @@ struct Lowering {
     }
   }
 
+  void sync_indexed_data_local(const std::string& name, const Val& v) {
+    td.env().erase(name);
+    if (!v.si.param_free) return;
+    if (const DataMap::Entry* en = observation(v)) td.env()[name] = *en;
+  }
+
+  void observe_indexed_rhs(const mir::Expr& rhs, const Val& v) {
+    if (observation(v) || !v.si.param_free) return;
+    if (auto evaluated = try_eval_pure(rhs)) {
+      observe(v, std::move(*evaluated));
+      return;
+    }
+    if (rhs.type_ != "UInt" || g.slots[v.slot].len != 1) return;
+    try {
+      const long value = eval_int(rhs);
+      DataMap::Entry en;
+      en.is_int = true;
+      en.i = {static_cast<int>(value)};
+      en.r = {static_cast<double>(value)};
+      observe(v, std::move(en));
+    } catch (const CompileError&) {
+      // Observation is an optimization. Runtime integer expressions remain
+      // graph values and deliberately do not acquire a compile-time binding.
+    }
+  }
+
   // CmdStan's var_context validates every declared dimension against the
   // supplied values before it reads one, and throws std::invalid_argument
   // naming the variable and both shapes. Without the same check the short
@@ -5222,6 +5248,7 @@ struct Lowering {
           const std::vector<int64_t>* dd =
               is_array(prev_v.si) ? &array_shape(prev_v.si).dims : nullptr;
           const Val rhs_v = lower_expr(s.rhs);
+          observe_indexed_rhs(s.rhs, rhs_v);
           const int rhs = rhs_v.slot;
           SlotInfo out_si = prev_v.si;
           // A one-index All spans the complete logical value. Keep this as
@@ -5239,7 +5266,7 @@ struct Lowering {
                                 g.slots[prev].len, out_si, {0});
             propagate_int_update(nv, prev_v, rhs_v, 0, 1);
             scope[s.lhs] = nv;
-            sync_data_local(s.lhs, s.rhs, nv);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Whole matrix row write M[i] = row_vector: one value per column,
@@ -5256,7 +5283,7 @@ struct Lowering {
                                 {(int)i, (int)prev_v.si.rows});
             propagate_int_update(nv, prev_v, rhs_v, i, prev_v.si.rows);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Between write w[a:b] = rhs (contiguous on 1-D values).
@@ -5281,7 +5308,7 @@ struct Lowering {
                                 g.slots[prev].len, out_si, {(int)start});
             propagate_int_update(nv, prev_v, rhs_v, start, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Scatter write x[idx] = rhs. The indices are data, so spell it as
@@ -5305,7 +5332,7 @@ struct Lowering {
               nv = next;
             }
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Column write M[:, j] = rhs (contiguous in col-major storage).
@@ -5321,7 +5348,7 @@ struct Lowering {
                            out_si, {(int)(j * prev_v.si.rows)});
             propagate_int_update(nv, prev_v, rhs_v, j * prev_v.si.rows, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Row-range column write M[a:b, j] = rhs (contiguous within the
@@ -5342,7 +5369,7 @@ struct Lowering {
                                 g.slots[prev].len, out_si, {(int)start});
             propagate_int_update(nv, prev_v, rhs_v, start, 1);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           // Columns outermost, as CmdStan's assign walks them: a repeated
@@ -5368,7 +5395,7 @@ struct Lowering {
                 nv = next;
               }
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           if (all_single && dd && s.lhs_idx.size() <= dd->size() &&
@@ -5395,7 +5422,7 @@ struct Lowering {
                                         {(int)a.off}));
             propagate_int_update(nv, prev_v, rhs_v, a.off, a.stride);
             scope[s.lhs] = nv;
-            td.env().erase(s.lhs);
+            sync_indexed_data_local(s.lhs, nv);
             return;
           }
           int64_t flat = 0;
@@ -5415,7 +5442,7 @@ struct Lowering {
                               out_si, {(int)flat});
           propagate_int_update(nv, prev_v, rhs_v, flat, 1);
           scope[s.lhs] = nv;
-          td.env().erase(s.lhs);
+          sync_indexed_data_local(s.lhs, nv);
           return;
         }
         {
