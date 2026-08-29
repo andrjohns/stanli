@@ -4,3 +4,6 @@ model {
   M[:, 1] = v;
   target += sum(M);
 }
+
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: column assignment size mismatch for M

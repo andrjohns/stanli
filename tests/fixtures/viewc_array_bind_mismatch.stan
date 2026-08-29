@@ -9,3 +9,6 @@ model {
   }
   target += B[1, 1];
 }
+
+// STANLI-LIT: PASS
+// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: assignment logical view mismatch for B

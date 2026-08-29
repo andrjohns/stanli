@@ -714,6 +714,40 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME test_vectorize_ab
            COMMAND ${Python3_EXECUTABLE} tests/test_vectorize_ab.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  # Source-level lit cases are one marked .stan file each. CMake discovers
+  # both the dedicated tests/lit tree and existing fixtures that opt in, then
+  # gives every case its own CTest entry. Adding coverage needs no build-system
+  # edit and no new C++ target. The core developer setup deliberately has no
+  # stanc, so these skip there, while compiler-bearing CI runs them all.
+  file(GLOB_RECURSE STANLI_LIT_CANDIDATES CONFIGURE_DEPENDS
+       "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.stan")
+  foreach(STANLI_LIT_CASE IN LISTS STANLI_LIT_CANDIDATES)
+    file(STRINGS "${STANLI_LIT_CASE}" STANLI_LIT_MARKER LIMIT_COUNT 1
+         REGEX "^// STANLI-LIT: (PASS|XFAIL)$")
+    if(STANLI_LIT_MARKER)
+      file(RELATIVE_PATH STANLI_LIT_REL
+           "${CMAKE_CURRENT_SOURCE_DIR}/tests" "${STANLI_LIT_CASE}")
+      string(REGEX REPLACE "^lit/" "" STANLI_LIT_REL "${STANLI_LIT_REL}")
+      string(REGEX REPLACE "\\.stan$" "" STANLI_LIT_NAME
+             "${STANLI_LIT_REL}")
+      string(REGEX REPLACE "[^A-Za-z0-9_]" "_" STANLI_LIT_NAME
+             "${STANLI_LIT_NAME}")
+      set(STANLI_LIT_TEST "lit_${STANLI_LIT_NAME}")
+      add_test(NAME ${STANLI_LIT_TEST}
+               COMMAND ${Python3_EXECUTABLE} tests/lit/run.py
+                       ${STANLI_LIT_CASE}
+                       $<TARGET_FILE:stanli_check>
+                       ${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc
+               WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+      set(STANLI_LIT_LABELS lit)
+      if(STANLI_LIT_MARKER MATCHES "XFAIL$")
+        list(APPEND STANLI_LIT_LABELS broken)
+      endif()
+      set_tests_properties(${STANLI_LIT_TEST} PROPERTIES
+        LABELS "${STANLI_LIT_LABELS}"
+        SKIP_RETURN_CODE 77)
+    endif()
+  endforeach()
   # The model census's coverage ratchet, over synthetic rows plus the
   # checked-in baseline. The census itself needs deps/stanc3-src, a stanc
   # and a CmdStan and so runs by hand; what runs here is the gate it grew,
