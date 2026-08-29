@@ -4254,7 +4254,7 @@ struct Lowering {
       Val a = lower_expr(e.args[0]);
       return emit_value(OP_LOGIT, {a}, g.slots[a.slot].len, a.si);
     }
-    if ((e.name == "min" || e.name == "max") && in_write_array) {
+    if (e.name == "min" || e.name == "max") {
       // Preserve the construction-time path for well-formed data-only
       // extrema, including the scalar two-argument overload.  Dynamic
       // lowering is deliberately much narrower.
@@ -4267,7 +4267,7 @@ struct Lowering {
       if ((!is_vector(a.si) && !is_row_vector(a.si)) || g.slots[a.slot].len < 0)
         fail("min/max needs one vector or row-vector argument", e.raw);
       Val result = emit_value(OP_EXTREMA_VEC, {a}, 1);
-      result.autodiff = false;
+      if (in_write_array) result.autodiff = false;
       g.ops.back().variant = kind == mir::ExtremaKind::Max ? 1u : 0u;
       return result;
     }
@@ -4275,9 +4275,9 @@ struct Lowering {
       Val a = lower_expr(e.args[0]);
       return emit_value(OP_MEAN, {a}, 1);
     }
-    if (e.name == "prod" && in_write_array) {
+    if (e.name == "prod") {
       // Preserve the pre-existing construction-time behavior for data-only
-      // products.  OP_PROD_VEC is only the dynamic write_array tranche.
+      // products. Dynamic products use OP_PROD_VEC in either graph.
       if (auto v = fold_const(e)) return *v;
       if (e.args.size() != 1 || e.type_ != "UReal" ||
           e.unsized.leaf != mir::UnsizedLeaf::Real || e.unsized.depth != 0)
@@ -4304,6 +4304,14 @@ struct Lowering {
       Val result = emit_value(OP_PROD_VEC, {a}, 1);
       g.ops.back().variant = grouping == mir::ProdGrouping::Scalar ? 1u : 0u;
       return result;
+    }
+    if (e.name == "sd" || e.name == "variance") {
+      if (e.args.size() != 1)
+        fail(e.name + ": reduction needs exactly one argument", e.raw);
+      Val a = lower_expr(e.args[0]);
+      if (g.slots[a.slot].len <= 0)
+        fail(e.name + ": input must have a positive size", e.raw);
+      return emit_value(e.name == "sd" ? OP_SD : OP_VARIANCE, {a}, 1);
     }
     if (e.name == "rep_vector" || e.name == "rep_row_vector") {
       Val a = lower_expr(e.args[0]);

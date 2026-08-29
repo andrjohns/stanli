@@ -1727,12 +1727,32 @@ class MirInterp {
     }
     if (e.name == "sd") {
       Value a = eval(e.args[0]);
+      if (a.r.empty()) fail("sd: input must have a positive size", e.raw);
+      if (a.r.size() == 1) {
+        r.r = {T(0.0)};
+        return r;
+      }
       T m = T(0.0);
       for (const T& v : a.r) m += v;
       m /= (double)a.r.size();
       T s2 = T(0.0);
       for (const T& v : a.r) s2 += (v - m) * (v - m);
       r.r = {stan::math::sqrt(s2 / (double)(a.r.size() - 1))};
+      return r;
+    }
+    if (e.name == "variance") {
+      Value a = eval(e.args[0]);
+      if (a.r.empty()) fail("variance: input must have a positive size", e.raw);
+      if (a.r.size() == 1) {
+        r.r = {T(0.0)};
+        return r;
+      }
+      T m = T(0.0);
+      for (const T& v : a.r) m += v;
+      m /= (double)a.r.size();
+      T s2 = T(0.0);
+      for (const T& v : a.r) s2 += (v - m) * (v - m);
+      r.r = {s2 / (double)(a.r.size() - 1)};
       return r;
     }
     if (e.name == "sum") {

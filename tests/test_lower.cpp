@@ -258,6 +258,48 @@ int main() {
   stanli::set_packet_math(false);
   using namespace stanli;
 
+  // Section A1's five reductions must lower in the autodiff model graph, not
+  // merely in the generated-quantities graph. A zero product and tied maximum
+  // pin the non-generic reverse cases; singleton dispersion must remain a
+  // disconnected constant just as it is in Stan Math.
+  {
+    DataMap d;
+    CompiledModel reductions =
+        compile_model(slurp("tests/fixtures/a1_reductions.tmir.sexp"), d);
+    check(count_opcode(reductions, OP_PROD_VEC) == 1,
+          "A1 product opcode census");
+    check(count_opcode(reductions, OP_EXTREMA_VEC) == 2,
+          "A1 extrema opcode census");
+    check(count_opcode(reductions, OP_SD) == 2, "A1 sd opcode census");
+    check(count_opcode(reductions, OP_VARIANCE) == 2,
+          "A1 variance opcode census");
+
+    Executor reduction_ex(std::move(reductions.graph));
+    reductions.bind(reduction_ex);
+    const double q[] = {0.25, 0.25, 0.0, 0.4};
+    std::copy(q, q + 4, reduction_ex.params_data());
+    double gradient[4];
+    const double lp = reduction_ex.gradient(gradient);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> y(3), singleton(1);
+    for (int i = 0; i < 3; ++i) y(i) = q[i];
+    singleton(0) = q[3];
+    var reference = stan::math::std_normal_lpdf<true>(y);
+    reference += stan::math::std_normal_lpdf<true>(singleton);
+    reference += stan::math::prod(y) + stan::math::min(y) + stan::math::max(y) +
+                 stan::math::sd(y) + stan::math::variance(y);
+    reference += stan::math::sd(singleton) + stan::math::variance(singleton);
+    reference.grad();
+
+    expect_ulp("A1 reductions lp", lp, reference.val());
+    for (int i = 0; i < 3; ++i)
+      expect_ulp("A1 reductions y" + std::to_string(i), gradient[i],
+                 y(i).adj());
+    expect_eq("A1 singleton gradient", gradient[3], singleton(0).adj());
+    stan::math::recover_memory();
+  }
+
   // Direct input preload must be an exact replacement for stanc's generated
   // FnReadData reconstruction.  This one fixture covers a vector, a matrix,
   // and two array-of-vector inputs; y is deliberately written with integer

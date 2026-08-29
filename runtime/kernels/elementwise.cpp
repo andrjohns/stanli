@@ -150,7 +150,9 @@ void sum_vec_bwd(KernelCtx& ctx) {
       ctx.in_adj[0].data[i] += ctx.out_adj;
 }
 
-// OP_PROD_VEC: generated-quantities-only product of a vector/row-vector.
+// OP_PROD_VEC: product of a vector/row-vector. The scratch stores one partial
+// per input coefficient for the model-block reverse pass; generated quantities
+// never execute the backward callback.
 // Variant 1 preserves the ascending scalar reduction selected by Eigen when
 // the source expression contains a strided matrix row.  The lowering records
 // that fact before the expression is materialized into a contiguous slot.
@@ -166,17 +168,34 @@ void prod_vec_fwd(KernelCtx& ctx) {
     double product = ctx.in[0].data[0];
     for (int64_t i = 1; i < ctx.in[0].len; ++i) product *= ctx.in[0].data[i];
     ctx.out.data[0] = product;
-    return;
+  } else {
+    assert(ctx.variant == 0);
+    using Vec = Eigen::Matrix<double, Eigen::Dynamic, 1>;
+    const Eigen::Map<const Vec> input(ctx.in[0].data, ctx.in[0].len);
+    ctx.out.data[0] = stan::math::prod(
+        input.unaryExpr(Eigen::internal::core_cast_op<double, double>()));
   }
-  assert(ctx.variant == 0);
-  using Vec = Eigen::Matrix<double, Eigen::Dynamic, 1>;
-  const Eigen::Map<const Vec> input(ctx.in[0].data, ctx.in[0].len);
-  ctx.out.data[0] = stan::math::prod(
-      input.unaryExpr(Eigen::internal::core_cast_op<double, double>()));
+
+  // Direct forward-only kernel probes do not provide scratch. Executors do,
+  // and only they can subsequently invoke the reverse pass.
+  if (ctx.scratch == nullptr) return;
+  ctx.scratch[0] = 1.0;
+  for (int64_t i = 1; i < ctx.in[0].len; ++i)
+    ctx.scratch[i] = ctx.scratch[i - 1] * ctx.in[0].data[i - 1];
+  double suffix = 1.0;
+  for (int64_t i = ctx.in[0].len; i-- > 0;) {
+    ctx.scratch[i] *= suffix;
+    suffix *= ctx.in[0].data[i];
+  }
+}
+void prod_vec_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  for (int64_t i = 0; i < ctx.in[0].len; ++i)
+    ctx.in_adj[0].data[i] += ctx.out_adj * ctx.scratch[i];
 }
 
-// OP_EXTREMA_VEC: generated-quantities-only min/max of a direct named
-// vector/row-vector (variant 0/1).  Stan Math defines extrema of an empty real
+// OP_EXTREMA_VEC: min/max of a direct named vector/row-vector (variant 0/1).
+// Stan Math defines extrema of an empty real
 // Eigen container as +/- infinity.  For nonempty inputs, the same-type unary
 // expression deliberately clears DirectAccessBit while retaining packet
 // access, so Eigen begins its packet reduction at lane zero just as it does
@@ -194,9 +213,27 @@ void extrema_vec_fwd(KernelCtx& ctx) {
   const Eigen::Map<const Vec> input(ctx.in[0].data, ctx.in[0].len);
   const auto owning_grouping =
       input.unaryExpr(Eigen::internal::core_cast_op<double, double>());
+  Eigen::Index selected = 0;
+  // Keep Stan Math's exact value path. Eigen's index-returning overload can
+  // select a different packet evaluator for NaNs and signed-zero ties, so it
+  // is used only to remember the reverse destination.
   ctx.out.data[0] = ctx.variant == 0 ? stan::math::min(owning_grouping)
                                      : stan::math::max(owning_grouping);
+  if (ctx.variant == 0)
+    (void)owning_grouping.minCoeff(&selected);
+  else
+    (void)owning_grouping.maxCoeff(&selected);
+  if (ctx.scratch != nullptr) ctx.scratch[0] = static_cast<double>(selected);
 }
+void extrema_vec_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data || ctx.in[0].len == 0) return;
+  ctx.in_adj[0].data[static_cast<int64_t>(ctx.scratch[0])] += ctx.out_adj;
+}
+
+int64_t input_len_scratch(const Op& op, const Slot* slots) {
+  return slots[op.in[0]].len;
+}
+int64_t scalar_scratch(const Op&, const Slot*) { return 1; }
 
 // OP_INDEX: scalar out = in[flat], idata = {flat}. Backward scatters.
 void index_fwd(KernelCtx& ctx) {
@@ -435,8 +472,10 @@ void register_elementwise_kernels() {
   register_kernel(OP_BCAST_FMA, Kernel{fma_fwd, fma_bwd, nullptr});
   register_kernel(OP_MATVEC, Kernel{matvec_fwd, matvec_bwd, nullptr});
   register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
-  register_kernel(OP_PROD_VEC, Kernel{prod_vec_fwd, nullptr, nullptr});
-  register_kernel(OP_EXTREMA_VEC, Kernel{extrema_vec_fwd, nullptr, nullptr});
+  register_kernel(OP_PROD_VEC,
+                  Kernel{prod_vec_fwd, prod_vec_bwd, input_len_scratch});
+  register_kernel(OP_EXTREMA_VEC,
+                  Kernel{extrema_vec_fwd, extrema_vec_bwd, scalar_scratch});
   register_kernel(OP_INDEX, Kernel{index_fwd, index_bwd, nullptr});
   register_kernel(OP_SET_INDEX, Kernel{set_index_fwd, set_index_bwd, nullptr});
   register_kernel(OP_SET_INDEX_INPLACE, Kernel{set_index_inplace_fwd,

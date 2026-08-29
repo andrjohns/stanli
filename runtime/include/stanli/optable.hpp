@@ -28,6 +28,8 @@ namespace stanli {
   X(OP_BETA_BINOMIAL_LPMF)          \
   X(OP_LOGIT)                       \
   X(OP_MEAN)                        \
+  X(OP_SD)                          \
+  X(OP_VARIANCE)                    \
   X(OP_REP_VEC)                     \
   X(OP_INDEX)                       \
   X(OP_SET_INDEX)                   \

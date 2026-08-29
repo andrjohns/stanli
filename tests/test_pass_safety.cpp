@@ -416,7 +416,7 @@ static void test_rng_is_an_effect_barrier() {
          got_rng.gen()() == want_rng.gen()());
 }
 
-static void test_product_is_forward_only_pass_barrier() {
+static void test_product_pass_barrier() {
   Graph g;
   Fills fills;
   const int input = g.add_slot(5, true);
@@ -446,9 +446,10 @@ static void test_product_is_forward_only_pass_barrier() {
     stores += op.opcode == OP_SET_INDEX_INPLACE;
     island_ops += op.opcode == OP_ISLAND;
   }
-  expect("product has no backward kernel",
+  expect("product has a backward kernel",
          find_kernel(OP_PROD_VEC) != nullptr &&
-             kernel(OP_PROD_VEC).backward == nullptr);
+             kernel(OP_PROD_VEC).backward != nullptr &&
+             kernel(OP_PROD_VEC).scratch_size != nullptr);
   expect("product is absent from value-free backward traits",
          !backward_ignores_values(OP_PROD_VEC));
   expect("product survives constfold with parameter input",
@@ -472,7 +473,7 @@ static void test_product_is_forward_only_pass_barrier() {
   expect("standalone products keep pinned Stan Math grouping", exact);
 }
 
-static void test_extrema_is_forward_only_pass_barrier() {
+static void test_extrema_pass_barrier() {
   Graph g;
   Fills fills;
   const int input = g.add_slot(7, true);
@@ -505,9 +506,9 @@ static void test_extrema_is_forward_only_pass_barrier() {
     island_ops += op.opcode == OP_ISLAND;
   }
   const Kernel* extrema = find_kernel(OP_EXTREMA_VEC);
-  expect("extrema has a forward-only no-scratch kernel",
-         extrema != nullptr && extrema->backward == nullptr &&
-             extrema->scratch_size == nullptr);
+  expect("extrema has a backward kernel", extrema != nullptr &&
+                                              extrema->backward != nullptr &&
+                                              extrema->scratch_size != nullptr);
   expect("extrema is absent from value-free backward traits",
          !backward_ignores_values(OP_EXTREMA_VEC));
   expect("extrema survives constfold with parameter input",
@@ -573,8 +574,8 @@ int main() {
   test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);  // see the fuzz loop
   test_whitelist_backwards_ignore_values();
   test_rng_is_an_effect_barrier();
-  test_product_is_forward_only_pass_barrier();
-  test_extrema_is_forward_only_pass_barrier();
+  test_product_pass_barrier();
+  test_extrema_pass_barrier();
   test_random_graphs_preserve_gradients();
   if (failures) {
     std::printf("%d failures\n", failures);

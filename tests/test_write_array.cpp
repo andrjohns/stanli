@@ -2095,9 +2095,9 @@ void test_product_exact_grouping() {
   }
 
   const Kernel& product = kernel(OP_PROD_VEC);
-  if (product.backward != nullptr) {
+  if (product.backward == nullptr || product.scratch_size == nullptr) {
     ++failures;
-    std::printf("FAIL product kernel has a backward implementation\n");
+    std::printf("FAIL product kernel has no differentiable implementation\n");
   }
 
   const double denorm = std::numeric_limits<double>::denorm_min();
@@ -2331,9 +2331,9 @@ void test_product_exact_grouping() {
 void test_extrema_exact_grouping() {
   using namespace stanli;
   const Kernel& extrema = kernel(OP_EXTREMA_VEC);
-  if (extrema.backward != nullptr || extrema.scratch_size != nullptr) {
+  if (extrema.backward == nullptr || extrema.scratch_size == nullptr) {
     ++failures;
-    std::printf("FAIL extrema kernel is not forward-only/no-scratch\n");
+    std::printf("FAIL extrema kernel has no differentiable implementation\n");
   }
 
   const double inf = std::numeric_limits<double>::infinity();
@@ -2696,20 +2696,21 @@ void test_gq_extrema_lowering_guards() {
     expect_extrema_interp(udf, "dynamic UDF extrema stays interpreted");
   }
 
-  // The opcode is generated-quantities-only: an active log_prob reduction
-  // must still be refused rather than acquiring a forward-only reverse path.
-  bool reverse_refused = false;
+  // The same opcode now serves active log_prob reductions through its stored
+  // selected coefficient.
+  bool reverse_compiled = false;
   try {
     DataMap no_data;
-    (void)compile_model(slurp("tests/fixtures/gq_extrema_reverse.tmir.sexp"),
-                        no_data);
-  } catch (const CompileError& e) {
-    reverse_refused = std::string(e.what()).find("unsupported function min") !=
-                      std::string::npos;
+    CompiledModel reverse = compile_model(
+        slurp("tests/fixtures/gq_extrema_reverse.tmir.sexp"), no_data);
+    reverse_compiled =
+        std::any_of(reverse.graph.ops.begin(), reverse.graph.ops.end(),
+                    [](const Op& op) { return op.opcode == OP_EXTREMA_VEC; });
+  } catch (const CompileError&) {
   }
-  if (!reverse_refused) {
+  if (!reverse_compiled) {
     ++failures;
-    std::printf("FAIL dynamic log_prob extrema was not refused\n");
+    std::printf("FAIL dynamic log_prob extrema was not compiled\n");
   }
 }
 
@@ -2728,7 +2729,7 @@ void test_compiled_gq_reductions() {
   }
 
   // The same fixture pins both legacy seams in log_prob: data-only prod is
-  // folded rather than becoming the forward-only opcode, and pure-data int
+  // folded rather than becoming a runtime opcode, and pure-data int
   // sum still compiles/evaluates outside the runtime GQ specialization.
   int log_products = 0;
   for (const Op& op : cm.graph.ops)
@@ -3274,8 +3275,7 @@ void test_gq_reduction_lowering_guards() {
     expect_reduction_interp(nested_math, "expression surface",
                             "prod(1-exp(x)) stays interpreted");
 
-  // A dynamic product in log_prob must retain the old unsupported/fallback
-  // behavior; the forward-only opcode is never admitted to reverse mode.
+  // A dynamic product in log_prob uses the same opcode with stored partials.
   std::string reverse = base;
   const size_t log_prod = reverse.find("(FunApp (StanLib prod");
   const std::string data_node =
@@ -3288,16 +3288,17 @@ void test_gq_reduction_lowering_guards() {
       "AutoDiffable))))";
   if (replace_reduction_after(reverse, log_prod, data_node, active_node,
                               "reverse-mode product")) {
-    bool refused = false;
+    bool compiled = false;
     try {
-      (void)compile_model(reverse, reduction_data());
-    } catch (const CompileError& e) {
-      refused = std::string(e.what()).find("unsupported function prod") !=
-                std::string::npos;
+      CompiledModel model = compile_model(reverse, reduction_data());
+      compiled =
+          std::any_of(model.graph.ops.begin(), model.graph.ops.end(),
+                      [](const Op& op) { return op.opcode == OP_PROD_VEC; });
+    } catch (const CompileError&) {
     }
-    if (!refused) {
+    if (!compiled) {
       ++failures;
-      std::printf("FAIL dynamic log_prob product was not refused\n");
+      std::printf("FAIL dynamic log_prob product was not compiled\n");
     }
   }
 
