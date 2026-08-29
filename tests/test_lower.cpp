@@ -4104,9 +4104,9 @@ int main() {
   }
 
   // Two dimension-preserving selectors on a matrix form their Cartesian
-  // submatrix. Different reordered Multi lists pin column-major gather order;
-  // the Between/Between expression covers matrix ranges, and Multi/Single
-  // covers a gathered row set from one column. All route each selected
+  // submatrix. Different reordered Multi lists pin column-major gather order,
+  // Between/Between covers matrix ranges, and the mixed Multi/Single and
+  // Single/Multi forms keep the surviving axis. All route each selected
   // cell's adjoint back to the source matrix.
   {
     DataMap d;
@@ -4121,15 +4121,13 @@ int main() {
     double gradient[9] = {};
     const double lp = gex.gradient(gradient);
     const double want = 2.0 * (q[5] + q[3] + q[8] + q[6]) +
-                        2.0 * (q[3] + q[4] + q[6] + q[7]) + 2.0 * (q[2] + q[0]);
+                        2.0 * (q[3] + q[4] + q[6] + q[7]) +
+                        2.0 * (q[2] + q[0]) + 2.0 * (q[3] + q[6]);
     expect_eq("matrix selectors: lp", lp, want);
-    for (int i = 0; i < 9; ++i) {
-      const bool selected_once =
-          i == 0 || i == 2 || i == 4 || i == 5 || i == 7 || i == 8;
-      const bool selected_twice = i == 3 || i == 6;
+    const int times[9] = {1, 0, 1, 3, 1, 1, 3, 1, 1};
+    for (int i = 0; i < 9; ++i)
       expect_eq("matrix selectors: g" + std::to_string(i), gradient[i],
-                selected_twice ? 4.0 : (selected_once ? 2.0 : 0.0));
-    }
+                2.0 * times[i]);
   }
 
   // O1 composes a scalar UDF index through a two-axis gather as a nested

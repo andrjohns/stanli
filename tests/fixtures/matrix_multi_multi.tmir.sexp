@@ -139,6 +139,23 @@
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
                (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern
+            (FunApp (StanLib sum FnPlain AoS)
+             (((pattern
+                (Indexed
+                 ((pattern (Var computed))
+                  (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
+                 ((Single
+                   ((pattern (Lit Int 1))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (MultiIndex
+                   ((pattern (Var column_indices))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))))
+               (meta ((type_ URowVector) (loc <opaque>) (adlevel AutoDiffable)))))))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>)))))
     (meta <opaque>))))
  (reverse_mode_log_prob
@@ -240,6 +257,23 @@
                    ((pattern (Lit Int 1))
                     (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly))))))))
                (meta ((type_ UVector) (loc <opaque>) (adlevel AutoDiffable)))))))
+           (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
+        (meta <opaque>))
+       ((pattern
+         (TargetPE
+          ((pattern
+            (FunApp (StanLib sum FnPlain SoA)
+             (((pattern
+                (Indexed
+                 ((pattern (Var computed))
+                  (meta ((type_ UMatrix) (loc <opaque>) (adlevel AutoDiffable))))
+                 ((Single
+                   ((pattern (Lit Int 1))
+                    (meta ((type_ UInt) (loc <opaque>) (adlevel DataOnly)))))
+                  (MultiIndex
+                   ((pattern (Var column_indices))
+                    (meta ((type_ (UArray UInt)) (loc <opaque>) (adlevel DataOnly))))))))
+               (meta ((type_ URowVector) (loc <opaque>) (adlevel AutoDiffable)))))))
            (meta ((type_ UReal) (loc <opaque>) (adlevel AutoDiffable))))))
         (meta <opaque>)))))
     (meta <opaque>))))

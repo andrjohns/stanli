@@ -1121,9 +1121,7 @@ struct Lowering {
       return;
     }
     if (const DataMap::Entry* en = observation(v)) {
-      DataMap::Entry copy = *en;
-      td.env().erase(name);
-      td.env()[name] = std::move(copy);
+      td.env()[name] = *en;
       return;
     }
     // Evaluate before erasing the old binding: `x = x + data_step` reads the
@@ -1574,37 +1572,6 @@ struct Lowering {
           return emit_value(OP_GATHER, {base},
                             (int64_t)rows.size() * base.si.cols, si, gather);
         }
-        // A two-axis matrix gather/range is the Cartesian selection
-        // M[rows, cols], not a pairwise zip. Preserve index-array order and
-        // duplicates; column-major output means selected columns are outer
-        // and selected rows are inner in the flat gather list.
-        const auto is_matrix_selector = [](const mir::Expr& index) {
-          return index.name == "IndexAll" || index.name == "IndexSingle" ||
-                 index.name == "IndexBetween" || index.name == "IndexMulti";
-        };
-        if (e.args.size() == 3 && is_matrix(base.si) &&
-            is_matrix_selector(e.args[1]) && is_matrix_selector(e.args[2]) &&
-            (e.args[1].name != "IndexSingle" ||
-             e.args[2].name != "IndexSingle")) {
-          const std::vector<int64_t> rows = index_positions(
-              e.args[1], base.si.rows, "matrix row gather", e.raw);
-          const std::vector<int64_t> cols = index_positions(
-              e.args[2], base.si.cols, "matrix column gather", e.raw);
-          std::vector<int> gather;
-          gather.reserve(rows.size() * cols.size());
-          for (int64_t j : cols)
-            for (int64_t i : rows)
-              gather.push_back(checked_immediate(j * base.si.rows + i,
-                                                 "matrix gather offset"));
-          SlotInfo si = view_of(e.type_);
-          si.param_free = base.si.param_free;
-          if (e.type_ == "UMatrix")
-            si = matrix_view((int64_t)rows.size(), (int64_t)cols.size(),
-                             base.si.param_free);
-          return emit_value(OP_GATHER, {base},
-                            (int64_t)rows.size() * (int64_t)cols.size(), si,
-                            gather);
-        }
         // A range over the outermost array dimension is contiguous because
         // graph storage keeps each whole outer element together. Preserve
         // the complete suffix shape even when its storage width is zero.
@@ -1733,6 +1700,38 @@ struct Lowering {
           const int64_t len = hi >= lo ? hi - lo + 1 : 0;
           return emit_value(OP_SLICE, {base}, len, view_of(e.type_),
                             {(int)(len ? (j - 1) * base.si.rows + lo - 1 : 0)});
+        }
+        // Any two-axis matrix selection the slices above leave is the
+        // Cartesian selection M[rows, cols], not a pairwise zip. Preserve
+        // index-array order and duplicates; column-major output means
+        // selected columns are outer and selected rows are inner in the flat
+        // gather list.
+        const auto is_matrix_selector = [](const mir::Expr& index) {
+          return index.name == "IndexAll" || index.name == "IndexSingle" ||
+                 index.name == "IndexBetween" || index.name == "IndexMulti";
+        };
+        if (e.args.size() == 3 && is_matrix(base.si) &&
+            is_matrix_selector(e.args[1]) && is_matrix_selector(e.args[2]) &&
+            (e.args[1].name != "IndexSingle" ||
+             e.args[2].name != "IndexSingle")) {
+          const std::vector<int64_t> rows = index_positions(
+              e.args[1], base.si.rows, "matrix row gather", e.raw);
+          const std::vector<int64_t> cols = index_positions(
+              e.args[2], base.si.cols, "matrix column gather", e.raw);
+          std::vector<int> gather;
+          gather.reserve(rows.size() * cols.size());
+          for (int64_t j : cols)
+            for (int64_t i : rows)
+              gather.push_back(checked_immediate(j * base.si.rows + i,
+                                                 "matrix gather offset"));
+          SlotInfo si = view_of(e.type_);
+          si.param_free = base.si.param_free;
+          if (e.type_ == "UMatrix")
+            si = matrix_view((int64_t)rows.size(), (int64_t)cols.size(),
+                             base.si.param_free);
+          return emit_value(OP_GATHER, {base},
+                            (int64_t)rows.size() * (int64_t)cols.size(), si,
+                            gather);
         }
         // Params/locals with recorded dims, laid out by flat_addr above.
         // Matrix views are col-major and never take this array-major path.
