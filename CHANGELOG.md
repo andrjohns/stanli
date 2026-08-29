@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Loop-invariant target terms do not unroll
+
+A `for` loop whose body only adds iterator-independent terms to `target` now
+lowers once and multiplies those terms by the data-computed trip count. The
+ten-million-iteration and 4,000-by-1,440 nested reproducers from #248 both
+compile to two ops with baseline memory use; loops with assignments to outer
+variables, print/reject, or other observable effects retain the ordinary
+per-iteration path.
+
 ### Full-span reads lower
 
 `m[:, :]` and `v[:]` compile instead of failing with `unsupported index
