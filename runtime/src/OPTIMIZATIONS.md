@@ -914,6 +914,80 @@ three evaluation points for all three models (63/63 scalars). This is a
 targeted mechanism A/B; it does not replace the full-corpus warmed means or
 CmdStan columns in `docs/corpus-bench.tsv`.
 
+### Direct coupled RK sensitivities (`ode.cpp`, disable: `STANLI_NO_ODE_DIRECT_RK=1`)
+
+An eligible RK45 or Cash--Karp solve now keeps the entire sensitivity system
+in plain doubles. Its coupled state has the same layout and evolution as Stan
+Math's pinned RK implementation:
+
+```text
+z              = [y, S_y0 lane 0, ..., S_theta lane P-1]
+y'             = f(t, y, theta)
+S_y0'          = J_y S_y0
+S_theta'       = J_theta + J_y S_theta
+```
+
+The complete coupled vector still enters the adaptive error norm. The runtime
+uses the pinned Dopri5 or Cash--Karp Boost tableau, controller, initial step,
+output schedule, tolerances, and maximum-step checker. For each callback it
+runs the compiled RHS once on doubles, runs its generated reverse once per RHS
+output to obtain `J_y` and `J_theta`, and propagates the active sensitivity
+lanes in Stan Math's scalar order. Thread-local register, adjoint, Jacobian,
+state, and time buffers are reused across callbacks. The observer writes
+solution values and the dense solution Jacobian directly into the `OP_ODE`
+output and scratch regions; the existing `OP_ODE` backward remains the same
+matrix-vector pullback.
+
+Eligibility is deliberately narrower than either the RHS register compiler or
+`gen_adjoint`. The RHS must compile, use RK45 or CKRK, contain no runtime
+control flow, and consist entirely of an explicit exact-grouping opcode
+whitelist. A newly added opcode therefore fails closed. Jumps, `DOT` (whose
+double packet reduction can group differently from the `var` replay),
+`FMAX`/`FMIN` (whose signed-zero tie choice differs), kernel calls, densities,
+and other unproved operations keep the current Stan Math solve. BDF and Adams
+also keep that solve. Data-only ODEs retain their cheaper ordinary double
+solve because they have no sensitivity lanes to accelerate.
+
+The generated payload is made from a clone of the canonical RHS. The
+canonical program is never checkpoint-mutated and remains the exact nested
+autodiff oracle and structural fallback. `STANLI_NO_ODE_DIRECT_RK=1`, read when
+the model is lowered, selects that oracle while still building the same
+payload and recording the same eligibility/refusal result. This makes the
+switch both an emergency escape hatch and a same-binary A/B control. Runtime
+shape inconsistencies also fail closed to the oracle. On the direct path,
+validation order, public function labels, and the translation of Boost's
+no-progress failure reproduce the corresponding Stan Math exception type and
+message.
+
+This is not the stopped Phase 0 generated-callback experiment. Phase 0 put
+generated Jacobian rows behind the existing Stan callback by constructing
+`precomputed_gradients_vari` outputs, and its complete callback measured only
+0.853x and 0.930x as fast as the canonical callback. The admitted path creates
+no callback `var`, arena operand array, or precomputed-gradient node. It uses
+the generated reverse only as a double-space local-Jacobian provider inside a
+separately owned coupled RK solve; the Phase 0 bridge remains unimplemented.
+
+On 2026-08-28, an uninstrumented Release build on an Apple M3 Ultra
+(`-O3 -ffp-contract=off`) ran 15 alternating paired batches of at least 0.5 s
+per arm through the integrated implementation:
+
+| model | current oracle / direct RK | paired 95% CI | pinned CmdStan default / direct RK | pinned CmdStan `--O1` / direct RK |
+| --- | ---: | ---: | ---: | ---: |
+| `lotka_volterra` | 1.8615x | [1.8380x, 1.8853x] | 2.1158x | 2.1241x |
+| `soil_incubation` | 1.8035x | [1.7578x, 1.8505x] | 2.2124x | 2.1454x |
+
+The ineligible branched BDF control, `one_comp_mm_elim_abs`, was unchanged at
+1.0050x [0.9995x, 1.0106x]. Before integration, the complete-solve ceiling
+prototype measured RK45 at 1.800x/1.796x and CKRK at 1.821x/1.860x on the two
+eligible real models. At all three evaluation points, each eligible model
+matched every solution and Jacobian bit and every callback count; all 18
+branchless synthetic shapes won under both RK tableaux. These macOS arm64
+results admit the default-on policy, but they are not cross-architecture
+evidence. Exact default-versus-oracle
+parity and the focused ODE suite on Linux x86-64 are a merge gate. A Linux
+failure must narrow the whitelist or retain the oracle, not weaken the bitwise
+gate.
+
 ## Executor details (`executor.cpp`)
 
 - Each op's context (the pointers telling the kernel where its inputs,
@@ -1009,10 +1083,10 @@ silently. Three layers:
 
 The env switches (`STANLI_NO_DATA_PRELOAD`, `STANLI_NO_INPLACE`,
 `STANLI_NO_CONSTFOLD`, `STANLI_NO_REROLL`, `STANLI_NO_ISLAND`,
-`STANLI_NO_ISLAND_COMPACT`) exist so a wrong
-result can be attributed to one optimization quickly, and they are how each
-one is measured: every speed number is the same build with one variable set
-and unset.
+`STANLI_NO_ISLAND_COMPACT`, `STANLI_NO_ODE_DIRECT_RK`) exist so a wrong result
+can be attributed to one optimization quickly, and they are how each one is
+measured: every speed number is the same build with one variable set and
+unset.
 
 ## Historical targeted measurements
 

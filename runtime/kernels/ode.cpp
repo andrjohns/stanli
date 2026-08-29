@@ -23,6 +23,7 @@
 // initial tape reset, only that output and those inputs need clearing between
 // rows; the graph backward later applies the rows in Stan's reverse order.
 #include <stanli/graph.hpp>
+#include <stanli/island.hpp>
 #include <stanli/packet.hpp>
 #include <stanli/mir_interp.hpp>
 #include <stanli/ode.hpp>
@@ -30,6 +31,11 @@
 
 #include <stan/math.hpp>
 
+#include <algorithm>
+#include <boost/numeric/odeint.hpp>
+#include <functional>
+#include <limits>
+#include <stdexcept>
 #include <type_traits>
 #include <vector>
 
@@ -207,6 +213,297 @@ std::vector<std::vector<stan::return_type_t<T_y0, T_theta>>> solve(
   return out;
 }
 
+// Mutable storage for the direct RK callback. It is deliberately per thread,
+// not part of OdeSpec: executors share the immutable spec and may run in
+// parallel. An ODE RHS cannot itself solve an ODE, so the same non-reentrant
+// contract as rhs_regs<T>() lets successive solves reuse every allocation.
+struct DirectRkWorkspace {
+  std::vector<double> values;
+  std::vector<double> adjoints;
+  std::vector<double> f;
+  std::vector<double> J_y;
+  std::vector<double> J_theta;
+  std::vector<double> state;
+  std::vector<double> times;
+};
+
+DirectRkWorkspace& direct_rk_workspace() {
+  static thread_local DirectRkWorkspace workspace;
+  return workspace;
+}
+
+// Evaluate f, J_y and (when needed) J_theta without constructing a nested
+// autodiff tape. The immutable payload is a clone of the canonical RHS with
+// checkpoint saves for its generated reverse; the exact canonical program
+// remains available to solve() as the oracle.
+class DirectRkDerivative {
+ public:
+  DirectRkDerivative(const OdeSpec& spec, size_t theta_source,
+                     DirectRkWorkspace& workspace)
+      : rhs_(spec.prog),
+        generated_(*spec.direct_rk),
+        theta_source_(theta_source),
+        workspace_(workspace) {}
+
+  template <bool ThetaAutodiff>
+  void evaluate(double t, const double* y, const double* theta,
+                const double* x_r) {
+    workspace_.values.resize((size_t)generated_.n_regs);
+    workspace_.adjoints.resize((size_t)generated_.adj.n_regs);
+    workspace_.f.resize((size_t)rhs_.n_y);
+    workspace_.J_y.resize((size_t)rhs_.n_y * (size_t)rhs_.n_y);
+    if constexpr (ThetaAutodiff) {
+      workspace_.J_theta.resize((size_t)rhs_.n_y * theta_source_);
+      std::fill(workspace_.J_theta.begin(), workspace_.J_theta.end(), 0.0);
+    }
+
+    detail::seed_rhs_regs<double>(rhs_, t, y, theta, theta_source_, x_r,
+                                  workspace_.values);
+
+    run_program(static_cast<const Program&>(generated_), workspace_.values);
+    for (size_t i = 0; i < generated_.out_regs.size(); ++i)
+      workspace_.f[i] = workspace_.values[(size_t)generated_.out_regs[i]];
+
+    const AdjProgram& reverse = generated_.adj;
+    for (size_t output = 0; output < generated_.out_regs.size(); ++output) {
+      std::fill(workspace_.adjoints.begin(), workspace_.adjoints.end(), 0.0);
+      const int output_reg = generated_.out_regs[output];
+      workspace_.adjoints[(size_t)reverse.adj_reg[(size_t)output_reg]] = 1.0;
+      run_adjoint(generated_, reverse, workspace_.values.data(),
+                  workspace_.adjoints.data());
+      for (int input = 0; input < rhs_.n_y; ++input) {
+        const int reg = rhs_.y0 + input;
+        workspace_.J_y[output * (size_t)rhs_.n_y + (size_t)input] =
+            workspace_.adjoints[(size_t)reverse.adj_reg[(size_t)reg]];
+      }
+      if constexpr (ThetaAutodiff) {
+        for (int input = 0; input < rhs_.n_th; ++input) {
+          const int reg = rhs_.th0 + input;
+          workspace_.J_theta[output * theta_source_ + (size_t)input] =
+              workspace_.adjoints[(size_t)reverse.adj_reg[(size_t)reg]];
+        }
+      }
+    }
+  }
+
+ private:
+  const RhsProgram& rhs_;
+  const IslandProg& generated_;
+  size_t theta_source_;
+  DirectRkWorkspace& workspace_;
+};
+
+// The state layout and arithmetic grouping are the pinned Stan Math coupled
+// system's: base states, one S-vector per active y0 lane, then one per active
+// theta lane. In particular the parameter lane starts with J_theta and adds
+// the J_y product left-to-right, which is observable in the last bit.
+template <bool YAutodiff, bool ThetaAutodiff>
+class DirectRkSystem {
+ public:
+  DirectRkSystem(const OdeSpec& spec, size_t states, size_t theta_source,
+                 const double* theta, DirectRkWorkspace& workspace)
+      : derivative_(spec, theta_source, workspace),
+        states_(states),
+        theta_source_(theta_source),
+        theta_(theta),
+        x_r_(spec.x_r.data()),
+        workspace_(workspace) {}
+
+  void operator()(const std::vector<double>& z, std::vector<double>& dz,
+                  double t) const {
+    const size_t y_lanes = YAutodiff ? states_ : 0;
+    const size_t theta_lanes = ThetaAutodiff ? theta_source_ : 0;
+    const size_t expected = states_ * (1 + y_lanes + theta_lanes);
+    if (z.size() != expected)
+      throw std::runtime_error("coupled RK state has unexpected size");
+    dz.resize(expected);
+
+    derivative_.template evaluate<ThetaAutodiff>(t, z.data(), theta_, x_r_);
+    for (size_t output = 0; output < states_; ++output) {
+      dz[output] = workspace_.f[output];
+      if constexpr (YAutodiff) {
+        for (size_t lane = 0; lane < states_; ++lane) {
+          double derivative = 0.0;
+          for (size_t input = 0; input < states_; ++input)
+            derivative += z[states_ + states_ * lane + input] *
+                          workspace_.J_y[output * states_ + input];
+          dz[states_ + states_ * lane + output] = derivative;
+        }
+      }
+      if constexpr (ThetaAutodiff) {
+        for (size_t lane = 0; lane < theta_source_; ++lane) {
+          double derivative = workspace_.J_theta[output * theta_source_ + lane];
+          for (size_t input = 0; input < states_; ++input)
+            derivative +=
+                z[states_ + states_ * y_lanes + states_ * lane + input] *
+                workspace_.J_y[output * states_ + input];
+          dz[states_ + states_ * y_lanes + states_ * lane + output] =
+              derivative;
+        }
+      }
+    }
+  }
+
+ private:
+  mutable DirectRkDerivative derivative_;
+  size_t states_;
+  size_t theta_source_;
+  const double* theta_;
+  const double* x_r_;
+  DirectRkWorkspace& workspace_;
+};
+
+const char* direct_rk_function_name(const OdeSpec& spec) {
+  if (spec.legacy) return "integrate_ode_rk45";
+  return spec.solver == OdeSpec::CKRK ? "ode_ckrk_tol" : "ode_rk45_tol";
+}
+
+void validate_direct_rk(const char* function_name, const OdeSpec& spec,
+                        const double* y0, size_t states, const double* theta,
+                        size_t theta_source) {
+  const Eigen::Map<const Eigen::VectorXd> y0_map(y0, (Eigen::Index)states);
+  const Eigen::Map<const Eigen::VectorXd> theta_map(theta,
+                                                    (Eigen::Index)theta_source);
+  stan::math::check_finite(function_name, "initial state", y0_map);
+  stan::math::check_finite(function_name, "initial time", spec.t0);
+  stan::math::check_finite(function_name, "times", spec.ts);
+  stan::math::check_finite(function_name, "ode parameters and data", theta_map);
+  stan::math::check_finite(function_name, "ode parameters and data", spec.x_r);
+  stan::math::check_finite(function_name, "ode parameters and data", spec.x_i);
+  stan::math::check_nonzero_size(function_name, "initial state", y0_map);
+  stan::math::check_nonzero_size(function_name, "times", spec.ts);
+  stan::math::check_sorted(function_name, "times", spec.ts);
+  stan::math::check_less(function_name, "initial time", spec.t0, spec.ts[0]);
+  stan::math::check_positive_finite(function_name, "relative_tolerance",
+                                    spec.rtol);
+  stan::math::check_positive_finite(function_name, "absolute_tolerance",
+                                    spec.atol);
+  stan::math::check_positive(function_name, "max_num_steps", spec.max_steps);
+}
+
+template <bool YAutodiff, bool ThetaAutodiff>
+bool direct_rk_shape_ok(const KernelCtx& ctx, const OdeSpec& spec) {
+  if (ctx.in[0].len <= 0 || ctx.in[1].len < 0 || ctx.out.len < 0 ||
+      spec.prog.n_y < 0 || spec.prog.n_th < 0 || spec.prog.n_xr < 0 ||
+      spec.direct_rk->n_regs < 0 || spec.direct_rk->adj.n_regs < 0)
+    return false;
+  const size_t states = (size_t)ctx.in[0].len;
+  const size_t theta_source = (size_t)ctx.in[1].len;
+  const size_t max = std::numeric_limits<size_t>::max();
+  if ((size_t)spec.prog.n_y != states ||
+      (size_t)spec.prog.n_th > theta_source ||
+      (size_t)spec.prog.n_xr != spec.x_r.size() ||
+      spec.prog.out_regs.size() != states ||
+      spec.direct_rk->out_regs.size() != states ||
+      (spec.ts.size() != 0 && states > max / spec.ts.size()) ||
+      (size_t)ctx.out.len != spec.ts.size() * states ||
+      states > max - theta_source)
+    return false;
+  const size_t width = states + theta_source;
+  const size_t y_lanes = YAutodiff ? states : 0;
+  const size_t theta_lanes = ThetaAutodiff ? theta_source : 0;
+  if (y_lanes > max - theta_lanes || 1 > max - y_lanes - theta_lanes)
+    return false;
+  const size_t lane_count = 1 + y_lanes + theta_lanes;
+  if (states > max / states || states > max / lane_count ||
+      (theta_source != 0 && states > max / theta_source) ||
+      (size_t)ctx.out.len > max / std::max<size_t>(1, width))
+    return false;
+  return true;
+}
+
+template <bool YAutodiff, bool ThetaAutodiff>
+void solve_direct_rk(KernelCtx& ctx, const OdeSpec& spec) {
+  using boost::numeric::odeint::integrate_times;
+  using boost::numeric::odeint::make_controlled;
+  using boost::numeric::odeint::make_dense_output;
+  using boost::numeric::odeint::max_step_checker;
+  using boost::numeric::odeint::no_progress_error;
+  using boost::numeric::odeint::runge_kutta_cash_karp54;
+  using boost::numeric::odeint::runge_kutta_dopri5;
+
+  const size_t states = (size_t)ctx.in[0].len;
+  const size_t theta_source = (size_t)ctx.in[1].len;
+  const size_t width = states + theta_source;
+  const size_t y_lanes = YAutodiff ? states : 0;
+  const size_t theta_lanes = ThetaAutodiff ? theta_source : 0;
+  const size_t coupled_size = states * (1 + y_lanes + theta_lanes);
+  const char* function_name = direct_rk_function_name(spec);
+
+  validate_direct_rk(function_name, spec, ctx.in[0].data, states,
+                     ctx.in[1].data, theta_source);
+  if ((size_t)ctx.out.len != spec.ts.size() * states)
+    throw std::runtime_error("OP_ODE output shape does not match solve times");
+
+  DirectRkWorkspace& workspace = direct_rk_workspace();
+  workspace.state.assign(coupled_size, 0.0);
+  for (size_t i = 0; i < states; ++i) workspace.state[i] = ctx.in[0].data[i];
+  if constexpr (YAutodiff)
+    for (size_t i = 0; i < states; ++i)
+      workspace.state[states + states * i + i] = 1.0;
+
+  // Inactive columns are observable scratch, even though ode_bwd will not
+  // scatter them. Zeroing the complete matrix keeps the established contract.
+  std::fill(ctx.scratch, ctx.scratch + (size_t)ctx.out.len * width, 0.0);
+
+  workspace.times.resize(spec.ts.size() + 1);
+  workspace.times[0] = spec.t0;
+  std::copy(spec.ts.begin(), spec.ts.end(), workspace.times.begin() + 1);
+  DirectRkSystem<YAutodiff, ThetaAutodiff> system(spec, states, theta_source,
+                                                  ctx.in[1].data, workspace);
+  bool initial_observed = false;
+  size_t time_index = 0;
+  auto observer = [&](const std::vector<double>& state, double) {
+    if (!initial_observed) {
+      initial_observed = true;
+      return;
+    }
+    if (time_index >= spec.ts.size())
+      throw std::runtime_error("direct RK observer produced too many states");
+    for (size_t output_state = 0; output_state < states; ++output_state) {
+      const size_t output = time_index * states + output_state;
+      ctx.out.data[output] = state[output_state];
+      if constexpr (YAutodiff)
+        for (size_t lane = 0; lane < states; ++lane)
+          ctx.scratch[output * width + lane] =
+              state[states + states * lane + output_state];
+      if constexpr (ThetaAutodiff)
+        for (size_t lane = 0; lane < theta_source; ++lane)
+          ctx.scratch[output * width + states + lane] =
+              state[states + states * y_lanes + states * lane + output_state];
+    }
+    ++time_index;
+  };
+
+  try {
+    if (spec.solver == OdeSpec::RK45) {
+      integrate_times(
+          make_dense_output(spec.atol, spec.rtol,
+                            runge_kutta_dopri5<std::vector<double>, double,
+                                               std::vector<double>, double>()),
+          std::ref(system), workspace.state, workspace.times.begin(),
+          workspace.times.end(), 0.1, observer,
+          max_step_checker(spec.max_steps));
+    } else {
+      integrate_times(
+          make_controlled(
+              spec.atol, spec.rtol,
+              runge_kutta_cash_karp54<std::vector<double>, double,
+                                      std::vector<double>, double>()),
+          std::ref(system), workspace.state, workspace.times.begin(),
+          workspace.times.end(), 0.1, observer,
+          max_step_checker(spec.max_steps));
+    }
+  } catch (const no_progress_error&) {
+    stan::math::throw_domain_error(function_name, "",
+                                   workspace.times[time_index + 1],
+                                   "Failed to integrate to next output time (",
+                                   ") in less than max_num_steps steps");
+  }
+  if (time_index != spec.ts.size())
+    throw std::runtime_error("direct RK observer produced too few states");
+}
+
 // Solve with the scalar types selected at lowering. OP_ODE variant bit 2 marks
 // an explicit type mask: low bit y0, next bit theta (1 = var). Variant zero is
 // the compatibility encoding for hand-built graphs and means the former
@@ -231,6 +528,15 @@ void ode_fwd_typed(KernelCtx& ctx, const OdeSpec& s) {
         ctx.out.data[(int64_t)n * S + k] = solv[n][k];
     for (int64_t i = 0; i < ctx.out.len * W; ++i) J[i] = 0.0;
   } else {
+    // The lowering-time switch keeps the exact current solve as a same-binary
+    // oracle without an environment lookup in this repeated kernel. A payload
+    // is present only when generated differentiation refused no opcode.
+    if (s.direct_rk_enabled && s.direct_rk &&
+        (s.solver == OdeSpec::RK45 || s.solver == OdeSpec::CKRK) &&
+        direct_rk_shape_ok<YAutodiff, ThetaAutodiff>(ctx, s)) {
+      solve_direct_rk<YAutodiff, ThetaAutodiff>(ctx, s);
+      return;
+    }
     stan::math::nested_rev_autodiff nested;
     std::vector<T_y0> z0(ctx.in[0].data, ctx.in[0].data + S);
     std::vector<T_theta> th(ctx.in[1].data, ctx.in[1].data + P);

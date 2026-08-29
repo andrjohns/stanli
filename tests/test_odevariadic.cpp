@@ -19,6 +19,8 @@
 //      loudly.
 //   3. _tol at a tighter tolerance must sit closer to the others, not
 //      further away.
+#include "env_helpers.hpp"
+
 #include <stanli/compile.hpp>
 #include <stanli/ode.hpp>
 #include <stanli/optable.hpp>
@@ -26,12 +28,16 @@
 #include <stan/math.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -47,6 +53,20 @@ static std::string slurp(const std::string& p) {
   std::ostringstream ss;
   ss << f.rdbuf();
   return ss.str();
+}
+
+static uint64_t bits(double value) {
+  uint64_t result;
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
+}
+
+static bool bitwise_equal(const std::vector<double>& lhs,
+                          const std::vector<double>& rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (size_t i = 0; i < lhs.size(); ++i)
+    if (bits(lhs[i]) != bits(rhs[i])) return false;
+  return true;
 }
 
 static void expect_close(const std::string& what, double got, double want,
@@ -99,9 +119,14 @@ OdeActivityRun direct_activity_run(const stanli::OdeSpec& spec) {
     Eigen::VectorXd y0((Eigen::Index)test_y0.size());
     for (size_t i = 0; i < test_y0.size(); ++i)
       y0((Eigen::Index)i) = test_y0[i];
-    const auto solved = stan::math::ode_rk45_tol(
-        DirectRhs{}, y0, spec.t0, spec.ts, spec.rtol, spec.atol, spec.max_steps,
-        nullptr, test_theta, spec.x_r, spec.x_i);
+    const auto solved =
+        spec.solver == stanli::OdeSpec::CKRK
+            ? stan::math::ode_ckrk_tol(DirectRhs{}, y0, spec.t0, spec.ts,
+                                       spec.rtol, spec.atol, spec.max_steps,
+                                       nullptr, test_theta, spec.x_r, spec.x_i)
+            : stan::math::ode_rk45_tol(DirectRhs{}, y0, spec.t0, spec.ts,
+                                       spec.rtol, spec.atol, spec.max_steps,
+                                       nullptr, test_theta, spec.x_r, spec.x_i);
     for (const auto& state : solved)
       for (Eigen::Index k = 0; k < state.size(); ++k)
         out.value.push_back(state(k));
@@ -111,9 +136,14 @@ OdeActivityRun direct_activity_run(const stanli::OdeSpec& spec) {
     for (size_t i = 0; i < test_y0.size(); ++i)
       y0((Eigen::Index)i) = test_y0[i];
     std::vector<T_theta> theta(test_theta.begin(), test_theta.end());
-    const auto solved = stan::math::ode_rk45_tol(
-        DirectRhs{}, y0, spec.t0, spec.ts, spec.rtol, spec.atol, spec.max_steps,
-        nullptr, theta, spec.x_r, spec.x_i);
+    const auto solved =
+        spec.solver == stanli::OdeSpec::CKRK
+            ? stan::math::ode_ckrk_tol(DirectRhs{}, y0, spec.t0, spec.ts,
+                                       spec.rtol, spec.atol, spec.max_steps,
+                                       nullptr, theta, spec.x_r, spec.x_i)
+            : stan::math::ode_rk45_tol(DirectRhs{}, y0, spec.t0, spec.ts,
+                                       spec.rtol, spec.atol, spec.max_steps,
+                                       nullptr, theta, spec.x_r, spec.x_i);
     stan::math::var weighted = 0.0;
     size_t o = 0;
     for (const auto& state : solved)
@@ -133,21 +163,24 @@ OdeActivityRun direct_activity_run(const stanli::OdeSpec& spec) {
 }
 
 template <bool YAutodiff, bool ThetaAutodiff>
-OdeActivityRun kernel_activity_run(const stanli::OdeSpec& spec) {
+OdeActivityRun kernel_activity_run(
+    const stanli::OdeSpec& spec, const std::vector<double>& y0_values = test_y0,
+    const std::vector<double>& theta_values = test_theta) {
   using namespace stanli;
   OdeActivityRun out;
-  out.value.assign(spec.ts.size() * test_y0.size(), 0.0);
-  out.y_grad.assign(test_y0.size(), 0.0);
-  out.theta_grad.assign(test_theta.size(), 0.0);
-  out.jacobian.assign(out.value.size() * (test_y0.size() + test_theta.size()),
-                      std::numeric_limits<double>::quiet_NaN());
+  out.value.assign(spec.ts.size() * y0_values.size(), 0.0);
+  out.y_grad.assign(y0_values.size(), 0.0);
+  out.theta_grad.assign(theta_values.size(), 0.0);
+  out.jacobian.assign(
+      out.value.size() * (y0_values.size() + theta_values.size()),
+      std::numeric_limits<double>::quiet_NaN());
 
   KernelCtx ctx;
   ctx.n_in = 2;
   ctx.in[0] =
-      Desc{const_cast<double*>(test_y0.data()), (int64_t)test_y0.size()};
-  ctx.in[1] =
-      Desc{const_cast<double*>(test_theta.data()), (int64_t)test_theta.size()};
+      Desc{const_cast<double*>(y0_values.data()), (int64_t)y0_values.size()};
+  ctx.in[1] = Desc{const_cast<double*>(theta_values.data()),
+                   (int64_t)theta_values.size()};
   ctx.out = Desc{out.value.data(), (int64_t)out.value.size()};
   ctx.scratch = out.jacobian.data();
   ctx.udata = &spec;
@@ -167,14 +200,14 @@ OdeActivityRun kernel_activity_run(const stanli::OdeSpec& spec) {
   // backward must not rely on 0 * adjoint being harmless: a stale/poisoned
   // column can contain NaN. Poison those columns after checking forward and
   // require the type mask, rather than mere buffer presence, to gate scatter.
-  const size_t width = test_y0.size() + test_theta.size();
+  const size_t width = y0_values.size() + theta_values.size();
   for (size_t o = 0; o < out.value.size(); ++o) {
     if constexpr (!YAutodiff)
-      for (size_t i = 0; i < test_y0.size(); ++i)
+      for (size_t i = 0; i < y0_values.size(); ++i)
         out.jacobian[o * width + i] = std::numeric_limits<double>::quiet_NaN();
     if constexpr (!ThetaAutodiff)
-      for (size_t i = 0; i < test_theta.size(); ++i)
-        out.jacobian[o * width + test_y0.size() + i] =
+      for (size_t i = 0; i < theta_values.size(); ++i)
+        out.jacobian[o * width + y0_values.size() + i] =
             std::numeric_limits<double>::quiet_NaN();
   }
   ode->backward(ctx);
@@ -184,10 +217,23 @@ OdeActivityRun kernel_activity_run(const stanli::OdeSpec& spec) {
 
 template <bool YAutodiff, bool ThetaAutodiff>
 void check_activity_case(const stanli::OdeSpec& spec, const char* label) {
+  stanli::OdeSpec oracle_spec = spec;
+  oracle_spec.direct_rk_enabled = false;
+  const OdeActivityRun oracle =
+      kernel_activity_run<YAutodiff, ThetaAutodiff>(oracle_spec);
+  stanli::OdeSpec direct_spec = spec;
+  direct_spec.direct_rk_enabled = true;
   const OdeActivityRun got =
-      kernel_activity_run<YAutodiff, ThetaAutodiff>(spec);
+      kernel_activity_run<YAutodiff, ThetaAutodiff>(direct_spec);
   const OdeActivityRun want =
       direct_activity_run<YAutodiff, ThetaAutodiff>(spec);
+  const std::string prefix = std::string(label) + ": direct/oracle ";
+  expect(prefix + "solution bits", bitwise_equal(got.value, oracle.value));
+  expect(prefix + "full scratch bits",
+         bitwise_equal(got.jacobian, oracle.jacobian));
+  expect(prefix + "y pullback bits", bitwise_equal(got.y_grad, oracle.y_grad));
+  expect(prefix + "theta pullback bits",
+         bitwise_equal(got.theta_grad, oracle.theta_grad));
   expect(std::string(label) + " output shape",
          got.value.size() == want.value.size());
   for (size_t i = 0; i < got.value.size() && i < want.value.size(); ++i)
@@ -205,12 +251,111 @@ void check_activity_case(const stanli::OdeSpec& spec, const char* label) {
     if constexpr (!YAutodiff)
       for (size_t i = 0; i < test_y0.size(); ++i)
         expect(std::string(label) + " zero y Jacobian column",
-               got.jacobian[o * width + i] == 0.0);
+               bits(got.jacobian[o * width + i]) == bits(0.0));
     if constexpr (!ThetaAutodiff)
       for (size_t i = 0; i < test_theta.size(); ++i)
         expect(std::string(label) + " zero theta Jacobian column",
-               got.jacobian[o * width + test_y0.size() + i] == 0.0);
+               bits(got.jacobian[o * width + test_y0.size() + i]) == bits(0.0));
   }
+}
+
+struct OdeError {
+  bool threw = false;
+  std::string type;
+  std::string message;
+};
+
+static OdeError capture_ode_error(
+    const stanli::OdeSpec& spec, bool use_direct,
+    const std::vector<double>& y0_values = test_y0,
+    const std::vector<double>& theta_values = test_theta) {
+  stanli::OdeSpec selected_spec = spec;
+  selected_spec.direct_rk_enabled = use_direct;
+  OdeError result;
+  try {
+    (void)kernel_activity_run<true, true>(selected_spec, y0_values,
+                                          theta_values);
+  } catch (const std::exception& error) {
+    result.threw = true;
+    result.type = typeid(error).name();
+    result.message = error.what();
+  }
+  return result;
+}
+
+static void check_error_parity(
+    const stanli::OdeSpec& spec, const std::string& label,
+    const std::vector<double>& y0_values = test_y0,
+    const std::vector<double>& theta_values = test_theta) {
+  const OdeError oracle =
+      capture_ode_error(spec, false, y0_values, theta_values);
+  const OdeError direct =
+      capture_ode_error(spec, true, y0_values, theta_values);
+  expect(label + ": oracle throws", oracle.threw);
+  expect(label + ": direct throws", direct.threw);
+  expect(label + ": exception type", direct.type == oracle.type);
+  expect(label + ": exception message", direct.message == oracle.message);
+}
+
+// OdeSpec and its generated derivative payload are graph-owned and shared by
+// executor copies. The mutable direct-RK register/Jacobian buffers must remain
+// thread-local: otherwise two chains can agree in a serial test and corrupt
+// each other as soon as multiple chains evaluate the same model concurrently.
+static void check_shared_spec_threads(const stanli::OdeSpec& spec) {
+  stanli::OdeSpec direct_spec = spec;
+  direct_spec.direct_rk_enabled = true;
+
+  constexpr int kThreads = 4;
+  constexpr int kRepeats = 6;
+  std::vector<std::vector<double>> y0(kThreads, test_y0);
+  std::vector<std::vector<double>> theta(kThreads, test_theta);
+  std::vector<OdeActivityRun> expected;
+  expected.reserve(kThreads);
+  for (int thread = 0; thread < kThreads; ++thread) {
+    y0[(size_t)thread][0] += 0.07 * thread;
+    y0[(size_t)thread][1] -= 0.04 * thread;
+    theta[(size_t)thread][0] += 0.03 * thread;
+    theta[(size_t)thread][1] += 0.02 * thread;
+    expected.push_back(kernel_activity_run<true, true>(
+        direct_spec, y0[(size_t)thread], theta[(size_t)thread]));
+  }
+
+  std::atomic<int> ready{0};
+  std::atomic<bool> start{false};
+  std::vector<std::string> errors(kThreads);
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (int thread = 0; thread < kThreads; ++thread) {
+    threads.emplace_back([&, thread] {
+      ready.fetch_add(1, std::memory_order_release);
+      while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+      try {
+        for (int repeat = 0; repeat < kRepeats; ++repeat) {
+          const OdeActivityRun got = kernel_activity_run<true, true>(
+              direct_spec, y0[(size_t)thread], theta[(size_t)thread]);
+          const OdeActivityRun& want = expected[(size_t)thread];
+          if (!bitwise_equal(got.value, want.value) ||
+              !bitwise_equal(got.jacobian, want.jacobian) ||
+              !bitwise_equal(got.y_grad, want.y_grad) ||
+              !bitwise_equal(got.theta_grad, want.theta_grad)) {
+            errors[(size_t)thread] =
+                "direct result differs from the serial shared-spec result";
+            break;
+          }
+        }
+      } catch (const std::exception& error) {
+        errors[(size_t)thread] = error.what();
+      }
+    });
+  }
+  while (ready.load(std::memory_order_acquire) != kThreads)
+    std::this_thread::yield();
+  start.store(true, std::memory_order_release);
+  for (auto& thread : threads) thread.join();
+
+  for (int thread = 0; thread < kThreads; ++thread)
+    expect("shared OdeSpec thread " + std::to_string(thread),
+           errors[(size_t)thread].empty());
 }
 
 static void check_precomputed_jacobian_harvest() {
@@ -246,26 +391,55 @@ static void check_precomputed_jacobian_harvest() {
   }
 }
 
-static const stanli::OdeSpec* fixture_rk45_spec(const stanli::Graph& graph) {
+static const stanli::OdeSpec* fixture_spec(
+    const stanli::Graph& graph, stanli::OdeSpec::Solver solver,
+    const std::string& rhs_name = "rhs") {
   using namespace stanli;
   for (const Op& op : graph.ops)
     if (op.opcode == OP_ODE) {
       const auto* spec = static_cast<const OdeSpec*>(op.udata);
-      if (!spec->legacy && spec->solver == OdeSpec::RK45 &&
-          spec->rhs_name == "rhs")
+      if (!spec->legacy && spec->solver == solver && spec->rhs_name == rhs_name)
         return spec;
     }
   return nullptr;
+}
+
+static stanli::CompiledModel compile_ode_fixture(const std::string& mir_text,
+                                                 const stanli::DataMap& data,
+                                                 bool disable_direct_rk) {
+  const char* selector = "STANLI_NO_ODE_DIRECT_RK";
+  disable_direct_rk ? test_setenv(selector, "1", 1) : test_unsetenv(selector);
+  try {
+    stanli::CompiledModel cm = stanli::compile_model(mir_text, data);
+    test_unsetenv(selector);
+    return cm;
+  } catch (...) {
+    test_unsetenv(selector);
+    throw;
+  }
 }
 
 int main() {
   using namespace stanli;
 
   DataMap data = DataMap::from_json_file("tests/fixtures/odevariadic.json");
-  CompiledModel cm =
-      compile_model(slurp("tests/fixtures/odevariadic.tmir.sexp"), data);
-  const OdeSpec* rk45_spec = fixture_rk45_spec(cm.graph);
+  const std::string mir_text = slurp("tests/fixtures/odevariadic.tmir.sexp");
+  CompiledModel cm = compile_ode_fixture(mir_text, data, false);
+  CompiledModel oracle_cm = compile_ode_fixture(mir_text, data, true);
+  const OdeSpec* rk45_spec = fixture_spec(cm.graph, OdeSpec::RK45);
+  const OdeSpec* ckrk_spec = fixture_spec(cm.graph, OdeSpec::CKRK);
+  const OdeSpec* mixed_rk45_spec =
+      fixture_spec(cm.graph, OdeSpec::RK45, "rhs_mixed");
   expect("fixture exposes a modern rk45 rhs", rk45_spec != nullptr);
+  expect("fixture exposes a modern ckrk rhs", ckrk_spec != nullptr);
+  expect("fixture exposes a mixed-data rk45 rhs", mixed_rk45_spec != nullptr);
+  const OdeSpec* oracle_rk45_spec =
+      fixture_spec(oracle_cm.graph, OdeSpec::RK45);
+  expect("oracle fixture exposes a modern rk45 rhs",
+         oracle_rk45_spec != nullptr);
+  if (oracle_rk45_spec)
+    expect("inverse selector disables direct RK at lowering",
+           !oracle_rk45_spec->direct_rk_enabled);
 
   bool log_has_vv = false, log_has_vd = false, log_has_dv = false;
   for (const Op& op : cm.graph.ops)
@@ -293,14 +467,83 @@ int main() {
   check_precomputed_jacobian_harvest();
 
   if (rk45_spec) {
+    expect("branchless RK45 has a direct derivative payload",
+           (bool)rk45_spec->direct_rk && rk45_spec->direct_rk_why.empty() &&
+               rk45_spec->direct_rk_enabled);
     check_activity_case<true, false>(*rk45_spec, "active y/data theta");
     check_activity_case<false, true>(*rk45_spec, "data y/active theta");
     check_activity_case<true, true>(*rk45_spec, "active y/active theta");
     check_activity_case<false, false>(*rk45_spec, "data y/data theta");
+    check_shared_spec_threads(*rk45_spec);
+
+    OdeSpec invalid = *rk45_spec;
+    invalid.rtol = 0.0;
+    check_error_parity(invalid, "RK45 invalid relative tolerance");
+    invalid = *rk45_spec;
+    invalid.ts.clear();
+    check_error_parity(invalid, "RK45 empty times");
+    invalid = *rk45_spec;
+    invalid.ts[0] = invalid.t0;
+    check_error_parity(invalid, "RK45 time equals initial time");
+    invalid = *rk45_spec;
+    invalid.max_steps = 0;
+    check_error_parity(invalid, "RK45 invalid max steps");
+    std::vector<double> invalid_y0 = test_y0;
+    invalid_y0[0] = std::numeric_limits<double>::quiet_NaN();
+    check_error_parity(*rk45_spec, "RK45 nonfinite initial state", invalid_y0);
+    std::vector<double> invalid_theta = test_theta;
+    invalid_theta[1] = std::numeric_limits<double>::infinity();
+    check_error_parity(*rk45_spec, "RK45 nonfinite parameter", test_y0,
+                       invalid_theta);
+    invalid = *rk45_spec;
+    invalid.t0 = std::numeric_limits<double>::quiet_NaN();
+    check_error_parity(invalid, "RK45 nonfinite initial time");
+    invalid = *rk45_spec;
+    invalid.ts[1] = std::numeric_limits<double>::infinity();
+    check_error_parity(invalid, "RK45 nonfinite output time");
+    invalid = *rk45_spec;
+    std::swap(invalid.ts[0], invalid.ts[1]);
+    check_error_parity(invalid, "RK45 unordered output times");
+    invalid = *rk45_spec;
+    invalid.max_steps = 1;
+    check_error_parity(invalid, "RK45 integration step limit");
+
+    OdeSpec legacy = *rk45_spec;
+    legacy.legacy = true;
+    check_activity_case<true, true>(legacy, "legacy RK45 active y/theta");
+    legacy.rtol = 0.0;
+    check_error_parity(legacy, "legacy RK45 invalid relative tolerance");
+  }
+  if (mixed_rk45_spec) {
+    expect("mixed-data RK45 has a direct derivative payload",
+           (bool)mixed_rk45_spec->direct_rk &&
+               mixed_rk45_spec->direct_rk_why.empty() &&
+               mixed_rk45_spec->direct_rk_enabled);
+    expect("mixed-data RK45 exposes one real datum and three parameters",
+           mixed_rk45_spec->x_r.size() == 1 &&
+               mixed_rk45_spec->prog.n_xr == 1 &&
+               mixed_rk45_spec->prog.n_th == 3);
+    if (mixed_rk45_spec->x_r.size() == 1 && mixed_rk45_spec->prog.n_xr == 1 &&
+        mixed_rk45_spec->prog.n_th == 3) {
+      OdeSpec invalid = *mixed_rk45_spec;
+      invalid.x_r[0] = std::numeric_limits<double>::quiet_NaN();
+      check_error_parity(invalid, "RK45 nonfinite real data", test_y0,
+                         {0.2, 0.35, 0.4});
+    }
+  }
+  if (ckrk_spec) {
+    expect("branchless CKRK has a direct derivative payload",
+           (bool)ckrk_spec->direct_rk && ckrk_spec->direct_rk_why.empty() &&
+               ckrk_spec->direct_rk_enabled);
+    check_activity_case<true, false>(*ckrk_spec, "CKRK active y/data theta");
+    check_activity_case<false, true>(*ckrk_spec, "CKRK data y/active theta");
+    check_activity_case<true, true>(*ckrk_spec, "CKRK active y/theta");
   }
 
   Executor ex(std::move(cm.graph));
   cm.bind(ex);
+  Executor oracle_ex(std::move(oracle_cm.graph));
+  oracle_cm.bind(oracle_ex);
 
   // a, b, p[2], y0[2]
   const int64_t n = ex.n_params();
@@ -310,10 +553,19 @@ int main() {
   std::vector<double> q((size_t)n);
   for (int64_t i = 0; i < n; ++i) q[(size_t)i] = -0.3 + 0.11 * (double)i;
 
-  std::vector<double> grad((size_t)n);
-  for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = q[(size_t)i];
+  std::vector<double> grad((size_t)n), oracle_grad((size_t)n);
+  expect("oracle model has the same parameter count",
+         oracle_ex.n_params() == n);
+  for (int64_t i = 0; i < n; ++i) {
+    ex.params_data()[i] = q[(size_t)i];
+    oracle_ex.params_data()[i] = q[(size_t)i];
+  }
+  const double oracle_lp = oracle_ex.gradient(oracle_grad.data());
   const double lp = ex.gradient(grad.data());
   expect("lp is finite", std::isfinite(lp));
+  expect("whole-model direct/oracle lp bits", bits(lp) == bits(oracle_lp));
+  expect("whole-model direct/oracle gradient bits",
+         bitwise_equal(grad, oracle_grad));
 
   // ---- the value-only forward ------------------------------------------
   // ode_fwd is the only kernel that skips work under forward_value_only:

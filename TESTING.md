@@ -327,9 +327,12 @@ interpreter but missing from graph lowering.
 [`tests/cross_path.hpp`](tests/cross_path.hpp) compiles one model several
 times, once per configuration, and compares the results. The
 configurations are `STANLI_NO_ISLAND`, `STANLI_ISLAND_ALWAYS`,
-`STANLI_NO_NATIVE_ADJ`, rerolling/in-place updates/constant folding off, and
-the shipped pipeline with `STANLI_WA_FORCE_INTERP` attaching `WaInterp` beside
-a complete `write_array` graph so both engines produce the same output row.
+`STANLI_NO_NATIVE_ADJ`, `STANLI_NO_ODE_DIRECT_RK`,
+rerolling/in-place updates/constant folding off, and the shipped pipeline with
+`STANLI_WA_FORCE_INTERP` attaching `WaInterp` beside a complete `write_array`
+graph so both engines produce the same output row. The ODE configuration
+retains the generated direct-RK payload but selects the canonical Stan Math
+solve, so the comparison isolates execution rather than preparation.
 
 The cross-path result excludes stochastic `write_array` columns from its
 bitwise count. It identifies them by running the interpreter with two seeds
@@ -370,6 +373,30 @@ backward, and covers the activation threshold, clone budget, overlap, and NaN
 behavior. `test_island` covers the opt-out through graph carving and execution,
 tagged-payload lifetime, and the rule that opcode zero remains invalid for
 graph carving and binding after the private helper is registered.
+
+The direct RK path has two additional focused gates. `test_ode_prog` checks
+that derivative construction leaves the canonical RHS bytecode unchanged,
+requires bitwise local RHS values and `J_y`/`J_theta` entries for admitted
+programs, and pins structural refusals including runtime jumps, `DOT`, and
+signed-zero-sensitive `FMAX`/`FMIN`. `test_odevariadic` compares the default
+path against a separately lowered `STANLI_NO_ODE_DIRECT_RK=1` oracle for RK45,
+CKRK, and legacy RK45. It compares solution bits, the complete Jacobian
+scratch matrix, both input pullbacks, whole-model log density and gradient,
+all scalar-activity masks, shared-spec multithreaded execution, and exception
+type and text. Data-only, BDF/Adams, ineligible RHS programs, and
+`forward_value_only` remain on their established paths.
+
+The direct/oracle gate is bitwise; it has no ledger tolerance. The integrated
+macOS arm64 Release A/B admitted the default path with 1.8615x
+[1.8380x, 1.8853x] oracle/direct on `lotka_volterra` and 1.8035x
+[1.7578x, 1.8505x] on `soil_incubation`, while the ineligible branched BDF
+control was unchanged. Linux x86-64 must run both default and
+`STANLI_NO_ODE_DIRECT_RK=1`, the focused ODE tests, and the ODE interface sweep
+before merge. Any architecture-specific disagreement narrows eligibility or
+keeps the oracle; it does not relax the exact gate. This testing contract is
+for the all-double coupled-sensitivity path. The slower Phase 0
+precomputed-gradient callback bridge remains stopped and is not selected by
+either arm.
 
 ## Testing graph transformations
 

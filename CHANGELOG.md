@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Compiled RK sensitivities avoid nested autodiff
+
+Eligible `ode_rk45` and `ode_ckrk` calls now integrate values and coupled
+sensitivities directly from the compiled RHS value and Jacobian program. The
+existing Stan Math path remains the exact fallback for unsupported RHS
+instructions and can be selected with `STANLI_NO_ODE_DIRECT_RK=1` for
+differential testing. This removes nested reverse-mode autodiff from the hot
+callback while preserving the pinned Stan Math tableau, controller, error
+norm, output layout, validation, and exception behavior.
+
 ### Infinite declaration bounds are identities
 
 Parameter declarations whose lower bound is negative infinity or whose upper

@@ -585,6 +585,18 @@ set_tests_properties(test_prep_profile_reroll_dispositions PROPERTIES
 add_executable(bench_opcost tools/bench_opcost.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(bench_opcost PRIVATE stanli)
+# Developer-only ODE RHS generated-adjoint spike.  Not a test and not installed.
+add_executable(bench_rhs_adjoint EXCLUDE_FROM_ALL
+  tools/bench_rhs_adjoint.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_rhs_adjoint PRIVATE stanli)
+# Developer-only complete-solve sensitivity ceilings.  They retain the merged
+# runtime as the oracle and install no experimental path in libstanli.
+add_executable(bench_ode_ceiling EXCLUDE_FROM_ALL
+  tools/bench_ode_ceiling.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_ode_ceiling PRIVATE stanli)
+add_executable(bench_ode_cvodes_ceiling EXCLUDE_FROM_ALL
+  tools/bench_ode_cvodes_ceiling.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_ode_cvodes_ceiling PRIVATE stanli)
 add_executable(bench_dispatch tools/bench_dispatch.cpp)
 add_executable(dump_ops tools/dump_ops.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)

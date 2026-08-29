@@ -71,9 +71,11 @@ int main() {
   int driven = 0, skipped = 0, comparisons = 0, declared = 0;
   int with_islands = 0, with_carved = 0, with_necessity = 0;
   int with_native_adj = 0, with_replay_adj = 0;
-  int with_wa_graph = 0, with_wa_interp = 0, with_ode = 0, with_ode_interp = 0;
+  int with_wa_graph = 0, with_wa_interp = 0, with_ode = 0;
+  int with_ode_direct_rk = 0, with_ode_interp = 0;
   int wa_columns_compared = 0, wa_rng_excluded = 0;
   int island_always_gained = 0, no_island_dropped = 0;
+  int no_ode_direct_rk_dropped = 0;
   std::vector<std::string> skips;
 
   for (const std::string& name : names) {
@@ -124,6 +126,7 @@ int main() {
     if (any(&cross::Paths::native_adj) > 0) ++with_native_adj;
     if (r.paths.islands > r.paths.native_adj) ++with_replay_adj;
     if (any(&cross::Paths::ode) > 0) ++with_ode;
+    if (r.paths.ode_direct_rk > 0) ++with_ode_direct_rk;
     if (any(&cross::Paths::ode_interp) > 0) ++with_ode_interp;
     if (r.paths.wa == "graph+interp") ++with_wa_graph;
     if (r.paths.wa == "truncated+interp") ++with_wa_interp;
@@ -136,6 +139,12 @@ int main() {
     };
     if (islands_of("no_island") < r.paths.islands) ++no_island_dropped;
     if (islands_of("island_always") > r.paths.islands) ++island_always_gained;
+    const auto direct_rk_of = [&r](const char* cfg) {
+      auto it = r.by_config.find(cfg);
+      return it == r.by_config.end() ? 0 : it->second.ode_direct_rk;
+    };
+    if (direct_rk_of("no_ode_direct_rk") < r.paths.ode_direct_rk)
+      ++no_ode_direct_rk_dropped;
   }
 
   std::printf(
@@ -144,17 +153,18 @@ int main() {
       driven, skipped, comparisons, declared);
   std::printf(
       "  engines: %d with islands (%d necessity, %d carved), %d with a "
-      "generated adjoint, %d with a var replay, %d with an ODE (%d falling "
-      "back to the interpreter)\n",
+      "generated adjoint, %d with a var replay, %d with an ODE (%d direct "
+      "RK, %d falling back to the interpreter)\n",
       with_islands, with_necessity, with_carved, with_native_adj,
-      with_replay_adj, with_ode, with_ode_interp);
+      with_replay_adj, with_ode, with_ode_direct_rk, with_ode_interp);
   std::printf(
       "  write_array: %d complete graphs, %d truncated, %d columns "
       "compared against the interpreter, %d excluded as RNG-tainted\n",
       with_wa_graph, with_wa_interp, wa_columns_compared, wa_rng_excluded);
   std::printf(
-      "  switches: NO_ISLAND drops islands on %d, ISLAND_ALWAYS adds on %d\n",
-      no_island_dropped, island_always_gained);
+      "  switches: NO_ISLAND drops islands on %d, ISLAND_ALWAYS adds on %d, "
+      "NO_ODE_DIRECT_RK drops direct RK on %d\n",
+      no_island_dropped, island_always_gained, no_ode_direct_rk_dropped);
   // Engine-coverage floors. These are measured values, not aspirations:
   // each is what the corpus reaches today, so a vocabulary regression that
   // moves work off a path (a carve that stops carving, an ODE right-hand
@@ -174,6 +184,9 @@ int main() {
              std::to_string(with_native_adj));
   expect(with_ode >= 1, "at least 1 fixture reaches the ODE integrator, got " +
                             std::to_string(with_ode));
+  expect(with_ode_direct_rk >= 1,
+         "at least 1 fixture reaches the direct RK path, got " +
+             std::to_string(with_ode_direct_rk));
   expect(with_wa_graph >= 80,
          "at least 80 fixtures lower their whole write_array section, got " +
              std::to_string(with_wa_graph));
@@ -194,6 +207,9 @@ int main() {
   expect(island_always_gained >= 1,
          "STANLI_ISLAND_ALWAYS adds islands somewhere, got " +
              std::to_string(island_always_gained));
+  expect(no_ode_direct_rk_dropped >= 1,
+         "STANLI_NO_ODE_DIRECT_RK disables a direct RK path somewhere, got " +
+             std::to_string(no_ode_direct_rk_dropped));
 
   // Only on a failure, and last: the skip list is the first thing anyone
   // asks for when a floor drops, and 80-odd lines of it on a green run is

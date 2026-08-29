@@ -16,6 +16,7 @@
 //   no_island      STANLI_NO_ISLAND: carver off, graph ops stay
 //   island_always  STANLI_ISLAND_ALWAYS: carve past the cost estimate
 //   no_native_adj  STANLI_NO_NATIVE_ADJ: islands replay under var
+//   no_ode_direct_rk STANLI_NO_ODE_DIRECT_RK: RK45/CKRK use their exact oracle
 //   passes_off     STANLI_NO_REROLL, STANLI_NO_INPLACE, STANLI_NO_CONSTFOLD
 //
 // The default compile also sets STANLI_WA_FORCE_INTERP, the one new switch:
@@ -126,9 +127,10 @@ struct Config {
 // previous config would silently make the next comparison vacuous.
 inline const std::vector<std::string>& harness_vars() {
   static const std::vector<std::string> v = {
-      "STANLI_NO_ISLAND",      "STANLI_ISLAND_ALWAYS", "STANLI_NO_NATIVE_ADJ",
-      "STANLI_NO_REROLL",      "STANLI_NO_INPLACE",    "STANLI_NO_CONSTFOLD",
-      "STANLI_WA_FORCE_INTERP"};
+      "STANLI_NO_ISLAND",       "STANLI_ISLAND_ALWAYS",
+      "STANLI_NO_NATIVE_ADJ",   "STANLI_NO_REROLL",
+      "STANLI_NO_INPLACE",      "STANLI_NO_CONSTFOLD",
+      "STANLI_WA_FORCE_INTERP", "STANLI_NO_ODE_DIRECT_RK"};
   return v;
 }
 
@@ -154,6 +156,7 @@ inline const std::vector<Config>& configs() {
       {"no_island", {"STANLI_NO_ISLAND"}},
       {"island_always", {"STANLI_ISLAND_ALWAYS"}},
       {"no_native_adj", {"STANLI_NO_NATIVE_ADJ"}},
+      {"no_ode_direct_rk", {"STANLI_NO_ODE_DIRECT_RK"}},
       {"passes_off",
        {"STANLI_NO_REROLL", "STANLI_NO_INPLACE", "STANLI_NO_CONSTFOLD"}},
   };
@@ -183,6 +186,7 @@ struct Paths {
   int native_adj = 0;  // islands running their generated backward
   int ode = 0;
   int ode_prog = 0;         // right-hand side compiled
+  int ode_direct_rk = 0;    // eligible and enabled coupled RK45/CKRK path
   int ode_interp = 0;       // right-hand side falls back to MirInterp under var
   std::string wa = "none";  // none | graph | interp | truncated+interp
   size_t wa_columns = 0;
@@ -191,9 +195,9 @@ struct Paths {
     char buf[256];
     std::snprintf(buf, sizeof(buf),
                   "islands %d (%d necessity, %d carved), native_adj %d/%d, "
-                  "wa %s, ode %d (%d program, %d interp)",
+                  "wa %s, ode %d (%d program, %d direct RK, %d interp)",
                   islands, necessity, carved, native_adj, islands, wa.c_str(),
-                  ode, ode_prog, ode_interp);
+                  ode, ode_prog, ode_direct_rk, ode_interp);
     return buf;
   }
 };
@@ -206,10 +210,12 @@ inline void scan_graph(const Graph& g, Paths* p) {
       if (static_cast<const IslandProg*>(op.udata)->native_adj) ++p->native_adj;
     } else if (op.opcode == OP_ODE) {
       ++p->ode;
-      if (static_cast<const OdeSpec*>(op.udata)->prog.ok)
+      const auto* spec = static_cast<const OdeSpec*>(op.udata);
+      if (spec->prog.ok)
         ++p->ode_prog;
       else
         ++p->ode_interp;
+      if (spec->direct_rk && spec->direct_rk_enabled) ++p->ode_direct_rk;
     }
   }
 }
