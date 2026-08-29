@@ -1,9 +1,11 @@
 # Build the platform wheels, and publish them to PyPI on a version tag.
 #
-# Pull requests build the representative manylinux target, compile the runtime
-# for wasm32, run the full runtime and corpus tests, and gate the bounded Windows
-# compiler cross-build. Every release target also builds after merge, nightly,
-# and on version tags; publishing is gated on the tag and all of those builds.
+# Pull requests build the representative manylinux target with Clang, compile
+# the runtime for wasm32, run the full runtime and corpus tests, and gate the
+# bounded Windows compiler cross-build. Shipped Linux and Windows builds retain
+# their established GCC toolchains. Every release target also builds after
+# merge, nightly, and on version tags; publishing is gated on the tag and all
+# of those builds.
 #
 # Not cibuildwheel: it exists to build one wheel per CPython version, and
 # stanli ships a ctypes-loaded shared library with no extension module, so
@@ -157,10 +159,6 @@ jobs:
       # the wheel tag promises. Without it the runner's own OS version
       # becomes the floor and the tag quietly lies.
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
-      # Native runtime builds use Clang explicitly. On Linux, Clang retains
-      # the manylinux image's GNU libstdc++/libgcc runtime libraries.
-      CC: clang
-      CXX: clang++
     strategy:
       fail-fast: false
       # A pull request builds one platform, and it is Linux x86_64. It
@@ -183,13 +181,15 @@ jobs:
       - name: System packages (manylinux)
         if: matrix.container != ''
         run: |
-          # Native runtime objects use Clang's frontends while retaining the
-          # manylinux image's GNU libstdc++/libgcc runtime libraries.
-          # Install it before the compiler fingerprint so the cache key names
-          # the compiler that CMake will actually invoke.
-          # Use the image's architecture-aware installer. Its Clang frontend
-          # is configured against this image's existing GNU toolchain/runtime.
-          manylinux-install-clang
+          # PR validation uses Clang's frontend with this image's existing GNU
+          # libstdc++/libgcc runtime. Release, scheduled, and manual builds keep
+          # the established GCC frontend so changing the validation compiler
+          # cannot change shipped runtime performance.
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            manylinux-install-clang
+            echo 'CC=clang' >> "$GITHUB_ENV"
+            echo 'CXX=clang++' >> "$GITHUB_ENV"
+          fi
           # OCaml's complete-object mode uses `ld -r`, which resolves its C
           # runtime dependencies from static archives during the partial link.
           dnf install -y unzip which diffutils patch rsync glibc-static
@@ -198,14 +198,15 @@ jobs:
           # explicitly rather than inheriting AlmaLinux's system python3.
           echo /opt/python/cp312-cp312/bin >> "$GITHUB_PATH"
 
-      - name: Fingerprint the selected Clang C++ compiler
+      - name: Fingerprint the selected C++ compiler
         id: toolchain
         shell: bash
         run: |
+          compiler="${CXX:-c++}"
           if command -v sha256sum >/dev/null; then
-            fingerprint=$("$CXX" --version | sha256sum | cut -d' ' -f1)
+            fingerprint=$("$compiler" --version | sha256sum | cut -d' ' -f1)
           else
-            fingerprint=$("$CXX" --version | shasum -a 256 | cut -d' ' -f1)
+            fingerprint=$("$compiler" --version | shasum -a 256 | cut -d' ' -f1)
           fi
           echo "id=$fingerprint" >> "$GITHUB_OUTPUT"
 
@@ -218,8 +219,8 @@ jobs:
         with:
           path: .ccache
           key: >-
-            ccache-${{ matrix.plat }}-release-clang-v5-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
-          restore-keys: ccache-${{ matrix.plat }}-release-clang-v5-${{ steps.toolchain.outputs.id }}-
+            ccache-${{ matrix.plat }}-${{ github.event_name == 'pull_request' && 'release-clang-v5' || 'release-v4' }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tests/**/*.cpp', 'tests/**/*.hpp', 'tools/**/*.cpp', 'tools/**/*.hpp', 'deps/fetch.sh') }}
+          restore-keys: ccache-${{ matrix.plat }}-${{ github.event_name == 'pull_request' && 'release-clang-v5' || 'release-v4' }}-${{ steps.toolchain.outputs.id }}-
 
       - name: System packages (macOS)
         if: matrix.container == ''
@@ -352,8 +353,12 @@ jobs:
           export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=600M
           export CCACHE_SLOPPINESS=pch_defines,time_macros
           ccache -z
+          compiler_args=()
+          if [ -n "${CC:-}" ] && [ -n "${CXX:-}" ]; then
+            compiler_args+=("-DCMAKE_C_COMPILER=$CC" "-DCMAKE_CXX_COMPILER=$CXX")
+          fi
           cmake -B build-rel -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+            "${compiler_args[@]}" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSTANLI_STANC_EMBED_OBJ="$PWD/deps/stanc3/stanc_embed.o" \

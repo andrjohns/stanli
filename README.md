@@ -301,10 +301,11 @@ python3 -m http.server -d web     # then open http://localhost:8000
 
 ## Build
 
-Developer C/C++ builds require a C++17 Clang toolchain (`clang` and
-`clang++`). The Windows release wheel remains on its established MSYS2 UCRT64
-GCC toolchain; that post-merge packaging job is outside the PR-latency path.
-Other GNU libraries and tools may remain installed for auxiliary workflows.
+Developer C/C++ builds should use a C++17 Clang toolchain (`clang` and
+`clang++`) to match pull-request validation. The shipped Linux and Windows
+release wheels retain their established GCC toolchains, while macOS uses
+AppleClang. Other GNU libraries and tools may remain installed for auxiliary
+workflows.
 
 One-shot setup (fetches pinned deps, builds, runs tests):
 

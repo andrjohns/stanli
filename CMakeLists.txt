@@ -20,22 +20,6 @@ endif()
 
 project(stanli C CXX)
 
-# Clang is the supported frontend for native builds that gate pull requests.
-# Windows remains on the established UCRT64 GCC toolchain: that post-merge job
-# does not affect PR latency, and mixing Clang -O0 test objects with its GNU
-# runtime archive currently exposes MinGW COMDAT/linker failures. Keep that
-# unrelated migration out of the fast-test policy.
-foreach(_stanli_language IN ITEMS C CXX)
-  if(NOT WIN32 AND
-     NOT CMAKE_${_stanli_language}_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
-    message(FATAL_ERROR
-      "stanli requires Clang for ${_stanli_language} on this platform; "
-      "got ${CMAKE_${_stanli_language}_COMPILER_ID} "
-      "(${CMAKE_${_stanli_language}_COMPILER}). "
-      "Configure with CC=clang and CXX=clang++.")
-  endif()
-endforeach()
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -536,6 +520,10 @@ endif()
 
 if(NOT EMSCRIPTEN)
 enable_testing()
+# Pull-request validation uses Clang so its cheap test translation units can
+# link to the optimized runtime objects below. Shipped platform builds may use
+# their established compiler; this switch changes test scaffolding only when
+# the frontend supports the shared-PCH policy we validate in CI.
 set(STANLI_FAST_TEST_TUS OFF)
 if(NOT WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
   set(STANLI_FAST_TEST_TUS ON)
