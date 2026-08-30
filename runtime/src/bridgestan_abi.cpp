@@ -540,6 +540,11 @@ int bs_param_constrain(const bs_model* m, bool include_tp, bool include_gq,
   }
 }
 
+// Keep the implementation-only initialization helpers in C++ linkage. GCC
+// rejects a C++ declaration followed by a definition inside this exported
+// C-linkage block, while Clang accepts the mismatch.
+}  // extern "C"
+
 namespace {
 
 const stanli::InitInterp* init_interp(const bs_model* m, std::string* why) {
@@ -598,6 +603,8 @@ int unconstrain_into(const bs_model* m,
 }
 
 }  // namespace
+
+extern "C" {
 
 int bs_param_unconstrain(const bs_model* m, const double* theta,
                          double* theta_unc, char** error_msg) {
