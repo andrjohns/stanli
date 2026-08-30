@@ -339,6 +339,21 @@ jobs:
             }
           done
 
+      # The ASan build intentionally does not embed stanc, but its CTest suite
+      # includes the source-level lit cases. Hand it the exact executable this
+      # job built from the shared source pin instead of rebuilding OCaml there.
+      - name: Publish the pinned compiler for ASan
+        if: >-
+          matrix.plat == 'manylinux_2_28_x86_64' &&
+          github.event_name != 'pull_request' &&
+          startsWith(github.ref, 'refs/tags/') == false
+        uses: actions/upload-artifact@v4
+        with:
+          name: stanc-linux-x86_64
+          path: |
+            deps/stanc3/stanc
+            deps/stanc3/stanc.src
+
       - name: Check the fixture corpus matches the pinned stanc
         if: matrix.container != ''
         shell: bash
@@ -1305,9 +1320,10 @@ jobs:
   # release commit already ran this check when it landed on main, so version
   # tags do not repeat it. It runs ctest and nothing else -- no corpus check,
   # no conformance, no wheel -- because those are covered by jobs that are
-  # not paying for instrumentation, and the 51 test binaries are the target.
+  # not paying for instrumentation, and the CTest suite is the target.
   asan:
     name: ctest under AddressSanitizer
+    needs: build
     if: >-
       github.event_name != 'pull_request' &&
       startsWith(github.ref, 'refs/tags/') == false
@@ -1347,6 +1363,16 @@ jobs:
           restore-keys: ccache-asan-clang-o1-g1-v3-${{ steps.toolchain.outputs.id }}-
       - name: Fetch pinned dependencies
         run: ./deps/fetch.sh
+      - name: Install the pinned compiler from the native build
+        uses: actions/download-artifact@v4
+        with:
+          name: stanc-linux-x86_64
+          path: deps/stanc3
+      - name: Check compiler provenance
+        run: |
+          test "$(cat deps/stanc3/stanc.src)" = "$STANC3_SRC_SHA"
+          chmod +x deps/stanc3/stanc
+          ./deps/stanc3/stanc --version
       # Both fatal runs of this job died at the same place -- the density
       # shards -- with "the runner has received a shutdown signal" while
       # the sibling manylinux job on its own runner sailed on. That is the
