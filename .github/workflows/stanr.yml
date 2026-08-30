@@ -1,0 +1,63 @@
+# Build the downstream stanr package with this checkout's vendored runtime,
+# then run stanr's own stanli-backend contract tests. This catches source/API
+# incompatibilities that the standalone R package cannot see: stanr embeds
+# Stanli directly and adapts it to Stan's model_base interface.
+name: stanr downstream
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'runtime/include/**'
+      - 'runtime/src/**'
+      - 'runtime/kernels/**'
+      - 'tests/test_stanr.sh'
+      - 'tests/test_stanr_backend.R'
+      - '.github/workflows/stanr.yml'
+  pull_request:
+    paths:
+      - 'runtime/include/**'
+      - 'runtime/src/**'
+      - 'runtime/kernels/**'
+      - 'tests/test_stanr.sh'
+      - 'tests/test_stanr_backend.R'
+      - '.github/workflows/stanr.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  backend:
+    name: current runtime in stanr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Pin the downstream source so unrelated upstream changes cannot make a
+      # Stanli pull request fail. Refresh this together with the test if stanr
+      # changes its vendoring or backend contract.
+      STANR_REF: da5de850718ca62ad752365d5467566eea22a0c5
+      MAKEFLAGS: -j2
+      TESTTHAT_CPUS: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: r
+          dependencies: '"hard"'
+          extra-packages: >-
+            any::R6, any::QuickJSR, any::posterior, any::withr, any::testthat
+
+      - name: Build and test stanr's Stanli backend
+        run: ./tests/test_stanr.sh "$STANR_REF"
