@@ -34,6 +34,7 @@ EXPORTS
   stanli_constrained_name
   stanli_constrain
   stanli_wa_n_columns
+  stanli_wa_n_generated_start
   stanli_wa_column_name
   stanli_wa_seed
   stanli_wa_seed_chain
