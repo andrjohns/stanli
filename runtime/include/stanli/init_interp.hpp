@@ -16,8 +16,9 @@
 // This runs stanc3's `transform_inits` section through the MIR interpreter,
 // the same way WaInterp runs `generate_quantities`. Interpreting rather than
 // lowering is deliberate: it happens once per chain, and it is the only way
-// to serve a bound that depends on an earlier parameter (`vector<lower=alpha>`),
-// whose value is not known until that parameter has been read.
+// to serve a bound that depends on an earlier parameter
+// (`vector<lower=alpha>`), whose value is not known until that parameter has
+// been read.
 //
 // Inside the section, `FnReadData` names a PARAMETER read from the caller's
 // init context, while data a bound refers to is an ordinary variable resolved

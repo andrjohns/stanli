@@ -252,9 +252,10 @@ void expect_unconstrain_inits_round_trip() {
   for (int64_t i = 0; i < n; ++i) {
     if (!(std::abs(back[(size_t)i] - q[(size_t)i]) < 1e-9)) {
       ++failures;
-      std::printf("FAIL stanli_unconstrain_inits round trip at %lld: %.17g "
-                  "want %.17g\n",
-                  (long long)i, back[(size_t)i], q[(size_t)i]);
+      std::printf(
+          "FAIL stanli_unconstrain_inits round trip at %lld: %.17g "
+          "want %.17g\n",
+          (long long)i, back[(size_t)i], q[(size_t)i]);
       break;
     }
   }
@@ -263,13 +264,15 @@ void expect_unconstrain_inits_round_trip() {
   if (stanli_unconstrain_inits(model, "{\"mu\": 0}", back.data(), err,
                                sizeof err) == 0) {
     ++failures;
-    std::printf("FAIL stanli_unconstrain_inits accepted an incomplete "
-                "document\n");
+    std::printf(
+        "FAIL stanli_unconstrain_inits accepted an incomplete "
+        "document\n");
   } else if (std::string(err).find("sigma") == std::string::npos) {
     ++failures;
-    std::printf("FAIL incomplete document did not name a missing parameter: "
-                "%s\n",
-                err);
+    std::printf(
+        "FAIL incomplete document did not name a missing parameter: "
+        "%s\n",
+        err);
   }
   stanli_model_free(model);
 }

@@ -49,8 +49,7 @@ bool elementwise(mir::Transform::Kind kind) {
 // The declared square side of a matrix leaf, checked square.
 int64_t square_side(const std::vector<int64_t>& dims, const char* what) {
   if (dims.size() != 2) bad_shape(std::string(what) + " needs a matrix leaf");
-  if (dims[0] != dims[1])
-    bad_shape(std::string(what) + " needs a square leaf");
+  if (dims[0] != dims[1]) bad_shape(std::string(what) + " needs a square leaf");
   return dims[0];
 }
 
@@ -112,8 +111,7 @@ int64_t free_leaf_size(mir::Transform::Kind kind,
       return vector_len(leaf_dims, "unit_vector");
     case mir::Transform::SumToZero:
       if (leaf_dims.size() == 1) return leaf_dims[0] - 1;
-      if (leaf_dims.size() == 2)
-        return (leaf_dims[0] - 1) * (leaf_dims[1] - 1);
+      if (leaf_dims.size() == 2) return (leaf_dims[0] - 1) * (leaf_dims[1] - 1);
       bad_shape("sum_to_zero needs a vector or matrix leaf");
     case mir::Transform::CholeskyCorr:
       return square_side(leaf_dims, "cholesky_factor_corr") *

@@ -592,11 +592,10 @@ int unconstrain_into(const bs_model* m,
   if (interp == nullptr) return refuse(error_msg, why);
   const std::vector<double> unc = interp->eval(inits);
   if ((int64_t)unc.size() != m->cm.n_unconstrained)
-    return refuse(error_msg,
-                  "the inverse transforms produced " +
-                      std::to_string(unc.size()) +
-                      " unconstrained values, expected " +
-                      std::to_string(m->cm.n_unconstrained));
+    return refuse(error_msg, "the inverse transforms produced " +
+                                 std::to_string(unc.size()) +
+                                 " unconstrained values, expected " +
+                                 std::to_string(m->cm.n_unconstrained));
   std::copy(unc.begin(), unc.end(), theta_unc);
   return 0;
 }
@@ -610,8 +609,7 @@ int bs_param_unconstrain(const bs_model* m, const double* theta,
     for (const auto& view : m->cm.views) declared += view.len;
     if (declared != (int64_t)m->count(false, false))
       return refuse(error_msg,
-                    "the declared parameters hold " +
-                        std::to_string(declared) +
+                    "the declared parameters hold " + std::to_string(declared) +
                         " constrained values but this model reports " +
                         std::to_string(m->count(false, false)) +
                         "; theta cannot be split");

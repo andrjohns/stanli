@@ -1368,9 +1368,8 @@ void restore_unsized_decls(Stmt& s, bool strict) {
 }
 
 void restore_unsized_decls(Program& prog, bool strict) {
-  for (auto* body :
-       {&prog.prepare_data, &prog.log_prob, &prog.generate_quantities,
-        &prog.transform_inits})
+  for (auto* body : {&prog.prepare_data, &prog.log_prob,
+                     &prog.generate_quantities, &prog.transform_inits})
     for (Stmt& s : *body) restore_unsized_decls(s, strict);
   for (FunDef& f : prog.fun_defs)
     for (Stmt& s : f.body) restore_unsized_decls(s, strict);
@@ -1393,9 +1392,8 @@ void resolve_overloads(Program& prog) {
   if (overloads.empty()) return;
   for (auto& [name, type] : prog.input_vars)
     for (Expr& d : type.dims) resolve_calls(d, overloads);
-  for (auto* body :
-       {&prog.prepare_data, &prog.log_prob, &prog.generate_quantities,
-        &prog.transform_inits})
+  for (auto* body : {&prog.prepare_data, &prog.log_prob,
+                     &prog.generate_quantities, &prog.transform_inits})
     for (Stmt& s : *body) resolve_calls(s, overloads);
   for (FunDef& f : prog.fun_defs)
     for (Stmt& s : f.body) resolve_calls(s, overloads);

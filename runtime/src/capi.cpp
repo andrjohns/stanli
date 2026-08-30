@@ -188,8 +188,8 @@ int64_t stanli_n_unconstrained(const stanli_model* m) {
   return m->ex->n_params();
 }
 
-int stanli_unconstrain_inits(stanli_model* m, const char* inits_json,
-                             double* q, char* err, size_t err_len) {
+int stanli_unconstrain_inits(stanli_model* m, const char* inits_json, double* q,
+                             char* err, size_t err_len) {
   try {
     if (!m->cm.transform_inits) {
       put_err(err, err_len,

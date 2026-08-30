@@ -597,11 +597,10 @@ void test_unsupported() {
   // serial order theta uses and the arena order q uses.
   err = nullptr;
   std::vector<double> theta((size_t)bs_param_num(m, false, false), 0.0);
-  expect_eq_int(
-      "bs_param_constrain for the unconstrain round trip",
-      bs_param_constrain(m, false, false, q.data(), theta.data(), nullptr,
-                         &err),
-      0);
+  expect_eq_int("bs_param_constrain for the unconstrain round trip",
+                bs_param_constrain(m, false, false, q.data(), theta.data(),
+                                   nullptr, &err),
+                0);
   std::vector<double> back((size_t)n, 0.0);
   expect_eq_int("bs_param_unconstrain rc",
                 bs_param_unconstrain(m, theta.data(), back.data(), &err), 0);
@@ -699,8 +698,8 @@ void test_initialize() {
                                    nullptr, &err),
                 0);
   // eight_schools: mu, tau, then theta_tilde's J values, in CSV order.
-  std::string json = "{\"mu\": " + number(theta[0]) + ", \"tau\": " +
-                     number(theta[1]) + ", \"theta_tilde\": [";
+  std::string json = "{\"mu\": " + number(theta[0]) +
+                     ", \"tau\": " + number(theta[1]) + ", \"theta_tilde\": [";
   for (size_t i = 2; i < theta.size(); ++i)
     json += (i > 2 ? ", " : "") + number(theta[i]);
   json += "]}";
@@ -713,9 +712,8 @@ void test_initialize() {
   for (int64_t i = 0; i < n; ++i)
     if (!(std::abs(from_json[(size_t)i] - chosen[(size_t)i]) < 1e-9))
       fail("bs_param_initialize moved the explicit point at " +
-           std::to_string(i) + ": got " +
-           std::to_string(from_json[(size_t)i]) + ", want " +
-           std::to_string(chosen[(size_t)i]));
+           std::to_string(i) + ": got " + std::to_string(from_json[(size_t)i]) +
+           ", want " + std::to_string(chosen[(size_t)i]));
 
   // Genuine exhaustion, not a contrived one: at a radius this wide every
   // draw puts mu at a magnitude whose normal(0, 5) term is -inf and tau at

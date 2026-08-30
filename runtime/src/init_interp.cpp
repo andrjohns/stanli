@@ -97,10 +97,9 @@ std::vector<double> InitInterp::eval(
   int64_t total_free = 0;
   for (const InitParam& p : params_) {
     const auto it = inits.find(p.name);
-    if (it == inits.end())
-      refuse("no starting value for parameter " + p.name);
-    const int64_t got = (int64_t)std::max(it->second.r.size(),
-                                          it->second.i.size());
+    if (it == inits.end()) refuse("no starting value for parameter " + p.name);
+    const int64_t got =
+        (int64_t)std::max(it->second.r.size(), it->second.i.size());
     if (got != p.constrained_len)
       refuse(p.name + " needs " + std::to_string(p.constrained_len) +
              " starting values, got " + std::to_string(got));
@@ -123,8 +122,7 @@ std::vector<double> InitInterp::eval(
   std::map<std::string, DataMap::Entry> shaped;
   for (const InitParam& p : params_) {
     DataMap::Entry e = inits.at(p.name);
-    if (e.r.empty() && !e.i.empty())
-      e.r.assign(e.i.begin(), e.i.end());
+    if (e.r.empty() && !e.i.empty()) e.r.assign(e.i.begin(), e.i.end());
     e.dims = p.dims;
     shaped.emplace(p.name, std::move(e));
   }
@@ -156,8 +154,7 @@ std::vector<double> InitInterp::eval(
     const InitParam& p = *found->second;
 
     const DataMap::Entry* value = cur->find(name);
-    if (value == nullptr)
-      refuse("no constrained value was built for " + name);
+    if (value == nullptr) refuse("no constrained value was built for " + name);
     if ((int64_t)value->r.size() != p.constrained_len)
       refuse(name + " built " + std::to_string(value->r.size()) +
              " constrained values, expected " +
@@ -169,8 +166,8 @@ std::vector<double> InitInterp::eval(
     for (const mir::Expr& e : s.write_transform->args)
       bounds.push_back(cur->eval(e));
 
-    const std::vector<int64_t> leaf_dims(
-        p.dims.end() - p.leaf_rank, p.dims.end());
+    const std::vector<int64_t> leaf_dims(p.dims.end() - p.leaf_rank,
+                                         p.dims.end());
     const int64_t inner_con = product(leaf_dims);
     const int64_t inner_free =
         free_leaf_size(s.write_transform->kind, leaf_dims);
@@ -193,8 +190,7 @@ std::vector<double> InitInterp::eval(
         leaf[(size_t)j] = value->r[(size_t)serial];
         for (size_t k = 0; k < bounds.size(); ++k)
           if (bounds[k].r.size() > 1)
-            gathered_bounds[k][(size_t)j] =
-                bound_at(bounds[k], serial, name);
+            gathered_bounds[k][(size_t)j] = bound_at(bounds[k], serial, name);
       }
       std::vector<TransformArg> args;
       for (size_t k = 0; k < bounds.size(); ++k)

@@ -453,8 +453,8 @@ Stmt read_stmt(Reader& reader) {
       // meaning a transform carries: FnCheck verifies a constraint,
       // FnWriteParam names one to invert.
       if (value.fn_name == "FnWriteParam")
-        value.write_transform = std::exchange(value.check_transform,
-                                              std::nullopt);
+        value.write_transform =
+            std::exchange(value.check_transform, std::nullopt);
       break;
     case Stmt::Return:
       value.has_init = reader.boolean();

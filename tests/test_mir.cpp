@@ -129,8 +129,7 @@ int main(int argc, char** argv) {
               free_writes[2]->write_transform->kind == mir::Transform::Identity,
           "theta_tilde inverts an identity transform");
     for (const mir::Stmt* w : free_writes)
-      check(!w->check_transform,
-            "a free write carries no check transform");
+      check(!w->check_transform, "a free write carries no check transform");
   }
 
   size_t gq_writes = 0;

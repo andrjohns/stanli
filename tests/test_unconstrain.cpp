@@ -52,7 +52,8 @@ void expect_near(const std::string& what, const std::vector<double>& got,
 std::vector<double> free_values(int64_t n) {
   std::vector<double> y((size_t)n);
   for (int64_t i = 0; i < n; ++i)
-    y[(size_t)i] = 0.35 * std::sin(0.7 * (double)i + 0.4) - 0.15 * (double)(i % 3);
+    y[(size_t)i] =
+        0.35 * std::sin(0.7 * (double)i + 0.4) - 0.15 * (double)(i % 3);
   return y;
 }
 
@@ -82,9 +83,9 @@ void round_trip(const std::string& what, stanli::mir::Transform::Kind kind,
     std::printf("FAIL %s: free_leaf_size threw: %s\n", what.c_str(), e.what());
     return;
   }
-  check(expected_free == n_free,
-        what + ": free length " + std::to_string(expected_free) + ", want " +
-            std::to_string(n_free));
+  check(expected_free == n_free, what + ": free length " +
+                                     std::to_string(expected_free) + ", want " +
+                                     std::to_string(n_free));
 
   std::vector<double> got((size_t)n_free, 0.0);
   try {
@@ -120,11 +121,12 @@ void structured_round_trips() {
     const Eigen::VectorXd direction = y / y.norm();
     const std::vector<double> want(direction.data(),
                                    direction.data() + direction.size());
-    round_trip("unit_vector[3]", K::UnitVector, {3}, 3,
-               [](const Eigen::VectorXd& v) {
-                 return as_vector(stan::math::unit_vector_constrain(v));
-               },
-               &want);
+    round_trip(
+        "unit_vector[3]", K::UnitVector, {3}, 3,
+        [](const Eigen::VectorXd& v) {
+          return as_vector(stan::math::unit_vector_constrain(v));
+        },
+        &want);
   }
   round_trip("sum_to_zero_vector[5]", K::SumToZero, {5}, 4,
              [](const Eigen::VectorXd& y) {
@@ -136,8 +138,8 @@ void structured_round_trips() {
              [](const Eigen::VectorXd& y) {
                Eigen::MatrixXd free_block =
                    Eigen::Map<const Eigen::MatrixXd>(y.data(), 3, 2);
-               return as_vector(
-                   Eigen::MatrixXd(stan::math::sum_to_zero_constrain(free_block)));
+               return as_vector(Eigen::MatrixXd(
+                   stan::math::sum_to_zero_constrain(free_block)));
              });
   round_trip("cholesky_factor_corr[4]", K::CholeskyCorr, {4, 4}, 6,
              [](const Eigen::VectorXd& y) {
@@ -154,8 +156,8 @@ void structured_round_trips() {
   round_trip("cov_matrix[3]", K::Covariance, {3, 3}, 6,
              [](const Eigen::VectorXd& y) {
                double lp = 0;
-               return as_vector(Eigen::MatrixXd(
-                   stan::math::cov_matrix_constrain(y, 3, lp)));
+               return as_vector(
+                   Eigen::MatrixXd(stan::math::cov_matrix_constrain(y, 3, lp)));
              });
   // Rectangular on purpose: M > N is the case whose free length is not a
   // triangular number.
@@ -195,8 +197,7 @@ void elementwise_round_trips() {
   for (const Case& c : cases) {
     std::vector<stanli::TransformArg> args;
     for (const auto& a : c.args)
-      args.push_back(
-          stanli::TransformArg{a.data(), (int64_t)a.size()});
+      args.push_back(stanli::TransformArg{a.data(), (int64_t)a.size()});
 
     // Forward, elementwise, through stan-math.
     std::vector<double> constrained(y.size());
@@ -260,7 +261,8 @@ void elementwise_ignores_rank() {
 
 void free_sizes() {
   using K = stanli::mir::Transform;
-  check(stanli::free_leaf_size(K::Simplex, {1}) == 0, "simplex[1] is free of 0");
+  check(stanli::free_leaf_size(K::Simplex, {1}) == 0,
+        "simplex[1] is free of 0");
   check(stanli::free_leaf_size(K::Covariance, {1, 1}) == 1, "cov_matrix[1]");
   check(stanli::free_leaf_size(K::CholeskyCov, {3, 3}) == 6,
         "square cholesky_factor_cov");

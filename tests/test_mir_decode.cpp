@@ -589,8 +589,7 @@ json write_program_object(const mir::Program& value) {
           {"log_prob", write_array(value.log_prob, write_stmt)},
           {"generate_quantities",
            write_array(value.generate_quantities, write_stmt)},
-          {"transform_inits",
-           write_array(value.transform_inits, write_stmt)},
+          {"transform_inits", write_array(value.transform_inits, write_stmt)},
           {"fun_defs", write_array(value.fun_defs, write_fun_def)},
           {"output_vars", write_strings(value.output_vars)}};
 }
@@ -1448,13 +1447,14 @@ void check_v2_rejections() {
   constrained_write.fn_name = "FnWriteParam";
   inits.generate_quantities.push_back(constrained_write);
   const mir::Program decoded_inits = decode_program(write_v2(inits));
-  check(decoded_inits.transform_inits.size() == 1 &&
-            decoded_inits.transform_inits[0].write_transform.has_value() &&
-            decoded_inits.transform_inits[0].write_transform->kind ==
-                mir::Transform::Lower &&
-            decoded_inits.transform_inits[0].write_transform->args.size() == 1 &&
-            !decoded_inits.transform_inits[0].check_transform.has_value(),
-        "v2 carries the transform to invert on transform_inits FnWriteParam");
+  check(
+      decoded_inits.transform_inits.size() == 1 &&
+          decoded_inits.transform_inits[0].write_transform.has_value() &&
+          decoded_inits.transform_inits[0].write_transform->kind ==
+              mir::Transform::Lower &&
+          decoded_inits.transform_inits[0].write_transform->args.size() == 1 &&
+          !decoded_inits.transform_inits[0].check_transform.has_value(),
+      "v2 carries the transform to invert on transform_inits FnWriteParam");
   check(decoded_inits.generate_quantities.size() == 1 &&
             !decoded_inits.generate_quantities[0].write_transform.has_value() &&
             !decoded_inits.generate_quantities[0].check_transform.has_value(),

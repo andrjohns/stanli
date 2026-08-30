@@ -123,8 +123,7 @@ void refusals(stanli::CompiledModel& cm) {
   const std::map<std::string, DataMap::Entry> good = cm.constrained_env(ex);
 
   const auto refused = [&](const std::map<std::string, DataMap::Entry>& inits,
-                           const std::string& needle,
-                           const std::string& what) {
+                           const std::string& needle, const std::string& what) {
     try {
       interp.eval(inits);
     } catch (const std::exception& e) {

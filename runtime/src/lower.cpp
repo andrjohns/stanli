@@ -6758,8 +6758,9 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
         const CompiledModel::ParamView& view = cm.views[i];
         const CompiledModel::UncParam& unc = cm.unc_params[i];
         if (view.name != unc.name) {
-          ti.truncated = "constrained and free parameters are out of order at " +
-                         view.name;
+          ti.truncated =
+              "constrained and free parameters are out of order at " +
+              view.name;
           break;
         }
         InitParam p;
@@ -6775,20 +6776,21 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
         // permutation too. Otherwise only a structured transform has a leaf;
         // an elementwise one treats each value on its own, which for a
         // vector or a plain array is the same enumeration either way.
-        p.leaf_rank = view.matrix_storage           ? 2
+        p.leaf_rank = view.matrix_storage                  ? 2
                       : is_structured_check(unc.transform) ? 1
                                                            : 0;
         if ((size_t)p.leaf_rank > p.dims.size()) {
-          ti.truncated = view.name + " declares fewer dimensions than its "
-                                     "transform needs";
+          ti.truncated = view.name +
+                         " declares fewer dimensions than its "
+                         "transform needs";
           break;
         }
         params.push_back(std::move(p));
       }
     }
     if (ti.truncated.empty())
-      ti.interp = std::make_shared<InitInterp>(prog, lo.td.env(),
-                                               std::move(params));
+      ti.interp =
+          std::make_shared<InitInterp>(prog, lo.td.env(), std::move(params));
     cm.transform_inits = std::move(ti);
   }
   prep.plain("compile", "total", compile_time);
