@@ -340,6 +340,7 @@ endif()
 if(NOT EMSCRIPTEN)
 add_library(stanli_shared SHARED
   runtime/src/capi.cpp
+  runtime/src/function.cpp
   runtime/src/build_id.cpp
   $<TARGET_OBJECTS:stanli_runtime_objects>
   $<TARGET_OBJECTS:stanli_tbb_stub>)
@@ -736,6 +737,14 @@ if(STANLI_FAST_TEST_TUS)
   target_compile_options(test_capi PRIVATE -O0)
 endif()
 add_test(NAME test_capi COMMAND test_capi
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(test_function tests/test_function.cpp)
+target_link_libraries(test_function PRIVATE stanli_shared)
+if(STANLI_FAST_TEST_TUS)
+  target_compile_options(test_function PRIVATE -O0)
+endif()
+add_test(NAME test_function COMMAND test_function
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # The conformance gate has its own failure modes (parser drift, a broad policy
