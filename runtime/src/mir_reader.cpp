@@ -1170,7 +1170,8 @@ void validate_bindings(const Stmt& s, Bindings& bindings,
       validate_expression(e, bindings, functions, strict_variable_metadata);
   for (const Transform* transform :
        {s.read_transform ? &*s.read_transform : nullptr,
-        s.check_transform ? &*s.check_transform : nullptr})
+        s.check_transform ? &*s.check_transform : nullptr,
+        s.write_transform ? &*s.write_transform : nullptr})
     if (transform)
       for (const Expr& e : transform->args)
         validate_expression(e, bindings, functions, strict_variable_metadata);

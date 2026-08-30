@@ -297,6 +297,7 @@ set(STANLI_RUNTIME_SOURCES
   runtime/src/mir_decode.cpp
   runtime/src/portable_mir_v2_reader.cpp
   runtime/src/lower.cpp
+  runtime/src/unconstrain.cpp
   runtime/src/wa_interp.cpp
   runtime/src/message_sink.cpp
   runtime/src/executor_pool.cpp
@@ -720,7 +721,7 @@ set(STANLI_TESTS
   test_write_array test_pool test_bridgestan test_mixture test_island
   test_adjoint test_diagnose test_multichain test_newtrans test_rejectprint
   test_odevariadic test_algebra test_estimate test_brmsmono
-  test_structured_arrays test_pathfinder)
+  test_structured_arrays test_pathfinder test_unconstrain)
 foreach(STANLI_TEST IN LISTS STANLI_TESTS)
   stanli_add_test(${STANLI_TEST})
 endforeach()
