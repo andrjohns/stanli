@@ -36,17 +36,13 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
       // dims outer-to-inner.
       std::vector<int64_t> dims;
       const json* cur = &v;
-      while (cur->is_array() && !cur->empty()) {
+      // Include the first zero extent: [[], []] is array[2] vector[0], not
+      // a one-dimensional value whose elements should be parsed as numbers.
+      while (cur->is_array()) {
         dims.push_back(static_cast<int64_t>(cur->size()));
+        if (cur->empty()) break;
         cur = &(*cur)[0];
       }
-      // The first empty nested array still contributes a trailing zero
-      // extent.  Without it, JSON such as [[], []] was inferred as a
-      // one-dimensional value of length two and the N-D walker then tried
-      // to convert each empty array to a number.  This is the ordinary JSON
-      // representation of array[2] vector[0] (and likewise for deeper
-      // zero-width containers).
-      if (cur->is_array()) dims.push_back(0);
       e.dims = dims;
       if (dims.size() == 2) {
         // Column-major, the Stan/Eigen convention (and what stanc's data

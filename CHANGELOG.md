@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0
+
 ### ctsem's structured-control vocabulary lowers
 
 `crossprod`, `tcrossprod`, scalar/vector `add_diag`, `matrix_exp`,
