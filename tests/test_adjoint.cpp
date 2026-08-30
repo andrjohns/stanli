@@ -34,6 +34,19 @@ using namespace stanli;
 
 static int failures = 0;
 
+// A private CALL target proves execution uses the payload's resolved
+// functions rather than consulting the graph opcode table. Its additive
+// immediates make context reuse observable without affecting the derivative.
+static void test_call_forward(KernelCtx& ctx) {
+  ctx.out.data[0] = ctx.in[0].data[0] * ctx.in[1].data[0] + ctx.variant +
+                    (ctx.n_idata ? ctx.idata[0] : 0);
+}
+
+static void test_call_backward(KernelCtx& ctx) {
+  ctx.in_adj[0].data[0] += ctx.out_adj * ctx.in[1].data[0];
+  ctx.in_adj[1].data[0] += ctx.out_adj * ctx.in[0].data[0];
+}
+
 static void expect(const char* what, bool ok) {
   if (!ok) {
     ++failures;
@@ -134,6 +147,146 @@ static int64_t ulps(double a, double b) {
   if ((ia < 0) != (ib < 0)) return INT64_MAX;
   const int64_t d = ia - ib;
   return d < 0 ? -d : d;
+}
+
+static void test_call_binding_refusal() {
+  Program::Call registered;
+  registered.opcode = OP_POW;
+  expect("CALL registered bind", bind_call(registered));
+  const Kernel* pow = find_kernel(OP_POW);
+  expect("CALL caches registered forward",
+         pow && registered.forward == pow->forward);
+  expect("CALL caches registered backward",
+         pow && registered.backward == pow->backward);
+
+  Program::Call unknown;
+  unknown.opcode = OP_COUNT_;
+  expect("CALL unknown bind refuses", !bind_call(unknown));
+  expect("CALL unknown bind stays empty",
+         unknown.forward == nullptr && unknown.backward == nullptr);
+
+  Program::Call forward_only;
+  forward_only.opcode = OP_RNG;
+  expect("CALL forward-only bind", bind_call(forward_only));
+  expect("CALL forward-only has no reverse",
+         forward_only.forward != nullptr && forward_only.backward == nullptr);
+  IslandProg no_reverse;
+  no_reverse.n_regs = 1;
+  no_reverse.out_regs = {0};
+  no_reverse.calls.push_back(forward_only);
+  no_reverse.code.push_back(Program::Instr{Program::CALL, 0, 0, 0, 0, 0});
+  expect("CALL missing backward adjoint refuses", !gen_adjoint(no_reverse));
+  expect("CALL missing backward refusal is transactional",
+         no_reverse.n_regs == 1 && no_reverse.code.size() == 1 &&
+             no_reverse.adj.empty());
+
+  IslandProg p;
+  p.n_regs = 3;
+  p.ins = {IslandProg::LiveIn{0, 1}, IslandProg::LiveIn{1, 1}};
+  p.out_regs = {2};
+  p.calls.push_back(unknown);
+  p.code.push_back(Program::Instr{Program::CALL, 0, 0, 0, 0, 0});
+  const IslandProg before = p;
+  expect("CALL unbound adjoint refuses", !gen_adjoint(p));
+  expect("CALL refusal keeps register count", p.n_regs == before.n_regs);
+  expect("CALL refusal keeps code",
+         p.code.size() == before.code.size() &&
+             std::memcmp(p.code.data(), before.code.data(),
+                         p.code.size() * sizeof(Program::Instr)) == 0);
+  expect("CALL refusal keeps payload",
+         p.calls.size() == 1 && p.calls[0].opcode == before.calls[0].opcode &&
+             p.calls[0].forward == nullptr && p.calls[0].backward == nullptr);
+  expect("CALL refusal keeps adjoint empty", p.adj.empty());
+
+  std::vector<double> reg(3, 0.0);
+  bool threw = false;
+  try {
+    run_program(p, reg.data());
+  } catch (const std::logic_error&) {
+    threw = true;
+  }
+  expect("CALL unbound forward throws", threw);
+}
+
+static void test_call_cached_forward_reverse_aliasing() {
+  // Reuse one payload twice around overwrites of both its input and output.
+  // A payload-level reverse cache would make both adjoint instructions read
+  // the second site's checkpoints; gen_adjoint therefore normalizes it to
+  // one bound Program::Call per instruction.
+  IslandProg p;
+  p.n_regs = 5;
+  p.ins = {IslandProg::LiveIn{0, 1}, IslandProg::LiveIn{1, 1},
+           IslandProg::LiveIn{4, 1}};
+  p.out_regs = {3, 2};
+  Program::Call call;
+  call.opcode = OP_COUNT_;  // deliberately absent from the graph table
+  call.variant = 3;
+  call.n_in = 2;
+  call.forward = test_call_forward;
+  call.backward = test_call_backward;
+  call.in[0] = 0;
+  call.in[1] = 1;
+  call.in_len[0] = 1;
+  call.in_len[1] = 1;
+  call.out = 2;
+  call.out_len = 1;
+  call.idata = {5};
+  p.calls.push_back(call);
+  p.code.push_back(Program::Instr{Program::CALL, 0, 0, 0, 0, 0});
+  p.code.push_back(Program::Instr{Program::MOV, 3, 2, 0, 0, 0});
+  p.code.push_back(Program::Instr{Program::MOV, 0, 4, 0, 0, 0});
+  p.code.push_back(Program::Instr{Program::CALL, 0, 0, 0, 0, 0});
+
+  expect("CALL shared payload adjoint generated", gen_adjoint(p));
+  expect("CALL reverse payload per instruction", p.calls.size() == 2);
+  if (p.calls.size() == 2) {
+    expect("CALL input checkpoints stay per instruction",
+           p.calls[0].bwd_value_in[0] != p.calls[1].bwd_value_in[0]);
+    expect("CALL output checkpoints stay per instruction",
+           p.calls[0].bwd_value_out != p.calls[1].bwd_value_out);
+    expect("CALL reverse dispatch pre-resolved",
+           p.calls[0].backward == test_call_backward &&
+               p.calls[1].backward == test_call_backward);
+  }
+
+  double a = 1.125, b = 1.75, c = 0.625;
+  std::vector<double> val((size_t)p.n_regs, 0.0);
+  val[0] = a;
+  val[1] = b;
+  val[4] = c;
+  run_program(p, val.data());
+  const double first = a * b + 8.0;
+  const double second = c * b + 8.0;
+  expect("CALL cached first forward bitwise", ulps(val[3], first) == 0);
+  expect("CALL cached second forward bitwise", ulps(val[2], second) == 0);
+
+  std::vector<double> adj((size_t)p.adj.n_regs, 0.0);
+  const double first_seed = 0.7, second_seed = -1.1;
+  adj[(size_t)p.adj.adj_reg[3]] = first_seed;
+  adj[(size_t)p.adj.adj_reg[2]] = second_seed;
+  run_adjoint(p, p.adj, val.data(), adj.data());
+
+  double want_a = 0.0, want_b = 0.0, want_c = 0.0;
+  KernelCtx direct;
+  direct.n_in = 2;
+  direct.out = Desc{nullptr, 1};
+  direct.in_adj[0] = Desc{&want_c, 1};
+  direct.in_adj[1] = Desc{&want_b, 1};
+  direct.in[0] = Desc{&c, 1};
+  direct.in[1] = Desc{&b, 1};
+  direct.out_adj = second_seed;
+  test_call_backward(direct);
+  direct.in_adj[0] = Desc{&want_a, 1};
+  direct.in[0] = Desc{&a, 1};
+  direct.out_adj = first_seed;
+  test_call_backward(direct);
+
+  expect("CALL cached reverse a bitwise",
+         ulps(adj[(size_t)p.adj.adj_reg[0]], want_a) == 0);
+  expect("CALL cached reverse b bitwise",
+         ulps(adj[(size_t)p.adj.adj_reg[1]], want_b) == 0);
+  expect("CALL cached reverse replacement bitwise",
+         ulps(adj[(size_t)p.adj.adj_reg[4]], want_c) == 0);
 }
 
 // One case, both ways. `tol` is how many ulp of disagreement the case
@@ -1268,6 +1421,8 @@ static void test_fuzz_ranges() {
 }
 
 int main() {
+  test_call_binding_refusal();
+  test_call_cached_forward_reverse_aliasing();
   test_binary_ops();
   test_fma();
   test_unary_ops();

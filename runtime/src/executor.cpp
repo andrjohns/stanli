@@ -70,12 +70,13 @@ const Kernel* find_kernel(uint16_t opcode) {
   return k.forward ? &k : nullptr;
 }
 
-// CALL support (program.hpp): the register machine invoking a graph
-// kernel. The context is assembled per call from the payload's ranges --
-// every field is a pointer into the register file plus immediates, so
-// this is loads and stores, no allocation.
-KernelCtx call_fwd_ctx(const Program::Call& call, double* reg) {
-  KernelCtx ctx;
+// CALL support (program.hpp): the register machine invoking a graph kernel.
+// Only pointer fields vary with a register-file base. Dispatch and the
+// integer/shape metadata are immutable call-site facts, so builders resolve
+// the former once and a program invocation reuses one context packet across
+// all of its CALL instructions.
+static void bind_call_fwd_ctx(const Program::Call& call, double* reg,
+                              KernelCtx& ctx) {
   ctx.n_in = call.n_in;
   for (int k = 0; k < call.n_in; ++k)
     ctx.in[k] = Desc{reg + call.in[k], call.in_len[k]};
@@ -84,14 +85,34 @@ KernelCtx call_fwd_ctx(const Program::Call& call, double* reg) {
   ctx.scratch = reg + call.scratch;
   ctx.idata = call.idata.data();
   ctx.n_idata = (int64_t)call.idata.size();
+}
+
+KernelCtx call_fwd_ctx(const Program::Call& call, double* reg) {
+  KernelCtx ctx;
+  bind_call_fwd_ctx(call, reg, ctx);
   return ctx;
 }
 
-void run_call(const Program::Call& call, double* reg) {
-  KernelCtx ctx = call_fwd_ctx(call, reg);
+bool bind_call(Program::Call& call) {
+  call.forward = nullptr;
+  call.backward = nullptr;
   const Kernel* k = find_kernel(call.opcode);
-  assert(k != nullptr);  // the carver only emits registered opcodes
-  k->forward(ctx);
+  if (k == nullptr || k->forward == nullptr) return false;
+  call.forward = k->forward;
+  call.backward = k->backward;
+  return true;
+}
+
+void run_call(const Program::Call& call, double* reg, KernelCtx& ctx) {
+  if (call.forward == nullptr)
+    throw std::logic_error("unbound Program::CALL forward");
+  bind_call_fwd_ctx(call, reg, ctx);
+  call.forward(ctx);
+}
+
+void run_call(const Program::Call& call, double* reg) {
+  KernelCtx ctx;
+  run_call(call, reg, ctx);
 }
 
 void register_elementwise_kernels();

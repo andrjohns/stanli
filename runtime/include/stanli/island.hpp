@@ -78,15 +78,21 @@ struct Softmax3IslandProg : IslandProg {
   std::shared_ptr<const Program> optimized_double;
 };
 
-// OP_ISLAND's variant is otherwise unused. This value selects the derived
-// payload's double-only plan while retaining the ordinary island opcode and
-// kernel-table layout. Setting it on a plain IslandProg violates the tagged
-// payload contract; the graph carver is the only production producer. Its
+// This value selects the derived payload's double-only plan while retaining
+// the ordinary island opcode and kernel-table layout. Setting it on a plain
+// IslandProg violates the tagged payload contract; the graph carver is the
+// only production producer. Its
 // forward must leave outputs and scratch bitwise-identical to OP_ISLAND's
 // canonical forward: the profiled executor and direct kernel-table callers
 // use that path, and the generated adjoint consumes either register file.
 // test_softmax3_double_exact enforces this contract.
 constexpr uint8_t kIslandSoftmax3Variant = 1;
+// Generic variant for a canonical IslandProg whose forward bytecode contains
+// Program::CALL. Executor binding selects its context-reusing forward once;
+// ordinary islands retain the context-free evaluator with no runtime check.
+constexpr uint8_t kIslandCallVariant = 2;
+
+void island_calls_fwd(KernelCtx& ctx);
 
 // Run compact_program (program.hpp) over the region's forward code, live-ins
 // included, before the adjoint generator reads it -- so the backward is
