@@ -309,7 +309,7 @@ void clu_bwd_inf(KernelCtx& ctx, int64_t n, const double* x, const double* il,
     if (ctx.in_adj[0].data)
       ctx.in_adj[0].data[i] += li && ui ? dout[i]
                                : li     ? -dout[i] * std::exp(x[i]) + lp_adj
-                               : ui     ? dout[i] * std::exp(x[i]) + lp_adj
+                               : ui ? dout[i] * std::exp(x[i]) + lp_adj
                                     : dout[i] * diff * il[i] * (1.0 - il[i]) +
                                           lp_adj * (1.0 - 2.0 * il[i]);
     if (!li)
