@@ -944,8 +944,11 @@ static void test_kernel_call_ops_carved(bool compact) {
   bool shifted_call_range = false;
   for (const Op& op : g.ops) {
     if (op.opcode != OP_ISLAND) continue;
+    expect("call island dispatch variant", op.variant == kIslandCallVariant);
     const auto& p = *static_cast<const IslandProg*>(op.udata);
     for (const Program::Call& call : p.calls) {
+      expect("call forward dispatch prebound", call.forward != nullptr);
+      expect("call backward dispatch prebound", call.backward != nullptr);
       auto check_range = [&](int reg, int len) {
         if (len == 0) return;
         const int base = p.adj.adj_reg[(size_t)reg];
@@ -959,12 +962,22 @@ static void test_kernel_call_ops_carved(bool compact) {
         check_range(call.in[k], call.in_len[k]);
       check_range(call.out, call.out_len);
     }
+    const size_t call_instrs =
+        std::count_if(p.code.begin(), p.code.end(),
+                      [](const auto& I) { return I.code == Program::CALL; });
+    expect("call reverse packet count", p.calls.size() == call_instrs);
+    for (const Program::Call& call : p.calls)
+      expect("call reverse packet prebound", call.backward != nullptr);
   }
   // With compaction on, the copies gen_adjoint used to share a cell for are
   // gone before it runs, so the mapping is an identity it never built.
   if (!compact) expect("call range actually compacted", shifted_call_range);
   const std::vector<double> got = run_grad_twice(std::move(g), fills);
   expect("callops sizes", got.size() == want.size());
+  expect("callops forward/reverse bitwise",
+         got.size() == want.size() &&
+             std::memcmp(got.data(), want.data(),
+                         got.size() * sizeof(double)) == 0);
   for (size_t i = 0; i < want.size() && i < got.size(); ++i)
     expect_close("callops v" + std::to_string(i), got[i], want[i]);
   if (!compact) test_unsetenv("STANLI_NO_ISLAND_COMPACT");

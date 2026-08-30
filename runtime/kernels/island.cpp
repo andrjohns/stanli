@@ -41,7 +41,8 @@ int64_t island_scratch(const Op& op, const Slot* slots) {
   return sum_in_lens(op, slots);
 }
 
-void island_fwd(KernelCtx& ctx) {
+template <bool ReuseCallCtx>
+void island_fwd_impl(KernelCtx& ctx) {
   const auto& p = *static_cast<const IslandProg*>(ctx.udata);
   if (p.native_adj) {
     // Mirrored by island_softmax3_fwd; keep these seed and harvest loops in
@@ -52,7 +53,7 @@ void island_fwd(KernelCtx& ctx) {
       for (int i = 0; i < li.len; ++i)
         ctx.scratch[li.reg + i] = ctx.in[input].data[li.offset + i];
     }
-    run_program(p, ctx.scratch);
+    run_program_impl<ReuseCallCtx>(p, ctx.scratch);
     for (size_t m = 0; m < p.out_regs.size(); ++m)
       ctx.out.data[m] = ctx.scratch[p.out_regs[m]];
     return;
@@ -67,6 +68,8 @@ void island_fwd(KernelCtx& ctx) {
   }
   run_island<double>(p, in, ctx.out.data);
 }
+
+void island_fwd(KernelCtx& ctx) { island_fwd_impl<false>(ctx); }
 
 // The generated backward: seed the live-outs, sweep, harvest the live-ins.
 void island_bwd_native(const IslandProg& p, KernelCtx& ctx) {
@@ -126,6 +129,8 @@ void island_bwd(KernelCtx& ctx) {
 }
 
 }  // namespace
+
+void island_calls_fwd(KernelCtx& ctx) { island_fwd_impl<true>(ctx); }
 
 void register_island_kernel() {
   register_kernel(OP_ISLAND, Kernel{island_fwd, island_bwd, island_scratch});

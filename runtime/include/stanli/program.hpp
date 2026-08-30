@@ -20,6 +20,7 @@
 #ifndef STANLI_PROGRAM_HPP
 #define STANLI_PROGRAM_HPP
 
+#include <stanli/kernel_types.hpp>
 #include <stanli/program_density.hpp>
 
 #include <stan/math.hpp>
@@ -33,7 +34,7 @@
 
 namespace stanli {
 
-struct KernelCtx;  // graph.hpp; only CALL's helpers touch it
+using KernelFn = void (*)(KernelCtx&);
 
 // Structural facts used by the program compilers and the generated-adjoint
 // pass. The evaluator's arithmetic stays in the explicit switch below: its
@@ -162,23 +163,33 @@ struct Program {
   // A CALL's payload: which kernel, and which register ranges stand in
   // for its slots. `scratch` is a range inside the register file, so the
   // partials the forward stashes are retained for the backward the same
-  // way every value is. `bwd_in`/`bwd_out` are where the VALUES live at
-  // backward time -- the same registers, unless the adjoint generator
-  // had to checkpoint them (some kernel backwards re-read their inputs;
-  // backward_ignores_values is a whitelist, not a guarantee).
+  // way every value is. The adjoint generator normalizes each CALL
+  // instruction to its own payload and binds checkpointed value and compact
+  // adjoint ranges below (adjoint.hpp).
   struct Call {
     uint16_t opcode = 0;
     uint8_t variant = 0;
     int8_t n_in = 0;
+    // Resolved once when the call site is built. A registered kernel's
+    // function identity is stable, so repeated table lookup during program
+    // execution can add no information. The generated adjoint uses the same
+    // bound `backward` pointer.
+    KernelFn forward = nullptr;
+    KernelFn backward = nullptr;
     int32_t in[6] = {0, 0, 0, 0, 0, 0};
     int32_t in_len[6] = {0, 0, 0, 0, 0, 0};
     int32_t out = 0;
     int32_t out_len = 0;
     int32_t scratch = 0;
     int32_t scratch_len = 0;
-    int32_t bwd_in[6] = {0, 0, 0, 0, 0, 0};
-    int32_t bwd_out = 0;
     std::vector<int> idata;
+    // Generated reverse binding. gen_adjoint normalizes CALL instructions to
+    // one payload each, then caches their checkpointed value ranges and
+    // compact adjoint ranges here. Forward-only Programs leave these zero.
+    int32_t bwd_value_in[6] = {0, 0, 0, 0, 0, 0};
+    int32_t bwd_adj_in[6] = {0, 0, 0, 0, 0, 0};
+    int32_t bwd_value_out = 0;
+    int32_t bwd_adj_out = 0;
   };
 
   std::vector<Instr> code;
@@ -243,17 +254,33 @@ bool compact_program_gated(Program& p, std::vector<std::pair<int, int>>& seeded,
 // Backward-only fields are left null; run_adjoint fills its own.
 KernelCtx call_fwd_ctx(const Program::Call& call, double* reg);
 
-// Run one CALL forward. Out of line: KernelCtx lives in graph.hpp and
-// the kernel table in the executor, neither of which this header needs
-// for anything else.
+// Resolve a manually constructed call site once. Production carvers already
+// have the Kernel in hand and bind its pointers directly. False leaves the
+// call unbound, so malformed or unavailable opcodes fail closed.
+bool bind_call(Program::Call& call);
+
+// Run one CALL forward through its pre-resolved function.
 void run_call(const Program::Call& call, double* reg);
+
+// Reuse a caller-owned transient context. Its pointer fields are rebound per
+// site, while construction/defaulting of the full packet is not paid again.
+void run_call(const Program::Call& call, double* reg, KernelCtx& ctx);
 
 // Run `p` over `reg`, which the caller has seeded and sized to at least
 // p.n_regs. The compilers guarantee every register is written before it is
 // read, so a reused file never leaks a previous call's values.
-template <typename T>
-void run_program(const Program& p, T* reg) {
+template <bool ReuseCallCtx>
+struct ProgramCallCtx {};
+
+template <>
+struct ProgramCallCtx<true> {
+  KernelCtx ctx;
+};
+
+template <bool ReuseCallCtx, typename T>
+void run_program_impl(const Program& p, T* reg) {
   using VecT = Eigen::Matrix<T, Eigen::Dynamic, 1>;
+  ProgramCallCtx<ReuseCallCtx> call_ctx;
   const int64_t n = (int64_t)p.code.size();
   for (int64_t pc = 0; pc < n; ++pc) {
     const Program::Instr& I = p.code[(size_t)pc];
@@ -509,7 +536,10 @@ void run_program(const Program& p, T* reg) {
       // program.
       case Program::CALL:
         if constexpr (std::is_same_v<T, double>) {
-          run_call(p.calls[(size_t)I.a], reg);
+          if constexpr (ReuseCallCtx)
+            run_call(p.calls[(size_t)I.a], reg, call_ctx.ctx);
+          else
+            run_call(p.calls[(size_t)I.a], reg);
         } else {
           // Kernels are double machinery; a program that reaches here
           // under var was carved wrong, and saying so beats corrupting
@@ -532,6 +562,17 @@ void run_program(const Program& p, T* reg) {
       }
     }
   }
+}
+
+template <typename T>
+void run_program(const Program& p, T* reg) {
+  if constexpr (std::is_same_v<T, double>) {
+    if (!p.calls.empty()) {
+      run_program_impl<true>(p, reg);
+      return;
+    }
+  }
+  run_program_impl<false>(p, reg);
 }
 
 template <typename T>

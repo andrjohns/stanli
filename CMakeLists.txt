@@ -673,6 +673,12 @@ set_tests_properties(test_prep_profile_reroll_dispositions PROPERTIES
 add_executable(bench_opcost tools/bench_opcost.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(bench_opcost PRIVATE stanli)
+# Developer-only Program::CALL dispatch/context benchmark.  It builds a
+# synthetic, model-independent register program so CALL overhead can be
+# measured without attributing a kernel's own arithmetic to the mechanism.
+add_executable(bench_program_call EXCLUDE_FROM_ALL
+  tools/bench_program_call.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_program_call PRIVATE stanli)
 # Developer-only ODE RHS generated-adjoint spike.  Not a test and not installed.
 add_executable(bench_rhs_adjoint EXCLUDE_FROM_ALL
   tools/bench_rhs_adjoint.cpp tests/tbb_stub.cpp)

@@ -86,6 +86,8 @@ using ForwardFn = void (*)(KernelCtx&);
 ForwardFn resolve_forward_fn(const Op& op) {
   if (op.opcode == OP_ISLAND && op.variant == kIslandSoftmax3Variant)
     return island_softmax3_fwd;
+  if (op.opcode == OP_ISLAND && op.variant == kIslandCallVariant)
+    return island_calls_fwd;
   return kernel(op.opcode).forward;
 }
 
@@ -98,6 +100,8 @@ std::shared_ptr<const Program> specialize_softmax3(const IslandProg& p,
   if (count == 0 || count < min_count) return nullptr;
   if (!within_clone_budget(p, count)) return nullptr;
   if (!ensure_program_softmax3_kernel()) return nullptr;
+  const Kernel* softmax3 = find_kernel(kProgramSoftmax3Opcode);
+  if (softmax3 == nullptr || softmax3->forward == nullptr) return nullptr;
 
   // Copy the whole Program base so a future field cannot be silently omitted
   // from the optimized clone. The one-time reserve may move existing CALLs,
@@ -110,6 +114,8 @@ std::shared_ptr<const Program> specialize_softmax3(const IslandProg& p,
     call.opcode = kProgramSoftmax3Opcode;
     call.variant = kProgramSoftmax3Variant;
     call.n_in = 1;
+    call.forward = softmax3->forward;
+    call.backward = softmax3->backward;
     call.in[0] = I.a;
     call.in_len[0] = 3;
     call.out = I.dst;
@@ -137,7 +143,7 @@ void island_softmax3_fwd(KernelCtx& ctx) {
     for (int i = 0; i < li.len; ++i)
       ctx.scratch[li.reg + i] = ctx.in[input].data[li.offset + i];
   }
-  run_program(optimized, ctx.scratch);
+  run_program_impl<true>(optimized, ctx.scratch);
   for (size_t m = 0; m < p.out_regs.size(); ++m)
     ctx.out.data[m] = ctx.scratch[p.out_regs[m]];
 }
