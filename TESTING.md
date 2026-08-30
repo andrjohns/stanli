@@ -265,19 +265,20 @@ guard that prevents that transformation is documented in
 test would not detect this state leak.
 
 Fixture MIR is generated from checked-in `.stan` files with the pinned
-compiler:
+compiler. CMake creates these ignored build artifacts before any native target
+that consumes them. To regenerate them explicitly, run:
 
 ```sh
-./deps/stanc3/stanc --O1 --debug-optimized-mir tests/fixtures/X.stan \
-  > tests/fixtures/X.tmir.sexp
+./tools/gen_fixtures.sh
 ```
 
-The `.hpp` file that stanc also writes beside the model is not part of the
-fixture and is removed.
+`tools/gen_fixtures.py` owns the O0/O1 policy and canonical spelling. The
+`.hpp` files that stanc also writes beside the models are removed. Neither the
+MIR nor the C++ output is checked in.
 
-`tools/dev_setup.sh --embed` and `--corpus` build the compiler executable from
-the configured stanc3 source revision. Core setup intentionally omits a
-compiler.
+Core `tools/dev_setup.sh` builds the compiler executable from the configured
+stanc3 source revision because both fixture generation and source-level lit
+tests use it. `--embed` additionally builds the in-process compiler object.
 
 Unit tests check the kernels and cases they explicitly construct. They do not
 by themselves establish that model lowering selects the intended kernel or
@@ -351,12 +352,12 @@ the `write_array` graph supports but the interpreter does not
 difference for `array[0] matrix[2, 3]`: the interpreter rejects the input
 while the graph returns a value.
 
-[`tests/test_cross_path.cpp`](tests/test_cross_path.cpp) drives the matrix
-over every `tests/fixtures/*.tmir.sexp` file (146 currently), so a new fixture
-is included automatically. Fixtures that cannot compile or evaluate are
-recorded as skipped. Minimum counts are enforced for each execution path and
-output mode, preventing a broad regression from appearing only as additional
-skips. The exact current thresholds are kept beside the test.
+[`tests/test_cross_path.cpp`](tests/test_cross_path.cpp) drives the matrix over
+every generated `tests/fixtures/*.tmir.sexp` file, so a new `.stan` fixture is
+included automatically. Fixtures that cannot compile or evaluate are recorded
+as skipped. Minimum counts are enforced for each execution path and output
+mode, preventing a broad regression from appearing only as additional skips.
+The exact current thresholds are kept beside the test.
 
 Generated adjoints have a separate comparison. `gen_adjoint`
 ([`runtime/src/adjoint.cpp`](runtime/src/adjoint.cpp)) generates an

@@ -30,7 +30,7 @@ sequential run. Once warm, the complete 67-test suite takes 2.2-2.5 s.
 Reproduce the current measurement with:
 
 ```sh
-./deps/fetch.sh
+./tools/dev_setup.sh --no-build
 cmake -S . -B build-benchmark -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build build-benchmark --target clean

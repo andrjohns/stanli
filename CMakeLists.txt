@@ -561,6 +561,64 @@ endif()
 
 if(NOT EMSCRIPTEN)
 enable_testing()
+
+# Runtime and lowering tests consume stanc's legacy MIR, but the generated
+# text is not source. Build it once from the checked-in Stan models with the
+# same pinned compiler the source-level lit tests use. Keeping the output in
+# tests/fixtures preserves the established test and developer-tool paths while
+# .gitignore keeps a build from dirtying the checkout.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(STANLI_FIXTURE_PYTHON "${Python3_EXECUTABLE}")
+if(WIN32)
+  set(_stanli_stanc_default
+      "${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc.exe")
+else()
+  set(_stanli_stanc_default
+      "${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc")
+endif()
+set(STANLI_STANC_EXECUTABLE "${_stanli_stanc_default}" CACHE FILEPATH
+    "Pinned stanc executable used to generate the legacy MIR test corpus")
+if(NOT EXISTS "${STANLI_STANC_EXECUTABLE}")
+  message(FATAL_ERROR
+    "Pinned stanc not found at ${STANLI_STANC_EXECUTABLE}; "
+    "run tools/dev_setup.sh --no-build or set STANLI_STANC_EXECUTABLE")
+endif()
+file(GLOB STANLI_FIXTURE_SOURCES CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/*.stan")
+set(STANLI_MIR_FIXTURES)
+foreach(STANLI_FIXTURE_SOURCE IN LISTS STANLI_FIXTURE_SOURCES)
+  get_filename_component(STANLI_FIXTURE_STEM
+                         "${STANLI_FIXTURE_SOURCE}" NAME_WE)
+  list(APPEND STANLI_MIR_FIXTURES
+       "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/${STANLI_FIXTURE_STEM}.tmir.sexp")
+endforeach()
+list(LENGTH STANLI_FIXTURE_SOURCES STANLI_FIXTURE_COUNT)
+string(JOIN "\n" STANLI_FIXTURE_MANIFEST_CONTENT
+       ${STANLI_FIXTURE_SOURCES})
+set(STANLI_FIXTURE_MANIFEST
+    "${CMAKE_CURRENT_BINARY_DIR}/stanli_mir_fixture_sources.txt")
+file(GENERATE OUTPUT "${STANLI_FIXTURE_MANIFEST}"
+     CONTENT "${STANLI_FIXTURE_MANIFEST_CONTENT}\n")
+set(_stanli_fixture_dependencies
+    ${STANLI_FIXTURE_SOURCES}
+    "${STANLI_FIXTURE_MANIFEST}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fixtures.py"
+    "${STANLI_STANC_EXECUTABLE}")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc.src")
+  list(APPEND _stanli_fixture_dependencies
+       "${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc.src")
+endif()
+add_custom_command(
+  OUTPUT ${STANLI_MIR_FIXTURES}
+  COMMAND ${STANLI_FIXTURE_PYTHON}
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fixtures.py"
+          --stanc "${STANLI_STANC_EXECUTABLE}"
+  DEPENDS ${_stanli_fixture_dependencies}
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Generating ${STANLI_FIXTURE_COUNT} legacy MIR fixtures"
+  VERBATIM)
+add_custom_target(stanli_mir_fixtures ALL DEPENDS ${STANLI_MIR_FIXTURES})
+
 # Pull-request validation uses Clang so its cheap test translation units can
 # link to the optimized runtime objects below. Shipped platform builds may use
 # their established compiler; this switch changes test scaffolding only when
@@ -605,6 +663,7 @@ endif()
 function(stanli_add_test NAME)
   add_executable(${NAME} tests/${NAME}.cpp
     $<TARGET_OBJECTS:stanli_tbb_stub>)
+  add_dependencies(${NAME} stanli_mir_fixtures)
   target_link_libraries(${NAME} PRIVATE ${STANLI_TEST_RUNTIME_TARGET})
   if(STANLI_FAST_TEST_TUS)
     stanli_configure_test_tu(${NAME})
@@ -626,6 +685,7 @@ stanli_embed_stanc(stanli_run)
 add_executable(stanli_check tools/stanli_check.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(stanli_check PRIVATE stanli stanli_stanc_process)
+add_dependencies(stanli_check stanli_mir_fixtures)
 add_executable(test_stanc_process tests/test_stanc_process.cpp)
 target_link_libraries(test_stanc_process PRIVATE stanli_stanc_process)
 add_test(NAME test_stanc_process COMMAND test_stanc_process)
@@ -643,9 +703,11 @@ add_test(NAME test_check_precompiled_mir_conflict
 add_executable(bench_grad tools/bench_grad.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(bench_grad PRIVATE stanli)
+add_dependencies(bench_grad stanli_mir_fixtures)
 add_executable(bench_mir_decode tools/bench_mir_decode.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(bench_mir_decode PRIVATE stanli)
+add_dependencies(bench_mir_decode stanli_mir_fixtures)
 add_test(NAME test_prep_only
          COMMAND bench_grad tests/fixtures/ar1.tmir.sexp
                  tests/fixtures/ar1.json --prep
@@ -683,6 +745,7 @@ target_link_libraries(bench_program_call PRIVATE stanli)
 add_executable(bench_rhs_adjoint EXCLUDE_FROM_ALL
   tools/bench_rhs_adjoint.cpp tests/tbb_stub.cpp)
 target_link_libraries(bench_rhs_adjoint PRIVATE stanli)
+add_dependencies(bench_rhs_adjoint stanli_mir_fixtures)
 # Developer-only complete-solve sensitivity ceilings.  They retain the merged
 # runtime as the oracle and install no experimental path in libstanli.
 add_executable(bench_ode_ceiling EXCLUDE_FROM_ALL
@@ -742,6 +805,7 @@ endforeach()
 # this executable is meant to verify in isolation.
 add_executable(test_capi tests/test_capi.cpp)
 target_link_libraries(test_capi PRIVATE stanli_shared)
+add_dependencies(test_capi stanli_mir_fixtures)
 if(STANLI_FAST_TEST_TUS)
   target_compile_options(test_capi PRIVATE -O0)
 endif()
@@ -750,6 +814,7 @@ add_test(NAME test_capi COMMAND test_capi
 
 add_executable(test_function tests/test_function.cpp)
 target_link_libraries(test_function PRIVATE stanli_shared)
+add_dependencies(test_function stanli_mir_fixtures)
 if(STANLI_FAST_TEST_TUS)
   target_compile_options(test_function PRIVATE -O0)
 endif()

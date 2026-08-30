@@ -343,9 +343,9 @@ workflows.
 One-shot setup (fetches pinned deps, builds, runs tests):
 
 ```
-./tools/dev_setup.sh               # core build + tests; no Stan compiler
-./tools/dev_setup.sh --embed       # + source-pinned stanc3, in-process compiler
-./tools/dev_setup.sh --corpus      # + source-pinned stanc3, posteriordb, CmdStan
+./tools/dev_setup.sh               # core build + tests + source-pinned stanc3
+./tools/dev_setup.sh --embed       # + in-process compiler
+./tools/dev_setup.sh --corpus      # + posteriordb and CmdStan
 ./tools/dev_setup.sh --conformance # + the Stan conformance reference stack
 ./tools/dev_setup.sh --all
 ```
@@ -357,7 +357,7 @@ here rather than only in the nightly; see
 Or manually:
 
 ```
-./deps/fetch.sh
+./tools/dev_setup.sh --no-build
 build_jobs=$(tools/build_jobs.sh)
 cmake -B build -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 cmake --build build --parallel "$build_jobs"
