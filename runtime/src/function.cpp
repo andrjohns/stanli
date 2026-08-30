@@ -203,9 +203,17 @@ int stanli_function_call(const stanli_function* function,
     std::vector<stanli::DataMap::Entry> values;
     values.reserve(selected->arg_names.size());
     for (size_t i = 0; i < selected->arg_names.size(); ++i) {
-      const auto& value = arguments->at(selected->arg_names[i]);
+      auto value = arguments->at(selected->arg_names[i]);
       validate_argument(selected->arg_names[i], selected->arg_views[i], value);
-      values.push_back(value);
+      // DataMap keeps an integer mirror so integer data can be promoted to a
+      // real formal. Once selected, the formal owns the type: leaving the
+      // mirror set would make a real identity function return an integer and
+      // could make later interpreter operations choose integer semantics.
+      if (selected->arg_views[i].leaf != stanli::mir::UnsizedLeaf::Int) {
+        value.is_int = false;
+        value.i.clear();
+      }
+      values.push_back(std::move(value));
     }
 
     stanli::MirInterp<double> interpreter(

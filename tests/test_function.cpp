@@ -37,6 +37,9 @@ functions {
   int plus_one(int x) {
     return x + 1;
   }
+  real real_identity(real x) {
+    return x;
+  }
   matrix scale_matrix(matrix x, real a) {
     return a * x;
   }
@@ -107,6 +110,12 @@ int main() {
     check(integer.is_int && integer.i == std::vector<int>({42}) &&
               integer.r == std::vector<double>({42.0}) && integer.dims.empty(),
           "integer result keeps both representations");
+
+    Function real_identity(source, "real_identity");
+    const DataMap::Entry promoted_real = real_identity(ints);
+    check(!promoted_real.is_int && promoted_real.i.empty() &&
+              promoted_real.r == std::vector<double>({41.0}),
+          "integer argument is promoted to the real formal");
 
     Function scale(source, "scale_matrix");
     DataMap matrix;
