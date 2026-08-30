@@ -1,6 +1,14 @@
 #include <stanli/function.hpp>
 
+#if __has_include(<stanli/capi.h>)
 #include <stanli/capi.h>
+#define STANLI_FUNCTION_HAS_CAPI 1
+#else
+// Source-only consumers may deliberately omit the separately exported C API
+// while compiling runtime/src/*.cpp as a library. Function::from_mir remains
+// usable there; only the convenience constructor from Stan source is absent.
+#define STANLI_FUNCTION_HAS_CAPI 0
+#endif
 #include <stanli/mir_decode.hpp>
 #include <stanli/mir_interp.hpp>
 
@@ -175,12 +183,19 @@ stanli_function* stanli_function_new_from_stan(const char* stan_code,
     put_err(err, err_len, "function source and name must not be null");
     return nullptr;
   }
+#if STANLI_FUNCTION_HAS_CAPI
   char* mir = stanli_stan_to_mir(stan_code, err, err_len);
   if (mir == nullptr) return nullptr;
   stanli_function* out =
       stanli_function_new_from_mir(mir, function_name, err, err_len);
   stanli_string_free(mir);
   return out;
+#else
+  put_err(err, err_len,
+          "Stan source compilation is unavailable without the Stanli C API; "
+          "construct the function from MIR instead");
+  return nullptr;
+#endif
 }
 
 void stanli_function_free(stanli_function* function) { delete function; }

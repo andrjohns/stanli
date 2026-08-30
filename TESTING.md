@@ -53,6 +53,7 @@ known exceptions.
 | cross-path matrix | Do stanli's execution paths agree with one another? | Bitwise, except entries named in the ledger | every pull request, within CTest |
 | transformation A/B | Do selected graph optimizations preserve model results? | Optimizations enabled and disabled agree at the default point within 1e-11 | manually after optimization changes |
 | BridgeStan C-ABI comparison | Does the public C interface agree with reference BridgeStan? | Four fixture models must pass value, name, count, and output-shape checks | every pull request |
+| downstream `stanr` embedding | Can the R package vendor this checkout and use Stanli through its `model_base` adapter? | `stanr` must build, then its Stanli-backend construction, derivative, sampling, data, output, init, and cache tests must pass | every pull request that changes the vendored runtime surface |
 | generated conformance sweep | For cases that both systems evaluate, do results agree, and which generated cases remain unsupported? | 10 ULP by default; reviewed per-case policy where needed | nightly and on demand |
 | coverage baseline | Did a previously verified generated case stop verifying? | No loss of a verified case; obsolete policy exceptions must be removed | within the nightly sweep |
 | model census | Do stanc3's 1,231 integration models still compile into stanli's runtime representation and, where checked, agree with CmdStan? | No decrease in per-model classification | manually, on demand |
@@ -621,7 +622,9 @@ repeat-evaluation tests are needed for that case.
 The full source-change path in the pull-request workflows requires the
 following checks, as defined in
 [`.github/workflows/wheels.yml`](.github/workflows/wheels.yml) and
-[`.github/workflows/lint.yml`](.github/workflows/lint.yml):
+[`.github/workflows/lint.yml`](.github/workflows/lint.yml), with the downstream
+embedding check in
+[`.github/workflows/stanr.yml`](.github/workflows/stanr.yml):
 
 - one platform build, `manylinux_2_28_x86_64`;
 - the compiler-only Windows cross-build and executable parity gate described
@@ -644,6 +647,10 @@ following checks, as defined in
   source rather than only against stanli's own interface tests;
 - the R package's tests under `R CMD check` against the library that
   build produced, with a missing-runtime skip treated as a failure;
+- the pinned downstream `stanr` package rebuilt with the current checkout's
+  vendored headers, runtime sources, and kernels, followed by `stanr`'s own
+  Stanli-backend tests for model construction, derivatives, sampling, data
+  marshaling, generated quantities, initialization, and caching;
 - `clang-format` over tracked project-owned C/C++ files, excluding vendored
   dependencies and third-party code. The formatter version is pinned because
   output can differ across major versions.
