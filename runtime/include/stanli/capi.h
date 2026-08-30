@@ -308,6 +308,16 @@ int stanli_sample_stream(stanli_model* m, uint32_t seed, int warmup,
                          stanli_draw_cb cb, void* user, char* err,
                          size_t err_len);
 
+/* Same draws, RNG stream, and callbacks as stanli_sample_stream. On success,
+ * `stats`, when non-null, receives samples * STANLI_N_SAMPLER_COLS doubles
+ * in draw-major order, excluding warmup. Both streaming entry points use
+ * the default maximum treedepth of 10. Stats are available after return,
+ * not during callbacks. */
+int stanli_sample_stream_stats(stanli_model* m, uint32_t seed, int warmup,
+                               int samples, double delta, double* draws,
+                               double* stats, stanli_draw_cb cb, void* user,
+                               char* err, size_t err_len);
+
 /* WALNUTS (within-orbit adaptive step-length NUTS, arXiv:2506.18746),
  * same streaming contract as stanli_sample_stream. `max_error` is the
  * sampler's tunable in place of NUTS's `delta`: the largest drift in

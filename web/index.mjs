@@ -126,6 +126,8 @@ export function compile(opts) {
  * @returns {Promise<{names: string[], samples: number, generatedStart: number,
  *                    columns: Object<string, Float64Array>,
  *                    exactLp: boolean,
+ *                    sampler: string, maxDepth: number|null,
+ *                    samplerStats: Float64Array|null,
  *                    pathfinder?: {path: {iter, lp}[], khat: number,
  *                                  selectedIter: number,
  *                                  selectedElbo: number,
@@ -134,6 +136,9 @@ export function compile(opts) {
  *                         total: number}}>}
  *   One column per CSV column CmdStan would write: constrained
  *   parameters, transformed parameters, and generated quantities.
+ *   NUTS also returns post-warmup samplerStats in draw-major order:
+ *   lp__, accept_stat__, stepsize__, treedepth__, n_leapfrog__,
+ *   divergent__, energy__. Other methods return null for samplerStats.
  */
 export function sample(opts) {
   return request({
@@ -152,12 +157,46 @@ export function sample(opts) {
         ? opts.sampler : "nuts",
     maxError: opts.maxError == null ? 0 : opts.maxError,
   }, opts).then((done) => {
-    const { names, samples, generatedStart, ms, exactLp, pathfinder } = done;
+    const { names, samples, generatedStart, ms, exactLp, pathfinder,
+            sampler, maxDepth } = done;
     const flat = new Float64Array(done.columns);
     const columns = {};
     names.forEach((name, i) => {
       columns[name] = flat.subarray(i * samples, (i + 1) * samples);
     });
-    return { names, samples, generatedStart, columns, ms, exactLp, pathfinder };
+    const samplerStats = done.samplerStats
+        ? new Float64Array(done.samplerStats) : null;
+    return { names, samples, generatedStart, columns, ms, exactLp, pathfinder,
+             sampler, maxDepth, samplerStats };
   });
+}
+
+/** Diagnose one NUTS fit, or an array of chains from the same model and
+ * configuration. Returns the native R/Python diagnostic report as text,
+ * using only post-warmup draws. Inputs are copied, never transferred away.
+ * WALNUTS and Pathfinder do not expose the required sampler statistics.
+ * @returns {Promise<string>} */
+export async function diagnose(fits) {
+  const chains = Array.isArray(fits) ? fits : [fits];
+  const first = chains[0];
+  if (!first || !Number.isInteger(first.samples) || first.samples < 1 ||
+      !Array.isArray(first.names) || !first.names.length)
+    throw new Error("diagnose requires nonempty NUTS draws");
+  for (const fit of chains) {
+    if (!fit || fit.sampler !== "nuts" || fit.samples !== first.samples ||
+        fit.maxDepth !== first.maxDepth || !Number.isInteger(fit.maxDepth) ||
+        fit.maxDepth < 1 || !Array.isArray(fit.names) ||
+        fit.names.length !== first.names.length ||
+        fit.names.some((name, j) => name !== first.names[j]) ||
+        !(fit.samplerStats instanceof Float64Array) ||
+        fit.samplerStats.length !== first.samples * 7 ||
+        !fit.columns || first.names.some((name) =>
+          !(fit.columns[name] instanceof Float64Array) ||
+          fit.columns[name].length !== first.samples))
+      throw new Error("diagnose requires matching NUTS chains with sampler statistics");
+  }
+  return request({ cmd: "diagnose", names: first.names, samples: first.samples,
+                   maxDepth: first.maxDepth,
+                   chains: chains.map((fit) => fit.columns),
+                   stats: chains.map((fit) => fit.samplerStats) }, {});
 }

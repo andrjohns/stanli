@@ -268,6 +268,14 @@ int stanli_sample_stream(stanli_model* m, uint32_t seed, int warmup,
                          int samples, double delta, double* draws,
                          stanli_draw_cb cb, void* user, char* err,
                          size_t err_len) {
+  return stanli_sample_stream_stats(m, seed, warmup, samples, delta, draws,
+                                    nullptr, cb, user, err, err_len);
+}
+
+int stanli_sample_stream_stats(stanli_model* m, uint32_t seed, int warmup,
+                               int samples, double delta, double* draws,
+                               double* stats, stanli_draw_cb cb, void* user,
+                               char* err, size_t err_len) {
   try {
     stanli::NutsConfig cfg;
     cfg.seed = seed;
@@ -284,9 +292,16 @@ int stanli_sample_stream(stanli_model* m, uint32_t seed, int warmup,
         cb((int32_t)i, wu ? 1 : 0, user);
       };
     }
-    auto out = stanli::run_nuts(*m->ex, cfg, nullptr, observe);
+    stanli::SamplerStats sampler_stats;
+    auto out = stanli::run_nuts(*m->ex, cfg, stats ? &sampler_stats : nullptr,
+                                observe);
     for (size_t s = 0; s < out.size(); ++s)
       std::memcpy(draws + s * n, out[s].data(), sizeof(double) * n);
+    if (stats)
+      for (size_t s = 0; s < sampler_stats.rows.size(); ++s)
+        std::memcpy(stats + s * STANLI_N_SAMPLER_COLS,
+                    sampler_stats.rows[s].data(),
+                    sizeof(double) * STANLI_N_SAMPLER_COLS);
     return 0;
   } catch (const std::exception& e) {
     put_err(err, err_len, e.what());
