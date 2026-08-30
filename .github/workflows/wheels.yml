@@ -511,7 +511,11 @@ jobs:
             --output-dir build-rel/vectorize-ab
 
       - name: Publish MIR vectorization measurements
-        if: always() && matrix.runtime == 'linux-x86_64'
+        if: >-
+          always() &&
+          matrix.runtime == 'linux-x86_64' &&
+          (github.event_name != 'pull_request' ||
+           needs.changes.outputs.vectorize == 'true')
         uses: actions/upload-artifact@v4
         with:
           name: mir-vectorization-measurements
