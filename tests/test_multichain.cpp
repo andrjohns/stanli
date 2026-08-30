@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -101,6 +102,42 @@ int main() {
     for (int64_t i = 0; i < n; ++i) src.params_data()[i] = q[(size_t)i];
     const double lp3 = src.gradient(g1.data());
     expect("clones do not share an arena", lp3 == lp1);
+  }
+
+  // Exercise the complete bound-executor lifetime as a black box. This
+  // model combines matrix metadata, integer-valued observations, density
+  // scratch, multiple reverse kernels, and immutable data in the arena. The
+  // clone must remain a usable model after both the source executor and the
+  // graph builder that supplied its metadata have died. Repetition also
+  // checks that forward/reverse scratch and adjoints are safely reusable.
+  {
+    std::unique_ptr<Executor> survivor;
+    std::vector<double> q;
+    std::vector<double> want_grad;
+    double want_lp = 0.0;
+    {
+      auto m = testmodels::logistic_glm();
+      Executor src(std::move(m.graph));
+      testmodels::fill_logistic_glm_data(m, src);
+      const int64_t n = src.n_params();
+      q.resize((size_t)n);
+      want_grad.resize((size_t)n);
+      for (int64_t i = 0; i < n; ++i) {
+        q[(size_t)i] = -0.2 + 0.07 * (double)i;
+        src.params_data()[i] = q[(size_t)i];
+      }
+      want_lp = src.gradient(want_grad.data());
+      survivor = std::make_unique<Executor>(src);
+    }
+
+    std::vector<double> got_grad(q.size());
+    bool same = true;
+    for (int rep = 0; rep < 8; ++rep) {
+      for (size_t i = 0; i < q.size(); ++i) survivor->params_data()[i] = q[i];
+      const double got_lp = survivor->gradient(got_grad.data());
+      same = same && got_lp == want_lp && got_grad == want_grad;
+    }
+    expect("source-destroyed clone remains bitwise identical", same);
   }
 
   // ---- chain ids give different streams, seeds reproduce ----------------
