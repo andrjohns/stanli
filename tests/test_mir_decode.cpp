@@ -225,7 +225,9 @@ void append_stmt(std::string& bytes, const mir::Stmt& value) {
     case mir::Stmt::NRFunApp:
       append_string(bytes, value.fn_name);
       append_expr_list(bytes, value.fn_args);
-      append_optional_transform(bytes, value.check_transform);
+      append_optional_transform(bytes, value.fn_name == "FnWriteParam"
+                                           ? value.write_transform
+                                           : value.check_transform);
       append_string(bytes, value.check_var_name);
       append_string(bytes, value.raw);
       break;
@@ -279,6 +281,7 @@ std::string write_v2(const mir::Program& value) {
                 append_fun(out, definition);
               });
   append_strings(payload, value.output_vars);
+  append_stmt_list(payload, value.transform_inits);
   return v2_wire(payload);
 }
 
@@ -556,6 +559,9 @@ json write_stmt(const mir::Stmt& value) {
                                   ? write_transform(*value.check_transform)
                                   : json(nullptr)},
           {"check_var_name", value.check_var_name},
+          {"write_transform", value.write_transform
+                                  ? write_transform(*value.write_transform)
+                                  : json(nullptr)},
           {"loopvar", value.loopvar},
           {"lower", write_expr(value.lower)},
           {"upper", write_expr(value.upper)},
@@ -583,6 +589,8 @@ json write_program_object(const mir::Program& value) {
           {"log_prob", write_array(value.log_prob, write_stmt)},
           {"generate_quantities",
            write_array(value.generate_quantities, write_stmt)},
+          {"transform_inits",
+           write_array(value.transform_inits, write_stmt)},
           {"fun_defs", write_array(value.fun_defs, write_fun_def)},
           {"output_vars", write_strings(value.output_vars)}};
 }
@@ -669,7 +677,8 @@ void strip_overload_suffixes(mir::Program& value) {
   for (auto& input : value.input_vars)
     for (mir::Expr& dim : input.second.dims) strip_overload_suffixes(dim);
   for (std::vector<mir::Stmt>* body :
-       {&value.prepare_data, &value.log_prob, &value.generate_quantities})
+       {&value.prepare_data, &value.log_prob, &value.generate_quantities,
+        &value.transform_inits})
     for (mir::Stmt& stmt : *body) strip_overload_suffixes(stmt);
   for (mir::FunDef& function : value.fun_defs) {
     strip_overload_suffix(function.name);
@@ -715,7 +724,8 @@ void clear_raw(mir::Stmt& value) {
 void clear_raw(mir::Program& value) {
   for (auto& input : value.input_vars) clear_raw(input.second);
   for (std::vector<mir::Stmt>* body :
-       {&value.prepare_data, &value.log_prob, &value.generate_quantities})
+       {&value.prepare_data, &value.log_prob, &value.generate_quantities,
+        &value.transform_inits})
     for (mir::Stmt& statement : *body) clear_raw(statement);
   for (mir::FunDef& function : value.fun_defs)
     for (mir::Stmt& statement : function.body) clear_raw(statement);
@@ -1396,6 +1406,11 @@ void check_v2_rejections() {
             empty.log_prob.empty() && empty.generate_quantities.empty() &&
             empty.fun_defs.empty() && empty.output_vars.empty(),
         "v2 empty program");
+  // empty_v2_payload() stops after output_vars, which is exactly the shape a
+  // producer that predates transform_inits emits. It must decode, with no
+  // inverse parameter transforms rather than an error.
+  check(empty.transform_inits.empty(),
+        "v2 document without the trailing section decodes");
   check(empty_wire.find('\0') == std::string::npos,
         "v2 envelope is safe for C-string transports");
 
@@ -1411,6 +1426,39 @@ void check_v2_rejections() {
             decoded_loop_control.log_prob[0].kind == mir::Stmt::Break &&
             decoded_loop_control.log_prob[1].kind == mir::Stmt::Continue,
         "v2 preserves break and continue statement tags");
+
+  // transform_inits round trip: the section survives, and the transform on
+  // its FnWriteParam comes back as write_transform rather than as the
+  // check_transform it shares a wire slot with. A write_array FnWriteParam
+  // carries neither.
+  mir::Program inits;
+  mir::Stmt free_write;
+  free_write.kind = mir::Stmt::NRFunApp;
+  free_write.fn_name = "FnWriteParam";
+  mir::Transform lower;
+  lower.kind = mir::Transform::Lower;
+  mir::Expr bound;
+  bound.kind = mir::Expr::LitInt;
+  bound.lit_i = 0;
+  lower.args.push_back(bound);
+  free_write.write_transform = lower;
+  inits.transform_inits.push_back(free_write);
+  mir::Stmt constrained_write;
+  constrained_write.kind = mir::Stmt::NRFunApp;
+  constrained_write.fn_name = "FnWriteParam";
+  inits.generate_quantities.push_back(constrained_write);
+  const mir::Program decoded_inits = decode_program(write_v2(inits));
+  check(decoded_inits.transform_inits.size() == 1 &&
+            decoded_inits.transform_inits[0].write_transform.has_value() &&
+            decoded_inits.transform_inits[0].write_transform->kind ==
+                mir::Transform::Lower &&
+            decoded_inits.transform_inits[0].write_transform->args.size() == 1 &&
+            !decoded_inits.transform_inits[0].check_transform.has_value(),
+        "v2 carries the transform to invert on transform_inits FnWriteParam");
+  check(decoded_inits.generate_quantities.size() == 1 &&
+            !decoded_inits.generate_quantities[0].write_transform.has_value() &&
+            !decoded_inits.generate_quantities[0].check_transform.has_value(),
+        "v2 leaves write_array FnWriteParam without a transform");
 
   const auto check_real_bits = [](uint64_t expected, const std::string& what) {
     const mir::Program decoded =
@@ -1437,8 +1485,13 @@ void check_v2_rejections() {
   truncated.pop_back();
   expect_error(v2_wire(truncated), "truncated input", "v2 truncated payload");
   std::string trailing = empty_v2_payload();
+  append_u32(trailing, 0);  // an empty transform_inits, which is well formed
   append_u8(trailing, 0);
   expect_error(v2_wire(trailing), "trailing bytes", "v2 trailing payload");
+  std::string short_section = empty_v2_payload();
+  append_u8(short_section, 0);
+  expect_error(v2_wire(short_section), "truncated input",
+               "v2 partial trailing section");
 
   std::string oversized_list;
   append_u32(oversized_list, 1000001);

@@ -461,17 +461,25 @@ and nr_fun_app_of_t kind args =
   match kind with
   | Fun_kind.CompilerInternal internal ->
       let name = internal_name internal in
-      let payload_args, check_transform, check_var_name =
+      (* One optional-transform slot serves both internals that carry one,
+         disambiguated by the function name. FnCheck names the constraint it
+         verifies; transform_inits' FnWriteParam names the transform to
+         INVERT, turning an already-constrained value into a free one.
+         write_array's own FnWriteParam carries none -- its value is
+         constrained already -- so documents produced before transform_inits
+         was encoded stay byte-identical. *)
+      let payload_args, payload_transform, check_var_name =
         match internal with
         | Internal_fun.FnCheck {trans; var_name; var} ->
             ([expr_of_t var], Some (transform_of_t trans), var_name)
-        | FnWriteParam {var; _} -> ([expr_of_t var], None, "")
+        | FnWriteParam {var; unconstrain_opt} ->
+            ([expr_of_t var], Option.map ~f:transform_of_t unconstrain_opt, "")
         | _ -> ([], None, "") in
       { (default_stmt ()) with
         st_kind= "NRFunApp"
       ; st_fn_name= name
       ; st_fn_args= payload_args @ ordinary_args
-      ; st_check_transform= check_transform
+      ; st_check_transform= payload_transform
       ; st_check_var_name= check_var_name }
   | StanLib (name, _, _) ->
       { (default_stmt ()) with
@@ -811,4 +819,8 @@ let encode (program : Program.Typed.t) =
   add_v2_list add_v2_fun buffer (List.map ~f:fun_of_t program.functions_block);
   add_v2_list add_v2_string buffer
     (List.map program.output_vars ~f:(fun (name, _, _) -> name));
+  (* Trailing, and therefore optional: a document written before this section
+     existed ends here and decodes with an empty transform_inits. *)
+  add_v2_list add_v2_stmt buffer
+    (List.map ~f:stmt_of_t program.transform_inits);
   "STANLI2:" ^ encode_base64 (Buffer.contents buffer)

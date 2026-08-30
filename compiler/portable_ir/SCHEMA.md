@@ -215,7 +215,7 @@ There is no inactive-field block.
 | 5 | `For` | `string loopvar`, `Expr lower`, `Expr upper`, `list<Stmt> body`, `string raw` |
 | 6 | `IfElse` | `Expr condition`, `list<Stmt> body`, `string raw` |
 | 7 | `While` | `Expr condition`, `list<Stmt> body`, `string raw` |
-| 8 | `NRFunApp` | `string name`, `list<Expr> args`, `optional<Transform> check_transform`, `string check_var_name`, `string raw` |
+| 8 | `NRFunApp` | `string name`, `list<Expr> args`, `optional<Transform> payload_transform`, `string check_var_name`, `string raw` |
 | 9 | `Return` | `bool has_value`, optional `Expr value`, `string raw` |
 | 10 | `Break` | none |
 | 11 | `Continue` | none |
@@ -254,9 +254,32 @@ list<Stmt> log_prob
 list<Stmt> generate_quantities
 list<FunDef> fun_defs
 list<string> output_vars
+list<Stmt> transform_inits   (optional; see below)
 ```
 
 An `InputVar` is `string name` followed by `SizedType type`.
+
+`payload_transform` is the one optional-transform slot an `NRFunApp` carries.
+Its meaning follows the internal function name, and the decoder splits the two
+apart so no consumer has to ask: on `FnCheck` it is the constraint being
+verified; on the `FnWriteParam` of `transform_inits` it is the transform to
+INVERT, turning an already-constrained value into a free one. The
+`FnWriteParam`s of `generate_quantities` carry none -- their values are
+constrained already.
+
+`transform_inits` is stanc3's inverse parameter-transform section: its
+`FnReadData` calls name PARAMETERS read from a caller-supplied init context
+rather than model data, and each parameter ends in an `FnWriteParam` carrying
+the transform to invert.
+
+It is the only optional element of the payload, and it is optional in exactly
+one direction. It trails every required section, so a document written by a
+producer from before it existed simply ends after `output_vars` and decodes
+with an empty `transform_inits` -- the same state as a model whose section
+could not be encoded, which callers already have to handle. A decoder must not
+treat its absence as truncation, and must still reject bytes beyond it. The
+current producer always emits it, empty list included, so the canonical bytes
+for a given input remain unique.
 
 The order of every list is semantic and preserved. Source locations and
 stanc3 fields absent from `stanli::mir` are not encoded.
@@ -338,3 +361,5 @@ and participates in the same byte comparison.
 
 A future incompatible layout gets a new ASCII header and a new decoder. It
 must never reuse `STANLI2:` with different tag meanings or field order.
+Appending an optional trailing section, as `transform_inits` did, is the one
+change that keeps the header: it cannot alter how any earlier byte is read.

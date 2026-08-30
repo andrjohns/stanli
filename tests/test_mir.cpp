@@ -87,6 +87,65 @@ int main(int argc, char** argv) {
   }
   check(n_target == 4, "4 TargetPE statements");
 
+  // transform_inits: the inverse of the parameter reads above. Each parameter
+  // is read by name from the caller's init context and written back free,
+  // carrying the transform to invert -- tau's Lower 0 is the same transform
+  // its FnReadParam constrains with. write_array's own FnWriteParam carries
+  // none, so a transform here is what separates the two sections.
+  std::vector<const mir::Stmt*> free_writes;
+  std::vector<std::string> init_reads;
+  std::function<void(const mir::Stmt&)> iwalk = [&](const mir::Stmt& s) {
+    if (s.kind == mir::Stmt::NRFunApp && s.fn_name == "FnWriteParam")
+      free_writes.push_back(&s);
+    if (s.kind == mir::Stmt::Assignment) {
+      std::function<void(const mir::Expr&)> scan = [&](const mir::Expr& e) {
+        if (e.kind == mir::Expr::FunApp && e.name == "FnReadData" &&
+            !e.args.empty())
+          init_reads.push_back(e.args[0].lit_s);
+        for (const auto& a : e.args) scan(a);
+      };
+      scan(s.rhs);
+    }
+    for (const auto& k : s.body) iwalk(k);
+  };
+  for (const auto& s : p.transform_inits) iwalk(s);
+
+  check(free_writes.size() == 3, "3 free writes in transform_inits");
+  check(init_reads.size() == 3 && init_reads[0] == "mu" &&
+            init_reads[1] == "tau" && init_reads[2] == "theta_tilde",
+        "transform_inits reads each parameter by name");
+  if (free_writes.size() == 3) {
+    check(free_writes[0]->write_transform &&
+              free_writes[0]->write_transform->kind == mir::Transform::Identity,
+          "mu inverts an identity transform");
+    check(free_writes[1]->write_transform &&
+              free_writes[1]->write_transform->kind == mir::Transform::Lower &&
+              free_writes[1]->write_transform->args.size() == 1 &&
+              free_writes[1]->write_transform->args[0].kind ==
+                  mir::Expr::LitInt &&
+              free_writes[1]->write_transform->args[0].lit_i == 0,
+          "tau inverts its lower bound 0");
+    check(free_writes[2]->write_transform &&
+              free_writes[2]->write_transform->kind == mir::Transform::Identity,
+          "theta_tilde inverts an identity transform");
+    for (const mir::Stmt* w : free_writes)
+      check(!w->check_transform,
+            "a free write carries no check transform");
+  }
+
+  size_t gq_writes = 0;
+  size_t gq_writes_with_transform = 0;
+  std::function<void(const mir::Stmt&)> gwalk = [&](const mir::Stmt& s) {
+    if (s.kind == mir::Stmt::NRFunApp && s.fn_name == "FnWriteParam") {
+      ++gq_writes;
+      if (s.write_transform) ++gq_writes_with_transform;
+    }
+    for (const auto& k : s.body) gwalk(k);
+  };
+  for (const auto& s : p.generate_quantities) gwalk(s);
+  check(gq_writes > 0 && gq_writes_with_transform == 0,
+        "write_array writes carry no transform to invert");
+
   // propto flags: all four tildes emit FnLpdf true
   int n_propto = 0;
   std::function<void(const mir::Expr&)> ewalk = [&](const mir::Expr& e) {
