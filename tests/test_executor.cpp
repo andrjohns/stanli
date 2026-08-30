@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <vector>
 
 static int failures = 0;
 static void expect_eq(const char* what, double got, double want) {
@@ -14,6 +15,213 @@ static void expect_eq(const char* what, double got, double want) {
     ++failures;
     std::printf("FAIL %-12s got %.17g want %.17g\n", what, got, want);
   }
+}
+
+static void expect_i64(const char* what, int64_t got, int64_t want) {
+  if (got != want) {
+    ++failures;
+    std::printf("FAIL %-12s got %lld want %lld\n", what, (long long)got,
+                (long long)want);
+  }
+}
+
+// A finalized graph retains only the integer payloads named by operations.
+// The second INDEX deliberately shares the first payload, while the extra
+// pool entries are dead.  All checks are public accounting and execution
+// behavior; no pointer identity is part of the contract.
+static void test_compact_idata_lifecycle() {
+  using namespace stanli;
+  std::unique_ptr<Executor> copy;
+  {
+    Graph g;
+    const int x = g.add_slot(5, true);
+    const int first = g.add_slot(1, false);
+    const int second = g.add_slot(1, false);
+    const int third = g.add_slot(1, false);
+    const int sum1 = g.add_slot(1, false);
+    const int sum2 = g.add_slot(1, false);
+    const int owned_first = g.add_op(OP_INDEX, {x}, first, {0});
+    const int shared = g.add_op(OP_INDEX, {x}, second);
+    g.ops[shared].idata = g.ops[owned_first].idata;
+    g.ops[shared].n_idata = g.ops[owned_first].n_idata;
+    g.add_op(OP_SLICE_STRIDED, {x}, third, {4, 1});
+    g.add_op(OP_ADD, {first, second}, sum1);
+    g.add_op(OP_ADD, {sum1, third}, sum2);
+    g.result_slot = sum2;
+    g.idata_pool.push_back({91, 92, 93});
+    g.idata_pool.push_back({});
+
+    g.compact_idata();
+    g.compact_idata();  // idempotence is observable through stable accounting.
+    expect_i64("idata elems", (int64_t)g.integer_storage_size(), 3);
+    expect_i64("idata blocks", (int64_t)g.integer_storage_blocks(), 1);
+
+    Graph source = g;
+    Executor ex(std::move(source));
+    ex.params_data()[0] = 1.5;
+    ex.params_data()[1] = -2.0;
+    ex.params_data()[2] = 4.0;
+    ex.params_data()[3] = 8.0;
+    ex.params_data()[4] = 3.25;
+    double grad[5] = {};
+    expect_eq("compact value", ex.gradient(grad), 6.25);
+    expect_eq("compact dx0", grad[0], 2.0);
+    expect_eq("compact dx4", grad[4], 1.0);
+    copy = std::make_unique<Executor>(ex);
+  }
+  double grad[5] = {};
+  for (int repeat = 0; repeat < 8; ++repeat) {
+    expect_eq("compact copy", copy->gradient(grad), 6.25);
+    expect_eq("compact copy dx0", grad[0], 2.0);
+    expect_eq("compact copy dx1", grad[1], 0.0);
+    expect_eq("compact copy dx2", grad[2], 0.0);
+    expect_eq("compact copy dx3", grad[3], 0.0);
+    expect_eq("compact copy dx4", grad[4], 1.0);
+  }
+  copy->params_data()[0] = -7.0;
+  copy->params_data()[4] = 0.75;
+  expect_eq("compact changed", copy->gradient(grad), -13.25);
+  expect_eq("compact changed dx0", grad[0], 2.0);
+  expect_eq("compact changed dx4", grad[4], 1.0);
+}
+
+static void test_compact_append_after_copy() {
+  using namespace stanli;
+  std::unique_ptr<Executor> appended_ex;
+  {
+    Graph finalized;
+    const int x = finalized.add_slot(3, true);
+    const int old_out = finalized.add_slot(1, false);
+    finalized.add_op(OP_INDEX, {x}, old_out, {0});
+    finalized.result_slot = old_out;
+    finalized.compact_idata();
+
+    Graph appended = finalized;
+    const int new_out = appended.add_slot(1, false);
+    const int total = appended.add_slot(1, false);
+    appended.add_op(OP_INDEX, {x}, new_out, {2});
+    appended.add_op(OP_ADD, {old_out, new_out}, total);
+    appended.result_slot = total;
+    appended.compact_idata();  // newly mutable pool remains executable.
+    appended_ex = std::make_unique<Executor>(std::move(appended));
+  }
+  appended_ex->params_data()[0] = 2.0;
+  appended_ex->params_data()[1] = 5.0;
+  appended_ex->params_data()[2] = 11.0;
+  double grad[3] = {};
+  expect_eq("append value", appended_ex->gradient(grad), 13.0);
+  expect_eq("append dx0", grad[0], 1.0);
+  expect_eq("append dx2", grad[2], 1.0);
+
+  Graph assigned;
+  {
+    Graph source = appended_ex->graph();
+    assigned = source;
+  }
+  appended_ex.reset();
+  Executor assigned_ex(std::move(assigned));
+  assigned_ex.params_data()[0] = -1.0;
+  assigned_ex.params_data()[2] = 4.5;
+  expect_eq("append assigned", assigned_ex.gradient(grad), 3.5);
+}
+
+static void test_mixed_owned_borrowed_idata() {
+  using namespace stanli;
+  std::vector<int> borrowed_index{1};
+  std::unique_ptr<Executor> copy;
+  {
+    Graph g;
+    const int x = g.add_slot(3, true);
+    const int owned_out = g.add_slot(1, false);
+    const int borrowed_out = g.add_slot(1, false);
+    const int result = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {x}, owned_out, {0});
+    const int borrowed = g.add_op(OP_INDEX, {x}, borrowed_out);
+    g.ops[borrowed].idata = borrowed_index.data();
+    g.ops[borrowed].n_idata = 1;
+    g.add_op(OP_ADD, {owned_out, borrowed_out}, result);
+    g.result_slot = result;
+    g.compact_idata();  // mixed ownership must decline as one transaction.
+    expect_i64("mixed elems", (int64_t)g.integer_storage_size(), 1);
+    Executor source(std::move(g));
+    source.params_data()[0] = 2.0;
+    source.params_data()[1] = 7.0;
+    source.params_data()[2] = 13.0;
+    double grad[3] = {};
+    expect_eq("borrowed initial", source.gradient(grad), 9.0);
+    copy = std::make_unique<Executor>(source);
+  }
+  borrowed_index[0] = 2;
+  double grad[3] = {};
+  expect_eq("borrowed updated", copy->gradient(grad), 15.0);
+  expect_eq("borrowed dx0", grad[0], 1.0);
+  expect_eq("borrowed dx2", grad[2], 1.0);
+}
+
+static void test_empty_and_dead_idata() {
+  using namespace stanli;
+  Graph dead;
+  dead.idata_pool.push_back({});
+  dead.idata_pool.push_back({7, 8, 9});
+  dead.compact_idata();
+  expect_i64("dead elems", (int64_t)dead.integer_storage_size(), 0);
+  expect_i64("dead blocks", (int64_t)dead.integer_storage_blocks(), 0);
+  const int param = dead.add_slot(2, true);
+  const int result = dead.add_slot(1, false);
+  dead.add_op(OP_INDEX, {param}, result, {1});
+  dead.result_slot = result;
+  dead.compact_idata();
+  expect_i64("dead then live", (int64_t)dead.integer_storage_size(), 1);
+  Executor dead_ex(std::move(dead));
+  dead_ex.params_data()[1] = 3.5;
+  double grad[2] = {};
+  expect_eq("dead then live value", dead_ex.gradient(grad), 3.5);
+  expect_eq("dead then live grad", grad[1], 1.0);
+
+  Graph zero;
+  zero.compact_idata();
+  expect_i64("empty elems", (int64_t)zero.integer_storage_size(), 0);
+  expect_i64("empty blocks", (int64_t)zero.integer_storage_blocks(), 0);
+  Executor zero_ex(std::move(zero));
+  zero_ex.run_forward_only();
+}
+
+static void test_compact_idata_refusal() {
+  using namespace stanli;
+  // An interior view is outside Graph's copy contract. Finalization must
+  // still leave this moved graph executable, not mistake the pool for dead.
+  Graph interior;
+  const int p = interior.add_slot(3, true);
+  const int out = interior.add_slot(1, false);
+  interior.add_op(OP_INDEX, {p}, out, {99, 2});
+  interior.ops[0].idata += 1;
+  interior.ops[0].n_idata = 1;
+  interior.result_slot = out;
+  interior.compact_idata();
+  expect_i64("interior retained", interior.integer_storage_size(), 2);
+  Executor ex(std::move(interior));
+  ex.params_data()[2] = 7.25;
+  double grad[3] = {};
+  expect_eq("interior value", ex.gradient(grad), 7.25);
+  expect_eq("interior grad", grad[2], 1.0);
+
+  Graph invalid;
+  const int input = invalid.add_slot(2, true);
+  const int output = invalid.add_slot(1, false);
+  invalid.add_op(OP_INDEX, {input}, output, {1});
+  invalid.result_slot = output;
+  invalid.idata_pool.push_back({88, 89});
+  invalid.ops[0].n_idata = 2;  // exceeds the owned buffer
+  invalid.compact_idata();
+  expect_i64("refusal elems", invalid.integer_storage_size(), 3);
+  expect_i64("refusal blocks", invalid.integer_storage_blocks(), 2);
+  invalid.ops[0].n_idata = 1;
+  invalid.compact_idata();
+  expect_i64("retry elems", invalid.integer_storage_size(), 1);
+  Executor repaired(std::move(invalid));
+  repaired.params_data()[1] = -2.5;
+  expect_eq("retry value", repaired.gradient(grad), -2.5);
+  expect_eq("retry grad", grad[1], 1.0);
 }
 
 int main() {
@@ -224,6 +432,12 @@ int main() {
     std::printf("FAIL constant adjoints got %lld want 1\n",
                 (long long)constant_ex.adjoint_storage_size());
   }
+
+  test_compact_idata_lifecycle();
+  test_compact_append_after_copy();
+  test_mixed_owned_borrowed_idata();
+  test_empty_and_dead_idata();
+  test_compact_idata_refusal();
 
   if (failures == 0) std::printf("test_executor OK\n");
   return failures == 0 ? 0 : 1;

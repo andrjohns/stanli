@@ -21,9 +21,10 @@ namespace stanli {
 struct Graph {
   std::vector<Slot> slots;
   std::vector<Op> ops;
-  // Owns per-op integer arrays. Owned Op::idata views always name data(), not
-  // an interior element. A copy must rebind each view into its corresponding
-  // copied vector rather than retain a pointer into the source.
+  // Mutable construction storage for per-op integer arrays. Owned views into
+  // this pool always name data(), not an interior element. Copies rebind them
+  // into copied vectors. compact_idata() can replace this pool at the final
+  // execution boundary with immutable storage shared by Graph copies.
   std::vector<std::vector<int>> idata_pool;
   // Owns per-op opaque payloads. Graph copies share these immutable payloads,
   // so the raw pointers in copied ops continue to name the shared objects.
@@ -37,7 +38,11 @@ struct Graph {
         ops(src.ops),
         idata_pool(src.idata_pool),
         udata_pool(src.udata_pool),
-        result_slot(src.result_slot) {
+        result_slot(src.result_slot),
+        compact_idata_(src.compact_idata_) {
+    // Finalized graphs usually have no mutable pool: their raw idata views
+    // remain valid through the shared immutable owner, with no rebinding.
+    if (src.idata_pool.empty()) return;
     // One sorted, contiguous temporary keeps graph cloning O(P log P) without
     // one hash-node allocation per integer payload. External Op::idata
     // pointers, if a hand-built graph has one, retain their caller-owned
@@ -73,6 +78,31 @@ struct Graph {
     return *this;
   }
 
+  // Finalize integer ownership after all graph rewrites have returned. This
+  // invalidates views into idata_pool other than the ones in ops; custom
+  // opaque payloads must own their integer data, not borrow from that pool.
+  // Exact owned bases are packed once, dead arrays are released, and copies
+  // share the resulting immutable buffer. Borrowed/unrecognized views or
+  // invalid lengths conservatively leave the whole graph unchanged.
+  //
+  // Idempotent and one-shot: a finalized graph can still be copied/extended,
+  // but any subsequently appended mutable arrays keep their ordinary deep-
+  // copy ownership rather than moving existing finalized views again.
+  void compact_idata();
+
+  // Retained integer elements and nonempty buffers, excluding borrowed data.
+  // These expose storage accounting without exposing the compact owner.
+  size_t integer_storage_size() const {
+    size_t size = compact_idata_ ? compact_idata_->size() : 0;
+    for (const auto& payload : idata_pool) size += payload.size();
+    return size;
+  }
+  size_t integer_storage_blocks() const {
+    size_t blocks = compact_idata_ ? 1 : 0;
+    for (const auto& payload : idata_pool) blocks += !payload.empty();
+    return blocks;
+  }
+
   int add_slot(int64_t len, bool is_param) {
     slots.push_back(Slot{0, len, is_param});
     return static_cast<int>(slots.size()) - 1;
@@ -100,6 +130,9 @@ struct Graph {
     ops.push_back(op);
     return static_cast<int>(ops.size()) - 1;
   }
+
+ private:
+  std::shared_ptr<const std::vector<int>> compact_idata_;
 };
 
 // Payload for OP_REJECT and OP_PRINT: the literal chunks of the message,

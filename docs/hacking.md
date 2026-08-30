@@ -242,7 +242,9 @@ deliberately small:
   Scratch offsets exist only while binding; the bound `KernelCtx` retains
   the scratch pointer, so graphs and executor copies do not store offsets.
 - `Graph`: the slots, the ops, and the pools that own the
-  `idata`/`udata` arrays.
+  `idata`/`udata` arrays. Construction uses separate mutable integer arrays;
+  initial Executor construction packs live owned arrays into one immutable
+  buffer shared by Graph/Executor copies. Numerical arenas remain private.
 - `KernelCtx`: what a kernel sees at run time. A raw `double*` and a
   length for each input, the output, and each adjoint, plus scratch.
   Assembled once at bind, never rebuilt.
@@ -250,8 +252,9 @@ deliberately small:
 For metadata changes, build `bench_executor_clone` explicitly in separate
 baseline and candidate Release build directories. Keep the baseline binary
 unchanged, and clean-build the candidate after changing a layout header.
-The model-independent scalar ADD chain reports graph construction, binding,
-clone and gradient times, exact `Op` storage, and current/peak RSS in MiB.
+The model-independent scalar ADD and INDEX chains report graph construction,
+integer finalization, binding, clone and gradient times, retained integer
+elements/buffers, exact `Op` storage, and current/peak RSS in MiB.
 Each clone is checked against an exact value and gradient before timing.
 
 ```sh
@@ -261,6 +264,10 @@ python3 tools/bench_executor_clone.py \
   build-base/bench_executor_clone build-candidate/bench_executor_clone \
   --ops 25000 --executors 1 8 32 --samples 12 --reps 20 \
   --json build-candidate/clone-layout.json
+python3 tools/bench_executor_clone.py \
+  build-base/bench_executor_clone build-candidate/bench_executor_clone \
+  --workload index --ops 100000 --executors 1 8 --dead-payloads 100000 \
+  --samples 12 --reps 20 --json build-candidate/clone-integers.json
 ```
 
 The driver alternates fresh processes and reports medians and interquartile
@@ -268,7 +275,32 @@ ranges. RSS is descriptive: allocator retention and page rounding can mask
 small live-storage savings. The ADD chain is a metadata stress case, not a
 prediction of model-wide speedups; also run `bench_opcost` for density kernels
 and `bench_grad` for a compiled-model canary. Timing runs should not overlap
-builds or other benchmarks.
+builds or other benchmarks. INDEX gives each operation a live one-integer
+payload; `--dead-payloads` adds unused four-integer arrays to either workload.
+Include `finalize_ms` in setup comparisons: pooling is not free, even when
+subsequent clones are cheaper. Per-graph storage counters include shared
+integers, so summing them across clones overcounts physical storage.
+
+### Integer payload ownership
+
+`Graph::compact_idata()` is a finalization boundary, not a lowering pass.
+Rewrite passes can hold pending Ops outside `graph.ops`, so compacting before
+they return would invalidate their views. Ordinary owned `Op::idata` views
+must name a construction buffer's exact base. Finalization validates those
+views and lengths, packs each live buffer once, and releases dead arrays and
+the outer pool capacity. All allocation precedes publication/rebinding.
+
+Borrowed, interior, or invalid views cause the whole compaction to decline
+without changing ownership. This preserves constant-folding subgraphs that
+borrow parent metadata. Custom opaque payloads must own their integers rather
+than borrow Graph-pool storage; finalization only rebinds views in `graph.ops`.
+Even non-null zero-length views are conservatively retained or declined.
+
+Compaction is one-shot once a shared buffer exists. Copying or extending a
+finalized Graph is supported: copies share that buffer and deep-copy/rebind
+any newly appended mutable arrays. Subsequent compaction leaves those new
+arrays alone, so it never invalidates existing finalized views. Kernels keep
+the same raw `const int*` access, with no extra hot-loop indirection.
 
 ### The variant byte
 

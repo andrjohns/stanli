@@ -11,7 +11,10 @@ from pathlib import Path
 
 METRICS = (
     "graph_ms",
+    "finalize_ms",
     "bind_ms",
+    "total_setup_first_ms",
+    "total_setup_ms",
     "clone_ms_total",
     "clone_ms_each",
     "gradient_ns",
@@ -21,7 +24,7 @@ METRICS = (
 )
 
 
-def run_one(binary, ops, executors, reps):
+def run_one(binary, ops, executors, reps, workload, dead_payloads):
     command = [
         str(binary),
         "--ops",
@@ -30,18 +33,35 @@ def run_one(binary, ops, executors, reps):
         str(executors),
         "--reps",
         str(reps),
+        "--workload",
+        workload,
+        "--dead-payloads",
+        str(dead_payloads),
     ]
     output = subprocess.check_output(command, text=True).strip()
     fields = dict(token.split("=", 1) for token in output.split())
-    for key, expected in (("ops", ops), ("executors", executors), ("reps", reps)):
+    for key, expected in (
+        ("ops", ops),
+        ("executors", executors),
+        ("reps", reps),
+        ("dead_payloads", dead_payloads),
+    ):
         if int(fields[key]) != expected:
             raise RuntimeError(f"unexpected {key} from {binary}: {fields[key]}")
+    if fields["workload"] != workload:
+        raise RuntimeError(f"unexpected workload from {binary}")
     for key in (
         *METRICS,
         "sizeof_op",
         "sizeof_slot",
         "sizeof_ctx",
         "op_bytes_per_executor",
+        "integer_storage_before",
+        "integer_blocks_before",
+        "integer_storage_after_bind",
+        "integer_blocks_after_bind",
+        "integer_storage_after_clone",
+        "integer_blocks_after_clone",
     ):
         fields[key] = float(fields[key])
     return fields
@@ -62,12 +82,16 @@ def main():
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--ops", type=int, default=25000)
     parser.add_argument("--executors", type=int, nargs="+", default=[1, 8, 32])
+    parser.add_argument("--workload", choices=("add", "index"), default="add")
+    parser.add_argument("--dead-payloads", type=int, default=0)
     parser.add_argument("--samples", type=int, default=12)
     parser.add_argument("--reps", type=int, default=20)
     parser.add_argument("--json", type=Path, help="retain raw paired samples")
     args = parser.parse_args()
-    if args.samples < 4 or args.ops < 1 or args.reps < 1:
-        parser.error("samples must be >= 4; ops and reps must be positive")
+    if args.samples < 4 or args.ops < 1 or args.reps < 1 or args.dead_payloads < 0:
+        parser.error(
+            "samples must be >= 4; ops/reps positive and dead-payloads nonnegative"
+        )
     if any(count < 1 for count in args.executors):
         parser.error("executor counts must be positive")
     binaries = {
@@ -81,6 +105,8 @@ def main():
         "platform": platform.platform(),
         "binaries": {key: str(value) for key, value in binaries.items()},
         "ops": args.ops,
+        "workload": args.workload,
+        "dead_payloads": args.dead_payloads,
         "reps": args.reps,
         "samples": args.samples,
         "results": [],
@@ -94,10 +120,26 @@ def main():
             if sample % 2:
                 order = tuple(reversed(order))
             pair = {
-                name: run_one(binaries[name], args.ops, count, args.reps)
+                name: run_one(
+                    binaries[name],
+                    args.ops,
+                    count,
+                    args.reps,
+                    args.workload,
+                    args.dead_payloads,
+                )
                 for name in order
             }
-            for key in ("ops_capacity", "slots", "slot_elements", "rss_method"):
+            for key in (
+                "ops_capacity",
+                "slots",
+                "slot_elements",
+                "rss_method",
+                "idata_arrays_before",
+                "idata_elements_before",
+                "integer_storage_before",
+                "integer_blocks_before",
+            ):
                 if pair["baseline"][key] != pair["candidate"][key]:
                     raise RuntimeError(f"baseline/candidate mismatch for {key}")
             if pair["baseline"]["sink"] != pair["candidate"]["sink"]:
@@ -105,12 +147,21 @@ def main():
             pairs.append(pair)
 
         result = {"executors": count, "pairs": pairs, "metrics": {}}
-        print(f"executors={count} ops={args.ops} samples={args.samples}")
+        print(
+            f"executors={count} ops={args.ops} workload={args.workload} "
+            f"dead_payloads={args.dead_payloads} samples={args.samples}"
+        )
         for metric in (
             "sizeof_op",
             "sizeof_slot",
             "sizeof_ctx",
             "op_bytes_per_executor",
+            "integer_storage_before",
+            "integer_blocks_before",
+            "integer_storage_after_bind",
+            "integer_blocks_after_bind",
+            "integer_storage_after_clone",
+            "integer_blocks_after_clone",
         ):
             a = pairs[0]["baseline"][metric]
             b = pairs[0]["candidate"][metric]

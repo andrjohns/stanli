@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -151,8 +152,86 @@ static void ensure_registered() {
   (void)once;
 }
 
+void Graph::compact_idata() {
+  if (compact_idata_ || idata_pool.empty()) return;
+
+  bool has_views = false;
+  for (const Op& op : ops) {
+    if (op.n_idata < 0 || (op.n_idata > 0 && op.idata == nullptr)) return;
+    has_views |= op.idata != nullptr;
+  }
+  if (!has_views) {
+    // Rewrites can remove every integer-using op but leave its pool behind.
+    // No lookup or temporary allocation is needed to release an all-dead pool.
+    std::vector<std::vector<int>>{}.swap(idata_pool);
+    return;
+  }
+
+  // Exact bases are the mutable pool's ownership contract. In particular,
+  // do not infer ownership using pointer ranges: const-folding subgraphs
+  // borrow parent payloads, and hand-built graphs can borrow external data.
+  constexpr size_t unused = std::numeric_limits<size_t>::max();
+  struct Entry {
+    const int* data;
+    size_t pool_index;
+    size_t offset = unused;
+  };
+  std::vector<Entry> entries;
+  entries.reserve(idata_pool.size());
+  for (size_t i = 0; i < idata_pool.size(); ++i)
+    if (!idata_pool[i].empty()) entries.push_back({idata_pool[i].data(), i});
+  std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+    return std::less<const int*>{}(a.data, b.data);
+  });
+  const auto find = [&](const int* p) {
+    return std::lower_bound(entries.begin(), entries.end(), p,
+                            [](const Entry& entry, const int* value) {
+                              return std::less<const int*>{}(entry.data, value);
+                            });
+  };
+
+  size_t total = 0;
+  const size_t max_size = std::vector<int>{}.max_size();
+  for (const Op& op : ops) {
+    if (op.idata == nullptr) continue;
+    const auto entry = find(op.idata);
+    if (entry == entries.end() || entry->data != op.idata) return;
+    const size_t size = idata_pool[entry->pool_index].size();
+    if (static_cast<uint64_t>(op.n_idata) > size) return;
+    if (entry->offset == unused) {
+      if (size > max_size - total)
+        throw std::length_error("integer payload storage is too large");
+      entry->offset = total;
+      total += size;
+    }
+  }
+
+  std::shared_ptr<std::vector<int>> compact;
+  if (total != 0) {
+    compact = std::make_shared<std::vector<int>>(total);
+    for (const Entry& entry : entries) {
+      if (entry.offset == unused) continue;
+      const auto& payload = idata_pool[entry.pool_index];
+      std::copy(payload.begin(), payload.end(), compact->data() + entry.offset);
+    }
+  }
+
+  // Every allocation and refusal precedes publication. The remaining raw
+  // pointer assignments, shared_ptr move and vector swap cannot throw.
+  compact_idata_ = std::move(compact);
+  for (Op& op : ops) {
+    if (op.idata == nullptr) continue;
+    const auto entry = find(op.idata);
+    assert(entry != entries.end() && entry->offset != unused);
+    op.idata = compact_idata_->data() + entry->offset;
+  }
+  // clear() would retain the outer vector's per-payload metadata capacity.
+  std::vector<std::vector<int>>{}.swap(idata_pool);
+}
+
 Executor::Executor(Graph g) : graph_(std::move(g)) {
   ensure_registered();
+  graph_.compact_idata();
   bind_();
 }
 
