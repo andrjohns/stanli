@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -66,6 +67,60 @@ std::string slurp(const char* path) {
   return text.str();
 }
 
+void typed_boundary(const std::string& mir) {
+  char err[8192] = {};
+  auto* f =
+      stanli_function_new_from_mir(mir.c_str(), "choose", err, sizeof(err));
+  check(f != nullptr, "typed boundary constructs from MIR");
+  if (!f) return;
+  double x = 4.0;
+  int first = 1;
+  stanli_function_argument args[] = {
+      {"x", 0, &x, nullptr, 1, nullptr, 0},
+      {"first", 1, nullptr, &first, 1, nullptr, 0}};
+  double result = 0;
+  const auto writer = [](void* context, int is_int, const double* reals,
+                         size_t real_size, const int*, size_t, const int64_t*,
+                         size_t dim_size) -> int {
+    if (is_int || real_size != 1 || dim_size != 0) return 1;
+    *static_cast<double*>(context) = reals[0];
+    return 0;
+  };
+  const auto call = [&] {
+    return stanli_function_call_values(f, args, 2, writer, &result, err,
+                                       sizeof(err));
+  };
+  check(call() == 0 && result == 8.0,
+        "typed boundary real and integer scalars");
+  args[0].size = 0;
+  check(call() != 0, "typed boundary rejects invalid scalar length");
+  args[0].size = 1;
+  args[1].ints = nullptr;
+  check(call() != 0, "typed boundary rejects null nonempty integer buffer");
+  args[1].ints = &first;
+  args[0].is_int = 2;
+  check(call() != 0, "typed boundary rejects invalid type discriminator");
+  args[0].is_int = 0;
+  args[0].name = "first";
+  check(call() != 0, "typed boundary rejects duplicate names");
+  args[0].name = "x";
+  args[0].dim_size = 1;
+  check(call() != 0, "typed boundary rejects null dimension buffer");
+  int64_t dims[] = {-1, 2};
+  args[0].dims = dims;
+  check(call() != 0, "typed boundary rejects negative dimensions");
+  dims[0] = std::numeric_limits<int64_t>::max();
+  args[0].dim_size = 2;
+  check(call() != 0, "typed boundary rejects overflowing dimensions");
+  args[0].dims = nullptr;
+  args[0].dim_size = 0;
+  check(call() == 0 && result == 8.0, "typed boundary recovers after errors");
+  check(stanli_function_call_values(f, nullptr, 2, writer, &result, err,
+                                    sizeof(err)) != 0,
+        "typed boundary rejects null argument table");
+  stanli_function_free(f);
+}
+
 }  // namespace
 
 int main() {
@@ -82,6 +137,7 @@ int main() {
     cached_args.set_int("first", 1);
     check(cached(cached_args).r == std::vector<double>({8.0}),
           "cached MIR function call");
+    typed_boundary(slurp("tests/fixtures/early_return.tmir.sexp"));
 
     if (!stanli_has_embedded_stanc()) {
       throws_with([&] { Function unavailable(source, "affine"); },

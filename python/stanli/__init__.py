@@ -16,7 +16,7 @@ import sys
 
 import numpy as np
 
-__all__ = ["Model", "Fit", "Summary", "OptimizeResult",
+__all__ = ["Model", "Function", "Fit", "Summary", "OptimizeResult",
            "exact_lp", "thread_safe", "stan_to_mir", "build_id",
            "bridgestan_model",
            "SAMPLER_COLUMNS", "__version__"]
@@ -933,3 +933,7 @@ class Model:
             _print_sample_reports(reports, first_chain, opts.samples,
                                   opts.max_depth)
         return fit
+
+
+# Kept separate from Model's JSON data path: functions bind typed buffers.
+from ._function import Function  # noqa: E402

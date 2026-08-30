@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Call Stan functions from Python
+
+`stanli.Function` exposes pure, value-returning Stan UDFs through a separate
+Python/NumPy adapter. It accepts source files, source strings, or cached MIR;
+calls use named Python arguments and typed numeric buffers, preserving integer
+identity and logical array dimensions without JSON serialization. Results are
+owned Python scalars or NumPy arrays. `tools/bench_python_function.py` compares
+steady-state call latency with plain Python and vectorized NumPy.
+
 ## 0.10.0
 
 ### ctsem's structured-control vocabulary lowers

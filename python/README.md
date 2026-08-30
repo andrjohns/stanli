@@ -111,6 +111,51 @@ change-of-variables Jacobian is folded into the graph when the model is
 lowered. `jacobian=False` raises rather than quietly handing back the
 other quantity.
 
+## Call a Stan function from Python
+
+`Function` exposes a pure, value-returning Stan user-defined function without
+building a model or compiling C++. Source compilation happens once:
+
+```python
+source = """
+functions {
+  vector affine(vector x, real a, real b) {
+    return a * x + b;
+  }
+}
+model {}
+"""
+affine = stanli.Function("affine", stan_code=source)
+affine(x=[1, 2, 4], a=2.5, b=-1)  # array([1.5, 4.0, 9.0])
+```
+
+Use `stan_file="functions.stan"` instead of `stan_code`, or pass
+`mir=stanli.stan_to_mir(source)` to reuse cached compilation. Calls take
+keyword arguments or one mapping, such as `affine({"x": x, "a": 2.5, "b": -1})`.
+Scalars return Python `float`/`int`; vectors, matrices, and arrays return owned
+NumPy arrays with the same logical shape. Inputs can be rectangular lists or
+NumPy arrays, including strided views. The adapter uses typed numeric buffers,
+not JSON.
+
+Integer inputs must fit Stan's 32-bit integers and promote to real formals.
+Overloads are selected using argument names, rank, and numeric type; select an
+ambiguous overload explicitly with a resolved name such as `f(real,vector)`.
+For empty integer arguments, supply an integer-dtype NumPy array (`[]` defaults
+to real). This is the native value-only interpreter, not autodiff: complex,
+void, RNG, and `_lp` entry points are outside this interface.
+
+From a repository checkout, compare an installed wheel's steady-state calls
+with plain Python and NumPy:
+
+```sh
+python tools/bench_python_function.py
+```
+
+For a development build, stage the Release library in `python/stanli/_bin/`
+and prefix the command with `PYTHONPATH=python`.
+The benchmark excludes one-time compilation from call latency, checks the
+answers first, alternates implementations, and reports medians and IQRs.
+
 ## How it works
 
 Every Stan model is a composition of a fixed vocabulary of operations:

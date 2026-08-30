@@ -245,4 +245,60 @@ int stanli_function_call(const stanli_function* function,
   }
 }
 
+int stanli_function_call_values(const stanli_function* function,
+                                const stanli_function_argument* arguments,
+                                size_t argument_size,
+                                stanli_function_result_writer write_result,
+                                void* result_context, char* err,
+                                size_t err_len) {
+  try {
+    if (argument_size != 0 && arguments == nullptr)
+      throw std::runtime_error("function arguments must not be null");
+    stanli::DataMap values;
+    for (size_t i = 0; i < argument_size; ++i) {
+      const auto& arg = arguments[i];
+      if (arg.name == nullptr || arg.name[0] == '\0')
+        throw std::runtime_error("function argument name must not be empty");
+      const std::string name = arg.name;
+      if (values.has(name))
+        throw std::runtime_error("duplicate function argument: " + name);
+      if (arg.dim_size != 0 && arg.dims == nullptr)
+        throw std::runtime_error("argument '" + name + "' dimensions are null");
+      std::vector<int64_t> dims;
+      if (arg.dim_size != 0) dims.assign(arg.dims, arg.dims + arg.dim_size);
+      if (static_cast<uint64_t>(checked_elements(dims, name)) != arg.size)
+        throw std::runtime_error("argument '" + name +
+                                 "' storage does not match its dimensions");
+      if (arg.is_int == 1) {
+        if (arg.size != 0 && arg.ints == nullptr)
+          throw std::runtime_error("integer argument '" + name + "' is null");
+        if (dims.empty()) {
+          values.set_int(name, arg.ints[0]);
+        } else {
+          std::vector<int> data;
+          if (arg.size != 0) data.assign(arg.ints, arg.ints + arg.size);
+          values.set_int_array(name, std::move(data), std::move(dims));
+        }
+      } else if (arg.is_int == 0) {
+        if (arg.size != 0 && arg.reals == nullptr)
+          throw std::runtime_error("real argument '" + name + "' is null");
+        if (dims.empty()) {
+          values.set_real(name, arg.reals[0]);
+        } else {
+          std::vector<double> data;
+          if (arg.size != 0) data.assign(arg.reals, arg.reals + arg.size);
+          values.set_real_array(name, std::move(data), std::move(dims));
+        }
+      } else {
+        throw std::runtime_error("argument '" + name + "' has invalid is_int");
+      }
+    }
+    return stanli_function_call(function, &values, write_result, result_context,
+                                err, err_len);
+  } catch (const std::exception& e) {
+    put_err(err, err_len, e.what());
+    return 1;
+  }
+}
+
 }  // extern "C"
