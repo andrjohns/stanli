@@ -591,14 +591,31 @@ void test_unsupported() {
       bs_log_density_hessian_vector_product(m, true, true, q.data(), vec.data(),
                                             &val, grad.data(), &err),
       &err, "first derivatives only");
+  // Both unconstrain entry points answer now. The round trip is the check
+  // that matters: constrain a free point and require it back, which fails on
+  // any drift between the two directions or any layout slip between the
+  // serial order theta uses and the arena order q uses.
   err = nullptr;
-  expect_refused("bs_param_unconstrain",
-                 bs_param_unconstrain(m, q.data(), out.data(), &err), &err,
-                 "forward constraint transforms only");
+  std::vector<double> theta((size_t)bs_param_num(m, false, false), 0.0);
+  expect_eq_int(
+      "bs_param_constrain for the unconstrain round trip",
+      bs_param_constrain(m, false, false, q.data(), theta.data(), nullptr,
+                         &err),
+      0);
+  std::vector<double> back((size_t)n, 0.0);
+  expect_eq_int("bs_param_unconstrain rc",
+                bs_param_unconstrain(m, theta.data(), back.data(), &err), 0);
+  for (int64_t i = 0; i < n; ++i)
+    if (!(std::abs(back[(size_t)i] - q[(size_t)i]) < 1e-9))
+      fail("bs_param_unconstrain round trip at " + std::to_string(i) +
+           ": got " + std::to_string(back[(size_t)i]) + ", want " +
+           std::to_string(q[(size_t)i]));
+  // A document that leaves a parameter out is refused by that parameter's
+  // name, not by an index into a buffer the caller never sees.
   err = nullptr;
-  expect_refused("bs_param_unconstrain_json",
-                 bs_param_unconstrain_json(m, "{\"mu\": 0}", out.data(), &err),
-                 &err, "forward constraint transforms only");
+  expect_refused("bs_param_unconstrain_json missing a parameter",
+                 bs_param_unconstrain_json(m, "{\"mu\": 0}", back.data(), &err),
+                 &err, "tau");
 
   // Density flags: only (propto=true, jacobian=true) is the quantity a
   // stanli graph computes, so the other three refuse rather than serve a
@@ -626,10 +643,10 @@ void test_unsupported() {
   err = nullptr;
   bs_rng* rng = bs_rng_construct(1, &err);
   err = nullptr;
-  expect_refused("bs_param_initialize with json",
+  expect_refused("bs_param_initialize with an incomplete json point",
                  bs_param_initialize(m, "{\"mu\": 0}", rng, 2.0, 100, true,
                                      q.data(), &err),
-                 &err, "inverse constraint transforms");
+                 &err, "tau");
   err = nullptr;
   expect_refused(
       "bs_param_initialize jacobian=false",
@@ -664,6 +681,41 @@ void test_initialize() {
                 bs_log_density(m, true, true, q.data(), &lp, &err), 0);
   if (!std::isfinite(lp))
     fail("bs_param_initialize returned a point with non-finite log density");
+
+  // An explicit constrained point is taken as given rather than replaced by a
+  // random draw: build one by constraining a known free point, hand it back
+  // as JSON, and require exactly that free point out.
+  const auto number = [](double x) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.17g", x);
+    return std::string(buf);
+  };
+  std::vector<double> chosen((size_t)n, 0.0);
+  for (int64_t i = 0; i < n; ++i)
+    chosen[(size_t)i] = 0.05 * (double)((i % 5) - 2);
+  std::vector<double> theta((size_t)bs_param_num(m, false, false), 0.0);
+  expect_eq_int("constrain the chosen point",
+                bs_param_constrain(m, false, false, chosen.data(), theta.data(),
+                                   nullptr, &err),
+                0);
+  // eight_schools: mu, tau, then theta_tilde's J values, in CSV order.
+  std::string json = "{\"mu\": " + number(theta[0]) + ", \"tau\": " +
+                     number(theta[1]) + ", \"theta_tilde\": [";
+  for (size_t i = 2; i < theta.size(); ++i)
+    json += (i > 2 ? ", " : "") + number(theta[i]);
+  json += "]}";
+
+  std::vector<double> from_json((size_t)n, 0.0);
+  expect_eq_int("bs_param_initialize from an explicit point",
+                bs_param_initialize(m, json.c_str(), rng, 2.0, 100, true,
+                                    from_json.data(), &err),
+                0);
+  for (int64_t i = 0; i < n; ++i)
+    if (!(std::abs(from_json[(size_t)i] - chosen[(size_t)i]) < 1e-9))
+      fail("bs_param_initialize moved the explicit point at " +
+           std::to_string(i) + ": got " +
+           std::to_string(from_json[(size_t)i]) + ", want " +
+           std::to_string(chosen[(size_t)i]));
 
   // Genuine exhaustion, not a contrived one: at a radius this wide every
   // draw puts mu at a magnitude whose normal(0, 5) term is -inf and tau at

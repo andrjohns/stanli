@@ -39,10 +39,11 @@ struct NutsConfig {
   // means start at the origin (CmdStan's `init=0`), which gets one
   // attempt because retrying an identical point cannot help.
   double init_radius = 2.0;
-  // An explicit starting point, or null. Length must be n_params(). This
-  // is the unconstrained scale because that is the scale stanli can read:
-  // constrained-scale inits would need the inverse parameter transforms,
-  // which do not exist here yet.
+  // An explicit starting point, or null. Length must be n_params(). The
+  // unconstrained scale is the sampler's contract: a caller starting from
+  // constrained values unconstrains them once, at its own boundary
+  // (CompiledModel::transform_inits), rather than teaching every sampler
+  // entry point a second kind of start.
   const double* init = nullptr;
 };
 

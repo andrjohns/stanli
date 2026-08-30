@@ -79,6 +79,22 @@ int64_t stanli_n_unconstrained(const stanli_model* m);
 /* log_prob (propto=false, jacobian included) and its gradient at
  * unconstrained q[n]. grad may be null for value-only. Returns 0 on success,
  * 1 on a rejected evaluation (domain error; *lp set to -inf). */
+/* Starting values on the CONSTRAINED scale, turned into the n_unconstrained
+ * free values the samplers and stanli_grad read.
+ *
+ * `inits_json` is a CmdStan-style JSON object naming every declared
+ * parameter. Writes n_unconstrained doubles to `q`. Returns 0 on success, or
+ * nonzero with a message in err: a missing, unknown, wrong-length, or
+ * out-of-support value names the parameter, and a model whose MIR carries no
+ * inverse parameter transforms says so.
+ *
+ * The sampler entry points keep taking UNCONSTRAINED inits
+ * (StanliSampleOpts::inits below). Unconstraining is a host-boundary step,
+ * done once per chain, and keeping it out of the sampler leaves one contract
+ * for a start rather than two. */
+int stanli_unconstrain_inits(stanli_model* m, const char* inits_json, double* q,
+                             char* err, size_t err_len);
+
 int stanli_grad(stanli_model* m, const double* q, double* lp, double* grad);
 
 /* NUTS with diagonal-metric adaptation. draws must hold
@@ -111,10 +127,11 @@ typedef struct {
   double init_radius;  /* uniform(-r, r) on the unconstrained scale; 0
                         * starts at the origin (CmdStan's `init=0`) */
   const double* inits; /* chains * n_unconstrained on the UNCONSTRAINED
-                        * scale, or null for random inits. Unconstrained
-                        * because that is the scale stanli can read: a
-                        * constrained init would need the inverse
-                        * parameter transforms, which do not exist yet. */
+                        * scale, or null for random inits. Start from
+                        * constrained values by running them through
+                        * stanli_unconstrain_inits first: it is a per-chain
+                        * host-boundary step, and one scale here means one
+                        * contract for what a start is. */
   int num_threads;     /* honoured only when stanli_thread_safe(); see there */
 } stanli_sample_opts;
 

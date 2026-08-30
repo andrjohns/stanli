@@ -114,6 +114,21 @@ std::vector<double> InitInterp::eval(
     if (!declared) refuse(name + " is not a parameter of this model");
   }
 
+  // Give every value its declared shape before the section runs. A caller
+  // supplies values in serial order and may or may not have nested them --
+  // a JSON document usually flattens an array of matrices to one list --
+  // and the interpreter reaches a bare parameter declaration through the
+  // same lookup as an FnReadData, so an unshaped entry would land in the
+  // environment and make the section's own indexed writes fail.
+  std::map<std::string, DataMap::Entry> shaped;
+  for (const InitParam& p : params_) {
+    DataMap::Entry e = inits.at(p.name);
+    if (e.r.empty() && !e.i.empty())
+      e.r.assign(e.i.begin(), e.i.end());
+    e.dims = p.dims;
+    shaped.emplace(p.name, std::move(e));
+  }
+
   std::vector<double> free_values;
   free_values.reserve((size_t)total_free);
 
@@ -124,9 +139,9 @@ std::vector<double> InitInterp::eval(
   MirHooks h;
   // FnReadData names a parameter here, never model data. Bare variables a
   // bound refers to come from env() instead, so these never collide.
-  h.data = [&inits](const std::string& name) -> const DataMap::Entry* {
-    const auto it = inits.find(name);
-    return it == inits.end() ? nullptr : &it->second;
+  h.data = [&shaped](const std::string& name) -> const DataMap::Entry* {
+    const auto it = shaped.find(name);
+    return it == shaped.end() ? nullptr : &it->second;
   };
   h.stmt = [&](const mir::Stmt& s) {
     if (s.kind != mir::Stmt::NRFunApp || s.fn_name != "FnWriteParam" ||
