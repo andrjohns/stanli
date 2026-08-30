@@ -156,6 +156,13 @@ and prefix the command with `PYTHONPATH=python`.
 The benchmark excludes one-time compilation from call latency, checks the
 answers first, alternates implementations, and reports medians and IQRs.
 
+Reuse a `Function` handle across calls: its native function lookup tables are
+cached at construction. Exact Python `float` and `int` arguments use a direct
+scalar path; NumPy scalars and other array-like values retain NumPy conversion.
+Overload selection, integer bounds, and shape validation still apply on every
+call. See the [optimization measurements and four-way A/B command](../docs/superpowers/plans/2026-08-30-python-function-overhead.md)
+for separate measurements of scalar packing and native lookup caching.
+
 ## How it works
 
 Every Stan model is a composition of a fixed vocabulary of operations:

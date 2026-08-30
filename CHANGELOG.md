@@ -11,6 +11,11 @@ identity and logical array dimensions without JSON serialization. Results are
 owned Python scalars or NumPy arrays. `tools/bench_python_function.py` compares
 steady-state call latency with plain Python and vectorized NumPy.
 
+Repeated calls now pack exact Python `float`/`int` scalars directly, bypassing
+NumPy conversion. Native handles retain immutable function lookup tables;
+overload selection and validation still run per call. Argument storage and
+interpreter state remain call-local, including for concurrent/reentrant calls.
+
 ## 0.10.0
 
 ### ctsem's structured-control vocabulary lowers

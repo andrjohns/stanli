@@ -273,11 +273,13 @@ affine(x=[1, 2, 4], a=2.5, b=-1)  # array([1.5, 4.0, 9.0])
 [function API and benchmark command](python/README.md#call-a-stan-function-from-python).
 
 Call overhead matters: an affine-function benchmark (`a*x+b`) measured
-19.3 µs per scalar call and 145 µs for a 100,000-element vector, versus
-2,360 µs for a Python list loop and 26.0 µs for NumPy on that vector.
+13.2 µs per scalar call and 125 µs for a 100,000-element vector, versus
+2,270 µs for a Python list loop and 24.2 µs for NumPy on that vector.
 These are 11-sample medians on an M3 Ultra, Release build, Python 3.11.15,
 and NumPy 2.4.6, excluding one-time compilation; the large-vector Stanli
-IQR was 139–149 µs. This is one workload, not a general Python speedup claim.
+IQR was 125–127 µs. Scalar packing and cached native lookups reduced scalar
+latency by about 27% in a [paired A/B](docs/superpowers/plans/2026-08-30-python-function-overhead.md).
+This is one workload, not a general Python speedup claim.
 [Run the comparison on your machine](tools/bench_python_function.py).
 
 ## R
