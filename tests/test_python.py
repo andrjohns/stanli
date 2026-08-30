@@ -73,6 +73,14 @@ def test_unconstrain_round_trip():
     back = m.unconstrain(values)
     assert np.allclose(back, q, atol=1e-9), (back, q)
 
+    values["not_a_parameter"] = 1.0
+    try:
+        m.unconstrain(values)
+    except ValueError as e:
+        assert "not_a_parameter" in str(e), str(e)
+    else:
+        raise AssertionError("expected ValueError for an unknown parameter")
+
 
 def test_unconstrain_names_a_missing_parameter():
     m = stanli.Model(stan_file=FIXTURES / "initrt.stan",

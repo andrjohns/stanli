@@ -176,6 +176,22 @@ void refusals(stanli::CompiledModel& cm) {
   }
 }
 
+void parameterless_model() {
+  using namespace stanli;
+  DataMap data;
+  data.set_real_array("M", {1, 2, 3, 4, 5, 6}, {2, 3});
+  CompiledModel cm = compile_model(
+      slurp("tests/fixtures/view_gq_data_matrix.tmir.sexp"), data);
+  check(cm.transform_inits.has_value(),
+        "an explicitly empty init section remains available");
+  if (!cm.transform_inits || !cm.transform_inits->interp) {
+    check(false, "a parameterless model has an init interpreter");
+    return;
+  }
+  check(cm.transform_inits->interp->eval({}).empty(),
+        "a parameterless model unconstrains to an empty vector");
+}
+
 }  // namespace
 
 int main() {
@@ -197,6 +213,7 @@ int main() {
   round_trip(cm, 0);
   round_trip(cm, 1);
   refusals(cm);
+  parameterless_model();
 
   if (failures == 0) std::printf("test_init_interp OK\n");
   return failures == 0 ? 0 : 1;

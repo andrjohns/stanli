@@ -127,10 +127,26 @@ runtime_compilation <- compile_bundled("runtime_bundled", runtime_source)
 stopifnot(length(runtime_compilation$errors) == 0L,
           startsWith(runtime_compilation$result, "STANLI2:"))
 
-# `mir` is the public compatibility seam. Supplying it forces this exact
-# bundled document through the dual decoder even though the Linux runtime
-# also contains an embedded source compiler.
-model <- stanli_model(mir = runtime_compilation$result)
+# `mir` is the public compatibility seam on the runtime version that owns this
+# producer. The appended transform_inits section is backward-compatible for
+# current decoders, but a previous runtime's strict v2 decoder rejects bytes it
+# does not know. In the deliberate current-package/previous-runtime CI cell,
+# exercise that runtime through its matching embedded compiler instead; the
+# compiler checks above still validate the current package's bundled artifact.
+decode_error <- NULL
+model <- tryCatch(
+  stanli_model(mir = runtime_compilation$result),
+  error = function(e) {
+    decode_error <<- conditionMessage(e)
+    NULL
+  })
+runtime_decodes_bundled <- is.null(decode_error)
+if (!runtime_decodes_bundled) {
+  if (!grepl("trailing bytes", decode_error, fixed = TRUE))
+    stop("the bundled MIR failed unexpectedly: ", decode_error,
+         call. = FALSE)
+  model <- stanli_model(code = runtime_source)
+}
 gradient <- log_prob_grad(model, 0.25)
 stopifnot(is.finite(gradient$lp),
           length(gradient$grad) == 1L,
@@ -146,4 +162,9 @@ stopifnot(all(c("mu", "mu_twice", "y_rep") %in% fit$columns),
                            2 * as.numeric(fit$draws[, , "mu"]),
                            tolerance = 1e-12)))
 
-message("R bundled portable compiler OK: V8, decoder, gradient, sampling, and GQ")
+message(if (runtime_decodes_bundled) {
+  "R bundled portable compiler OK: V8, decoder, gradient, sampling, and GQ"
+} else {
+  paste("R package/previous runtime OK; bundled compiler V8 contract and",
+        "matching embedded decoder, gradient, sampling, and GQ")
+})

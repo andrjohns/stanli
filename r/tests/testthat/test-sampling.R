@@ -70,6 +70,9 @@ test_that("unconstrain names a parameter it cannot use", {
     model { mu ~ normal(0, 1); sigma ~ normal(0, 1); }")
   expect_error(unconstrain(m, list(mu = 0)), "sigma")
   expect_error(unconstrain(m, list(mu = 0, sigma = -1)), "sigma")
+  expect_error(
+    unconstrain(m, list(mu = 0, sigma = 1, not_a_parameter = 2)),
+    "not_a_parameter")
 })
 
 test_that("refresh is a single nonnegative integer", {

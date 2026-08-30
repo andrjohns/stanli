@@ -310,6 +310,9 @@ struct Program {
   // and emits one FnWriteParam per parameter carrying the transform to
   // invert. This is the inverse direction of the log_prob graph's
   // FnReadParam constrains, and the only place stanli can learn it.
+  // Presence is separate from content: a current parameterless model carries
+  // an explicitly empty section, while an older producer carries no section.
+  bool has_transform_inits = false;
   std::vector<Stmt> transform_inits;
   std::vector<FunDef> fun_defs;
   // Output variable names (params, transformed params, generated

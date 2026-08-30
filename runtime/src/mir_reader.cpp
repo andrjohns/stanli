@@ -1482,8 +1482,10 @@ Program read_program(const sexp::Node& root) {
   // stanc3's inverse parameter transforms. Absent from a hand-written or
   // pre-backend-transform MIR, in which case constrained-scale inits stay
   // unavailable for this model rather than becoming an error here.
-  if (const Node* ti = field(root, "transform_inits"))
+  if (const Node* ti = field(root, "transform_inits")) {
+    prog.has_transform_inits = true;
     read_stmt_list((*ti)[1], prog.transform_inits);
+  }
   detail::finalize_program(prog);
   if (const Node* ov = field(root, "output_vars")) {
     // ((name <opaque> (...)) ...): parameters, transformed parameters and

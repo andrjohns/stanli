@@ -513,7 +513,10 @@ Program read_program(Reader& reader) {
   // parameter transforms -- the same state as a model whose section could not
   // be encoded. Anything else still has to be a well-formed statement list,
   // and finish() still rejects bytes beyond it.
-  if (!reader.at_end()) result.transform_inits = read_stmts(reader);
+  if (!reader.at_end()) {
+    result.has_transform_inits = true;
+    result.transform_inits = read_stmts(reader);
+  }
   return result;
 }
 

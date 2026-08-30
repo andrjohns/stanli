@@ -109,10 +109,9 @@ const stanli::InitInterp* init_interp(const bs_model* m, std::string* why);
 std::map<std::string, stanli::DataMap::Entry> inits_from_flat(
     const stanli::CompiledModel& cm, const double* theta);
 
-// The same, from a CmdStan-style JSON object. Only the declared parameters
-// are taken; the interpreter reports anything missing by name.
-std::map<std::string, stanli::DataMap::Entry> inits_from_json(
-    const stanli::InitInterp& interp, const char* json);
+// The same, from a CmdStan-style JSON object. The complete object is retained
+// so the interpreter can report both missing and unknown names.
+std::map<std::string, stanli::DataMap::Entry> inits_from_json(const char* json);
 
 // The names of one declared parameter's UNCONSTRAINED values.
 //
@@ -573,13 +572,11 @@ std::map<std::string, stanli::DataMap::Entry> inits_from_flat(
 }
 
 std::map<std::string, stanli::DataMap::Entry> inits_from_json(
-    const stanli::InitInterp& interp, const char* json) {
+    const char* json) {
   const stanli::DataMap supplied =
       stanli::DataMap::from_json(json == nullptr ? "{}" : json);
-  std::map<std::string, stanli::DataMap::Entry> out;
-  for (const stanli::InitParam& p : interp.params())
-    if (supplied.has(p.name)) out.emplace(p.name, supplied.at(p.name));
-  return out;
+  return std::map<std::string, stanli::DataMap::Entry>(
+      supplied.entries().begin(), supplied.entries().end());
 }
 
 // Shared by the three entry points below: unconstrain, then check the result
@@ -628,8 +625,7 @@ int bs_param_unconstrain_json(const bs_model* m, const char* json,
     std::string why;
     const stanli::InitInterp* interp = init_interp(m, &why);
     if (interp == nullptr) return refuse(error_msg, why);
-    return unconstrain_into(m, inits_from_json(*interp, json), theta_unc,
-                            error_msg);
+    return unconstrain_into(m, inits_from_json(json), theta_unc, error_msg);
   } catch (const std::exception& e) {
     return refuse(error_msg, e.what());
   } catch (...) {
@@ -649,8 +645,8 @@ int bs_param_initialize(const bs_model* m, const char* json, bs_rng* rng,
       std::string why;
       const stanli::InitInterp* interp = init_interp(m, &why);
       if (interp == nullptr) return refuse(error_msg, why);
-      const int rc = unconstrain_into(m, inits_from_json(*interp, json),
-                                      theta_unc, error_msg);
+      const int rc =
+          unconstrain_into(m, inits_from_json(json), theta_unc, error_msg);
       if (rc != 0) return rc;
       double lp = 0;
       try {

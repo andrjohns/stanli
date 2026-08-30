@@ -274,6 +274,38 @@ void expect_unconstrain_inits_round_trip() {
         "%s\n",
         err);
   }
+
+  // Unknown keys are not silently discarded: the public contract requires
+  // the error to name the value the model does not declare.
+  std::string unknown = json;
+  unknown.insert(unknown.size() - 1, ", \"not_a_parameter\": 1");
+  if (stanli_unconstrain_inits(model, unknown.c_str(), back.data(), err,
+                               sizeof err) == 0) {
+    ++failures;
+    std::printf("FAIL stanli_unconstrain_inits accepted an unknown name\n");
+  } else if (std::string(err).find("not_a_parameter") == std::string::npos) {
+    ++failures;
+    std::printf("FAIL unknown init error did not name its key: %s\n", err);
+  }
+  stanli_model_free(model);
+}
+
+void expect_parameterless_unconstrain() {
+  const std::string mir = slurp("tests/fixtures/view_gq_data_matrix.tmir.sexp");
+  char err[8192]{};
+  stanli_model* model = stanli_model_new(
+      mir.c_str(), R"({"M":[[1,2,3],[4,5,6]]})", err, sizeof err);
+  if (model == nullptr) {
+    ++failures;
+    std::printf("FAIL parameterless model construction: %s\n", err);
+    return;
+  }
+  double unused = 0.0;
+  if (stanli_n_unconstrained(model) != 0 ||
+      stanli_unconstrain_inits(model, "{}", &unused, err, sizeof err) != 0) {
+    ++failures;
+    std::printf("FAIL parameterless unconstrain: %s\n", err);
+  }
   stanli_model_free(model);
 }
 
@@ -656,6 +688,7 @@ void expect_sampling_progress() {
 
 int main() {
   expect_unconstrain_inits_round_trip();
+  expect_parameterless_unconstrain();
 
   expect_names("tests/fixtures/wanames.tmir.sexp", "{}",
                {

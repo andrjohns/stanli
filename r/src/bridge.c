@@ -197,7 +197,9 @@ SEXP stanli_bridge_load(SEXP path) {
   BIND("stanli_thread_safe", p_thread_safe);
   BIND("stanli_n_unconstrained", p_n_unconstrained);
   BIND("stanli_grad", p_grad);
-  BIND("stanli_unconstrain_inits", p_unconstrain_inits);
+  /* Added without an ABI bump: keep older version-1 runtimes loadable and
+   * report the unavailable feature only if a caller asks for it. */
+  *(void**)(&p_unconstrain_inits) = dl_sym(g_lib, "stanli_unconstrain_inits");
   BIND("stanli_n_constrained", p_n_constrained);
   BIND("stanli_constrained_name", p_constrained_name);
   BIND("stanli_constrain", p_constrain);
@@ -303,6 +305,10 @@ SEXP stanli_r_column_names(SEXP m) {
 
 SEXP stanli_r_unconstrain_inits(SEXP m, SEXP json) {
   require_loaded();
+  if (p_unconstrain_inits == NULL)
+    error(
+        "this stanli runtime predates constrained-scale starting values; "
+        "run stanli_install(overwrite = TRUE) to update it");
   void* mm = model_ptr(m);
   const int64_t n = p_n_unconstrained(mm);
   SEXP q = PROTECT(allocVector(REALSXP, (R_xlen_t)n));

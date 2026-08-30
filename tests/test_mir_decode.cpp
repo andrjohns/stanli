@@ -1408,10 +1408,18 @@ void check_v2_rejections() {
   // empty_v2_payload() stops after output_vars, which is exactly the shape a
   // producer that predates transform_inits emits. It must decode, with no
   // inverse parameter transforms rather than an error.
-  check(empty.transform_inits.empty(),
+  check(!empty.has_transform_inits && empty.transform_inits.empty(),
         "v2 document without the trailing section decodes");
   check(empty_wire.find('\0') == std::string::npos,
         "v2 envelope is safe for C-string transports");
+
+  // The current producer writes the section even when it is empty. Presence
+  // must survive independently of content so a parameterless current model
+  // can unconstrain an empty object, while an old document remains unsupported.
+  const mir::Program current_empty = decode_program(write_v2(mir::Program{}));
+  check(current_empty.has_transform_inits &&
+            current_empty.transform_inits.empty(),
+        "v2 explicitly empty transform_inits section stays present");
 
   mir::Program loop_control;
   mir::Stmt break_statement;
@@ -1448,7 +1456,8 @@ void check_v2_rejections() {
   inits.generate_quantities.push_back(constrained_write);
   const mir::Program decoded_inits = decode_program(write_v2(inits));
   check(
-      decoded_inits.transform_inits.size() == 1 &&
+      decoded_inits.has_transform_inits &&
+          decoded_inits.transform_inits.size() == 1 &&
           decoded_inits.transform_inits[0].write_transform.has_value() &&
           decoded_inits.transform_inits[0].write_transform->kind ==
               mir::Transform::Lower &&

@@ -615,6 +615,15 @@ void test_unsupported() {
   expect_refused("bs_param_unconstrain_json missing a parameter",
                  bs_param_unconstrain_json(m, "{\"mu\": 0}", back.data(), &err),
                  &err, "tau");
+  err = nullptr;
+  expect_refused(
+      "bs_param_unconstrain_json unknown parameter",
+      bs_param_unconstrain_json(
+          m,
+          "{\"mu\": 0, \"tau\": 1, \"theta_tilde\": [0,0,0,0,0,0,0,0], "
+          "\"not_a_parameter\": 1}",
+          back.data(), &err),
+      &err, "not_a_parameter");
 
   // Density flags: only (propto=true, jacobian=true) is the quantity a
   // stanli graph computes, so the other three refuse rather than serve a

@@ -205,13 +205,12 @@ int stanli_unconstrain_inits(stanli_model* m, const char* inits_json, double* q,
       return 1;
     }
     const stanli::InitInterp& interp = *m->cm.transform_inits->interp;
-    // Only the declared parameters are taken from the document; the
-    // interpreter names anything missing or unknown.
     const stanli::DataMap supplied =
         stanli::DataMap::from_json(inits_json == nullptr ? "{}" : inits_json);
-    std::map<std::string, stanli::DataMap::Entry> inits;
-    for (const stanli::InitParam& p : interp.params())
-      if (supplied.has(p.name)) inits.emplace(p.name, supplied.at(p.name));
+    // Preserve the complete document so InitInterp can reject unknown names
+    // as well as report missing declared parameters.
+    const std::map<std::string, stanli::DataMap::Entry> inits(
+        supplied.entries().begin(), supplied.entries().end());
     const std::vector<double> unc = interp.eval(inits);
     if ((int64_t)unc.size() != m->ex->n_params()) {
       put_err(err, err_len,

@@ -6742,7 +6742,7 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
     }
     cm.write_array = std::move(w);
   }
-  if (!prog->transform_inits.empty()) {
+  if (prog->has_transform_inits) {
     // The inverse parameter transforms. Nothing is interpreted here: the
     // section runs only when a caller actually supplies constrained starting
     // values, so a model nobody inits by name never pays for a bound
