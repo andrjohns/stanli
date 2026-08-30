@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 using namespace stanli;
@@ -87,7 +88,15 @@ static double time_ns(int reps, F&& f) {
   return std::chrono::duration<double, std::nano>(t1 - t0).count() / reps;
 }
 
-int main() {
+int main(int argc, char** argv) {
+  int reps = REPS;
+  if (argc == 2 && std::strcmp(argv[1], "--smoke") == 0) {
+    reps = 1;
+  } else if (argc != 1) {
+    std::fprintf(stderr, "usage: %s [--smoke]\n", argv[0]);
+    return 2;
+  }
+
   double sink = 0;
   std::vector<double> grad(2);
 
@@ -97,40 +106,43 @@ int main() {
   fill_inputs(exd);
   fill_inputs(ext);
 
-  const double a_ns = time_ns(REPS, [&] { sink += exd.gradient(grad.data()); });
-  const double b_ns = time_ns(REPS, [&] { exd.run_forward_only(); });
-  const double e_ns = time_ns(REPS, [&] { sink += ext.gradient(grad.data()); });
+  const double a_ns = time_ns(reps, [&] { sink += exd.gradient(grad.data()); });
+  const double b_ns = time_ns(reps, [&] { exd.run_forward_only(); });
+  const double e_ns = time_ns(reps, [&] { sink += ext.gradient(grad.data()); });
 
   // C: direct kernel calls, ctx prebuilt once (what a bind-time-ctx executor
   // would do per op).
   double yv = 0.5, muv = 0.3, sigv = 1.2, lpv = 0;
-  double y_adj_dummy = 0, mu_adj = 0, sig_adj = 0;
-  double scratch[3] = {0, 0, 0};
-  KernelCtx ctx;
+  double mu_adj = 0, sig_adj = 0, output_adj = 1.0;
+  const Kernel& k = kernel(OP_NORMAL_LPDF);
+  const Op& direct_op = exd.graph().ops.front();
+  const int64_t scratch_len =
+      k.scratch_size ? k.scratch_size(direct_op, exd.graph().slots.data()) : 0;
+  std::vector<double> scratch(static_cast<size_t>(scratch_len));
+  KernelCtx ctx{};
   ctx.n_in = 3;
   ctx.in[0] = {&yv, 1};
   ctx.in[1] = {&muv, 1};
   ctx.in[2] = {&sigv, 1};
   ctx.out = {&lpv, 1};
   ctx.variant = 0x06;
-  ctx.scratch = scratch;
+  ctx.scratch = scratch.data();
   ctx.in_adj[0] = {nullptr, 1};  // y is data
   ctx.in_adj[1] = {&mu_adj, 1};
   ctx.in_adj[2] = {&sig_adj, 1};
   ctx.out_adj = 1.0;
-  ctx.out_adj_vec = {&lpv, 1};
-  const Kernel& k = kernel(OP_NORMAL_LPDF);
-  const double c_ns = time_ns(REPS, [&] {
+  ctx.out_adj_vec = {&output_adj, 1};
+  const double c_ns = time_ns(reps, [&] {
     for (int i = 0; i < N; ++i) {
       yv = 0.1 * ((i % 17) - 8);
       k.forward(ctx);
-      k.backward(const_cast<KernelCtx&>(ctx));
+      k.backward(ctx);
       sink += lpv;
     }
   });
 
   // D: the math floor on plain doubles.
-  const double d_ns = time_ns(REPS, [&] {
+  const double d_ns = time_ns(reps, [&] {
     for (int i = 0; i < N; ++i) {
       const double y = 0.1 * ((i % 17) - 8);
       const double z = (y - muv) / sigv;

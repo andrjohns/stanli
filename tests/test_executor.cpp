@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 
 static int failures = 0;
 static void expect_eq(const char* what, double got, double want) {
@@ -86,6 +87,45 @@ int main() {
   sparse_ex.value_ptr(sd)[17] = -1.25;
   expect_eq("sparse value 2", sparse_ex.gradient(sparse_grad), 5.0);
   expect_eq("sparse grad 2", sparse_grad[0], -1.25);
+
+  // The source dies before the copy executes. This is deliberately a
+  // black-box lifetime check: under ASan, any copied execution metadata that
+  // still refers to the source is reported when the gradient runs.
+  std::unique_ptr<Executor> idata_copy;
+  {
+    Graph source;
+    const int source_param = source.add_slot(3, true);
+    const int source_result = source.add_slot(1, false);
+    source.add_op(OP_INDEX, {source_param}, source_result, {1});
+    source.result_slot = source_result;
+    Executor source_ex(std::move(source));
+    source_ex.params_data()[0] = 2.0;
+    source_ex.params_data()[1] = 7.0;
+    source_ex.params_data()[2] = -3.0;
+    idata_copy = std::make_unique<Executor>(source_ex);
+  }
+  double idata_grad[3] = {0, 0, 0};
+  expect_eq("copied idata value", idata_copy->gradient(idata_grad), 7.0);
+  expect_eq("copied idata d0", idata_grad[0], 0.0);
+  expect_eq("copied idata d1", idata_grad[1], 1.0);
+  expect_eq("copied idata d2", idata_grad[2], 0.0);
+
+  // Cover Graph's copy assignment separately from Executor's copy
+  // construction, again through public execution behavior rather than an
+  // assertion about its internal pointer representation.
+  Graph assigned_graph;
+  {
+    Graph source;
+    const int source_input = source.add_slot(2, false);
+    const int source_output = source.add_slot(1, false);
+    source.add_op(OP_INDEX, {source_input}, source_output, {1});
+    source.result_slot = source_output;
+    assigned_graph = source;
+  }
+  Executor assigned_ex(std::move(assigned_graph));
+  assigned_ex.value_ptr(0)[0] = 3.0;
+  assigned_ex.value_ptr(0)[1] = 11.0;
+  expect_eq("assigned idata value", assigned_ex.forward(), 11.0);
 
   // BCAST_FMA forward: out[i] = a + b * x[i].
   Graph g2;

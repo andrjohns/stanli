@@ -6,11 +6,14 @@
 
 #include <stanli/kernel_types.hpp>
 
+#include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <string>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace stanli {
@@ -18,11 +21,57 @@ namespace stanli {
 struct Graph {
   std::vector<Slot> slots;
   std::vector<Op> ops;
-  std::vector<std::vector<int>> idata_pool;  // owns per-op integer arrays
-  // Owns per-op opaque payloads; pointers into this outlive lowering because
-  // the graph is moved, never copied element-wise.
+  // Owns per-op integer arrays. Owned Op::idata views always name data(), not
+  // an interior element. A copy must rebind each view into its corresponding
+  // copied vector rather than retain a pointer into the source.
+  std::vector<std::vector<int>> idata_pool;
+  // Owns per-op opaque payloads. Graph copies share these immutable payloads,
+  // so the raw pointers in copied ops continue to name the shared objects.
   std::vector<std::shared_ptr<void>> udata_pool;
   int result_slot = -1;
+
+  Graph() = default;
+
+  Graph(const Graph& src)
+      : slots(src.slots),
+        ops(src.ops),
+        idata_pool(src.idata_pool),
+        udata_pool(src.udata_pool),
+        result_slot(src.result_slot) {
+    // One sorted, contiguous temporary keeps graph cloning O(P log P) without
+    // one hash-node allocation per integer payload. External Op::idata
+    // pointers, if a hand-built graph has one, retain their caller-owned
+    // lifetime; pointers owned by idata_pool are rebound to this graph.
+    using Rebind = std::pair<const int*, const int*>;
+    std::vector<Rebind> rebind;
+    rebind.reserve(src.idata_pool.size());
+    for (size_t i = 0; i < src.idata_pool.size(); ++i) {
+      if (!src.idata_pool[i].empty())
+        rebind.emplace_back(src.idata_pool[i].data(), idata_pool[i].data());
+    }
+    const auto before = [](const Rebind& a, const Rebind& b) {
+      return std::less<const int*>{}(a.first, b.first);
+    };
+    std::sort(rebind.begin(), rebind.end(), before);
+    for (size_t i = 0; i < src.ops.size(); ++i) {
+      const int* p = src.ops[i].idata;
+      if (p == nullptr) continue;
+      const auto it = std::lower_bound(rebind.begin(), rebind.end(),
+                                       Rebind{p, nullptr}, before);
+      if (it != rebind.end() && it->first == p) ops[i].idata = it->second;
+    }
+  }
+
+  Graph(Graph&&) noexcept = default;
+  Graph& operator=(Graph&&) noexcept = default;
+
+  Graph& operator=(const Graph& src) {
+    if (this != &src) {
+      Graph copy(src);
+      *this = std::move(copy);
+    }
+    return *this;
+  }
 
   int add_slot(int64_t len, bool is_param) {
     slots.push_back(Slot{0, len, is_param});
