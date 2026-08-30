@@ -9,6 +9,7 @@
 #include <stanli/data.hpp>
 
 #include <cstddef>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -24,10 +25,18 @@ stanli_function* stanli_function_new_from_mir(const char* mir_text,
                                               const char* function_name,
                                               char* err, size_t err_len);
 void stanli_function_free(stanli_function* function);
+
+// Results are borrowed only for the duration of this callback. Keeping the
+// copy on the caller side avoids transferring STL-owned storage across the
+// shared-library boundary, where the two sides may use different C++ runtimes.
+typedef int (*stanli_function_result_writer)(
+    void* context, int is_int, const double* reals, size_t real_size,
+    const int* ints, size_t int_size, const int64_t* dims, size_t dim_size);
+
 int stanli_function_call(const stanli_function* function,
                          const stanli::DataMap* arguments,
-                         stanli::DataMap::Entry* result, char* err,
-                         size_t err_len);
+                         stanli_function_result_writer write_result,
+                         void* result_context, char* err, size_t err_len);
 
 }  // extern "C"
 
@@ -61,9 +70,37 @@ class Function {
   DataMap::Entry operator()(const DataMap& arguments) const {
     char err[8192] = {};
     DataMap::Entry result;
-    if (stanli_function_call(handle_, &arguments, &result, err, sizeof(err)))
+    struct ResultContext {
+      DataMap::Entry* result;
+      std::exception_ptr error;
+    } context{&result, nullptr};
+
+    const auto write_result = [](void* opaque, int is_int, const double* reals,
+                                 size_t real_size, const int* ints,
+                                 size_t int_size, const int64_t* dims,
+                                 size_t dim_size) -> int {
+      auto& context = *static_cast<ResultContext*>(opaque);
+      try {
+        context.result->is_int = is_int != 0;
+        context.result->r.clear();
+        context.result->i.clear();
+        context.result->dims.clear();
+        if (real_size != 0) context.result->r.assign(reals, reals + real_size);
+        if (int_size != 0) context.result->i.assign(ints, ints + int_size);
+        if (dim_size != 0) context.result->dims.assign(dims, dims + dim_size);
+        return 0;
+      } catch (...) {
+        context.error = std::current_exception();
+        return 1;
+      }
+    };
+
+    if (stanli_function_call(handle_, &arguments, write_result, &context, err,
+                             sizeof(err))) {
+      if (context.error) std::rethrow_exception(context.error);
       throw std::runtime_error(err[0] ? err
                                       : "Stan function evaluation failed");
+    }
     return result;
   }
 
