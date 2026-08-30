@@ -154,6 +154,29 @@ class MirInterp {
     fail("function returned no value: " + f.name);
   }
 
+  // Bind already-typed values positionally and preserve the complete return
+  // value, including integer identity and logical dimensions.  Function's
+  // public C++ entry point uses this path: DataMap::Entry is Value itself for
+  // the double instantiation, so no host/container conversion is needed.
+  Value call(const mir::FunDef& f, const std::vector<Value>& args) {
+    if (udf_depth_ > 64) fail("UDF recursion too deep");
+    if (f.arg_names.size() != args.size())
+      fail("function argument count mismatch: " + f.name);
+    MirInterp sub(funs_, where_, hooks_);
+    sub.udf_depth_ = udf_depth_ + 1;
+    sub.propto_ctx_ = propto_ctx_;
+    for (size_t k = 0; k < args.size(); ++k) {
+      sub.env_[f.arg_names[k]] = args[k];
+      sub.set_declared_dims(f.arg_names[k], args[k].dims);
+    }
+    try {
+      for (const auto& s : f.body) sub.exec(s);
+    } catch (ReturnV& r) {
+      return std::move(r.v);
+    }
+    fail("function returned no value: " + f.name);
+  }
+
   Value eval(const mir::Expr& e) {
     Value r;
     switch (e.kind) {
