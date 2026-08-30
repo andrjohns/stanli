@@ -38,6 +38,28 @@ int stanli_function_call(const stanli_function* function,
                          stanli_function_result_writer write_result,
                          void* result_context, char* err, size_t err_len);
 
+// Plain-C input buffers for language bindings that cannot construct DataMap.
+// Exactly one of reals/ints is used, according to is_int (0 or 1). Values are
+// first-index-fastest, just like DataMap; no dimensions means one scalar.
+// All storage is borrowed for the call and may be null only when its size is
+// zero. The runtime copies inputs before evaluation and never mutates them.
+struct stanli_function_argument {
+  const char* name;
+  int is_int;
+  const double* reals;
+  const int* ints;
+  size_t size;
+  const int64_t* dims;
+  size_t dim_size;
+};
+
+int stanli_function_call_values(const stanli_function* function,
+                                const stanli_function_argument* arguments,
+                                size_t argument_size,
+                                stanli_function_result_writer write_result,
+                                void* result_context, char* err,
+                                size_t err_len);
+
 }  // extern "C"
 
 namespace stanli {

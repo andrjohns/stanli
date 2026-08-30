@@ -18,6 +18,7 @@ EXPORTS
   stanli_function_new_from_mir
   stanli_function_free
   stanli_function_call
+  stanli_function_call_values
   stanli_build_id
   stanli_exact_lp
   stanli_model_free

@@ -8,8 +8,10 @@ Run against an installed wheel (CI does) or a local build:
 import base64
 import concurrent.futures
 import contextlib
+import copy
 import io
 import pathlib
+import pickle
 import re
 import shutil
 import subprocess
@@ -23,6 +25,161 @@ import numpy as np
 import stanli
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
+
+FUNCTION_SOURCE = """
+functions {
+  vector affine(vector x, real a, real b) { return a * x + b; }
+  real real_identity(real x) { return x; }
+  int int_identity(int x) { return x; }
+  matrix scale_matrix(matrix x, real a) { return a * x; }
+  matrix flip_matrix(matrix x) { return x'; }
+  array[,] int int_matrix(array[,] int x) { return x; }
+  array[] int second_row(array[,] int x) { return x[2]; }
+  array[,,] real tensor(array[,,] real x) { return x; }
+  real tensor_element(array[,,] real x) { return x[2, 1, 3]; }
+  array[] vector vectors(array[] vector x) { return x; }
+  vector second_vector(array[] vector x) { return x[2]; }
+  real numeric(int x) { return x + 10.0; }
+  real numeric(real x) { return x + 20.0; }
+  real constant() { return 3.5; }
+  real density(real sigma) { return normal_lpdf(0.0 | 0.0, sigma); }
+}
+model {}
+"""
+
+
+def test_function_source_file_and_cached_mir():
+    f = stanli.Function("affine", stan_code=FUNCTION_SOURCE)
+    assert "Function" in stanli.__all__
+    assert repr(f) == "<stanli.Function affine>"
+    np.testing.assert_array_equal(f(x=[1, 2, 4], a=2.5, b=-1), [1.5, 4, 9])
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "functions π.stan"
+        path.write_text(FUNCTION_SOURCE, encoding="utf-8")
+        from_file = stanli.Function("affine", stan_file=path)
+        np.testing.assert_array_equal(
+            from_file({"x": [1., 2., 4.], "a": 2.5, "b": -1.}), [1.5, 4, 9])
+    mir = stanli.stan_to_mir(FUNCTION_SOURCE)
+    # A cached function must never re-enter either compiler path.
+    with mock.patch("stanli._function.stan_to_mir", side_effect=AssertionError):
+        cached = stanli.Function("constant", mir=mir)
+        assert cached() == 3.5
+    with mock.patch.object(stanli._lib, "stanli_has_embedded_stanc", return_value=0), \
+            mock.patch.object(stanli, "_subprocess_mir", return_value=mir) as compiler:
+        fallback = stanli.Function("constant", stan_code=FUNCTION_SOURCE)
+        assert fallback() == fallback() == 3.5
+        compiler.assert_called_once_with(FUNCTION_SOURCE)
+    for duplicate in (copy.copy, copy.deepcopy, pickle.dumps):
+        try:
+            duplicate(cached)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("native function handles must not be duplicated")
+
+
+def test_function_scalar_types_overloads_and_nonfinite():
+    mir = stanli.stan_to_mir(FUNCTION_SOURCE)
+    integer = stanli.Function("int_identity", mir=mir)
+    real = stanli.Function("real_identity", mir=mir)
+    assert integer(x=np.int64(41)) == 41
+    assert type(integer(x=41)) is int
+    assert type(real(x=41)) is float
+    assert real(x=np.float32(1.25)) == 1.25
+    for value in (-2**31, 2**31 - 1):
+        assert integer(x=value) == value
+    assert np.isnan(real(x=np.nan))
+    assert real(x=np.inf) == np.inf
+    assert real(x=-np.inf) == -np.inf
+    assert np.signbit(real(x=-0.0))
+    numeric = stanli.Function("numeric", mir=mir)
+    assert numeric(x=2) == 12.0
+    assert numeric(x=2.0) == 22.0
+    resolved = stanli.Function("numeric(real)", mir=mir)
+    assert resolved(x=2) == 22.0
+
+
+def test_function_container_layout_ownership_and_empty_dimensions():
+    mir = stanli.stan_to_mir(FUNCTION_SOURCE)
+    scale = stanli.Function("scale_matrix", mir=mir)
+    # Non-square and strided, so row/column-major mistakes cannot hide.
+    x = np.arange(24., dtype=np.float64).reshape(4, 6)[::2, ::-2]
+    original = x.copy()
+    result = scale(x=x, a=2.)
+    np.testing.assert_array_equal(result, 2. * x)
+    np.testing.assert_array_equal(stanli.Function("flip_matrix", mir=mir)(x=x), x.T)
+    np.testing.assert_array_equal(stanli.Function("second_vector", mir=mir)(x=x), x[1])
+    scale(x=x, a=-3.)
+    del scale
+    np.testing.assert_array_equal(result, 2. * x)
+    result[:] = -99
+    np.testing.assert_array_equal(x, original)
+    ints = stanli.Function("int_matrix", mir=mir)
+    ix = np.arange(6, dtype=np.int64).reshape(2, 3)
+    np.testing.assert_array_equal(ints(x=ix), ix)
+    np.testing.assert_array_equal(stanli.Function("second_row", mir=mir)(x=ix), ix[1])
+    assert ints(x=ix).dtype == np.dtype(np.intc)
+    tensor = stanli.Function("tensor", mir=mir)
+    cube = np.arange(24.).reshape(2, 3, 4)
+    np.testing.assert_array_equal(tensor(x=cube), cube)
+    assert stanli.Function("tensor_element", mir=mir)(x=cube) == cube[1, 0, 2]
+    vectors = stanli.Function("vectors", mir=mir)
+    np.testing.assert_array_equal(vectors(x=x), x)
+    for shape in ((0, 3), (2, 0)):
+        assert ints(x=np.empty(shape, dtype=np.int32)).shape == shape
+    assert tensor(x=np.empty((0, 2, 3))).shape == (0, 2, 3)
+    assert tensor(x=np.empty((2, 0, 3))).shape == (2, 0, 3)
+    assert stanli.Function("affine", mir=mir)(x=[], a=2., b=1.).shape == (0,)
+
+
+def test_function_errors_and_recovery():
+    mir = stanli.stan_to_mir(FUNCTION_SOURCE)
+    integer = stanli.Function("int_identity", mir=mir)
+    for value, error in [(1.5, RuntimeError), ([1], RuntimeError),
+                         (True, TypeError), (1j, TypeError), ("1", TypeError),
+                         (2**31, OverflowError), (-2**31 - 1, OverflowError),
+                         (2**100, OverflowError),
+                         (np.array([2**32], dtype=np.uint64), OverflowError)]:
+        try:
+            integer(x=value)
+        except error:
+            pass
+        else:
+            raise AssertionError(f"{value!r} did not raise {error.__name__}")
+    for call, error in [
+        (lambda: integer(), RuntimeError),
+        (lambda: integer({"x": 1}, x=2), TypeError),
+        (lambda: integer(1), TypeError),
+        (lambda: integer({"x\0ignored": 1}), ValueError),
+        (lambda: stanli.Function("absent", mir=mir), RuntimeError),
+        (lambda: stanli.Function("constant"), ValueError),
+    ]:
+        try:
+            call()
+        except error:
+            pass
+        else:
+            raise AssertionError(f"call did not raise {error.__name__}")
+    assert integer(x=4) == 4
+    density = stanli.Function("density", mir=mir)
+    try:
+        density(sigma=-1.)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a Stan domain error must reach Python")
+    assert np.isfinite(density(sigma=1.))
+    # Python exceptions during the borrowed-result callback must also be
+    # propagated, not printed-and-ignored by ctypes.
+    affine = stanli.Function("affine", mir=mir)
+    with mock.patch("stanli._function.np.ctypeslib.as_array",
+                    side_effect=MemoryError("result copy")):
+        try:
+            affine(x=[1.], a=1., b=0.)
+        except MemoryError as exc:
+            assert str(exc) == "result copy"
+        else:
+            raise AssertionError("callback exception was swallowed")
 
 
 def _portable_payload(mir):
