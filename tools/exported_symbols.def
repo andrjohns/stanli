@@ -27,6 +27,7 @@ EXPORTS
   stanli_grad
   stanli_sample
   stanli_sample_stream
+  stanli_sample_stream_stats
   stanli_sample_walnuts_stream
   stanli_run_pathfinder
   stanli_n_constrained

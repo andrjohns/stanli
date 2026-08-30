@@ -201,6 +201,7 @@ std::string format_summary(const std::vector<ParamSummary>& s) {
 std::string format_diagnostics(const FitDiagnostics& d) {
   std::string out;
   int problems = 0;
+  int unavailable = 0;
   const auto line = [&out](const std::string& s) { out += s + "\n"; };
   char buf[512];
 
@@ -235,11 +236,15 @@ std::string format_diagnostics(const FitDiagnostics& d) {
       line(buf);
     }
 
-    int bad_e = 0;
+    int bad_e = 0, missing_e = 0;
     double worst_e = 0;
     for (size_t c = 0; c < d.ebfmi_by_chain.size(); ++c) {
       const double e = d.ebfmi_by_chain[c];
-      if (!std::isnan(e) && e < kEbfmiThreshold) {
+      if (!std::isfinite(e)) {
+        ++missing_e;
+        continue;
+      }
+      if (e < kEbfmiThreshold) {
         if (bad_e == 0 || e < worst_e) worst_e = e;
         ++bad_e;
       }
@@ -253,14 +258,23 @@ std::string format_diagnostics(const FitDiagnostics& d) {
                     "are explored badly; reparameterize.",
                     kEbfmiThreshold, bad_e, (long long)d.n_chains, worst_e);
       line(buf);
-    } else {
+    } else if (missing_e == 0) {
       std::snprintf(buf, sizeof buf, "E-BFMI is above %.1f in every chain.",
                     kEbfmiThreshold);
       line(buf);
     }
+    if (missing_e > 0) {
+      ++unavailable;
+      line("E-BFMI is unavailable in " + std::to_string(missing_e) +
+           (missing_e == 1 ? " chain" : " chains") +
+           " (too few draws or non-varying energy).");
+    }
   }
 
-  if (!std::isnan(d.max_rhat)) {
+  if (std::isnan(d.max_rhat)) {
+    ++unavailable;
+    line("R-hat is unavailable (too few draws or non-varying parameters).");
+  } else {
     if (d.max_rhat > kRhatThreshold) {
       ++problems;
       std::snprintf(buf, sizeof buf,
@@ -280,7 +294,10 @@ std::string format_diagnostics(const FitDiagnostics& d) {
   // ESS is judged per chain, which is how the Vehtari et al. threshold is
   // stated: 100 per chain, not 100 overall.
   const double ess_floor = kEssPerChainThreshold * (double)d.n_chains;
-  if (!std::isnan(d.min_ess_bulk)) {
+  if (std::isnan(d.min_ess_bulk)) {
+    ++unavailable;
+    line("Bulk ESS is unavailable (too few draws or non-varying parameters).");
+  } else {
     if (d.min_ess_bulk < ess_floor) {
       ++problems;
       std::snprintf(buf, sizeof buf,
@@ -299,7 +316,10 @@ std::string format_diagnostics(const FitDiagnostics& d) {
       line(buf);
     }
   }
-  if (!std::isnan(d.min_ess_tail)) {
+  if (std::isnan(d.min_ess_tail)) {
+    ++unavailable;
+    line("Tail ESS is unavailable (too few draws or non-varying parameters).");
+  } else {
     if (d.min_ess_tail < ess_floor) {
       ++problems;
       std::snprintf(buf, sizeof buf,
@@ -318,7 +338,9 @@ std::string format_diagnostics(const FitDiagnostics& d) {
     }
   }
 
-  if (problems == 0)
+  if (problems == 0 && unavailable > 0)
+    line("Diagnostics are incomplete; unavailable checks have not passed.");
+  else if (problems == 0)
     line("No problems detected.");
   else
     line(problems == 1

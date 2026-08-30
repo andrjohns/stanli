@@ -50,6 +50,16 @@
   tr { cursor: pointer; }
   tr:hover td { background: #8881; }
   td.bad { color: #c33; font-weight: 600; }
+  .diagnostics {
+    margin: .8rem 0; padding: .7rem .9rem;
+    border: 1px solid #8884; border-radius: 6px;
+  }
+  .diagnostics h4 { font-size: .85rem; margin: 0 0 .35rem; }
+  .diagnostics pre {
+    margin: 0; font: .8rem/1.5 ui-monospace, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .diagnostic-note { font-size: .75rem; opacity: .75; margin: .45rem 0 0; }
   .plots { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: .4rem; }
   tr.plotrow td { padding: .3rem 0 .7rem; border-bottom: 1px solid #8883; }
   tr.plotrow:hover td { background: none; }
@@ -180,7 +190,7 @@ Compare methods side by side.</p>
 <div class="times" id="times"></div>
 
 <script type="module">
-import { compile, preload, sample } from "./stanli.mjs";
+import { compile, diagnose, preload, sample } from "./stanli.mjs";
 const $ = (id) => document.getElementById(id);
 
 // ---- background warm-up ----------------------------------------------------
@@ -520,6 +530,44 @@ let cmpMode = null;
 let singleMode = null;
 let singleSelName = null;
 
+async function completedFit(results, sampler) {
+  let diagnostics = null;
+  if (sampler === "nuts") {
+    try {
+      diagnostics = await diagnose(results);
+    } catch (err) {
+      // A reporting failure must not discard successfully sampled draws.
+      diagnostics = "Sampling diagnostics unavailable: " + err.message;
+    }
+  } else if (sampler === "walnuts") {
+    diagnostics = "WALNUTS does not currently expose divergence, maximum " +
+        "treedepth, or E-BFMI diagnostics. These checks are unavailable, " +
+        "not passed. R-hat and ESS estimates are shown in the table below.";
+  }
+  return { names: results[0].names, samples: results[0].samples, sampler,
+           generatedStart: results[0].generatedStart,
+           chains: results.map((r) => r.columns), diagnostics };
+}
+
+function showDiagnostics(parent, f) {
+  if (!f.diagnostics) return;
+  const section = document.createElement("section");
+  section.className = "diagnostics";
+  const heading = document.createElement("h4");
+  heading.textContent = "Sampling diagnostics";
+  const report = document.createElement("pre");
+  report.textContent = f.diagnostics;
+  section.append(heading, report);
+  if (f.sampler === "nuts") {
+    const note = document.createElement("p");
+    note.className = "diagnostic-note";
+    note.textContent = "The NUTS report uses rank-normalized R-hat and " +
+        "bulk/tail ESS; summary tables use unnormalized estimates.";
+    section.appendChild(note);
+  }
+  parent.prepend(section);
+}
+
 // Run nChains chains of one sampler from already-compiled MIR, streaming
 // live draws into `onLive(chain, msg)`. Returns {fit, ms}.
 async function runChains(sampler, opts, nChains, seed, onLive) {
@@ -532,9 +580,7 @@ async function runChains(sampler, opts, nChains, seed, onLive) {
   for (const r of results)
     for (const k of ["lower", "sample"]) ms[k] += r.ms[k];
   return {
-    fit: { names: results[0].names, samples: results[0].samples,
-           generatedStart: results[0].generatedStart,
-           chains: results.map((r) => r.columns) },
+    fit: await completedFit(results, sampler),
     // Pathfinder only: which iterate of each path the ELBO chose.
     selected: results.map((r) => (r.pathfinder ? r.pathfinder.selectedIter
                                                : -1)),
@@ -753,16 +799,14 @@ async function runCompare(opts, nChains, seed, compiled, tWall) {
         onLive: (m) => handlers[w](c, m),
       }).then((r) => ({ w, r })));
   const done = await Promise.all(jobs);
-  const collect = (w) => {
+  const collect = async (w) => {
     const rs = done.filter((d) => d.w === w).map((d) => d.r);
     const ms = { lower: 0, sample: 0 };
     for (const r of rs)
       for (const k of ["lower", "sample"]) ms[k] += r.ms[k];
-    return { fit: { names: rs[0].names, samples: rs[0].samples,
-                    generatedStart: rs[0].generatedStart,
-                    chains: rs.map((r) => r.columns) }, ms };
+    return { fit: await completedFit(rs, w), ms };
   };
-  const rn = collect("nuts"), rw = collect("walnuts");
+  const [rn, rw] = await Promise.all([collect("nuts"), collect("walnuts")]);
   cmpFits = { nuts: rn.fit, walnuts: rw.fit };
   cmpMode = "both";
   const wall = performance.now() - tWall;
@@ -796,6 +840,7 @@ async function runCompare(opts, nChains, seed, compiled, tWall) {
     const f = cmpFits[w];
     const div = cols[w].querySelector(".ctable");
     div.innerHTML = summaryTable(f);
+    showDiagnostics(div, f);
     for (const tr of div.querySelectorAll("tr[data-n]"))
       tr.onclick = () => cmpSelect(tr.dataset.n);
   }
@@ -1064,7 +1109,8 @@ async function runNutsPathfinder(opts, nChains, seed, compiled, tWall) {
   const sum = document.createElement("div");
   sum.className = "cmpsum";
   $("out").append(wrap, sum);
-  cols.nuts.querySelector(".ctable").remove();
+  // Keep NUTS's result container for its sampling diagnostics; the
+  // parameter summary itself is shared with Pathfinder below.
 
   const live = newLive(nChains);
   const pfLive = newLive(1);
@@ -1157,9 +1203,8 @@ async function runNutsPathfinder(opts, nChains, seed, compiled, tWall) {
   const ms = { lower: 0, sample: 0 };
   for (const r of rs)
     for (const key of ["lower", "sample"]) ms[key] += r.ms[key];
-  v.nutsFit = { names: rs[0].names, samples: rs[0].samples,
-                generatedStart: rs[0].generatedStart,
-                chains: rs.map((r) => r.columns) };
+  v.nutsFit = await completedFit(rs, "nuts");
+  showDiagnostics(cols.nuts.querySelector(".ctable"), v.nutsFit);
   cmpFits = { nuts: v.nutsFit, pathfinder: v.pfFit };
   const wall = performance.now() - tWall;
 
@@ -1279,6 +1324,7 @@ function render(ms, nChains, mode) {
   const label = SAMPLER_LABEL[mode];
   const pathfinder = mode === "pathfinder";
   $("out").innerHTML = summaryTable(fit);
+  showDiagnostics($("out"), fit);
   const perChain = ms.sample / nChains;
   $("times").textContent =
       `${nChains} ${label} ` +

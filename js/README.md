@@ -27,6 +27,28 @@ fit.generatedStart;    // index where generated-quantity columns begin
 fit.ms;                // {stanc, lower, sample, total} in milliseconds
 ```
 
+For NUTS, `await diagnose(fit)` returns the same text report as the R and
+Python bindings: divergences, maximum-treedepth saturation, E-BFMI,
+rank-normalized R-hat, and bulk/tail ESS. Pass an array of fits from the
+same model and configuration to diagnose all chains together:
+
+```js
+import { compile, diagnose, sample } from "@seantalts/stanli";
+const { mir } = await compile({ code });
+const fits = await Promise.all([1, 2, 3, 4].map((seed) =>
+  sample({ mir, data, seed })));
+console.log(await diagnose(fits));
+```
+
+`fit.samplerStats` contains seven doubles per post-warmup draw, in order:
+`lp__`, `accept_stat__`, `stepsize__`, `treedepth__`, `n_leapfrog__`,
+`divergent__`, `energy__`. `fit.maxDepth` records the sampling limit (10).
+WALNUTS and Pathfinder return `null` for `samplerStats`; `diagnose()` rejects
+these methods rather than treating missing statistics as successful checks.
+The demo displays the report after NUTS runs, including comparisons, and
+explicitly marks WALNUTS sampler diagnostics as unavailable. Pathfinder keeps
+its existing importance-weight k-hat diagnostic.
+
 Columns cover the full CmdStan CSV: constrained parameters, transformed
 parameters, and generated quantities (RNG draws stream from `seed`).
 When there are no generated quantities, `generatedStart === fit.names.length`.

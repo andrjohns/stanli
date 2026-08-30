@@ -208,6 +208,24 @@ int main() {
            format_diagnostics(fd).find("E-BFMI is below") != std::string::npos);
   }
 
+  // A short/constant fit must not turn missing diagnostics into an all-clear.
+  {
+    const double draws[] = {1, 1};
+    const double stats[2 * N_SAMPLER_COLS] = {};
+    DrawSet ds{draws, 1, 2, 1};
+    const auto text =
+        format_diagnostics(diagnose(ds, summarize(ds, {"x"}), stats, 10));
+    expect("constant energy is unavailable",
+           text.find("E-BFMI is unavailable") != std::string::npos);
+    expect("constant parameters are unavailable",
+           text.find("R-hat is unavailable") != std::string::npos &&
+               text.find("Bulk ESS is unavailable") != std::string::npos &&
+               text.find("Tail ESS is unavailable") != std::string::npos);
+    expect("missing checks are not an all-clear",
+           text.find("No problems detected") == std::string::npos &&
+               text.find("Diagnostics are incomplete") != std::string::npos);
+  }
+
   // ---- the summary table renders ----------------------------------------
   {
     std::vector<ParamSummary> s(1);

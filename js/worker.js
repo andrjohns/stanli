@@ -35,6 +35,54 @@ function compileMir(code) {
       "browser_model", code, ["O1", "debug-optimized-mir"]);
 }
 
+// Reuse the native report (including rank-normalized R-hat and bulk/tail
+// ESS) across all chains. Pack the column-oriented JS draws into the C ABI's
+// chain/draw/column order. Keep this work off the UI thread.
+function diagnose(M, req) {
+  const allocations = [];
+  const alloc = (bytes) => {
+    const ptr = M._malloc(bytes);
+    allocations.push(ptr);
+    return ptr;
+  };
+  try {
+    const { names, samples, chains, stats, maxDepth } = req;
+    const nCols = names.length;
+    const drawsPtr = alloc(8 * chains.length * samples * nCols);
+    const statsPtr = alloc(8 * chains.length * samples * 7);
+    const namesPtr = alloc(4 * nCols);
+    const namePtrs = names.map((name) => {
+      const ptr = M.stringToNewUTF8(name);
+      allocations.push(ptr);
+      return ptr;
+    });
+    // Allocations can grow WASM memory: acquire heap views only afterwards.
+    new Uint32Array(M.HEAPF64.buffer, namesPtr, nCols).set(namePtrs);
+    for (let c = 0; c < chains.length; ++c) {
+      M.HEAPF64.set(stats[c], statsPtr / 8 + c * samples * 7);
+      for (let j = 0; j < nCols; ++j)
+        for (let s = 0; s < samples; ++s)
+          M.HEAPF64[drawsPtr / 8 + (c * samples + s) * nCols + j] =
+              chains[c][names[j]][s];
+    }
+    let size = 8192;
+    let outPtr = alloc(size);
+    const report = () => Number(M._stanli_diagnose_text(
+        drawsPtr, BigInt(chains.length), BigInt(samples), BigInt(nCols),
+        namesPtr, statsPtr, maxDepth, outPtr, size));
+    const needed = report();
+    if (!needed) throw new Error("Could not compute sampling diagnostics");
+    if (needed > size) {
+      size = needed;
+      outPtr = alloc(size);
+      if (!report()) throw new Error("Could not compute sampling diagnostics");
+    }
+    return M.UTF8ToString(outPtr);
+  } finally {
+    for (const ptr of allocations) M._free(ptr);
+  }
+}
+
 
 // Pathfinder: one L-BFGS climb, a normal approximation fitted along it,
 // and draws from that approximation -- milliseconds, where a sampler
@@ -94,6 +142,10 @@ onmessage = async (e) => {
       return;
     }
     const M = await ready;
+    if (req.cmd === "diagnose") {
+      postMessage({ done: diagnose(M, req) });
+      return;
+    }
     let mir = req.mir;
     if (!mir) {
       say("compiling Stan -> MIR (stanc3)");
@@ -164,19 +216,27 @@ onmessage = async (e) => {
     // Hamiltonian error per macro step rather than NUTS's target
     // acceptance rate, and 0 asks the runtime for its default.
     let pf = null;
-    if (pathfinder) {
-      pf = runPathfinder(M, model, req, samples, drawsPtr, errPtr, errLen);
-    } else {
-      const rc = walnuts
-          ? M._stanli_sample_walnuts_stream(model, req.seed >>> 0, warmup,
-                                            samples, +req.maxError || 0,
-                                            drawsPtr, cbPtr, 0, errPtr, errLen)
-          : M._stanli_sample_stream(model, req.seed >>> 0, warmup,
-                                    samples, +req.delta, drawsPtr,
-                                    cbPtr, 0, errPtr, errLen);
+    let samplerStats = null;
+    const statsPtr = pathfinder || walnuts ? 0 : M._malloc(8 * samples * 7);
+    try {
+      if (pathfinder) {
+        pf = runPathfinder(M, model, req, samples, drawsPtr, errPtr, errLen);
+      } else {
+        const rc = walnuts
+            ? M._stanli_sample_walnuts_stream(model, req.seed >>> 0, warmup,
+                                              samples, +req.maxError || 0,
+                                              drawsPtr, cbPtr, 0, errPtr, errLen)
+            : M._stanli_sample_stream_stats(model, req.seed >>> 0, warmup,
+                                            samples, +req.delta, drawsPtr,
+                                            statsPtr, cbPtr, 0, errPtr, errLen);
+        if (rc !== 0) throw new Error(M.UTF8ToString(errPtr));
+        if (statsPtr)
+          samplerStats = M.HEAPF64.slice(statsPtr / 8, statsPtr / 8 + samples * 7);
+      }
+    } finally {
       if (cbPtr) M.removeFunction(cbPtr);
       if (liveRowPtr) M._free(liveRowPtr);
-      if (rc !== 0) throw new Error(M.UTF8ToString(errPtr));
+      if (statsPtr) M._free(statsPtr);
     }
     const tSample = performance.now();
 
@@ -216,6 +276,9 @@ onmessage = async (e) => {
     postMessage({
       done: {
         names, samples, generatedStart, pathfinder: pf,
+        sampler: pathfinder ? "pathfinder" : walnuts ? "walnuts" : "nuts",
+        maxDepth: pathfinder ? null : 10,
+        samplerStats: samplerStats ? samplerStats.buffer : null,
         // True unless the runtime was built with STANLI_LITE_LP, which
         // drops stan-math's propto instantiations and shifts lp__ by a
         // per-model constant. The shipped browser build does not, so this
@@ -230,7 +293,7 @@ onmessage = async (e) => {
           total: performance.now() - t0,
         },
       },
-    }, [cols.buffer]);
+    }, samplerStats ? [cols.buffer, samplerStats.buffer] : [cols.buffer]);
   } catch (err) {
     postMessage({ error: String(err && err.message || err) });
   }

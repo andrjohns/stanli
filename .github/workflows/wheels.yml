@@ -1896,6 +1896,8 @@ jobs:
         run: |
           node tests/test_wasm.cjs web/stanli.js \
             web/stanli-compiler.js web/stancjs.bc.js
+          node tests/test_worker_diagnostics.cjs web/stanli.js \
+            web/stanli-compiler.js
 
       - name: Assemble the page and the npm package
         run: |

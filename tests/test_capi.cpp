@@ -693,6 +693,63 @@ void expect_sampling_progress() {
   stanli_model_free(observed);
 }
 
+// Browser streaming must expose the same diagnostics as the existing
+// multi-chain API without changing any draw or callback-visible row.
+void expect_streaming_stats() {
+  const std::string mir = slurp("tests/fixtures/es.tmir.sexp");
+  const std::string data = slurp("tests/fixtures/es.json");
+  char err[8192]{};
+  auto* model = stanli_model_new(mir.c_str(), data.c_str(), err, sizeof err);
+  expect_true("stream stats model", model != nullptr);
+  if (!model) return;
+  stanli_sample_opts opts;
+  stanli_sample_opts_init(&opts);
+  opts.seed = 292;
+  opts.chains = 1;
+  opts.warmup = 100;
+  opts.samples = 50;
+  const int64_t n = stanli_n_unconstrained(model);
+  std::vector<double> reference((size_t)(opts.samples * n));
+  std::vector<double> stats((size_t)(opts.samples * STANLI_N_SAMPLER_COLS));
+  expect_true("reference sampling",
+              stanli_sample_multi(model, &opts, reference.data(), stats.data(),
+                                  err, sizeof err) == 0);
+  std::vector<double> streamed(reference.size());
+  std::vector<double> streamed_stats(stats.size());
+  struct Capture {
+    int warmup = 0, samples = 0;
+    int64_t width;
+    const double* draws;
+    std::vector<double> observed;
+  } capture{0, 0, n, streamed.data(), {}};
+  const auto callback = [](int32_t i, int32_t warmup, void* user) {
+    auto& c = *static_cast<Capture*>(user);
+    if (warmup) {
+      ++c.warmup;
+    } else {
+      ++c.samples;
+      c.observed.insert(c.observed.end(), c.draws + i * c.width,
+                        c.draws + (i + 1) * c.width);
+    }
+  };
+  expect_true("streaming stats sampling",
+              stanli_sample_stream_stats(
+                  model, opts.seed, opts.warmup, opts.samples, opts.delta,
+                  streamed.data(), streamed_stats.data(), callback, &capture,
+                  err, sizeof err) == 0);
+  expect_true("streamed draws match multi-chain bytes", streamed == reference);
+  expect_true("streamed stats match multi-chain bytes",
+              streamed_stats == stats);
+  expect_true("callback sees completed rows", capture.observed == reference);
+  expect_true("warmup is excluded from stats",
+              capture.warmup == opts.warmup && capture.samples == opts.samples);
+  expect_true("old sampler succeeds",
+              stanli_sample(model, opts.seed, opts.warmup, opts.samples,
+                            opts.delta, streamed.data(), err, sizeof err) == 0);
+  expect_true("old sampler retains identical draws", streamed == reference);
+  stanli_model_free(model);
+}
+
 }  // namespace
 
 int main() {
@@ -738,6 +795,7 @@ int main() {
   expect_necessity_effects_refused();
   expect_pathfinder();
   expect_sampling_progress();
+  expect_streaming_stats();
 
   if (failures == 0) std::printf("test_capi OK\n");
   return failures == 0 ? 0 : 1;
