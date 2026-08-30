@@ -201,6 +201,39 @@ relinking). Loading the uncommon densities on demand was built and removed;
 the measurements and the emscripten limitation that blocks it are in
 [docs/density-pack.md](docs/density-pack.md).
 
+## C++
+
+Native builds with embedded stanc expose a value-only function entry point.
+The source is compiled once by `Function`; subsequent calls bind named
+`DataMap` arguments directly to the Stan formals and return a
+`DataMap::Entry`, including integer identity and logical dimensions.
+
+```cpp
+#include <stanli/function.hpp>
+
+const std::string source = R"stan(
+functions {
+  vector affine(vector x, real a, real b) {
+    return a * x + b;
+  }
+}
+model {}
+)stan";
+
+stanli::Function affine(source, "affine");
+stanli::DataMap args;
+args.set_real_array("x", {1, 2, 4});
+args.set_real("a", 2.5);
+args.set_real("b", -1);
+stanli::DataMap::Entry result = affine(args);  // {1.5, 4, 9}
+```
+
+`Function::from_mir(mir, name)` skips source compilation for cached portable
+or legacy MIR and works in builds without embedded stanc. Arguments are
+matched by formal name. The first version evaluates pure, value-returning
+functions on doubles; `_lp`, void, RNG, and autodiff entry points are not part
+of this surface.
+
 ## Python
 
 A ctypes wrapper over the shared library, published to PyPI as one
