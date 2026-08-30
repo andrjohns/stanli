@@ -2,7 +2,7 @@
 #ifndef STANLI_OPTABLE_HPP
 #define STANLI_OPTABLE_HPP
 
-#include <stanli/graph.hpp>
+#include <stanli/kernel_types.hpp>
 
 #include <limits>
 
