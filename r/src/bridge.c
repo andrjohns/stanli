@@ -121,6 +121,7 @@ static int (*p_exact_lp)(void);
 static int (*p_thread_safe)(void);
 static int64_t (*p_n_unconstrained)(const void*);
 static int (*p_grad)(void*, const double*, double*, double*);
+static int (*p_unconstrain_inits)(void*, const char*, double*, char*, size_t);
 static int64_t (*p_n_constrained)(const void*);
 static const char* (*p_constrained_name)(const void*, int64_t);
 static int (*p_constrain)(void*, const double*, double*);
@@ -196,6 +197,7 @@ SEXP stanli_bridge_load(SEXP path) {
   BIND("stanli_thread_safe", p_thread_safe);
   BIND("stanli_n_unconstrained", p_n_unconstrained);
   BIND("stanli_grad", p_grad);
+  BIND("stanli_unconstrain_inits", p_unconstrain_inits);
   BIND("stanli_n_constrained", p_n_constrained);
   BIND("stanli_constrained_name", p_constrained_name);
   BIND("stanli_constrain", p_constrain);
@@ -297,6 +299,23 @@ SEXP stanli_r_column_names(SEXP m) {
   }
   UNPROTECT(1);
   return out;
+}
+
+SEXP stanli_r_unconstrain_inits(SEXP m, SEXP json) {
+  require_loaded();
+  void* mm = model_ptr(m);
+  const int64_t n = p_n_unconstrained(mm);
+  SEXP q = PROTECT(allocVector(REALSXP, (R_xlen_t)n));
+  char err[4096];
+  err[0] = '\0';
+  const int rc = p_unconstrain_inits(mm, CHAR(STRING_ELT(json, 0)), REAL(q),
+                                     err, sizeof err);
+  if (rc != 0) {
+    UNPROTECT(1);
+    error("%s", err);
+  }
+  UNPROTECT(1);
+  return q;
 }
 
 SEXP stanli_r_grad(SEXP m, SEXP q) {

@@ -41,6 +41,37 @@ test_that("log_prob_grad returns lp and a gradient of the right length", {
   expect_length(g$grad, m$n_unconstrained)
 })
 
+test_that("unconstrain turns constrained starting values into the free vector", {
+  skip_without_runtime()
+  # A model whose free order differs from its serial order: the simplex has
+  # one fewer free value than constrained, and the array batches sit
+  # contiguously in the free vector while the CSV lists the first index
+  # fastest.
+  m <- stanli_model(code = "
+    parameters { real mu; real<lower=0> sigma; array[2] simplex[3] s; }
+    model {
+      mu ~ normal(0, 1); sigma ~ normal(0, 1);
+      for (i in 1:2) s[i] ~ dirichlet(rep_vector(1.0, 3));
+    }")
+  q <- unconstrain(m, list(
+    mu = 0.5, sigma = 1.25,
+    s = matrix(c(0.2, 0.3, 0.5, 0.1, 0.6, 0.3), nrow = 2, byrow = TRUE)))
+  expect_length(q, m$n_unconstrained)
+  expect_true(all(is.finite(q)))
+  # sigma is log(1.25) because its only transform is the lower bound.
+  expect_equal(q[2], log(1.25))
+  expect_equal(q[1], 0.5)
+})
+
+test_that("unconstrain names a parameter it cannot use", {
+  skip_without_runtime()
+  m <- stanli_model(code = "
+    parameters { real mu; real<lower=0> sigma; }
+    model { mu ~ normal(0, 1); sigma ~ normal(0, 1); }")
+  expect_error(unconstrain(m, list(mu = 0)), "sigma")
+  expect_error(unconstrain(m, list(mu = 0, sigma = -1)), "sigma")
+})
+
 test_that("refresh is a single nonnegative integer", {
   bad <- list(-1, 1.5, NA_real_, NaN, Inf, c(1, 2), "1", TRUE, NULL)
   for (value in bad)

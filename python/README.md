@@ -244,8 +244,9 @@ Stated plainly:
 - The sampler is Stan's own NUTS with diagonal-metric adaptation, and
   `optimize()` is Stan's L-BFGS. No variational inference or Pathfinder
   yet.
-- `inits` are on the unconstrained scale. Constrained inits would need
-  the inverse parameter transforms, which do not exist here yet.
+- `inits` are on the unconstrained scale. `model.unconstrain({...})`
+  turns constrained starting values into that vector, so unconstraining is
+  a step per starting point rather than a second kind of argument.
 - `optimize(jacobian=False)` (CmdStan's default penalized maximum
   likelihood) raises; see above.
 

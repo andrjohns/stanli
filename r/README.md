@@ -68,6 +68,9 @@ bulk/tail ESS, MCSE), so the numbers agree with `stansummary`.
 including E-BFMI, the one that catches a badly explored heavy tail.
 `optimize_model()` finds the posterior mode by L-BFGS, and its
 `$unconstrained` element is what `sample_model(init = )` takes.
+`unconstrain(m, list(mu = 0.5, sigma = 1.2))` builds the same vector from
+starting values on the constrained scale, naming the parameter when one is
+missing, the wrong size, or outside its support.
 
 Chains run in parallel by default. Threading does not change the
 answer: each chain owns its executor and its RNG stream, so a parallel
@@ -116,10 +119,6 @@ revision, and content hash. CI verifies that provenance and compiles valid and
 invalid models through the file on Linux, macOS, and Windows.
 
 ## What is not here yet
-
-`init` is on the **unconstrained** scale: unconstraining a user's
-starting values needs the inverse parameter transforms, and stanli has
-only the forward ones.
 
 `optimize_model()` returns the posterior **mode**. CmdStan's `optimize`
 defaults to `jacobian=0`, the penalized maximum likelihood, which

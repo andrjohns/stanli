@@ -11,7 +11,8 @@ optimize_model(model, seed = 1, iter = 2000, init = NULL, init_radius = 2)
 
 \item{seed, iter}{Optimizer configuration.}
 
-\item{init}{Optional start on the unconstrained scale.}
+\item{init}{Optional start on the unconstrained scale; see
+[unconstrain()] to build one from constrained values.}
 
 \item{init_radius}{Random start radius.}
 }

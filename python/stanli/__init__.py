@@ -108,6 +108,10 @@ def _load_lib():
                                 ctypes.POINTER(ctypes.c_double),
                                 ctypes.POINTER(ctypes.c_double),
                                 ctypes.POINTER(ctypes.c_double)]
+    lib.stanli_unconstrain_inits.restype = ctypes.c_int
+    lib.stanli_unconstrain_inits.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                             ctypes.POINTER(ctypes.c_double),
+                                             ctypes.c_char_p, ctypes.c_size_t]
     lib.stanli_n_constrained.restype = ctypes.c_int64
     lib.stanli_n_constrained.argtypes = [ctypes.c_void_p]
     lib.stanli_constrained_name.restype = ctypes.c_char_p
@@ -701,6 +705,32 @@ class Model:
                                "(domain error in a distribution or function)")
         return lp.value, grad
 
+    def unconstrain(self, values):
+        """Starting values on the CONSTRAINED scale, as the free vector.
+
+        `values` is a dict of parameter name to value, or a JSON string in
+        CmdStan's data format. Every declared parameter must appear, at its
+        declared size; a missing, unknown, wrong-length, or out-of-support
+        value raises naming the parameter.
+
+        Containers are listed in Stan's own serialization order -- the first
+        index fastest, the order a CSV column carries -- and may be nested or
+        flat; the declaration owns the shape either way.
+
+        The result is what `sample(inits=...)`, `optimize(init=...)`, and
+        `log_prob_grad` all take, so unconstraining is a step you do once per
+        starting point rather than a second kind of argument on every call.
+        """
+        # The same shapes data accepts: a dict, a path, or JSON text.
+        document = _data_to_json(values).encode()
+        q = np.empty(self.n_unconstrained)
+        err = ctypes.create_string_buffer(4096)
+        rc = _lib.stanli_unconstrain_inits(self._m, document, _dptr(q), err,
+                                           len(err))
+        if rc != 0:
+            raise ValueError(err.value.decode())
+        return q
+
     def _column_names(self):
         """The CSV columns for a draw, and whether write_array supplies them.
 
@@ -777,10 +807,10 @@ class Model:
         means a matched stream per chain.
 
         `inits` is on the UNCONSTRAINED scale: one vector shared by every
-        chain, or one row per chain. That is the scale stanli can read --
-        a constrained init would need the inverse parameter transforms,
-        which do not exist here yet. `init_radius=0` starts every chain at
-        the origin, which is CmdStan's `init=0`.
+        chain, or one row per chain. Start from constrained values by
+        passing them through `unconstrain()` first -- one scale here means
+        one contract for what a start is. `init_radius=0` starts every
+        chain at the origin, which is CmdStan's `init=0`.
 
         `parallel_chains` defaults to running every chain at once, capped
         at the machine's cores. Threading changes nothing about the

@@ -47,6 +47,44 @@ def test_log_prob_grad():
     assert np.isfinite(grad).all(), grad
 
 
+def test_unconstrain_round_trip():
+    # The forward direction is the oracle: constrain a free point into the
+    # CSV row, hand the constrained parameters back by name, and require the
+    # free point out. initrt carries an array of simplexes and an array of
+    # matrices, whose serial order differs from the free vector's.
+    m = stanli.Model(stan_file=FIXTURES / "initrt.stan",
+                     data=FIXTURES / "initrt.json")
+    q = np.ascontiguousarray(
+        [0.1 + 0.05 * (i % 7) - 0.15 * (i % 3)
+         for i in range(m.n_unconstrained)], dtype=np.float64)
+
+    # The forward direction has no public wrapper yet, so drive the C entry
+    # point the module already binds. The point of this test is unconstrain().
+    names, _ = m._column_names()
+    row = np.empty(len(names))
+    rc = stanli._lib.stanli_wa_row(m._m, stanli._dptr(q), stanli._dptr(row))
+    assert rc == 0
+
+    values = {}
+    for name, value in zip(names, row):
+        values.setdefault(name.split(".")[0], []).append(float(value))
+    values = {k: (v[0] if len(v) == 1 else v) for k, v in values.items()}
+
+    back = m.unconstrain(values)
+    assert np.allclose(back, q, atol=1e-9), (back, q)
+
+
+def test_unconstrain_names_a_missing_parameter():
+    m = stanli.Model(stan_file=FIXTURES / "initrt.stan",
+                     data=FIXTURES / "initrt.json")
+    try:
+        m.unconstrain({"mu": 0.0})
+    except ValueError as e:
+        assert "sigma" in str(e), str(e)
+        return
+    raise AssertionError("expected ValueError for an incomplete document")
+
+
 def test_failing_gradient_raises():
     # normal with sigma = -1 passes compilation but throws inside stan-math
     # at evaluation time; the wrapper must raise, not hand back an
