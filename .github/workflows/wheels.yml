@@ -290,11 +290,17 @@ jobs:
       # The pinned release binary, not install.sh: the installer prompts for
       # its target directory and takes no positional argument, so it is not
       # usable unattended. A warm artifact cache does not need opam at all.
+      #
+      # No --retry-all-errors here, unlike the steps that run on the runner
+      # itself: this one runs inside the manylinux image, whose curl predates
+      # that flag (7.71) and exits 2 on it. Because a cache hit skips this
+      # step entirely, the break only surfaces on a change to compiler/ocaml,
+      # compiler/native, or tools/stanc_embed -- the inputs to the key above.
       - name: opam ${{ env.OPAM_VERSION }}
         if: steps.stanc-cache.outputs.cache-hit != 'true'
         run: |
           url=https://github.com/ocaml/opam/releases/download
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+          curl -fsSL --retry 5 --retry-delay 2 \
             -o /tmp/opam \
             "$url/$OPAM_VERSION/opam-$OPAM_VERSION-${{ matrix.opam_arch }}"
           chmod +x /tmp/opam

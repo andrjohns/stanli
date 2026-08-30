@@ -143,8 +143,10 @@ class PathLogger : public stan::callbacks::logger {
 };
 
 // util::initialize reaches an explicit init only through transform_inits,
-// which ExecutorModel refuses because it has no inverse transforms. The
-// point here is already unconstrained, so it needs no transform at all.
+// which ExecutorModel refuses because the adapter holds no MIR section to
+// invert with. The point here is already unconstrained -- a caller starting
+// from constrained values unconstrains at its own boundary -- so it needs no
+// transform at all.
 class PathfinderModel : public ExecutorModel {
  public:
   PathfinderModel(Executor& ex, const double* init)

@@ -153,22 +153,25 @@ class ExecutorModel {
     unconstrained_param_names(names);
   }
 
-  // Constrained-scale inits, which stanli cannot express: unconstraining
-  // a user's starting values needs the INVERSE parameter transforms, and
-  // only the forward ones exist. Callers here always pass an empty
-  // context (initialize then draws at random and never reaches this), so
-  // throwing is the honest way to say the one case that is missing --
-  // quietly returning zeros would start the run somewhere the user did
-  // not ask for.
+  // Constrained-scale inits do not come through this adapter. The inverse
+  // parameter transforms exist now (stanli::InitInterp, reached through
+  // CompiledModel::transform_inits, stanli_unconstrain_inits, or
+  // bs_param_unconstrain), but they need the model's MIR section, which this
+  // adapter deliberately does not hold -- it sees an Executor and nothing
+  // else. Every caller in this repository unconstrains at its own boundary
+  // and hands the samplers a free vector, so nothing reaches this; throwing
+  // keeps it that way, because quietly returning zeros would start a run
+  // somewhere the user did not ask for.
   template <typename Context>
   void transform_inits(const Context& /*context*/,
                        std::vector<int>& /*params_i*/,
                        std::vector<double>& /*params_r*/,
                        std::ostream* /*msgs*/ = nullptr) const {
     throw std::runtime_error(
-        "stanli cannot take inits on the constrained scale: it has the "
-        "forward parameter transforms but not their inverses. Pass an "
-        "unconstrained init instead.");
+        "this adapter does not take inits on the constrained scale: "
+        "unconstrain them first (stanli_unconstrain_inits, "
+        "bs_param_unconstrain, or CompiledModel::transform_inits) and pass "
+        "the free vector.");
   }
 
  private:

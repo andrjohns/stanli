@@ -33,9 +33,9 @@ sample_model(
 
 \item{init}{Optional starting point on the UNCONSTRAINED scale: one
 vector shared by every chain, or a matrix with one row per chain.
-The unconstrained scale is what stanli can read -- a constrained
-init would need the inverse parameter transforms, which do not
-exist.}
+Start from constrained values by passing them through
+[unconstrain()] first -- one scale here means one contract for what
+a start is.}
 
 \item{init_radius}{Random inits are drawn uniform(-r, r); 0 starts at
 the origin.}
@@ -47,10 +47,11 @@ each phase, plus the first and last transition of the phase. Set to 0 to
 suppress all automatic sampling output.}
 }
 \value{
-An object of class `stanli_fit`. Its `report` element contains per-chain
-warmup and sampling times plus exact divergence and maximum-treedepth counts.
-With a compatible older runtime that predates progress reporting,
-`report$available` is `FALSE` and those values are `NA`.
+An object of class `stanli_fit`. Its `report` element contains
+  per-chain warmup and sampling times plus exact divergence and
+  maximum-treedepth counts. With a compatible older runtime that predates
+  progress reporting, `report$available` is `FALSE` and those values are
+  `NA`.
 }
 \description{
 Four chains by default, run in parallel: R-hat needs more than one

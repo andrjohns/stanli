@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -176,6 +177,135 @@ void expect_structured_arrays(int B) {
     expect_values(tag + " write-array", row, oracle::write_values(B));
   }
 
+  stanli_model_free(model);
+}
+
+// stanli_unconstrain_inits, checked by round trip against the model's own
+// forward direction: constrain a free point through stanli_wa_row, feed the
+// constrained values back as JSON, and require the original free point.
+void expect_unconstrain_inits_round_trip() {
+  const std::string mir = slurp("tests/fixtures/initrt.tmir.sexp");
+  const std::string data = slurp("tests/fixtures/initrt.json");
+  char err[8192]{};
+  stanli_model* model =
+      stanli_model_new(mir.c_str(), data.c_str(), err, sizeof err);
+  if (model == nullptr) {
+    ++failures;
+    std::printf("FAIL initrt construction: %s\n", err);
+    return;
+  }
+
+  const int64_t n = stanli_n_unconstrained(model);
+  std::vector<double> q((size_t)n, 0.0);
+  for (int64_t i = 0; i < n; ++i)
+    q[(size_t)i] = 0.1 + 0.05 * (double)(i % 7) - 0.15 * (double)(i % 3);
+
+  // The constrained parameters, in the CSV order the JSON document mirrors.
+  const int64_t n_cols = stanli_wa_n_columns(model);
+  std::vector<double> row((size_t)n_cols, 0.0);
+  if (stanli_wa_row(model, q.data(), row.data()) != 0) {
+    ++failures;
+    std::printf("FAIL initrt write_array\n");
+    stanli_model_free(model);
+    return;
+  }
+
+  // Rebuild the document from the CSV names, which carry each parameter's
+  // shape in their indices.
+  std::vector<std::string> flat;
+  for (int64_t i = 0; i < n_cols; ++i)
+    flat.emplace_back(stanli_wa_column_name(model, i));
+  std::map<std::string, std::vector<double>> by_name;
+  std::vector<std::string> order;
+  for (size_t i = 0; i < flat.size() && i < row.size(); ++i) {
+    const std::string base = flat[i].substr(0, flat[i].find('.'));
+    if (by_name.find(base) == by_name.end()) order.push_back(base);
+    by_name[base].push_back(row[i]);
+  }
+  std::string json = "{";
+  for (size_t i = 0; i < order.size(); ++i) {
+    const std::vector<double>& v = by_name[order[i]];
+    char buf[32];
+    json += (i ? ", " : "") + ("\"" + order[i] + "\": ");
+    if (v.size() == 1) {
+      std::snprintf(buf, sizeof buf, "%.17g", v[0]);
+      json += buf;
+    } else {
+      json += "[";
+      for (size_t k = 0; k < v.size(); ++k) {
+        std::snprintf(buf, sizeof buf, "%.17g", v[k]);
+        json += (k ? ", " : "") + std::string(buf);
+      }
+      json += "]";
+    }
+  }
+  json += "}";
+
+  std::vector<double> back((size_t)n, 0.0);
+  if (stanli_unconstrain_inits(model, json.c_str(), back.data(), err,
+                               sizeof err) != 0) {
+    ++failures;
+    std::printf("FAIL stanli_unconstrain_inits: %s\n", err);
+    stanli_model_free(model);
+    return;
+  }
+  for (int64_t i = 0; i < n; ++i) {
+    if (!(std::abs(back[(size_t)i] - q[(size_t)i]) < 1e-9)) {
+      ++failures;
+      std::printf(
+          "FAIL stanli_unconstrain_inits round trip at %lld: %.17g "
+          "want %.17g\n",
+          (long long)i, back[(size_t)i], q[(size_t)i]);
+      break;
+    }
+  }
+
+  // A document missing a parameter is refused by name.
+  if (stanli_unconstrain_inits(model, "{\"mu\": 0}", back.data(), err,
+                               sizeof err) == 0) {
+    ++failures;
+    std::printf(
+        "FAIL stanli_unconstrain_inits accepted an incomplete "
+        "document\n");
+  } else if (std::string(err).find("sigma") == std::string::npos) {
+    ++failures;
+    std::printf(
+        "FAIL incomplete document did not name a missing parameter: "
+        "%s\n",
+        err);
+  }
+
+  // Unknown keys are not silently discarded: the public contract requires
+  // the error to name the value the model does not declare.
+  std::string unknown = json;
+  unknown.insert(unknown.size() - 1, ", \"not_a_parameter\": 1");
+  if (stanli_unconstrain_inits(model, unknown.c_str(), back.data(), err,
+                               sizeof err) == 0) {
+    ++failures;
+    std::printf("FAIL stanli_unconstrain_inits accepted an unknown name\n");
+  } else if (std::string(err).find("not_a_parameter") == std::string::npos) {
+    ++failures;
+    std::printf("FAIL unknown init error did not name its key: %s\n", err);
+  }
+  stanli_model_free(model);
+}
+
+void expect_parameterless_unconstrain() {
+  const std::string mir = slurp("tests/fixtures/view_gq_data_matrix.tmir.sexp");
+  char err[8192]{};
+  stanli_model* model = stanli_model_new(
+      mir.c_str(), R"({"M":[[1,2,3],[4,5,6]]})", err, sizeof err);
+  if (model == nullptr) {
+    ++failures;
+    std::printf("FAIL parameterless model construction: %s\n", err);
+    return;
+  }
+  double unused = 0.0;
+  if (stanli_n_unconstrained(model) != 0 ||
+      stanli_unconstrain_inits(model, "{}", &unused, err, sizeof err) != 0) {
+    ++failures;
+    std::printf("FAIL parameterless unconstrain: %s\n", err);
+  }
   stanli_model_free(model);
 }
 
@@ -557,6 +687,9 @@ void expect_sampling_progress() {
 }  // namespace
 
 int main() {
+  expect_unconstrain_inits_round_trip();
+  expect_parameterless_unconstrain();
+
   expect_names("tests/fixtures/wanames.tmir.sexp", "{}",
                {
                    "s",

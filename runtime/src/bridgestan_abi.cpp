@@ -97,6 +97,22 @@ stanli::DataMap load_data(const char* data) {
   return stanli::DataMap::from_json(s);
 }
 
+// The model's inverse parameter transforms, or null with the reason. A model
+// compiled from a MIR that predates the transform_inits section has none, and
+// so does one whose section could not be prepared.
+const stanli::InitInterp* init_interp(const bs_model* m, std::string* why);
+
+// A flat constrained block, split into the named values the init interpreter
+// reads. `theta` is bs_param_num(m, false, false) values: the constrained
+// parameters only, in CSV order, which is each parameter's serial order in
+// declaration order -- exactly what `views` describes.
+std::map<std::string, stanli::DataMap::Entry> inits_from_flat(
+    const stanli::CompiledModel& cm, const double* theta);
+
+// The same, from a CmdStan-style JSON object. The complete object is retained
+// so the interpreter can report both missing and unknown names.
+std::map<std::string, stanli::DataMap::Entry> inits_from_json(const char* json);
+
 // The names of one declared parameter's UNCONSTRAINED values.
 //
 // These are not the constrained CSV names: lowering records the exact free
@@ -524,39 +540,128 @@ int bs_param_constrain(const bs_model* m, bool include_tp, bool include_gq,
   }
 }
 
+namespace {
+
+const stanli::InitInterp* init_interp(const bs_model* m, std::string* why) {
+  if (!m->cm.transform_inits) {
+    *why =
+        "this model has no inverse parameter transforms: its MIR carries no "
+        "transform_inits section";
+    return nullptr;
+  }
+  if (!m->cm.transform_inits->interp) {
+    *why = "this model's inverse parameter transforms are unavailable: " +
+           m->cm.transform_inits->truncated;
+    return nullptr;
+  }
+  return m->cm.transform_inits->interp.get();
+}
+
+std::map<std::string, stanli::DataMap::Entry> inits_from_flat(
+    const stanli::CompiledModel& cm, const double* theta) {
+  std::map<std::string, stanli::DataMap::Entry> out;
+  int64_t at = 0;
+  for (const auto& view : cm.views) {
+    stanli::DataMap::Entry e;
+    e.dims = view.dims;
+    e.r.assign(theta + at, theta + at + view.len);
+    out.emplace(view.name, std::move(e));
+    at += view.len;
+  }
+  return out;
+}
+
+std::map<std::string, stanli::DataMap::Entry> inits_from_json(
+    const char* json) {
+  const stanli::DataMap supplied =
+      stanli::DataMap::from_json(json == nullptr ? "{}" : json);
+  return std::map<std::string, stanli::DataMap::Entry>(
+      supplied.entries().begin(), supplied.entries().end());
+}
+
+// Shared by the three entry points below: unconstrain, then check the result
+// is the length the sampler reads.
+int unconstrain_into(const bs_model* m,
+                     const std::map<std::string, stanli::DataMap::Entry>& inits,
+                     double* theta_unc, char** error_msg) {
+  std::string why;
+  const stanli::InitInterp* interp = init_interp(m, &why);
+  if (interp == nullptr) return refuse(error_msg, why);
+  const std::vector<double> unc = interp->eval(inits);
+  if ((int64_t)unc.size() != m->cm.n_unconstrained)
+    return refuse(error_msg, "the inverse transforms produced " +
+                                 std::to_string(unc.size()) +
+                                 " unconstrained values, expected " +
+                                 std::to_string(m->cm.n_unconstrained));
+  std::copy(unc.begin(), unc.end(), theta_unc);
+  return 0;
+}
+
+}  // namespace
+
 int bs_param_unconstrain(const bs_model* m, const double* theta,
                          double* theta_unc, char** error_msg) {
-  (void)m;
-  (void)theta;
-  (void)theta_unc;
-  return refuse(error_msg,
-                "bs_param_unconstrain is not available: stanli implements "
-                "the forward constraint transforms only, so it cannot map a "
-                "constrained point back to the unconstrained scale");
+  try {
+    int64_t declared = 0;
+    for (const auto& view : m->cm.views) declared += view.len;
+    if (declared != (int64_t)m->count(false, false))
+      return refuse(error_msg,
+                    "the declared parameters hold " + std::to_string(declared) +
+                        " constrained values but this model reports " +
+                        std::to_string(m->count(false, false)) +
+                        "; theta cannot be split");
+    return unconstrain_into(m, inits_from_flat(m->cm, theta), theta_unc,
+                            error_msg);
+  } catch (const std::exception& e) {
+    return refuse(error_msg, e.what());
+  } catch (...) {
+    return refuse(error_msg, "unknown error in bs_param_unconstrain");
+  }
 }
 
 int bs_param_unconstrain_json(const bs_model* m, const char* json,
                               double* theta_unc, char** error_msg) {
-  (void)m;
-  (void)json;
-  (void)theta_unc;
-  return refuse(error_msg,
-                "bs_param_unconstrain_json is not available: stanli "
-                "implements the forward constraint transforms only, so it "
-                "cannot map a constrained point back to the unconstrained "
-                "scale");
+  try {
+    std::string why;
+    const stanli::InitInterp* interp = init_interp(m, &why);
+    if (interp == nullptr) return refuse(error_msg, why);
+    return unconstrain_into(m, inits_from_json(json), theta_unc, error_msg);
+  } catch (const std::exception& e) {
+    return refuse(error_msg, e.what());
+  } catch (...) {
+    return refuse(error_msg, "unknown error in bs_param_unconstrain_json");
+  }
 }
 
 int bs_param_initialize(const bs_model* m, const char* json, bs_rng* rng,
                         double init_radius, int max_tries, bool jacobian,
                         double* theta_unc, char** error_msg) {
   try {
-    if (json != nullptr)
-      return refuse(error_msg,
-                    "bs_param_initialize with an explicit JSON point needs "
-                    "the inverse constraint transforms, which stanli does "
-                    "not have; pass NULL to initialize randomly");
     if (!jacobian) return refuse(error_msg, kFlagLimitation);
+    if (json != nullptr) {
+      // An explicit point is taken as given: the retries below exist to find
+      // a random start in support, and silently replacing a point the caller
+      // chose would hide the real problem.
+      std::string why;
+      const stanli::InitInterp* interp = init_interp(m, &why);
+      if (interp == nullptr) return refuse(error_msg, why);
+      const int rc =
+          unconstrain_into(m, inits_from_json(json), theta_unc, error_msg);
+      if (rc != 0) return rc;
+      double lp = 0;
+      try {
+        lp = m->density(theta_unc, nullptr);
+      } catch (const std::exception& e) {
+        return refuse(error_msg, std::string("the supplied starting point is "
+                                             "outside the model's support: ") +
+                                     e.what());
+      }
+      if (!std::isfinite(lp))
+        return refuse(error_msg,
+                      "the supplied starting point has a non-finite log "
+                      "density");
+      return 0;
+    }
     if (rng == nullptr)
       return refuse(error_msg, "bs_param_initialize needs a bs_rng");
     if (!(init_radius >= 0.0))

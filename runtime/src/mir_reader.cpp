@@ -757,6 +757,20 @@ Stmt read_stmt(const Node& n) {
           if (const Node* name = field(internal, "var_name"))
             s.check_var_name = (*name)[1].atom;
         }
+        // transform_inits' FnWriteParam names the transform to INVERT, so
+        // that an already-constrained value becomes a free one. The payload
+        // is an OCaml option one level deeper than FnReadParam's `constrain`:
+        // `(unconstrain_opt (Simplex))` and `(unconstrain_opt ((Lower e)))`
+        // both wrap the transform in a one-element list, and
+        // `(unconstrain_opt ())` is None -- the shape every write_array
+        // FnWriteParam has, its value being constrained already.
+        if (s.fn_name == "FnWriteParam") {
+          if (const Node* t = field(internal, "unconstrain_opt")) {
+            const Node& option = (*t)[1];
+            if (!option.is_atom() && option.size() == 1)
+              s.write_transform = read_transform(option[0]);
+          }
+        }
         // FnWriteParam names its column in the payload, not in the (empty)
         // argument list; FnCheck likewise carries its checked value here.
         if (const Node* v = field(internal, "var"))
@@ -1004,7 +1018,8 @@ void validate_program_shape(const Program& program) {
   for (const auto& input : program.input_vars)
     validate_sized_type_shape(input.second);
   for (const std::vector<Stmt>* body :
-       {&program.prepare_data, &program.log_prob, &program.generate_quantities})
+       {&program.prepare_data, &program.log_prob, &program.generate_quantities,
+        &program.transform_inits})
     for (const Stmt& statement : *body) validate_statement_shape(statement);
   for (const FunDef& function : program.fun_defs) {
     const size_t arity = function.arg_names.size();
@@ -1155,7 +1170,8 @@ void validate_bindings(const Stmt& s, Bindings& bindings,
       validate_expression(e, bindings, functions, strict_variable_metadata);
   for (const Transform* transform :
        {s.read_transform ? &*s.read_transform : nullptr,
-        s.check_transform ? &*s.check_transform : nullptr})
+        s.check_transform ? &*s.check_transform : nullptr,
+        s.write_transform ? &*s.write_transform : nullptr})
     if (transform)
       for (const Expr& e : transform->args)
         validate_expression(e, bindings, functions, strict_variable_metadata);
@@ -1352,8 +1368,8 @@ void restore_unsized_decls(Stmt& s, bool strict) {
 }
 
 void restore_unsized_decls(Program& prog, bool strict) {
-  for (auto* body :
-       {&prog.prepare_data, &prog.log_prob, &prog.generate_quantities})
+  for (auto* body : {&prog.prepare_data, &prog.log_prob,
+                     &prog.generate_quantities, &prog.transform_inits})
     for (Stmt& s : *body) restore_unsized_decls(s, strict);
   for (FunDef& f : prog.fun_defs)
     for (Stmt& s : f.body) restore_unsized_decls(s, strict);
@@ -1376,8 +1392,8 @@ void resolve_overloads(Program& prog) {
   if (overloads.empty()) return;
   for (auto& [name, type] : prog.input_vars)
     for (Expr& d : type.dims) resolve_calls(d, overloads);
-  for (auto* body :
-       {&prog.prepare_data, &prog.log_prob, &prog.generate_quantities})
+  for (auto* body : {&prog.prepare_data, &prog.log_prob,
+                     &prog.generate_quantities, &prog.transform_inits})
     for (Stmt& s : *body) resolve_calls(s, overloads);
   for (FunDef& f : prog.fun_defs)
     for (Stmt& s : f.body) resolve_calls(s, overloads);
@@ -1410,6 +1426,11 @@ void detail::finalize_program(Program& prog, bool strict_variable_metadata) {
                     strict_variable_metadata);
   Bindings gq_bindings = prepare_bindings;
   validate_bindings(prog.generate_quantities, gq_bindings, functions,
+                    strict_variable_metadata);
+  // transform_inits sees data and transformed data and declares each
+  // parameter locally, exactly like generate_quantities does.
+  Bindings init_bindings = prepare_bindings;
+  validate_bindings(prog.transform_inits, init_bindings, functions,
                     strict_variable_metadata);
   for (const auto& f : prog.fun_defs) {
     Bindings args;
@@ -1458,6 +1479,13 @@ Program read_program(const sexp::Node& root) {
   read_stmt_list((*lp)[1], prog.log_prob);
   if (const Node* gq = field(root, "generate_quantities"))
     read_stmt_list((*gq)[1], prog.generate_quantities);
+  // stanc3's inverse parameter transforms. Absent from a hand-written or
+  // pre-backend-transform MIR, in which case constrained-scale inits stay
+  // unavailable for this model rather than becoming an error here.
+  if (const Node* ti = field(root, "transform_inits")) {
+    prog.has_transform_inits = true;
+    read_stmt_list((*ti)[1], prog.transform_inits);
+  }
   detail::finalize_program(prog);
   if (const Node* ov = field(root, "output_vars")) {
     // ((name <opaque> (...)) ...): parameters, transformed parameters and

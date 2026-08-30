@@ -1,5 +1,6 @@
 #include <stanli/algebra.hpp>
 #include <stanli/compile.hpp>
+#include <stanli/unconstrain.hpp>
 #include <stanli/constfold.hpp>
 #include <stanli/cse.hpp>
 #include <stanli/inplace.hpp>
@@ -6740,6 +6741,57 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
       w.interp = std::make_shared<WaInterp>(prog, std::move(env));
     }
     cm.write_array = std::move(w);
+  }
+  if (prog->has_transform_inits) {
+    // The inverse parameter transforms. Nothing is interpreted here: the
+    // section runs only when a caller actually supplies constrained starting
+    // values, so a model nobody inits by name never pays for a bound
+    // expression this build cannot evaluate.
+    CompiledModel::TransformInits ti;
+    std::vector<InitParam> params;
+    if (cm.views.size() != cm.unc_params.size()) {
+      ti.truncated = "the constrained and free parameter lists disagree (" +
+                     std::to_string(cm.views.size()) + " vs " +
+                     std::to_string(cm.unc_params.size()) + ")";
+    } else {
+      for (size_t i = 0; i < cm.views.size(); ++i) {
+        const CompiledModel::ParamView& view = cm.views[i];
+        const CompiledModel::UncParam& unc = cm.unc_params[i];
+        if (view.name != unc.name) {
+          ti.truncated =
+              "constrained and free parameters are out of order at " +
+              view.name;
+          break;
+        }
+        InitParam p;
+        p.name = view.name;
+        p.dims = view.dims;
+        p.constrained_len = view.len;
+        p.free_len = unc.len;
+        // The leaf is the unit the arena keeps contiguous inside each
+        // element of the surrounding array. An innermost matrix is one
+        // whatever the transform is -- the arena stores it column-major
+        // while a serial init lists it first-index-fastest, and an
+        // elementwise transform over an array of matrices has to cross that
+        // permutation too. Otherwise only a structured transform has a leaf;
+        // an elementwise one treats each value on its own, which for a
+        // vector or a plain array is the same enumeration either way.
+        p.leaf_rank = view.matrix_storage                  ? 2
+                      : is_structured_check(unc.transform) ? 1
+                                                           : 0;
+        if ((size_t)p.leaf_rank > p.dims.size()) {
+          ti.truncated = view.name +
+                         " declares fewer dimensions than its "
+                         "transform needs";
+          break;
+        }
+        params.push_back(std::move(p));
+      }
+    }
+    if (ti.truncated.empty())
+      ti.interp =
+          std::make_shared<InitInterp>(prog, lo.td.env(), std::move(params));
+    cm.transform_inits = std::move(ti);
   }
   prep.plain("compile", "total", compile_time);
   prep.report();

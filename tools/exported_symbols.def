@@ -22,6 +22,7 @@ EXPORTS
   stanli_exact_lp
   stanli_model_free
   stanli_n_unconstrained
+  stanli_unconstrain_inits
   stanli_grad
   stanli_sample
   stanli_sample_stream

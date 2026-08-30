@@ -98,6 +98,32 @@ log_prob_grad <- function(model, q) {
   .Call("stanli_r_grad", model$ptr, as.double(q))
 }
 
+#' Starting values on the constrained scale, as the free vector
+#'
+#' Every declared parameter must appear, at its declared size. A missing,
+#' unknown, wrong-length, or out-of-support value is an error naming the
+#' parameter. Containers are listed in Stan's own serialization order (the
+#' first index fastest, the order a CSV column carries) and may be nested or
+#' flat -- the declaration owns the shape either way.
+#'
+#' The result is what `sample_model(init = )` and `optimize_model(init = )`
+#' take, so unconstraining is a step per starting point rather than a second
+#' kind of argument.
+#'
+#' @param model A `stanli_model`.
+#' @param values A named list of constrained starting values, or a JSON
+#'   string in CmdStan's data format.
+#' @return A numeric vector of length `model$n_unconstrained`.
+#' @export
+unconstrain <- function(model, values) {
+  json <- if (is.character(values) && length(values) == 1) {
+    values
+  } else {
+    to_json(values)
+  }
+  .Call("stanli_r_unconstrain_inits", model$ptr, json)
+}
+
 #' Sample a model with NUTS
 #'
 #' Four chains by default, run in parallel: R-hat needs more than one
@@ -111,9 +137,9 @@ log_prob_grad <- function(model, q) {
 #' @param save_warmup Keep the warmup draws.
 #' @param init Optional starting point on the UNCONSTRAINED scale: one
 #'   vector shared by every chain, or a matrix with one row per chain.
-#'   The unconstrained scale is what stanli can read -- a constrained
-#'   init would need the inverse parameter transforms, which do not
-#'   exist.
+#'   Start from constrained values by passing them through
+#'   [unconstrain()] first -- one scale here means one contract for what
+#'   a start is.
 #' @param init_radius Random inits are drawn uniform(-r, r); 0 starts at
 #'   the origin.
 #' @param parallel_chains Chains to run at once. Defaults to all of them.
@@ -245,7 +271,8 @@ stanli_diagnose <- function(fit) {
 #'
 #' @param model A `stanli_model`.
 #' @param seed,iter Optimizer configuration.
-#' @param init Optional start on the unconstrained scale.
+#' @param init Optional start on the unconstrained scale; see
+#'   [unconstrain()] to build one from constrained values.
 #' @param init_radius Random start radius.
 #' @return A list with `values` (named), `unconstrained`, and `lp`.
 #' @export

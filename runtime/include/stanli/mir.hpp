@@ -242,6 +242,13 @@ struct Stmt {
   // are its bounds.
   std::optional<Transform> check_transform;
   std::string check_var_name;
+  // FnWriteParam in transform_inits: the transform to INVERT, so that a
+  // constrained value supplied by the user becomes a free one. write_array's
+  // own FnWriteParam leaves this empty -- its value is constrained already.
+  // Both readers split this out of the one optional-transform slot the wire
+  // and the S-expression share with FnCheck, so consumers never have to ask
+  // which meaning a transform carries.
+  std::optional<Transform> write_transform;
   // For
   std::string loopvar;
   Expr lower, upper;
@@ -298,6 +305,15 @@ struct Program {
   // FnWriteParam. Gated on emit_transformed_parameters__ /
   // emit_generated_quantities__, which the lowering pins to 1.
   std::vector<Stmt> generate_quantities;
+  // stanc3's `transform_inits`: reads each parameter by name from a caller
+  // supplied context (FnReadData names the PARAMETER here, not model data)
+  // and emits one FnWriteParam per parameter carrying the transform to
+  // invert. This is the inverse direction of the log_prob graph's
+  // FnReadParam constrains, and the only place stanli can learn it.
+  // Presence is separate from content: a current parameterless model carries
+  // an explicitly empty section, while an older producer carries no section.
+  bool has_transform_inits = false;
+  std::vector<Stmt> transform_inits;
   std::vector<FunDef> fun_defs;
   // Output variable names (params, transformed params, generated
   // quantities) in FnWriteParam emission order, from the MIR's
