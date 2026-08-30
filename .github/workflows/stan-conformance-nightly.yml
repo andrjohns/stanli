@@ -66,7 +66,8 @@ jobs:
       - name: opam (for a cold stanc build)
         run: |
           url=https://github.com/ocaml/opam/releases/download
-          curl -fsSL --retry 5 -o /tmp/opam \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o /tmp/opam \
             "$url/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-linux"
           chmod +x /tmp/opam
           sudo install -m 755 /tmp/opam /usr/local/bin/opam
@@ -135,7 +136,8 @@ jobs:
       - name: opam (for a cold stanc build)
         run: |
           url=https://github.com/ocaml/opam/releases/download
-          curl -fsSL --retry 5 -o /tmp/opam \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o /tmp/opam \
             "$url/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-linux"
           chmod +x /tmp/opam
           sudo install -m 755 /tmp/opam /usr/local/bin/opam

@@ -294,7 +294,8 @@ jobs:
         if: steps.stanc-cache.outputs.cache-hit != 'true'
         run: |
           url=https://github.com/ocaml/opam/releases/download
-          curl -fsSL -o /tmp/opam \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o /tmp/opam \
             "$url/$OPAM_VERSION/opam-$OPAM_VERSION-${{ matrix.opam_arch }}"
           chmod +x /tmp/opam
           sudo install -m 755 /tmp/opam /usr/local/bin/opam 2>/dev/null ||
@@ -883,11 +884,17 @@ jobs:
           mkdir -p previous-release/runtime legacy-release
           previous=https://github.com/seantalts/stanli/releases/download/v0.9.6
           legacy=https://github.com/seantalts/stanli/releases/download/v0.9.3
-          curl -fsSL "$previous/stanli-runtime-linux-x86_64.tar.gz" \
+          # A GitHub asset redirect reset the connection once and failed this
+          # whole job. Plain --retry does not include curl error 35, so keep
+          # retry-all-errors on every independently verified release asset.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            "$previous/stanli-runtime-linux-x86_64.tar.gz" \
             -o previous-release/runtime.tar.gz
-          curl -fsSL "$previous/stanli_0.9.6.tar.gz" \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            "$previous/stanli_0.9.6.tar.gz" \
             -o previous-release/stanli_0.9.6.tar.gz
-          curl -fsSL "$legacy/stanli_0.9.3.tar.gz" \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            "$legacy/stanli_0.9.3.tar.gz" \
             -o legacy-release/stanli_0.9.3.tar.gz
           echo 'dee1311c5be011fa85070316302bde634f70e7f8c0cfe4e81954d91be5a75ffa  previous-release/runtime.tar.gz' | sha256sum -c -
           echo 'ea5271500e363fceca94fb60005dee7a80266d1a40836305468723887c3a6629  previous-release/stanli_0.9.6.tar.gz' | sha256sum -c -
@@ -1713,7 +1720,8 @@ jobs:
         if: steps.stancjs-cache.outputs.cache-hit != 'true'
         run: |
           url=https://github.com/ocaml/opam/releases/download
-          curl -fsSL -o /tmp/opam \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o /tmp/opam \
             "$url/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-linux"
           sudo install -m 755 /tmp/opam /usr/local/bin/opam
           opam init --bare --disable-sandboxing --no-setup -y
