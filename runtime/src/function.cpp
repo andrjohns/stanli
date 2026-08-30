@@ -92,15 +92,9 @@ bool named(const stanli::mir::FunDef& f, std::string_view requested) {
          f.name[requested.size()] == '(';
 }
 
-const stanli::mir::FunDef* select_function(const stanli::mir::Program& program,
-                                           const std::string& requested,
-                                           const stanli::DataMap* arguments) {
-  std::vector<const stanli::mir::FunDef*> candidates;
-  for (const auto& f : program.fun_defs)
-    if (named(f, requested)) candidates.push_back(&f);
-  if (candidates.empty())
-    throw std::runtime_error("Stan function not found: " + requested);
-
+const stanli::mir::FunDef* select_function(
+    const std::vector<const stanli::mir::FunDef*>& candidates,
+    const std::string& requested, const stanli::DataMap* arguments) {
   // An explicitly resolved signature, e.g. foo(real,vector), selects one
   // definition without inspecting values.
   for (const auto* f : candidates)
@@ -147,6 +141,11 @@ const stanli::mir::FunDef* select_function(const stanli::mir::Program& program,
 struct stanli_function {
   std::shared_ptr<const stanli::mir::Program> program;
   std::string requested_name;
+  // Built once, then read-only. The immutable Program owns every pointed-to
+  // definition and outlives these tables. Overload winners are deliberately
+  // NOT cached: type/rank/promotion validation still runs on each call.
+  std::map<std::string, const stanli::mir::FunDef*> functions;
+  std::vector<const stanli::mir::FunDef*> candidates;
 };
 
 extern "C" {
@@ -163,10 +162,11 @@ stanli_function* stanli_function_new_from_mir(const char* mir_text,
     out->requested_name = function_name;
     // Fail at construction for a missing name. Overloads are intentionally
     // selected later, when their argument values are present.
-    bool found = false;
-    for (const auto& f : out->program->fun_defs)
-      found |= named(f, function_name);
-    if (!found)
+    for (const auto& f : out->program->fun_defs) {
+      out->functions.emplace(f.name, &f);
+      if (named(f, function_name)) out->candidates.push_back(&f);
+    }
+    if (out->candidates.empty())
       throw std::runtime_error("Stan function not found: " +
                                std::string(function_name));
     return out.release();
@@ -209,11 +209,7 @@ int stanli_function_call(const stanli_function* function,
       throw std::runtime_error(
           "function, arguments, and result writer must not be null");
     const stanli::mir::FunDef* selected = select_function(
-        *function->program, function->requested_name, arguments);
-
-    std::map<std::string, const stanli::mir::FunDef*> functions;
-    for (const auto& f : function->program->fun_defs)
-      functions.emplace(f.name, &f);
+        function->candidates, function->requested_name, arguments);
 
     std::vector<stanli::DataMap::Entry> values;
     values.reserve(selected->arg_names.size());
@@ -232,7 +228,7 @@ int stanli_function_call(const stanli_function* function,
     }
 
     stanli::MirInterp<double> interpreter(
-        functions, "function " + function->requested_name);
+        function->functions, "function " + function->requested_name);
     const auto result = interpreter.call(*selected, values);
     if (write_result(result_context, result.is_int ? 1 : 0, result.r.data(),
                      result.r.size(), result.i.data(), result.i.size(),

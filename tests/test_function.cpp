@@ -56,6 +56,16 @@ functions {
   real numeric(real x) {
     return x + 20;
   }
+  real direction(vector x) {
+    return sum(x);
+  }
+  real direction(row_vector x) {
+    return -sum(x);
+  }
+  real descend(real x, int remaining) {
+    if (remaining == 0) return x;
+    return descend(x + 1, remaining - 1);
+  }
 }
 model {}
 )stan";
@@ -199,6 +209,41 @@ int main() {
     promoted.set_int("x", 2);
     check(numeric(promoted).r == std::vector<double>({12.0}),
           "integer overload wins over real promotion");
+    for (int i = 0; i < 3; ++i) {
+      check(numeric(scalar).r == std::vector<double>({22.0}),
+            "cached candidates select a real overload after an integer");
+      check(numeric(promoted).r == std::vector<double>({12.0}),
+            "cached candidates select an integer overload after a real");
+      throws_with([&] { (void)numeric(vector); }, "no overload",
+                  "cached candidates still reject invalid ranks");
+      check(overloaded(vector).r == std::vector<double>({6.0}) &&
+                overloaded(scalar).r == std::vector<double>({2.5}),
+            "cached candidates select by the current rank");
+    }
+    Function resolved(source, "numeric(real)");
+    check(resolved(promoted).r == std::vector<double>({22.0}),
+          "resolved signature preserves promotion despite integer overload");
+    Function direction(source, "direction");
+    throws_with([&] { (void)direction(vector); }, "ambiguously match",
+                "cached candidates preserve vector/row-vector ambiguity");
+    Function resolved_direction(source, "direction(vector)");
+    check(resolved_direction(vector).r == std::vector<double>({6.0}),
+          "resolved signature disambiguates identical host ranks");
+
+    // Recursive calls cannot be inlined away: they exercise the cached full
+    // definition table, not just the top-level candidate list.
+    Function descend(source, "descend");
+    DataMap recursive;
+    recursive.set_real("x", 1.5);
+    recursive.set_int("remaining", 3);
+    check(descend(recursive).r == std::vector<double>({4.5}),
+          "cached table supports nested user-function calls");
+    recursive.set_int("remaining", 70);
+    throws_with([&] { (void)descend(recursive); }, "recursion too deep",
+                "cached table preserves recursion guard");
+    recursive.set_int("remaining", 2);
+    check(descend(recursive).r == std::vector<double>({3.5}),
+          "cached table recovers after an interpreter failure");
 
     throws_with(
         [&] {
