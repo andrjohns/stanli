@@ -363,18 +363,6 @@ jobs:
             deps/stanc3/stanc
             deps/stanc3/stanc.src
 
-      - name: Check the fixture corpus matches the pinned stanc
-        if: matrix.container != ''
-        shell: bash
-        run: |
-          cp -a tests/fixtures "$RUNNER_TEMP/fixtures-before"
-          ./tools/gen_fixtures.sh
-          if ! diff -rq "$RUNNER_TEMP/fixtures-before" tests/fixtures; then
-            echo "tests/fixtures is stale against deps/stanc3/stanc." >&2
-            echo "Run tools/gen_fixtures.sh and commit the result." >&2
-            exit 1
-          fi
-
       - name: Configure and build
         run: |
           # $PWD, not github.workspace: inside the manylinux containers the
@@ -1511,8 +1499,9 @@ jobs:
 
   # Pull requests compile the complete runtime for wasm32, catching portable
   # ABI and type-width failures without paying for the final Emscripten link.
-  # Pushes and tags finish the module, run it, and publish the artifact used by
-  # the Pages and release jobs below.
+  # Pushes and tags finish the module and publish the artifact used by the
+  # Pages and release jobs below. Those jobs run the end-to-end source compile
+  # and sampling smoke test with the matching browser compiler artifact.
   wasm:
     name: wasm (browser build)
     needs: changes
@@ -1583,9 +1572,6 @@ jobs:
             cmake --build build-wasm -j4
           fi
           ccache -s
-      - name: Sample eight schools under Node
-        if: github.event_name != 'pull_request'
-        run: node tests/test_wasm.cjs
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
         with:

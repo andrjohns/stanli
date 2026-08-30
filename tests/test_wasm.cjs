@@ -1,11 +1,13 @@
 // The WASM build end to end under Node: load the module, compile eight
-// schools from its pinned MIR fixture, evaluate a gradient, sample, and
-// check the posterior mean of mu. Mirrors the wheel smoke test.
+// schools from Stan source, evaluate a gradient, sample, and check the
+// posterior mean of mu. Mirrors the wheel smoke test.
 //
 //   node tests/test_wasm.cjs [stanli.js] [stanli-compiler.js] [stancjs.bc.js]
 "use strict";
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const {spawnSync} = require("child_process");
 
 const modPath = path.resolve(
     process.argv[2] || path.join(__dirname, "..", "build-wasm", "stanli.js"));
@@ -16,6 +18,29 @@ const fallbackPath = process.argv[4] && path.resolve(process.argv[4]);
 function fail(msg) {
   console.error("FAIL " + msg);
   process.exit(1);
+}
+
+function nativeMir(fixtures) {
+  const executable = process.platform === "win32" ? "stanc.exe" : "stanc";
+  const stanc = path.resolve(
+      process.env.STANC || path.join(__dirname, "..", "deps", "stanc3",
+                                    executable));
+  if (!fs.existsSync(stanc))
+    throw new Error("missing pinned compiler: " + stanc);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "stanli-wasm-stanc-"));
+  try {
+    const source = path.join(root, "es.stan");
+    fs.copyFileSync(path.join(fixtures, "es.stan"), source);
+    const compiled = spawnSync(
+        stanc, ["--O1", "--debug-optimized-mir", source],
+        {encoding: "utf8"});
+    if (compiled.error) throw compiled.error;
+    if (compiled.status !== 0)
+      throw new Error("stanc failed: " + (compiled.stderr || compiled.status));
+    return compiled.stdout;
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
 }
 
 createStanli().then((M) => {
@@ -55,7 +80,11 @@ createStanli().then((M) => {
         fail("fallback stancjs has unsubstituted version metadata");
     }
   } else {
-    mir = fs.readFileSync(path.join(fixtures, "es.tmir.sexp"), "utf8");
+    try {
+      mir = nativeMir(fixtures);
+    } catch (error) {
+      fail(String(error));
+    }
   }
   const data = fs.readFileSync(
       path.join(fixtures, "eight_schools.json"), "utf8");

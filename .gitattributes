@@ -1,4 +1,3 @@
-tests/fixtures/*.tmir.sexp linguist-generated=true
 .gitattributes text eol=lf
 compiler/js/* text eol=lf
 compiler/ocaml/* text eol=lf
