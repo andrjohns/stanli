@@ -187,12 +187,12 @@ void stanli_function_free(stanli_function* function) { delete function; }
 
 int stanli_function_call(const stanli_function* function,
                          const stanli::DataMap* arguments,
-                         stanli::DataMap::Entry* result, char* err,
-                         size_t err_len) {
+                         stanli_function_result_writer write_result,
+                         void* result_context, char* err, size_t err_len) {
   try {
-    if (function == nullptr || arguments == nullptr || result == nullptr)
+    if (function == nullptr || arguments == nullptr || write_result == nullptr)
       throw std::runtime_error(
-          "function, arguments, and result must not be null");
+          "function, arguments, and result writer must not be null");
     const stanli::mir::FunDef* selected = select_function(
         *function->program, function->requested_name, arguments);
 
@@ -218,7 +218,11 @@ int stanli_function_call(const stanli_function* function,
 
     stanli::MirInterp<double> interpreter(
         functions, "function " + function->requested_name);
-    *result = interpreter.call(*selected, values);
+    const auto result = interpreter.call(*selected, values);
+    if (write_result(result_context, result.is_int ? 1 : 0, result.r.data(),
+                     result.r.size(), result.i.data(), result.i.size(),
+                     result.dims.data(), result.dims.size()) != 0)
+      throw std::runtime_error("function result writer failed");
     return 0;
   } catch (const std::exception& e) {
     put_err(err, err_len, e.what());

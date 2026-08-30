@@ -120,9 +120,16 @@ jobs:
         if: steps.stanc-cache.outputs.cache-hit != 'true'
         run: |
           url=https://github.com/ocaml/opam/releases/download
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
-            -o /tmp/opam \
-            "$url/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-linux"
+          # This runs in manylinux, whose old curl lacks --retry-all-errors.
+          # An outer loop still retries every curl failure, including resets.
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL -o /tmp/opam \
+              "$url/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-linux"; then
+              break
+            fi
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep $((attempt * 2))
+          done
           chmod +x /tmp/opam
           sudo install -m 755 /tmp/opam /usr/local/bin/opam 2>/dev/null ||
             install -m 755 /tmp/opam /usr/local/bin/opam
