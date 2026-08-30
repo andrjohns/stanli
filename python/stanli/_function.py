@@ -7,6 +7,10 @@ import numpy as np
 from . import _lib, _read_utf8_file, stan_to_mir
 
 
+_INT_MIN = np.iinfo(np.intc).min
+_INT_MAX = np.iinfo(np.intc).max
+
+
 class _Argument(ctypes.Structure):
     """Mirrors stanli_function_argument in stanli/function.hpp."""
     _fields_ = [
@@ -120,18 +124,37 @@ class Function:
         # ctypes borrows all these buffers until the call (including the
         # result callback) finishes. Never let conversion temporaries die.
         buffers = []
-        int_bounds = np.iinfo(np.intc)
         for i, (name, value) in enumerate(arguments.items()):
             if not isinstance(name, str) or not name or "\0" in name:
                 raise ValueError("argument names must be nonempty strings without NUL")
+            # Exact built-ins need no NumPy shape/dtype discovery. Keep bool,
+            # subclasses, and NumPy scalars on the established conversion path
+            # so their array protocols and rejection behavior are unchanged.
+            # Storage remains call-local, including during reentrant callbacks.
+            if type(value) is float:
+                scalar = ctypes.c_double(value)
+                encoded_name = name.encode()
+                native[i] = _Argument(encoded_name, 0, ctypes.pointer(scalar),
+                                      None, 1, None, 0)
+                buffers.extend((scalar, encoded_name))
+                continue
+            if type(value) is int:
+                if not _INT_MIN <= value <= _INT_MAX:
+                    raise OverflowError(f"argument '{name}' does not fit a Stan integer")
+                scalar = ctypes.c_int(value)
+                encoded_name = name.encode()
+                native[i] = _Argument(encoded_name, 1, None,
+                                      ctypes.pointer(scalar), 1, None, 0)
+                buffers.extend((scalar, encoded_name))
+                continue
             if isinstance(value, (int, np.integer)) and not (
-                    int_bounds.min <= value <= int_bounds.max):
+                    _INT_MIN <= value <= _INT_MAX):
                 raise OverflowError(f"argument '{name}' does not fit a Stan integer")
             array = np.asarray(value)
             is_int = array.dtype.kind in "iu"
             if is_int:
-                if array.size and (array.min() < int_bounds.min or
-                                   array.max() > int_bounds.max):
+                if array.size and (array.min() < _INT_MIN or
+                                   array.max() > _INT_MAX):
                     raise OverflowError(f"argument '{name}' does not fit a Stan integer")
             elif array.dtype.kind != "f":
                 raise TypeError(f"argument '{name}' must contain real or integer numbers")

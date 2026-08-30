@@ -14,6 +14,7 @@ import pathlib
 import pickle
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,85 @@ def test_function_scalar_types_overloads_and_nonfinite():
     assert numeric(x=2.0) == 22.0
     resolved = stanli.Function("numeric(real)", mir=mir)
     assert resolved(x=2) == 22.0
+
+
+def test_function_scalar_fast_path_and_array_fallback():
+    mir = stanli.stan_to_mir(FUNCTION_SOURCE)
+    real = stanli.Function("real_identity", mir=mir)
+    integer = stanli.Function("int_identity", mir=mir)
+    # Identity must preserve every bit, including signed zero, subnormals,
+    # infinities, and a NaN payload, on both the scalar and generic paths.
+    values = [0., -0., 1.25, -1e300, 5e-324, float("inf"), -float("inf"),
+              struct.unpack("d", struct.pack("Q", 0x7ff8000000000042))[0]]
+    for value in values:
+        expected = struct.pack("d", real(x=np.asarray(value)))
+        assert struct.pack("d", real(x=value)) == expected
+    for value in (-2**31, -1, 0, 2**31 - 1):
+        assert integer(x=value) == integer(x=np.asarray(value)) == value
+        assert type(real(x=value)) is float
+    with mock.patch("stanli._function.np.asarray", side_effect=AssertionError):
+        assert real(x=1.25) == 1.25
+        assert integer(x=17) == 17
+
+    class RealSubclass(float):
+        pass
+
+    class IntSubclass(int):
+        pass
+
+    for value in (RealSubclass(1.25), IntSubclass(3), np.float32(1.25),
+                  np.float64(1.25), np.int64(3), np.uint32(3)):
+        with mock.patch("stanli._function.np.asarray", wraps=np.asarray) as convert:
+            assert real(x=value) == float(value)
+            convert.assert_called_once_with(value)
+    for value, error in ((True, TypeError), (np.bool_(False), TypeError),
+                         (2**31, OverflowError), (-2**31 - 1, OverflowError),
+                         (np.uint64(2**63), OverflowError)):
+        try:
+            real(x=value)
+        except error:
+            pass
+        else:
+            raise AssertionError(f"{value!r} did not raise {error.__name__}")
+    assert real(x=-0.0) == 0.0  # recovery after conversion failures
+
+
+def test_function_concurrent_and_reentrant_calls():
+    mir = stanli.stan_to_mir(FUNCTION_SOURCE)
+    numeric = stanli.Function("numeric", mir=mir)
+    barrier = threading.Barrier(4)
+
+    def calls(worker):
+        barrier.wait()
+        for i in range(40):
+            value = worker * 100 + i
+            assert numeric(x=value) == value + 10.
+            assert numeric(x=float(value)) == value + 20.
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(calls, range(4)))
+
+    # Invoke the same handle from inside its result callback. Both the native
+    # interpreter state and Python argument/result buffers must remain local.
+    adapter = stanli._function
+    original = adapter._write_result
+    entered = False
+    nested = []
+
+    @adapter._ResultWriter
+    def writer(*args):
+        nonlocal entered
+        if not entered:
+            entered = True
+            try:
+                nested.append(numeric(x=3.0))
+            except BaseException as exc:
+                nested.append(exc)
+        return original(*args)
+
+    with mock.patch.object(adapter, "_write_result", writer):
+        assert numeric(x=7) == 17.
+    assert nested == [23.]
 
 
 def test_function_container_layout_ownership_and_empty_dimensions():
