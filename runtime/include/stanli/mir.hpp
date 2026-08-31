@@ -7,6 +7,7 @@
 #include <stanli/sexp.hpp>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -320,6 +321,79 @@ struct Program {
   // output_vars section.
   std::vector<std::string> output_vars;
 };
+
+// reduce_sum(f, sliced, grainsize, shared...) reaches its partial-sum
+// function through a bare Var rather than a call, so both engines need the
+// same three answers about that reference: whether this is a reduce_sum at
+// all, which definition the name means, and what propto it asks for.
+
+inline bool is_reduce_sum(const Expr& e) {
+  return e.kind == Expr::FunApp && e.fn_lib == Expr::Lib::StanLib &&
+         (e.name == "reduce_sum" || e.name == "reduce_sum_static");
+}
+
+// The `_lupdf` / `_lupmf` spelling at the functor reference is stanc3's
+// propto marker; the definition is always the normalized `_lpdf` / `_lpmf`.
+// The marker is the only surviving propto signal here: the functor's
+// `(FnLpdf true)` type is not part of the portable encoding, and the
+// reduce_sum node itself is FnPlain, so neither can be consulted instead.
+inline std::string reduce_sum_partial_name(const std::string& functor,
+                                           bool* propto) {
+  const auto unnormalized = [&](const char* marker) {
+    return functor.size() > 6 &&
+           functor.compare(functor.size() - 6, 6, marker) == 0;
+  };
+  if (unnormalized("_lupdf")) {
+    *propto = true;
+    return functor.substr(0, functor.size() - 6) + "_lpdf";
+  }
+  if (unnormalized("_lupmf")) {
+    *propto = true;
+    return functor.substr(0, functor.size() - 6) + "_lpmf";
+  }
+  *propto = false;
+  return functor;
+}
+
+// The formals reduce_sum calls its partial-sum function with, in order: the
+// slice, its two bounds, then every shared argument unchanged.
+inline std::vector<UnsizedView> reduce_sum_partial_views(const Expr& e) {
+  std::vector<UnsizedView> views;
+  if (e.args.size() < 3) return views;
+  views.reserve(e.args.size());
+  views.push_back(e.args[1].unsized);
+  views.push_back({0, UnsizedLeaf::Int});
+  views.push_back({0, UnsizedLeaf::Int});
+  for (size_t i = 3; i < e.args.size(); ++i) views.push_back(e.args[i].unsized);
+  return views;
+}
+
+// The reader mangles an overloaded definition's name and rewrites its call
+// sites, but a functor reference is a Var and is never rewritten. Take the
+// unmangled name when it is the only one, and otherwise select the overload
+// whose formals match the call reduce_sum will make. Returns null when the
+// name resolves to nothing or, impossibly, to more than one.
+inline const FunDef* resolve_reduce_sum_partial(
+    const std::map<std::string, const FunDef*>& funs, const std::string& base,
+    const std::vector<UnsizedView>& views) {
+  const auto exact = funs.find(base);
+  if (exact != funs.end()) return exact->second;
+  const FunDef* match = nullptr;
+  for (const auto& [name, def] : funs) {
+    if (name.size() <= base.size() || name.compare(0, base.size(), base) != 0 ||
+        name[base.size()] != '(')
+      continue;
+    if (def->arg_views.size() != views.size()) continue;
+    bool same = true;
+    for (size_t i = 0; i < views.size() && same; ++i)
+      same = def->arg_views[i].depth == views[i].depth &&
+             def->arg_views[i].leaf == views[i].leaf;
+    if (!same) continue;
+    if (match) return nullptr;
+    match = def;
+  }
+  return match;
+}
 
 Program read_program(const sexp::Node& root);
 

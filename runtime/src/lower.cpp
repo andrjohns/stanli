@@ -418,6 +418,9 @@ struct Lowering {
   std::set<std::string> effectful_visiting;
   std::set<std::string> int_locals;  // SInt locals in log_prob (data-only)
   int udf_depth = 0;
+  // Names the reduce_sum rewrite binds its lowered slice under, kept
+  // distinct so nested calls do not share one.
+  int reduce_sum_slices = 0;
   // int_env as bind_data left it, before either section's locals and loop
   // variables were folded in; the write_array lowering starts from this.
   std::map<std::string, long> int_env_data;
@@ -2428,9 +2431,24 @@ struct Lowering {
     if (e.kind == mir::Expr::FunApp &&
         e.fn_lib == mir::Expr::Lib::UserDefined && fun_effectful(e.name))
       return true;
+    // reduce_sum reaches its partial-sum function through a Var, so the
+    // UserDefined test above cannot see a print or reject in that body.
+    if (mir::is_reduce_sum(e) && reduce_sum_effectful(e)) return true;
     for (const auto& a : e.args)
       if (expr_effectful(a)) return true;
     return false;
+  }
+
+  bool reduce_sum_effectful(const mir::Expr& e) {
+    if (e.args.empty() || e.args[0].kind != mir::Expr::Var) return true;
+    bool propto = false;
+    const mir::FunDef* f = mir::resolve_reduce_sum_partial(
+        fun_defs, mir::reduce_sum_partial_name(e.args[0].name, &propto),
+        mir::reduce_sum_partial_views(e));
+    // A functor this cannot resolve is refused at lowering. Until it gets
+    // there, assume the worst rather than fold away a call whose body has
+    // never been examined.
+    return f == nullptr || fun_effectful(f->name);
   }
 
   bool stmt_effectful(const mir::Stmt& s) {
@@ -3521,6 +3539,149 @@ struct Lowering {
     return Val{slot, false, si};
   }
 
+  mir::Expr slice_bound_literal(int64_t value, const std::string& raw) {
+    if (value > std::numeric_limits<int32_t>::max())
+      fail("reduce_sum: slice bound exceeds the Stan integer range", raw);
+    mir::Expr literal;
+    literal.kind = mir::Expr::LitInt;
+    literal.lit_i = static_cast<long>(value);
+    literal.lit = static_cast<double>(value);
+    literal.type_ = "UInt";
+    literal.unsized = {0, mir::UnsizedLeaf::Int};
+    literal.data_only = true;
+    literal.raw = raw;
+    return literal;
+  }
+
+  // reduce_sum(f, sliced, grainsize, shared...) sums f over the terms of a
+  // partition of `sliced`, and its contract is that the partition is
+  // unobservable: the terms must sum to the same value however the slice is
+  // cut. Stan Math without STAN_THREADS takes that freedom to its limit and
+  // makes exactly one call over the whole slice, returning zero for an empty
+  // one (prim/functor/reduce_sum.hpp). stanli has no threading, so it lowers
+  // to that same single call. That is not an approximation to be reconciled
+  // later: it agrees with default CmdStan term for term, and it is also the
+  // fastest shape available here, because cutting the slice would shorten
+  // the callee's vectorized densities and buy nothing back.
+  //
+  // Written out, the call is an ordinary user-function call, so this rewrites
+  // it to f(sliced, 1, size(sliced), shared...) and hands that to the
+  // inliner, which already owns argument binding, propto threading, and the
+  // data-only formal rules.
+  std::optional<Val> lower_reduce_sum(const mir::Expr& e) {
+    if (!mir::is_reduce_sum(e)) return std::nullopt;
+    if (e.args.size() < 3)
+      fail(
+          "reduce_sum: expected a partial-sum function, a sliced argument, "
+          "and a grainsize",
+          e.raw);
+    if (e.args[0].kind != mir::Expr::Var)
+      fail("reduce_sum: the partial-sum argument is not a function name",
+           e.raw);
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Real)
+      fail("reduce_sum: result is not a real", e.raw);
+
+    // Stan Math checks the grainsize at runtime, and it is always data, so a
+    // grainsize that folds is checked here instead. One that does not fold is
+    // left alone rather than refusing a model CmdStan runs: grainsize is a
+    // scheduling hint and cannot change the serial sum.
+    std::optional<long> grainsize;
+    try {
+      grainsize = eval_int(e.args[2]);
+    } catch (const CompileError&) {
+    }
+    if (grainsize && *grainsize < 1)
+      fail("reduce_sum: grainsize must be positive, got " +
+               std::to_string(*grainsize),
+           e.raw);
+
+    // An empty slice returns zero without the callee running at all, and a
+    // zero-length local can have declaration geometry but no materialized
+    // slot, so ask decls before asking for a value. The empty map_rect
+    // branch above has the same shape and the same reason.
+    if (e.args[1].kind == mir::Expr::Var) {
+      const auto declared = decls.find(e.args[1].name);
+      if (declared != decls.end() && is_array(declared->second.si) &&
+          array_shape(declared->second.si).dims.front() == 0)
+        return constant(0.0);
+    }
+    Val slice = lower_expr(e.args[1]);
+    if (!is_array(slice.si))
+      fail("reduce_sum: the sliced argument is not an array", e.raw);
+    const int64_t n = array_shape(slice.si).dims.front();
+    if (n == 0) return constant(0.0);
+
+    bool propto = false;
+    const std::string base =
+        mir::reduce_sum_partial_name(e.args[0].name, &propto);
+    const std::vector<mir::UnsizedView> views =
+        mir::reduce_sum_partial_views(e);
+    const mir::FunDef* f =
+        mir::resolve_reduce_sum_partial(fun_defs, base, views);
+    if (f == nullptr)
+      fail("reduce_sum: unknown partial-sum function " + base, e.raw);
+    if (f->arg_views.size() != views.size())
+      fail("reduce_sum: " + base + " takes " +
+               std::to_string(f->arg_views.size()) +
+               " arguments, but reduce_sum calls it with " +
+               std::to_string(views.size()),
+           e.raw);
+    if (f->arg_views[1].depth != 0 ||
+        f->arg_views[1].leaf != mir::UnsizedLeaf::Int ||
+        f->arg_views[2].depth != 0 ||
+        f->arg_views[2].leaf != mir::UnsizedLeaf::Int)
+      fail(
+          "reduce_sum: " + base + " must take the two slice bounds as integers",
+          e.raw);
+
+    // Bind the lowered slice under a name no Stan identifier can collide
+    // with, so the rewritten call can name it instead of lowering the slice
+    // expression a second time. resolve_overloads borrows Stan's syntax for
+    // the same purpose.
+    const std::string bound =
+        "(reduce_sum slice " + std::to_string(reduce_sum_slices++) + ")";
+    scope[bound] = slice;
+    decls[bound] = DeclView{g.slots[slice.slot].len, slice.autodiff, slice.si,
+                            false, false};
+
+    mir::Expr call;
+    call.kind = mir::Expr::FunApp;
+    call.fn_lib = mir::Expr::Lib::UserDefined;
+    call.name = f->name;
+    // lower_call_udf reads this exactly as CmdStan reads the generated
+    // functor's propto__ argument: an `_lupdf` functor inherits the caller's
+    // normalization, an `_lpdf` one forces the normalized density.
+    call.fn_propto = propto;
+    call.type_ = e.type_;
+    call.unsized = e.unsized;
+    call.data_only = e.data_only;
+    call.raw = e.raw;
+    call.args.reserve(views.size());
+    mir::Expr sliced;
+    sliced.kind = mir::Expr::Var;
+    sliced.name = bound;
+    sliced.type_ = e.args[1].type_;
+    sliced.unsized = e.args[1].unsized;
+    sliced.data_only = e.args[1].data_only;
+    sliced.raw = e.args[1].raw;
+    call.args.push_back(std::move(sliced));
+    call.args.push_back(slice_bound_literal(1, e.raw));
+    call.args.push_back(slice_bound_literal(n, e.raw));
+    for (size_t i = 3; i < e.args.size(); ++i) call.args.push_back(e.args[i]);
+
+    Val result{-1, false, {}};
+    try {
+      result = lower_call_udf(call);
+    } catch (...) {
+      scope.erase(bound);
+      decls.erase(bound);
+      throw;
+    }
+    scope.erase(bound);
+    decls.erase(bound);
+    return result;
+  }
+
   Val lower_funapp(const mir::Expr& e) {
     if (e.fn_lib == mir::Expr::Lib::StanLib && e.name == "dims")
       return lower_dims(e);
@@ -3617,6 +3778,7 @@ struct Lowering {
       fail("unsupported function kind for " + e.name, e.raw);
     }
     if (auto v = lower_empty_map_rect(e)) return *v;
+    if (auto v = lower_reduce_sum(e)) return *v;
     // The stan-library names split into disjoint groups; each helper owns
     // one and declines the rest.
     if (auto v = lower_multi_normal_rng(e)) return *v;
