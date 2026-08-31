@@ -2920,6 +2920,29 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // is_inf / is_nan on data-time scalars: the lowering folds them to
+  // integer constants (0 for the finite reads, 1 for 1.0/0.0 and 0.0/0.0),
+  // so the normal mean is a + b + c + d = 2.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/isinf.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/isinf.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "isinf 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.6;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var theta = 0.6;
+    var acc = stan::math::normal_lpdf<true>(theta, 2.0, 1.0);
+    acc.grad();
+    expect_eq("isinf lp", lp, acc.val());
+    expect_eq("isinf g0", grad[0], theta.adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {
