@@ -2985,6 +2985,119 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // beta[:, 1, 1]: an outer array range kept in full, with fixed row/column
+  // indices into every element's matrix (array[2] matrix[2,2]). Check both
+  // the gathered sum and every gradient against the var path.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/idxarray3d.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/idxarray3d.tmir.sexp"), d);
+    check(lm.n_unconstrained == 8, "idxarray3d 8 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[8];
+    for (int k = 0; k < 8; ++k) q[k] = 0.1 * (k + 1) - 0.4;
+    for (int k = 0; k < 8; ++k) lex.params_data()[k] = q[k];
+    double grad[8];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    // Column-major within each matrix, array-major overall. Filled by
+    // element rather than Eigen's comma initializer, which always reads
+    // row-major regardless of the matrix's own storage order.
+    Eigen::Matrix<var, -1, -1> b1(2, 2), b2(2, 2);
+    for (int j = 0; j < 2; ++j)
+      for (int i = 0; i < 2; ++i) {
+        b1(i, j) = q[j * 2 + i];
+        b2(i, j) = q[4 + j * 2 + i];
+      }
+    var acc =
+        stan::math::normal_lpdf<true>(stan::math::to_vector(b1), 0.0, 1.0) +
+        stan::math::normal_lpdf<true>(stan::math::to_vector(b2), 0.0, 1.0) +
+        b1(0, 0) + b2(0, 0);
+    acc.grad();
+    expect_eq("idxarray3d lp", lp, acc.val());
+    Eigen::Matrix<var, -1, -1> both[2] = {b1, b2};
+    for (int e = 0, k = 0; e < 2; ++e)
+      for (int j = 0; j < 2; ++j)
+        for (int i = 0; i < 2; ++i, ++k)
+          expect_eq("idxarray3d g" + std::to_string(k), grad[k],
+                    both[e](i, j).adj());
+    stan::math::recover_memory();
+  }
+
+  // state_probs[1, 1, 1:2]: a full array-index prefix pins one row_vector
+  // leaf element (array[2, 2] row_vector[3]), then a trailing range reads
+  // inside it. Check the gathered sum and every gradient against the var
+  // path.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/idxrowvec.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/idxrowvec.tmir.sexp"), d);
+    check(lm.n_unconstrained == 12, "idxrowvec 12 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[12];
+    for (int k = 0; k < 12; ++k) q[k] = 0.1 * (k + 1) - 0.6;
+    for (int k = 0; k < 12; ++k) lex.params_data()[k] = q[k];
+    double grad[12];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    // Array-major (row, then column), each row_vector[3] contiguous.
+    Eigen::Matrix<var, 1, -1> sp[2][2];
+    for (int i = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j) {
+        Eigen::Matrix<var, 1, -1> v(3);
+        const int base = (i * 2 + j) * 3;
+        v << q[base], q[base + 1], q[base + 2];
+        sp[i][j] = v;
+      }
+    var acc = sp[0][0](0) + sp[0][0](1);
+    for (int i = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j)
+        acc += stan::math::normal_lpdf<true>(sp[i][j], 0.0, 1.0);
+    acc.grad();
+    expect_eq("idxrowvec lp", lp, acc.val());
+    for (int i = 0, k = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j)
+        for (int c = 0; c < 3; ++c, ++k)
+          expect_eq("idxrowvec g" + std::to_string(k), grad[k],
+                    sp[i][j](c).adj());
+    stan::math::recover_memory();
+  }
+
+  // H[1, :, :] = seed * theta: an explicit `:` for every leaf dimension
+  // after a full array-index prefix, on array[2] matrix[2, 2] H. Checks lp
+  // and the gradient against the var path built from the same statements
+  // (H[1] = theta*I, H[2] = I, both normal(0,1) on to_vector, plus
+  // theta ~ normal(0,1)).
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/idxassign.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/idxassign.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "idxassign 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = -0.6;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var theta = -0.6;
+    Eigen::Matrix<var, -1, -1> seed =
+        Eigen::Matrix<double, -1, -1>::Identity(2, 2);
+    Eigen::Matrix<var, -1, -1> h1 = seed * theta, h2 = seed;
+    var acc =
+        stan::math::normal_lpdf<true>(stan::math::to_vector(h1), 0.0, 1.0) +
+        stan::math::normal_lpdf<true>(stan::math::to_vector(h2), 0.0, 1.0) +
+        stan::math::normal_lpdf<true>(theta, 0.0, 1.0);
+    acc.grad();
+    expect_eq("idxassign lp", lp, acc.val());
+    expect_eq("idxassign g0", grad[0], theta.adj());
+    stan::math::recover_memory();
+  }
+
   // A parameter sized by a transformed-data for-loop accumulator
   // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
   // transformed-data interpreter used to lose the accumulator's int-ness on

@@ -1801,6 +1801,60 @@ struct Lowering {
           SlotInfo si = indexed_view(base.si, n_idx, a.len, e.type_);
           return emit_value(OP_SLICE, {base}, a.len, si, {(int)a.off});
         }
+        // A full array-index prefix pins one vector/row_vector leaf element;
+        // exactly one trailing range/all index then reads inside that leaf.
+        // The prefix is not all-single-index in stanc's own sense (the trailing
+        // index is a range), so this falls outside the block above even
+        // though every array position is fixed. Graph storage keeps the
+        // pinned leaf contiguous, so this is one contiguous read from its
+        // start once flat_addr locates it.
+        if (bdims && (array_shape(base.si).leaf == ViewKind::Vector ||
+                      array_shape(base.si).leaf == ViewKind::RowVector)) {
+          const size_t n_arr = bdims->size() - 1;
+          const mir::Expr& last = e.args.back();
+          bool prefix_single =
+              e.args.size() == n_arr + 2 &&
+              (last.name == "IndexBetween" || last.name == "IndexAll");
+          for (size_t d = 0; prefix_single && d < n_arr; ++d)
+            if (e.args[1 + d].name != "IndexSingle") prefix_single = false;
+          if (prefix_single) {
+            std::vector<int64_t> ix;
+            ix.reserve(n_arr);
+            for (size_t d = 0; d < n_arr; ++d) {
+              const int64_t one = eval_int(e.args[1 + d].args[0]);
+              check_index(one, (*bdims)[d], "array index", e.raw);
+              ix.push_back(one - 1);
+            }
+            const Addr a = flat_addr(*bdims, false, ix);
+            int64_t lo = 1, hi = a.len;
+            if (last.name == "IndexBetween") {
+              lo = eval_int(last.args[0]);
+              hi = eval_int(last.args[1]);
+              check_range(lo, hi, a.len, "array leaf range", e.raw);
+            }
+            const int64_t len = hi >= lo ? hi - lo + 1 : 0;
+            return emit_value(OP_SLICE, {base}, len, view_of(e.type_),
+                              {(int)(len ? a.off + lo - 1 : a.off)});
+          }
+        }
+        // A single outer-array range kept in full, with fixed row/column
+        // indices into every element's matrix: array[N] matrix[R, C][:, i,
+        // j]. Graph storage keeps each matrix contiguous and array-major, so
+        // this is a strided read of one scalar out of every element.
+        if (e.args.size() == 4 && is_array(base.si) && bdims &&
+            bdims->size() == 3 &&
+            array_shape(base.si).leaf == ViewKind::Matrix &&
+            e.args[1].name == "IndexAll" && e.args[2].name == "IndexSingle" &&
+            e.args[3].name == "IndexSingle") {
+          const int64_t N = (*bdims)[0], R = (*bdims)[1], C = (*bdims)[2];
+          const int64_t ri = eval_int(e.args[2].args[0]);
+          const int64_t cj = eval_int(e.args[3].args[0]);
+          check_index(ri, R, "matrix row", e.raw);
+          check_index(cj, C, "matrix column", e.raw);
+          const int64_t off = (cj - 1) * R + (ri - 1);
+          return emit_value(OP_SLICE_STRIDED, {base}, N, view_of(e.type_),
+                            {(int)off, (int)(R * C)});
+        }
         // Row of a column-major data matrix / 2-D array: strided slice.
         if (all_single && e.args.size() == 2 && is_matrix(base.si) &&
             e.type_ != "UReal" && e.type_ != "UInt") {
@@ -6278,6 +6332,42 @@ struct Lowering {
             scope[s.lhs] = nv;
             sync_indexed_data_local(s.lhs, nv);
             return;
+          }
+          // A full array-index prefix followed by an explicit `:` for every
+          // leaf dimension: H[i, :, :] on array[N] matrix[R, C] (or the
+          // vector/row_vector analog with one trailing `:`) spells the same
+          // whole-element replacement as H[i] = rhs, just with the leaf's
+          // own extent written out. Not `all_single` (the trailing indices
+          // are All, not Single), so it falls outside the block above.
+          if (dd) {
+            const ViewKind leaf = array_shape(prev_v.si).leaf;
+            const size_t lr = (size_t)leaf_rank(leaf);
+            const size_t n_arr = dd->size() - lr;
+            bool ok = lr > 0 && s.lhs_idx.size() == n_arr + lr;
+            for (size_t d = 0; ok && d < n_arr; ++d)
+              if (s.lhs_idx[d].name != "IndexSingle") ok = false;
+            for (size_t d = n_arr; ok && d < s.lhs_idx.size(); ++d)
+              if (s.lhs_idx[d].name != "IndexAll") ok = false;
+            if (ok) {
+              std::vector<int64_t> ix;
+              ix.reserve(n_arr);
+              for (size_t d = 0; d < n_arr; ++d) {
+                const int64_t one = eval_int(s.lhs_idx[d].args[0]);
+                check_index(one, (*dd)[d], "array assignment index", s.raw);
+                ix.push_back(one - 1);
+              }
+              const Addr a = flat_addr(*dd, leaf == ViewKind::Matrix, ix);
+              require_binding(
+                  rhs_v, a.len,
+                  indexed_view(prev_v.si, n_arr, a.len, s.rhs.type_), s.lhs,
+                  s.raw);
+              Val nv = emit_value(OP_SET_SLICE, {prev_v, rhs_v},
+                                  g.slots[prev].len, out_si, {(int)a.off});
+              propagate_int_update(nv, prev_v, rhs_v, a.off, 1);
+              scope[s.lhs] = nv;
+              sync_indexed_data_local(s.lhs, nv);
+              return;
+            }
           }
           int64_t flat = 0;
           if (all_single && s.lhs_idx.size() == 1) {

@@ -370,16 +370,23 @@ class MirInterp {
         }
         // Fix one or more leading dimensions of an N-D array and replace
         // the complete remaining container. For array[3] matrix[2,4] x,
-        // x[i,j] is a row_vector[4]. First-index-fast storage makes those
-        // trailing values a strided sequence at offset + prefix_stride*k.
-        if (en->dims.size() > 2 && !st.lhs_idx.empty() &&
-            st.lhs_idx.size() < en->dims.size()) {
-          bool all_single = true;
-          for (const auto& index : st.lhs_idx)
-            if (index.name != "IndexSingle") all_single = false;
-          if (all_single) {
+        // x[i,j] is a row_vector[4] (implicit rest); x[i, :, :] spells the
+        // same write with an explicit `:` for every remaining dimension.
+        // First-index-fast storage makes those trailing values a strided
+        // sequence at offset + prefix_stride*k.
+        if (en->dims.size() > 2 && !st.lhs_idx.empty()) {
+          size_t prefix_len = 0;
+          while (prefix_len < st.lhs_idx.size() &&
+                 st.lhs_idx[prefix_len].name == "IndexSingle")
+            ++prefix_len;
+          bool trailing_all = true;
+          for (size_t d = prefix_len; d < st.lhs_idx.size(); ++d)
+            if (st.lhs_idx[d].name != "IndexAll") trailing_all = false;
+          if (prefix_len > 0 && trailing_all && prefix_len < en->dims.size() &&
+              (st.lhs_idx.size() == prefix_len ||
+               st.lhs_idx.size() == en->dims.size())) {
             int64_t offset = 0, prefix_stride = 1;
-            for (size_t d = 0; d < st.lhs_idx.size(); ++d) {
+            for (size_t d = 0; d < prefix_len; ++d) {
               const long i = as_int(st.lhs_idx[d].args[0]);
               if (i < 1 || i > en->dims[d])
                 fail("indexed assignment index out of bounds", st.raw);
@@ -387,7 +394,7 @@ class MirInterp {
               prefix_stride *= en->dims[d];
             }
             int64_t rest = 1;
-            for (size_t d = st.lhs_idx.size(); d < en->dims.size(); ++d)
+            for (size_t d = prefix_len; d < en->dims.size(); ++d)
               rest *= en->dims[d];
             if (static_cast<int64_t>(v.r.size()) != rest)
               fail("indexed assignment size mismatch", st.raw);
