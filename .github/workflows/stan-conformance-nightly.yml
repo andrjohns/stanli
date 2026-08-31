@@ -82,7 +82,8 @@ jobs:
       - name: Build the public stanli Python runtime
         run: |
           cmake -B build-rel -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX"
+            -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+            -DSTANLI_STANC_EXECUTABLE="$PWD/deps/stanc3/stanc-pinned"
           cmake --build build-rel --target stanli_shared -j2
           mkdir -p python/stanli/_bin
           cp build-rel/libstanli.so python/stanli/_bin/
