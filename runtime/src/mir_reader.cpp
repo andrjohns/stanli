@@ -63,7 +63,7 @@ void validate_funapp_arity(const Expr& e) {
   }
 
   if (named(e, {"pi", "e", "machine_precision", "negative_infinity",
-                "positive_infinity"})) {
+                "positive_infinity", "not_a_number"})) {
     require_arity(e, 0);
     return;
   }

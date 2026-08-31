@@ -269,6 +269,7 @@
     "normal_lcdf",
     "normal_lpdf",
     "normal_rng",
+    "not_a_number",
     "num_elements",
     "ode_adams",
     "ode_adams_tol",
@@ -500,6 +501,7 @@
         "step",
         "is_inf",
         "is_nan",
+        "not_a_number",
         "machine_precision",
         "negative_infinity",
         "positive_infinity",
@@ -1128,7 +1130,7 @@
       ]
     }
   },
-  "name_count": 411,
+  "name_count": 412,
   "recognized_but_unsupported": {
     "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout.",
     "integrate_1d": "Mentioned only in effect analysis; no runtime implementation exists."
