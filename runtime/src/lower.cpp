@@ -3787,6 +3787,19 @@ struct Lowering {
     }
     if (auto v = lower_empty_map_rect(e)) return *v;
     if (auto v = lower_reduce_sum(e)) return *v;
+    // Nullary math constants stanc's optimizer will not fold because their
+    // value is non-finite (or, for machine_precision, platform-specific).
+    // They are plain constant slots here, same as the interpreter returns.
+    if (e.args.empty()) {
+      if (e.name == "not_a_number")
+        return constant(std::numeric_limits<double>::quiet_NaN());
+      if (e.name == "positive_infinity")
+        return constant(std::numeric_limits<double>::infinity());
+      if (e.name == "negative_infinity")
+        return constant(-std::numeric_limits<double>::infinity());
+      if (e.name == "machine_precision")
+        return constant(std::numeric_limits<double>::epsilon());
+    }
     // The stan-library names split into disjoint groups; each helper owns
     // one and declines the rest.
     if (auto v = lower_multi_normal_rng(e)) return *v;

@@ -2920,9 +2920,11 @@ int main() {
     stan::math::recover_memory();
   }
 
-  // is_inf / is_nan on data-time scalars: the lowering folds them to
-  // integer constants (0 for the finite reads, 1 for 1.0/0.0 and 0.0/0.0),
-  // so the normal mean is a + b + c + d = 2.
+  // is_inf / is_nan on data-time scalars and the nullary math constants
+  // (negative_infinity / positive_infinity / not_a_number, which stanc
+  // will not fold) all reduce to integer constants: the finite reads give
+  // 0, and 1.0/0.0, 0.0/0.0, the infinities, the NaN and eps > 0 give 1,
+  // so the normal mean is a + b + c + d + e + f + g + h = 6.
   {
     DataMap d = DataMap::from_json(slurp("tests/fixtures/isinf.json"));
     CompiledModel lm =
@@ -2936,7 +2938,7 @@ int main() {
 
     using stan::math::var;
     var theta = 0.6;
-    var acc = stan::math::normal_lpdf<true>(theta, 2.0, 1.0);
+    var acc = stan::math::normal_lpdf<true>(theta, 6.0, 1.0);
     acc.grad();
     expect_eq("isinf lp", lp, acc.val());
     expect_eq("isinf g0", grad[0], theta.adj());

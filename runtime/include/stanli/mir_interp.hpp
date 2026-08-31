@@ -2740,6 +2740,10 @@ class MirInterp {
       r.r = {T(std::numeric_limits<double>::infinity())};
       return r;
     }
+    if (e.name == "not_a_number") {
+      r.r = {T(std::numeric_limits<double>::quiet_NaN())};
+      return r;
+    }
     if (e.name == "student_t_lccdf" && e.args.size() == 4) {
       r.r = {stan::math::student_t_lccdf(
           eval(e.args[0]).r.at(0), eval(e.args[1]).r.at(0),
