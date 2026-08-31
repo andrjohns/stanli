@@ -56,6 +56,7 @@ known exceptions.
 | downstream `stanr` embedding | Can the R package vendor this checkout and use Stanli through its `model_base` adapter? | `stanr` must build, then its Stanli-backend construction, derivative, sampling, data, output, init, and cache tests must pass | every version release and on demand |
 | generated conformance sweep | For cases that both systems evaluate, do results agree, and which generated cases remain unsupported? | 10 ULP by default; reviewed per-case policy where needed | nightly and on demand |
 | coverage baseline | Did a previously verified generated case stop verifying? | No loss of a verified case; obsolete policy exceptions must be removed | within the nightly sweep |
+| integrated function models | Do ten mother-style models exercise supported function names and match CmdStan, including data-only and generated outputs? | Source/name coverage gate; log density, full gradients, names and every output at three points within scaled error 1e-9 | every pull request, within CTest |
 | model census | Do stanc3's 1,231 integration models still compile into stanli's runtime representation and, where checked, agree with CmdStan? | No decrease in per-model classification | manually, on demand |
 | sampler trace | Is NUTS configured comparably to CmdStan? | Diagnostic summaries remain within limits chosen for large configuration errors | manually after sampler changes |
 | AddressSanitizer | Does ASan detect invalid memory access while CTest runs? | No sanitizer diagnostics | after merge and nightly |
@@ -459,7 +460,8 @@ rejected it; many of these rows identify unimplemented signatures.
 such as complex or tuple results. `generator_gap` means the generated case was
 not usable as evidence—for example, the reference rejected a nominally valid
 case or its gradients were uninformative. `inapplicable` means there was no
-meaningful real-valued case to test. The definitions are in
+meaningful gradient case under the generator's current rules; it does not
+mean the function has no testable values or effects. The definitions are in
 [`harnesses/conformance/status.py`](harnesses/conformance/status.py).
 
 Unsupported cases and generator gaps are reported, counted, and given
@@ -496,6 +498,23 @@ only through operators rather than function calls; for example, an earlier
 implementation of `B / A` as elementwise division did not create a failing
 function-signature case. It cannot check a case that the generator cannot
 construct (`generator_gap`). It also measures agreement, not execution cost.
+
+PR #299 exposed a concrete gap in this distinction. In the checked-in
+baseline, the real-valued `reverse`, `block`, `to_matrix`, and container
+`rep_array` cases were generator gaps. The spacing, fill, and CSR-index
+helpers were generator gaps or inapplicable because they require data-only
+inputs or return integers. `.^` was outside the function-call inventory.
+None of those classifications established support on the graph, transformed
+data, or generated-quantity paths. The focused fixtures now run in CTest, with
+Stan Math value/gradient checks and cross-path comparisons. In addition,
+[ten integrated function models](tests/function_coverage/README.md) cover 411
+names, including data-only helpers, RNGs, solvers and five operators, against
+recorded CmdStan values, gradients and complete outputs on every PR. They
+cover supported forms per name rather than every overload. Nonuniform matrix
+weights are necessary: comparing only `sum(to_matrix(a))` cannot detect a
+permutation of `a`. The generated inventory still needs value-only cases and
+broader container/operator generation before it can cover these scopes
+automatically; a green coverage gate is not a claim of complete support.
 
 [`docs/coverage.md`](docs/coverage.md) contains a function-family summary and a
 script for regenerating it from an aggregate run; the nightly workflow does

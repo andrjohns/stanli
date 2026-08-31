@@ -14,6 +14,10 @@ model {
   matrix[3, 2] c = to_matrix(x, 3, 2);
   target += sum(a * c);
   target += sum(b);
+  target += dot_product(x, to_vector(b));
   target += sum(w);
   target += x' * to_vector(a);
+}
+generated quantities {
+  matrix[2, 3] converted = to_matrix(ar);
 }

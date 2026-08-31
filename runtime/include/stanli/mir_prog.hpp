@@ -2109,7 +2109,8 @@ struct ProgramCompiler {
       // Predicates, spelled on the comparison opcodes rather than opcodes of
       // their own: both read through value_of, so neither carries an adjoint
       // edge, which is what a 0/1 answer wants. x != x holds for NaN alone.
-      if (e.name == "is_nan" || e.name == "is_inf" || e.name == "PNot__") {
+      if (e.name == "is_nan" || e.name == "is_inf" || e.name == "PNot__" ||
+          e.name == "logical_negation") {
         const int rhs = e.name == "is_nan" ? -1 : konst(0.0);
         const Program::Code c = e.name == "is_nan" ? Program::NE : Program::EQ;
         const int r = alloc(a.len);

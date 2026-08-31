@@ -3903,7 +3903,8 @@ struct Lowering {
         (!scalar_outcome && !array_outcome) || !is_vector(arg.si))
       fail(e.name + ": MIR type does not match lowered values", e.raw);
     if (!e.args[0].data_only || !outcome.si.param_free ||
-        (udf_depth == 0 && e.args[1].data_only == arg.autodiff))
+        (udf_depth == 0 &&
+         arg.autodiff != (!in_write_array && !e.args[1].data_only)))
       fail(e.name + ": MIR adlevel contradicts lowered dependencies", e.raw);
     auto spec = std::make_shared<CategoricalSpec>();
     spec->logit = logit;
@@ -4708,16 +4709,16 @@ struct Lowering {
       const long n = eval_int(e.args[1]);
       return emit_value(OP_REP_VEC, {a}, n, view_of(e.type_));
     }
-    if (e.name == "rep_array" && (e.args.size() == 2 || e.args.size() == 3)) {
-      // The element keeps its shape; rep_array prepends one or two outer
+    if (e.name == "rep_array" && e.args.size() >= 2 && e.args.size() <= 4) {
+      // The element keeps its shape; rep_array prepends up to three outer
       // dimensions and tiles the element buffer once per outer cell. That
       // is a gather that walks 0..w-1 repeatedly.
       Val a = lower_expr(e.args[0]);
-      const int64_t n = eval_int(e.args[1]);
-      const int64_t m = e.args.size() == 3 ? eval_int(e.args[2]) : 1;
       const int64_t w = g.slots[a.slot].len;
-      std::vector<int64_t> dims{n};
-      if (e.args.size() == 3) dims.push_back(m);
+      std::vector<int64_t> dims;
+      for (size_t k = 1; k < e.args.size(); ++k)
+        dims.push_back(eval_int(e.args[k]));
+      const int64_t copies = checked_container_size(dims, e.name);
       ViewKind leaf = ViewKind::Flat;
       if (is_matrix(a.si)) {
         dims.push_back(a.si.rows);
@@ -4734,13 +4735,12 @@ struct Lowering {
         dims.insert(dims.end(), sh.dims.begin(), sh.dims.end());
         leaf = sh.leaf;
       }
-      const int64_t copies = e.args.size() == 3 ? n * m : n;
+      const int64_t size = checked_container_size({copies, w}, e.name);
       std::vector<int> gather;
-      gather.reserve((size_t)(copies * w));
-      for (int64_t c = 0; c < copies; ++c)
-        for (int64_t k = 0; k < w; ++k)
-          gather.push_back(checked_immediate(k, "rep_array gather offset"));
-      return emit_value(OP_GATHER, {a}, copies * w,
+      gather.reserve((size_t)size);
+      for (int64_t k = 0; k < size; ++k)
+        gather.push_back(checked_immediate(k % w, "rep_array gather offset"));
+      return emit_value(OP_GATHER, {a}, size,
                         array_view(dims, leaf, a.si.param_free), gather);
     }
     if ((e.name == "zeros_vector" || e.name == "zeros_row_vector" ||
@@ -4749,6 +4749,7 @@ struct Lowering {
       // A broadcast of the constant fill, exactly as rep_vector lowers.
       const long n = eval_int(e.args[0]);
       const double fill = e.name.rfind("ones", 0) == 0 ? 1.0 : 0.0;
+      (void)checked_container_size({n}, e.name);
       return emit_value(OP_REP_VEC, {constant(fill)}, n, view_of(e.type_));
     }
     if (e.name == "log_sum_exp" || e.name == "sum") {
@@ -4983,6 +4984,7 @@ struct Lowering {
       std::vector<int64_t> dims;
       if (is_array(a.si)) dims = array_shape(a.si).dims;
       if (dims.size() != 2) fail("to_matrix: unknown source shape", e.raw);
+      if (dims[0] == 0) dims[1] = 0;
       // array-major (row-major) source -> col-major matrix of the same
       // logical shape: transpose the storage.
       si = matrix_view(dims[0], dims[1], a.si.param_free);
@@ -5252,6 +5254,7 @@ struct Lowering {
       const long j = eval_int(e.args[2]);
       const long nr = eval_int(e.args[3]);
       const long nc = eval_int(e.args[4]);
+      check_block_shape(a.si.rows, a.si.cols, i, j, nr, nc);
       std::vector<int> gather;
       gather.reserve((size_t)(nr * nc));
       for (long c = 0; c < nc; ++c)

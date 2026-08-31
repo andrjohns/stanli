@@ -845,6 +845,17 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME test_conformance_harness
            COMMAND ${Python3_EXECUTABLE} tests/test_conformance.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_function_model_generation
+           COMMAND ${Python3_EXECUTABLE} tools/gen_function_models.py --check
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_function_model_harness
+           COMMAND ${Python3_EXECUTABLE} tests/test_function_models.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_function_models
+           COMMAND ${Python3_EXECUTABLE} tools/check_function_models.py
+                   --build ${CMAKE_CURRENT_BINARY_DIR}
+                   --stanc ${STANLI_STANC_EXECUTABLE}
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_vectorize_ab
            COMMAND ${Python3_EXECUTABLE} tests/test_vectorize_ab.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

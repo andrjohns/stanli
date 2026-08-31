@@ -2671,8 +2671,8 @@ int main() {
     stan::math::recover_memory();
   }
 
-  // to_matrix: transformed data reshapes a data vector and transposes a
-  // 2-D array (the one source that arrives row-major) in the interpreter,
+  // to_matrix: transformed data reshapes a data vector and converts a
+  // 2-D array in the interpreter,
   // while the log density reshapes a parameter vector in the graph. The
   // 3 x 2 vs 2 x 3 shapes and the a * c product would all still typecheck
   // under a wrong (row-major) fill, so the reference pins the ordering.
@@ -2701,6 +2701,7 @@ int main() {
     const Eigen::RowVectorXd w = stan::math::to_row_vector(a);
     Eigen::Matrix<var, -1, -1> c = stan::math::to_matrix(x, 3, 2);
     var acc = stan::math::sum(stan::math::multiply(a, c)) + stan::math::sum(b) +
+              stan::math::dot_product(x, stan::math::to_vector(b)) +
               stan::math::sum(w) +
               stan::math::dot_product(x, stan::math::to_vector(a));
     acc.grad();
@@ -2708,6 +2709,77 @@ int main() {
     for (int k = 0; k < 6; ++k)
       expect_eq("tomatrix g" + std::to_string(k), grad[k], x(k).adj());
     stan::math::recover_memory();
+  }
+
+  // Compare acceptance against Stan Math independently of the flat gather
+  // offsets. In particular, a row overrun may still fit in the source slot.
+  {
+    const std::string text = slurp("tests/fixtures/block_bounds.tmir.sexp");
+    const Eigen::MatrixXd reference = Eigen::MatrixXd::Ones(2, 3);
+    for (int row : {0, 1, 2, 3})
+      for (int col : {0, 1, 3, 4})
+        for (int nr : {0, 1, 2, 3})
+          for (int nc : {0, 1, 2}) {
+            bool expected = true, accepted = true;
+            try {
+              const Eigen::MatrixXd block =
+                  stan::math::block(reference, row, col, nr, nc);
+              (void)block;
+            } catch (const std::exception&) {
+              expected = false;
+            }
+            DataMap data;
+            data.set_int("row", row);
+            data.set_int("col", col);
+            data.set_int("nr", nr);
+            data.set_int("nc", nc);
+            try {
+              CompiledModel cm = compile_model(text, data);
+              Executor ex(std::move(cm.graph));
+              cm.bind(ex);
+              std::fill_n(ex.params_data(), 6, 1.0);
+              double grad[6];
+              const double lp = ex.gradient(grad);
+              if (expected) {
+                expect_eq("block boundary lp", lp, nr * nc);
+                for (int c = 0; c < 3; ++c)
+                  for (int r = 0; r < 2; ++r)
+                    expect_eq("block boundary gradient", grad[c * 2 + r],
+                              r >= row - 1 && r < row - 1 + nr &&
+                                      c >= col - 1 && c < col - 1 + nc
+                                  ? 1.0
+                                  : 0.0);
+              }
+            } catch (const std::exception&) {
+              accepted = false;
+            }
+            check(accepted == expected,
+                  "block graph acceptance " + std::to_string(row) + "," +
+                      std::to_string(col) + "," + std::to_string(nr) + "," +
+                      std::to_string(nc));
+          }
+  }
+
+  // Nonuniform coefficients distinguish each matrix lane. Container-valued
+  // replication/reversal must preserve the inner axes in both engines;
+  // the fixture's generated quantities also join the cross-path suite.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/container_shapes.tmir.sexp"), DataMap{});
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const double weights[6] = {1, 4, 3.5, 5, 3, 8};
+    for (double scale : {-0.25, 0.0, 0.5}) {
+      double want = 0;
+      for (int k = 0; k < 6; ++k) {
+        ex.params_data()[k] = scale * (k + 1);
+        want += weights[k] * ex.params_data()[k];
+      }
+      double grad[6];
+      expect_eq("container shapes lp", ex.gradient(grad), want);
+      for (int k = 0; k < 6; ++k)
+        expect_eq("container shapes gradient", grad[k], weights[k]);
+    }
   }
 
   // zeros_*/ones_* constructors: data-sized, so transformed data folds the

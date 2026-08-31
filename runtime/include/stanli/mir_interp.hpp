@@ -21,6 +21,7 @@
 #define STANLI_MIR_INTERP_HPP
 
 #include <stanli/compile.hpp>
+#include <stanli/container_shape.hpp>
 #include <stanli/data.hpp>
 #include <stanli/message_sink.hpp>
 #include <stanli/mir.hpp>
@@ -2083,6 +2084,7 @@ class MirInterp {
       const long i = as_int(e.args[1]), j = as_int(e.args[2]),
                  nr = as_int(e.args[3]), nc = as_int(e.args[4]);
       const int64_t R = m.dims[0];
+      check_block_shape(R, m.dims[1], i, j, nr, nc);
       r.dims = {nr, nc};
       r.r.reserve((size_t)(nr * nc));
       // Source and result are both column-major, so filling the result in
@@ -2395,16 +2397,17 @@ class MirInterp {
       return r;
     }
     // The zeros_*/ones_* constructors are rep_vector with a fixed fill.
-    // zeros_int_array/ones_array carry integer provenance.
+    // Only zeros_int_array carries integer provenance; ones_array is real.
     if ((e.name == "zeros_vector" || e.name == "zeros_row_vector" ||
          e.name == "ones_vector" || e.name == "ones_row_vector" ||
          e.name == "zeros_int_array" || e.name == "ones_array") &&
         e.args.size() == 1) {
       const long n = as_int(e.args[0]);
       const bool is_ones = e.name.rfind("ones", 0) == 0;
+      (void)checked_container_size({n}, e.name);
       r.r.assign(n, T(is_ones ? 1.0 : 0.0));
       r.dims = {n};
-      if (e.name == "zeros_int_array" || e.name == "ones_array") {
+      if (e.name == "zeros_int_array") {
         r.is_int = true;
         r.i.assign(n, is_ones ? 1 : 0);
       }
@@ -2412,7 +2415,7 @@ class MirInterp {
     }
     if (e.name == "identity_matrix" && e.args.size() == 1) {
       const long n = as_int(e.args[0]);
-      r.r.assign((size_t)(n * n), T(0.0));
+      r.r.assign((size_t)checked_container_size({n, n}, e.name), T(0.0));
       for (long k = 0; k < n; ++k) r.r[(size_t)(k * n + k)] = T(1.0);
       r.dims = {n, n};
       return r;
@@ -2468,12 +2471,14 @@ class MirInterp {
       return cmp([](double x, double y) { return x < y; });
     if (e.name == "Leq__")
       return cmp([](double x, double y) { return x <= y; });
-    if (e.name == "PNot__")
+    if (e.name == "PNot__" || e.name == "logical_negation")
       return un([](const T& x) { return T(val(x) == 0.0 ? 1.0 : 0.0); });
-    if (e.name == "is_nan") {
+    if (e.name == "is_nan" || e.name == "is_inf") {
       Value a = eval(e.args[0]);
-      if (a.r.size() != 1) fail("is_nan: needs a scalar", e.raw);
-      const int answer = std::isnan(val(a.r[0])) ? 1 : 0;
+      if (a.r.size() != 1) fail(e.name + ": needs a scalar", e.raw);
+      const double value = val(a.r[0]);
+      const int answer =
+          e.name == "is_nan" ? std::isnan(value) : std::isinf(value);
       r.is_int = true;
       r.i = {answer};
       r.r = {T((double)answer)};
@@ -2633,23 +2638,20 @@ class MirInterp {
     if (e.name == "to_matrix" && (e.args.size() == 1 || e.args.size() == 3)) {
       Value a = eval(e.args[0]);
       a.is_int = false;
-      // A 2-D array arrived first-index-fastest (row-major); every other
-      // source is already column-major, so only that case restripes.
+      a.i.clear();
+      // First-index-fast array storage is already column-major over the
+      // resulting matrix axes. Unlike the graph's outer-major arrays, this
+      // interpreter must not transpose it. Stan Math infers zero columns
+      // when the outer array is empty, regardless of its declared suffix.
       const bool from_2d_array =
           e.args.size() == 1 && a.dims.size() == 2 && e.args[0].unsized.depth;
       if (from_2d_array) {
-        const int64_t R = a.dims[0], C = a.dims[1];
-        decltype(a.r) col(a.r.size());
-        for (int64_t i = 0; i < R; ++i)
-          for (int64_t j = 0; j < C; ++j)
-            col[(size_t)(j * R + i)] = a.r.at((size_t)(i * C + j));
-        a.r = std::move(col);
-        a.dims = {R, C};
+        if (a.dims[0] == 0) a.dims[1] = 0;
         return a;
       }
       if (e.args.size() == 3) {
         const int64_t rows = as_int(e.args[1]), cols = as_int(e.args[2]);
-        if (rows * cols != (int64_t)a.r.size())
+        if (checked_container_size({rows, cols}, e.name) != (int64_t)a.r.size())
           fail("to_matrix: requested shape does not match source length",
                e.raw);
         a.dims = {rows, cols};
@@ -2984,23 +2986,22 @@ class MirInterp {
       r.r = {acc};
       return r;
     }
-    if (e.name == "rep_array" && (e.args.size() == 2 || e.args.size() == 3)) {
+    if (e.name == "rep_array" && e.args.size() >= 2 && e.args.size() <= 4) {
       Value v = eval(e.args[0]);
-      const long n = as_int(e.args[1]);
-      const long m = e.args.size() == 3 ? as_int(e.args[2]) : 1;
+      for (size_t k = 1; k < e.args.size(); ++k)
+        r.dims.push_back(as_int(e.args[k]));
       // The element keeps its own shape; rep_array only prepends the new
       // outer dimension(s). Interpreter storage is first-index-fast, so the
       // prepended axes vary fastest: element cell k lands at stride `copies`
       // across the result, not as a contiguous block.
-      const long copies = e.args.size() == 3 ? n * m : n;
+      const int64_t copies = checked_container_size(r.dims, e.name);
       r.is_int = v.is_int;
-      r.dims.clear();
-      r.dims.push_back(n);
-      if (e.args.size() == 3) r.dims.push_back(m);
       for (const int64_t d : v.dims) r.dims.push_back(d);
       const size_t width = std::max(v.r.size(), v.i.size());
-      r.r.assign((size_t)copies * v.r.size(), T(0.0));
-      if (v.is_int) r.i.assign((size_t)copies * v.i.size(), 0);
+      const int64_t size =
+          checked_container_size({copies, (int64_t)width}, e.name);
+      r.r.assign((size_t)size, T(0.0));
+      if (v.is_int) r.i.assign((size_t)size, 0);
       for (size_t k = 0; k < width; ++k)
         for (long c = 0; c < copies; ++c) {
           r.r[k * (size_t)copies + (size_t)c] = v.r.at(k);

@@ -780,6 +780,83 @@ int main(int argc, char** argv) {
               reversed_empty.dims == std::vector<int64_t>({0, 3}),
           "reverse preserves empty array geometry");
 
+    auto call = [](std::string name, std::vector<mir::Expr> args) {
+      mir::Expr e;
+      e.kind = mir::Expr::FunApp;
+      e.fn_lib = mir::Expr::Lib::StanLib;
+      e.name = std::move(name);
+      e.args = std::move(args);
+      return e;
+    };
+    mir::Expr matrix_arg;
+    matrix_arg.kind = mir::Expr::Var;
+    matrix_arg.name = "container_matrix";
+    matrix_arg.unsized = {0, mir::UnsizedLeaf::Matrix};
+    DataMap::Entry matrix_entry;
+    matrix_entry.dims = {2, 3};
+    matrix_entry.r = {1, 4, 2, 5, 3, 6};
+    interp.env()[matrix_arg.name] = matrix_entry;
+    // A row overrun can stay inside the flat buffer and silently read the
+    // next column. Compare acceptance against Stan Math, including its
+    // zero-length block rules (both endpoints must be valid indices).
+    const Eigen::MatrixXd reference =
+        Eigen::Map<const Eigen::MatrixXd>(matrix_entry.r.data(), 2, 3);
+    for (int row : {0, 1, 2, 3})
+      for (int col : {0, 1, 3, 4})
+        for (int nr : {0, 1, 2, 3})
+          for (int nc : {0, 1, 2}) {
+            bool expected = true, accepted = true;
+            Eigen::MatrixXd want;
+            DataMap::Entry got;
+            try {
+              want = stan::math::block(reference, row, col, nr, nc);
+            } catch (const std::exception&) {
+              expected = false;
+            }
+            try {
+              got = interp.eval(
+                  call("block", {matrix_arg, integer(row), integer(col),
+                                 integer(nr), integer(nc)}));
+            } catch (const std::exception&) {
+              accepted = false;
+            }
+            check(accepted == expected,
+                  "block interpreter acceptance " + std::to_string(row) + "," +
+                      std::to_string(col) + "," + std::to_string(nr) + "," +
+                      std::to_string(nc));
+            if (accepted && expected)
+              check(got.dims == std::vector<int64_t>({nr, nc}) &&
+                        got.r == std::vector<double>(want.data(),
+                                                     want.data() + want.size()),
+                    "block interpreter element order");
+          }
+    const auto ones = interp.eval(call("ones_array", {integer(3)}));
+    check(!ones.is_int && ones.i.empty() &&
+              ones.r == std::vector<double>({1, 1, 1}),
+          "ones_array has real provenance");
+    for (const std::string name :
+         {"zeros_vector", "zeros_row_vector", "ones_vector", "ones_row_vector",
+          "zeros_int_array", "ones_array", "identity_matrix"}) {
+      bool rejected = false;
+      try {
+        (void)interp.eval(call(name, {integer(-1)}));
+      } catch (const std::domain_error&) {
+        rejected = true;
+      } catch (const std::exception&) {
+      }
+      check(rejected, name + " rejects a negative size with domain_error");
+    }
+    // Negative extents must not cancel in the product, even for an empty
+    // element where no allocation can expose the invalid shape.
+    bool rejected = false;
+    try {
+      (void)interp.eval(
+          call("rep_array", {int_array({}, 1), integer(-2), integer(-3)}));
+    } catch (const std::domain_error&) {
+      rejected = true;
+    }
+    check(rejected, "rep_array validates every extent for empty elements");
+
     // These are the five mixed-index reads in mother.stan's optimized
     // generated-quantities MIR. The runtime value has one unified
     // first-index-fast layout: outer array, matrix row, matrix column.
