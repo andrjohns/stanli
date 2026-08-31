@@ -2788,6 +2788,35 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // .^ (EltPow__): the elementwise-power operator was missing from the
+  // binary-op table even though scalar Pow__ and the interpreter already
+  // had it. Both operand orders exercise the base and exponent gradients.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/eltpow.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/eltpow.tmir.sexp"), d);
+    check(lm.n_unconstrained == 3, "eltpow 3 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[3] = {0.6, 1.4, 0.9};
+    for (int k = 0; k < 3; ++k) lex.params_data()[k] = q[k];
+    double grad[3];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(3);
+    for (int k = 0; k < 3; ++k) x(k) = q[k];
+    Eigen::VectorXd base(3);
+    base << 2.0, 3.0, 1.5;
+    var acc = stan::math::sum(stan::math::pow(x, base)) +
+              stan::math::sum(stan::math::pow(base, x));
+    acc.grad();
+    expect_eq("eltpow lp", lp, acc.val());
+    for (int k = 0; k < 3; ++k)
+      expect_eq("eltpow g" + std::to_string(k), grad[k], x(k).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

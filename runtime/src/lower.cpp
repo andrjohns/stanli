@@ -4204,6 +4204,7 @@ struct Lowering {
         {"EltTimes__", OP_MUL},
         {"EltDivide__", OP_DIV},
         {"Pow__", OP_POW},
+        {"EltPow__", OP_POW},
         {"pow", OP_POW},
         // The named spellings of the same operators. `divide` is the one
         // that is not simply the operator renamed: `rv / A` is a solve,
