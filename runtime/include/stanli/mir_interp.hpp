@@ -2646,7 +2646,7 @@ class MirInterp {
       }
       return o;
     }
-    if (e.name == "Transpose__") {
+    if (e.name == "Transpose__" || e.name == "transpose") {
       Value a = eval(e.args[0]);
       if (a.dims.size() < 2) return a;  // vector transpose: same storage
       Value o;

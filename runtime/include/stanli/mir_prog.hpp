@@ -2411,6 +2411,18 @@ struct ProgramCompiler {
             it = reals.find(s.lhs);
           }
         }
+        if (it == reals.end() && s.lhs_idx.empty()) {
+          // First touch of this name from here, and nothing to import as a
+          // live-in either: an --O1 inliner return-temp (or similar
+          // compiler-introduced local) whose only other write sat in a
+          // branch the surrounding graph lowering folded away as
+          // unreachable, so it never got a slot to hand this region. A
+          // full-variable write with no prior binding is exactly the
+          // zero-length "adopt the assigned shape" case below, minus the
+          // placeholder declaration -- give it one now.
+          reals[s.lhs] = Range{};
+          it = reals.find(s.lhs);
+        }
         if (it == reals.end()) bail("assignment to undeclared " + s.lhs);
         const Range dst = it->second;
         const Range v = expr(s.rhs);

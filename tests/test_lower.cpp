@@ -3125,6 +3125,35 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // unsupported_undeclared_inline_solve, verbatim (see the fixture comment):
+  // a triply-nested inlined UDF chain whose innermost while loop has a
+  // compile-time-dead early-return branch (`if (N == 0) return 0;`, N is
+  // always >= 1 here). The graph lowering folds that branch away, so the
+  // while loop's carved runtime-control region has to write its own
+  // inlined return-temp with no live-in binding to import. `y` never
+  // reaches target, so lp is exactly normal(0,1) on theta regardless of
+  // whether the ODE math inside is right; this checks that it still
+  // compiles and grades correctly.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/inlinesolve.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/inlinesolve.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "inlinesolve 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = -1.664154007900521;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var theta = -1.664154007900521;
+    var acc = stan::math::normal_lpdf<true>(theta, 0.0, 1.0);
+    acc.grad();
+    expect_eq("inlinesolve lp", lp, acc.val());
+    expect_eq("inlinesolve g0", grad[0], theta.adj());
+    stan::math::recover_memory();
+  }
+
   // A parameter sized by a transformed-data for-loop accumulator
   // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
   // transformed-data interpreter used to lose the accumulator's int-ness on
