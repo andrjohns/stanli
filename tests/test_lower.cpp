@@ -3154,6 +3154,46 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // reject() with a literal-only message, inside a UDF's data-dependent
+  // branch (unsupported_FnReject, verbatim). z >= 0 never takes the reject
+  // arm, so lp is exactly normal(0, 1) on z; the model's effective support
+  // is z >= 0 (checked() rejects the rest), which is what makes it proper.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/rejectguard.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/rejectguard.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "rejectguard 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.7;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var z = 0.7;
+    var acc = stan::math::normal_lpdf<false>(z, 0.0, 1.0);
+    acc.grad();
+    expect_eq("rejectguard lp", lp, acc.val());
+    expect_eq("rejectguard g0", grad[0], z.adj());
+    stan::math::recover_memory();
+  }
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/rejectguard.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/rejectguard.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = -0.115;
+    double grad[1];
+    bool threw = false;
+    try {
+      lex.gradient(grad);
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    check(threw, "rejectguard throws for negative z");
+  }
+
   // A parameter sized by a transformed-data for-loop accumulator
   // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
   // transformed-data interpreter used to lose the accumulator's int-ness on

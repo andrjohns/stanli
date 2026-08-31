@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -116,7 +117,8 @@ enum ProgramOpFlag : uint16_t {
   X(QUAD_FORM_SYM, kProgramRangeA | kProgramRangeB | kProgramReadB |         \
                        kProgramRangeOutput | kProgramNoAdjoint)              \
   X(DENSITY, 0)                                                              \
-  X(CALL, 0)
+  X(CALL, 0)                                                                 \
+  X(REJECT, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)
 
 struct Program {
   enum Code : uint8_t {
@@ -195,6 +197,10 @@ struct Program {
   std::vector<Instr> code;
   std::vector<Call> calls;   // CALL payloads, indexed by Instr::a
   std::vector<double> pool;  // CONSTR data
+  // REJECT's literal message text, indexed by Instr::a. Never touched as a
+  // register (REJECT is kProgramNoInputs), so it rides beside the register
+  // file rather than in it.
+  std::vector<std::string> messages;
   int n_regs = 0;
   std::vector<int> out_regs;  // the values the caller reads back
 };
@@ -233,7 +239,7 @@ inline constexpr int program_output_len(const Program::Instr& instr) {
                                          : 1;
 }
 
-static_assert(program_code_count() == static_cast<size_t>(Program::CALL) + 1,
+static_assert(program_code_count() == static_cast<size_t>(Program::REJECT) + 1,
               "every Program::Code needs exactly one ProgramOpSpec");
 
 // Drop the initializer fills and the copies the MIR spells out, then
@@ -547,6 +553,12 @@ void run_program_impl(const Program& p, T* reg) {
           throw std::logic_error("CALL instruction in a var replay");
         }
         break;
+      // reject(): the same exception CmdStan's generated code throws from
+      // the same place, so the sampler counts it as a rejected proposal
+      // rather than a failure. No adjoint reaches this -- the forward
+      // already threw -- so there is nothing to do under var either.
+      case Program::REJECT:
+        throw std::domain_error(p.messages[(size_t)I.a]);
       case Program::DENSITY: {
         const int ar = program_density_arity(I.len);
         if (ar > 3) {

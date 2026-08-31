@@ -2769,6 +2769,24 @@ struct ProgramCompiler {
       }
       case mir::Stmt::NRFunApp:
         if (s.fn_name == "FnValidateSize") return;
+        if (s.fn_name == "FnReject") {
+          // Only a literal message: interleaving a runtime value would need
+          // to format it into the thrown string at forward time, which this
+          // machine has no instruction for. `reject("some literal")` is the
+          // common case (a guard on a parameter's domain) and needs none.
+          std::string msg;
+          for (const auto& a : s.fn_args) {
+            if (a.kind != mir::Expr::LitStr)
+              bail(
+                  "statement function FnReject with a runtime-valued "
+                  "message argument (a literal-only message is supported "
+                  "here)");
+            msg += a.lit_s;
+          }
+          p.messages.push_back(std::move(msg));
+          emit(Program::REJECT, 0, (int)p.messages.size() - 1);
+          return;
+        }
         bail("statement function " + s.fn_name +
              " requires the MIR interpreter");
       case mir::Stmt::Skip:
