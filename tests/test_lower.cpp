@@ -2735,6 +2735,34 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // csr_extract_v / csr_extract_u: the integer companions to
+  // csr_extract_w, folded in the interpreter over a row-major sparse view.
+  // A = [[10,0,20,0],[0,30,0,0],[0,0,40,50]] has w=[10,20,30,40,50],
+  // v=[1,3,2,3,4] (1-indexed column ids), u=[1,3,4,6] (1-indexed row
+  // starts, length rows+1). The log density only reads w, so the gradient
+  // pins w's order and the constant lp pins the two index arrays.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/csrextract.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/csrextract.tmir.sexp"), d);
+    check(lm.n_unconstrained == 5, "csrextract 5 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[5] = {0.4, -1.1, 0.7, 0.2, -0.5};
+    for (int k = 0; k < 5; ++k) lex.params_data()[k] = q[k];
+    double grad[5];
+    const double lp = lex.gradient(grad);
+
+    const double w[5] = {10, 20, 30, 40, 50};
+    double dot = 0.0;
+    for (int k = 0; k < 5; ++k) dot += q[k] * w[k];
+    // usum = 1+3+4+6 = 14, vsum = 1+3+2+3+4 = 13.
+    expect_eq("csrextract lp", lp, dot + 27.0);
+    for (int k = 0; k < 5; ++k)
+      expect_eq("csrextract g" + std::to_string(k), grad[k], w[k]);
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

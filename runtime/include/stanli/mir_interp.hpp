@@ -2932,6 +2932,27 @@ class MirInterp {
       r.dims = {(int64_t)r.r.size()};
       return r;
     }
+    // csr_extract_v (column indices) and csr_extract_u (row-start offsets)
+    // are the integer companions to csr_extract_w. stan-math needs a
+    // concrete (double) sparse view, so evaluate the value_of matrix.
+    if ((e.name == "csr_extract_v" || e.name == "csr_extract_u") &&
+        e.args.size() == 1) {
+      Value a = eval(e.args[0]);
+      if (a.dims.size() != 2)
+        fail(e.name + ": argument must be a matrix", e.raw);
+      Eigen::MatrixXd matrix(a.dims[0], a.dims[1]);
+      for (int64_t k = 0; k < (int64_t)a.r.size(); ++k)
+        matrix.data()[k] = val(a.r[(size_t)k]);
+      const std::vector<int> idx = e.name == "csr_extract_v"
+                                       ? stan::math::csr_extract_v(matrix)
+                                       : stan::math::csr_extract_u(matrix);
+      r.is_int = true;
+      r.dims = {(int64_t)idx.size()};
+      r.i.assign(idx.begin(), idx.end());
+      r.r.reserve(idx.size());
+      for (const int x : idx) r.r.push_back(T((double)x));
+      return r;
+    }
     if (e.name == "append_array" && e.args.size() == 2) {
       Value a = eval(e.args[0]), b = eval(e.args[1]);
       if (a.dims.empty() || b.dims.empty() || a.dims.size() != b.dims.size())
