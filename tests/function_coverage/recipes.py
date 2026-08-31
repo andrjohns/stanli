@@ -131,6 +131,7 @@ GROUPS = {
         "trunc": "trunc(v)", "step": "step(-0.5)",
         "is_inf": "is_inf(positive_infinity())",
         "is_nan": "is_nan(0.0)",
+        "not_a_number": "is_nan(not_a_number())",
         "machine_precision": "machine_precision()",
         "negative_infinity": "is_inf(negative_infinity())",
         "positive_infinity": "is_inf(positive_infinity())", "pi": "pi()",

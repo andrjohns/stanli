@@ -451,7 +451,13 @@ let rec stmt_of_t (stmt : Stmt.Located.t) =
   | Continue -> {(default_stmt ()) with st_kind= "Continue"}
   | Skip -> {(default_stmt ()) with st_kind= "Skip"}
   | NRFunApp (kind, args) -> nr_fun_app_of_t kind args
-  | JacobianPE _ | Profile _ ->
+  | Profile (_, body) ->
+      (* The profile name is only for stanc's own timing output, which
+         stanli does not produce; unwrap to the plain block it wraps. *)
+      { (default_stmt ()) with
+        st_kind= "Block"
+      ; st_body= List.map ~f:stmt_of_t body }
+  | JacobianPE _ ->
       { (default_stmt ()) with
         st_kind= "Unsupported"
       ; st_raw= raw_stmt_pattern stmt.pattern }

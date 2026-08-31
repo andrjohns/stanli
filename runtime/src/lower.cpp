@@ -3787,6 +3787,19 @@ struct Lowering {
     }
     if (auto v = lower_empty_map_rect(e)) return *v;
     if (auto v = lower_reduce_sum(e)) return *v;
+    // Nullary math constants stanc's optimizer will not fold because their
+    // value is non-finite (or, for machine_precision, platform-specific).
+    // They are plain constant slots here, same as the interpreter returns.
+    if (e.args.empty()) {
+      if (e.name == "not_a_number")
+        return constant(std::numeric_limits<double>::quiet_NaN());
+      if (e.name == "positive_infinity")
+        return constant(std::numeric_limits<double>::infinity());
+      if (e.name == "negative_infinity")
+        return constant(-std::numeric_limits<double>::infinity());
+      if (e.name == "machine_precision")
+        return constant(std::numeric_limits<double>::epsilon());
+    }
     // The stan-library names split into disjoint groups; each helper owns
     // one and declines the rest.
     if (auto v = lower_multi_normal_rng(e)) return *v;
@@ -4348,8 +4361,7 @@ struct Lowering {
     if (e.name == "normal_id_glm_lpdf" && e.args.size() == 5) {
       Val y = lower_expr(e.args[0]);
       Val X = lower_expr(e.args[1]);
-      if (!is_matrix(X.si) || !X.si.param_free)
-        fail("normal_id_glm: X must be a data matrix", e.raw);
+      if (!is_matrix(X.si)) fail("normal_id_glm: X must be a matrix", e.raw);
       Val alpha = lower_expr(e.args[2]);
       Val beta = lower_expr(e.args[3]);
       Val sigma = lower_expr(e.args[4]);
@@ -5029,8 +5041,8 @@ struct Lowering {
       Val x = lower_expr(e.args[0]);
       Val alpha = lower_expr(e.args[1]);
       Val rho = lower_expr(e.args[2]);
-      if (!x.si.param_free)
-        fail("gp_exp_quad_cov: parameter inputs unsupported", e.raw);
+      // x may be data or a parameter: gp_cov_bwd rebuilds the points from
+      // the promoted input, so a parameter x gets its adjoints too.
       // x is array[N] real (D == 1) or array[N] vector[D], stored
       // array-major, so D falls out of the declared dims.
       int64_t D = 1;

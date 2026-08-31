@@ -2889,6 +2889,126 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // gp_exp_quad_cov with a parameter x: the lowering used to refuse a
+  // non-data first argument. gp_cov_bwd now rebuilds the points from the
+  // promoted input, so x's adjoints propagate. Check every gradient
+  // (x, alpha, rho) against the var path with the same constrains.
+  {
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/gpcov.tmir.sexp"), DataMap());
+    check(lm.n_unconstrained == 5, "gpcov 5 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[5] = {0.3, -0.7, 1.1, -0.2, 0.4};
+    for (int k = 0; k < 5; ++k) lex.params_data()[k] = q[k];
+    double grad[5];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> qv(5);
+    for (int k = 0; k < 5; ++k) qv(k) = q[k];
+    var jac = 0.0;
+    std::vector<var> x{qv(0), qv(1), qv(2)};
+    var alpha = stan::math::lb_constrain<true>(qv(3), 0.0, jac);
+    var rho = stan::math::lb_constrain<true>(qv(4), 0.0, jac);
+    Eigen::Matrix<var, -1, -1> K = stan::math::gp_exp_quad_cov(x, alpha, rho);
+    var acc = stan::math::sum(K) + K(0, 1) * K(1, 2) + jac;
+    acc.grad();
+    expect_eq("gpcov lp", lp, acc.val());
+    for (int k = 0; k < 5; ++k)
+      expect_eq("gpcov g" + std::to_string(k), grad[k], qv(k).adj());
+    stan::math::recover_memory();
+  }
+
+  // is_inf / is_nan on data-time scalars and the nullary math constants
+  // (negative_infinity / positive_infinity / not_a_number, which stanc
+  // will not fold) all reduce to integer constants: the finite reads give
+  // 0, and 1.0/0.0, 0.0/0.0, the infinities, the NaN and eps > 0 give 1,
+  // so the normal mean is a + b + c + d + e + f + g + h = 6.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/isinf.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/isinf.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "isinf 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.6;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var theta = 0.6;
+    var acc = stan::math::normal_lpdf<true>(theta, 6.0, 1.0);
+    acc.grad();
+    expect_eq("isinf lp", lp, acc.val());
+    expect_eq("isinf g0", grad[0], theta.adj());
+    stan::math::recover_memory();
+  }
+
+  // normal_id_glm_lpdf with a parameter design matrix X: the lowering used
+  // to require a data X. The kernel now promotes X to var and scatters its
+  // adjoints from the scratch section between y and alpha. Check every
+  // gradient (X, beta, alpha, sigma) against the var path.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/glmparamx.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/glmparamx.tmir.sexp"), d);
+    check(lm.n_unconstrained == 12, "glmparamx 12 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[12];
+    for (int k = 0; k < 12; ++k) q[k] = 0.15 * (k + 1) - 0.8;
+    for (int k = 0; k < 12; ++k) lex.params_data()[k] = q[k];
+    double grad[12];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> p(12);
+    for (int k = 0; k < 12; ++k) p(k) = q[k];
+    // Layout: X (4x2 col-major), beta (2), alpha, sigma>0.
+    Eigen::Matrix<var, -1, -1> X(4, 2);
+    for (int c = 0; c < 2; ++c)
+      for (int r = 0; r < 4; ++r) X(r, c) = p(c * 4 + r);
+    Eigen::Matrix<var, -1, 1> beta(2);
+    beta << p(8), p(9);
+    var alpha = p(10);
+    var jac = 0.0;
+    var sigma = stan::math::lb_constrain<true>(p(11), 0.0, jac);
+    Eigen::VectorXd y(4);
+    y << 0.5, -1.0, 2.0, 0.3;
+    var acc =
+        stan::math::normal_id_glm_lpdf<false>(y, X, alpha, beta, sigma) + jac;
+    acc.grad();
+    expect_eq("glmparamx lp", lp, acc.val());
+    for (int k = 0; k < 12; ++k)
+      expect_eq("glmparamx g" + std::to_string(k), grad[k], p(k).adj());
+    stan::math::recover_memory();
+  }
+
+  // profile("name") { ... } wraps ordinary statements purely for stanc's own
+  // timing output; the reader unwraps it to a plain block, so this should
+  // compile and grade exactly as if the wrapper were absent.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/profile.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/profile.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "profile 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.4;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var x = 0.4;
+    var acc = stan::math::normal_lpdf<false>(x, 0.0, 1.0) +
+              stan::math::normal_lpdf<false>(0.7, x, 1.0);
+    acc.grad();
+    expect_eq("profile lp", lp, acc.val());
+    expect_eq("profile g0", grad[0], x.adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

@@ -2204,25 +2204,33 @@ class MirInterp {
         }
       return r;
     }
-    if (e.name == "crossprod" && e.args.size() == 1) {
+    if ((e.name == "crossprod" ||
+         e.name == "multiply_lower_tri_self_transpose") &&
+        e.args.size() == 1) {
       using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
-      if (a.dims.size() != 2) fail("crossprod: needs a matrix", e.raw);
+      if (a.dims.size() != 2) fail(e.name + ": needs a matrix", e.raw);
       const int64_t rows = a.dims[0], cols = a.dims[1];
       if (rows < 0 || cols < 0 ||
           (rows != 0 && cols > std::numeric_limits<int64_t>::max() / rows) ||
           rows * cols != static_cast<int64_t>(a.r.size()))
-        fail("crossprod: matrix shape does not match storage", e.raw);
+        fail(e.name + ": matrix shape does not match storage", e.raw);
       Mat matrix(rows, cols);
       for (int64_t j = 0; j < cols; ++j)
         for (int64_t i = 0; i < rows; ++i)
           matrix(i, j) = a.r[(size_t)(j * rows + i)];
-      const Mat product = stan::math::crossprod(matrix);
-      r.dims = {cols, cols};
-      r.r.resize((size_t)(cols * cols));
-      for (int64_t j = 0; j < cols; ++j)
-        for (int64_t i = 0; i < cols; ++i)
-          r.r[(size_t)(j * cols + i)] = product(i, j);
+      // crossprod is A' A (cols x cols); multiply_lower_tri_self_transpose
+      // takes the lower triangle of A and forms L L' (rows x rows).
+      const Mat product =
+          e.name == "crossprod"
+              ? Mat(stan::math::crossprod(matrix))
+              : Mat(stan::math::multiply_lower_tri_self_transpose(matrix));
+      const int64_t out = e.name == "crossprod" ? cols : rows;
+      r.dims = {out, out};
+      r.r.resize((size_t)(out * out));
+      for (int64_t j = 0; j < out; ++j)
+        for (int64_t i = 0; i < out; ++i)
+          r.r[(size_t)(j * out + i)] = product(i, j);
       return r;
     }
     if (e.name == "diag_matrix" && e.args.size() == 1) {
@@ -2740,6 +2748,10 @@ class MirInterp {
       r.r = {T(std::numeric_limits<double>::infinity())};
       return r;
     }
+    if (e.name == "not_a_number") {
+      r.r = {T(std::numeric_limits<double>::quiet_NaN())};
+      return r;
+    }
     if (e.name == "student_t_lccdf" && e.args.size() == 4) {
       r.r = {stan::math::student_t_lccdf(
           eval(e.args[0]).r.at(0), eval(e.args[1]).r.at(0),
@@ -2834,7 +2846,12 @@ class MirInterp {
     // factor. Interpreter storage is first-index-fast: the N array elements
     // are the fast axis and each observation must therefore be gathered with
     // stride N before it is handed to Stan Math.
-    if (e.name == "multi_normal_cholesky_lpdf" && e.args.size() == 3) {
+    if ((e.name == "multi_normal_cholesky_lpdf" ||
+         e.name == "multi_normal_lpdf") &&
+        e.args.size() == 3) {
+      // multi_normal takes a covariance matrix where the cholesky form
+      // takes its factor; both are width x width and enter the same way.
+      const bool cholesky = e.name == "multi_normal_cholesky_lpdf";
       Value y = eval(e.args[0]), mu_value = eval(e.args[1]),
             factor = eval(e.args[2]);
       const auto vector_shape = [&](const mir::Expr& expression,
@@ -2871,16 +2888,17 @@ class MirInterp {
         fail(e.name + ": random variable and location sizes differ", e.raw);
       if (observations != locations && observations != 1 && locations != 1)
         fail(e.name + ": vectorized argument sizes differ", e.raw);
+      const char* mrole = cholesky ? "Cholesky factor" : "covariance matrix";
       if (e.args[2].unsized.depth != 0 ||
           e.args[2].unsized.leaf != mir::UnsizedLeaf::Matrix ||
           factor.dims.size() != 2)
-        fail(e.name + ": Cholesky factor is not a matrix", e.raw);
+        fail(e.name + ": " + mrole + " is not a matrix", e.raw);
       if (width != 0 && width > std::numeric_limits<int64_t>::max() / width)
-        fail(e.name + ": Cholesky factor extent overflows", e.raw);
+        fail(e.name + ": " + mrole + " extent overflows", e.raw);
       const int64_t factor_size = width * width;
       if (factor.dims[0] != width || factor.dims[1] != width ||
           (int64_t)factor.r.size() != factor_size)
-        fail(e.name + ": Cholesky factor has the wrong shape", e.raw);
+        fail(e.name + ": " + mrole + " has the wrong shape", e.raw);
 
       using Vec = Eigen::Matrix<T, Eigen::Dynamic, 1>;
       using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
@@ -2894,16 +2912,19 @@ class MirInterp {
         for (int64_t i = 0; i < width; ++i)
           mus[(size_t)k]((Eigen::Index)i) =
               mu_value.r.at((size_t)(i * locations + k));
-      Mat L((Eigen::Index)width, (Eigen::Index)width);
+      Mat M((Eigen::Index)width, (Eigen::Index)width);
       for (int64_t j = 0; j < width; ++j)
         for (int64_t i = 0; i < width; ++i)
-          L((Eigen::Index)i, (Eigen::Index)j) =
+          M((Eigen::Index)i, (Eigen::Index)j) =
               factor.r[(size_t)(j * width + i)];
       const bool propto = e.fn_propto && propto_ctx_;
       const auto density = [&](const auto& yy, const auto& mm) -> T {
-        return propto
-                   ? stan::math::multi_normal_cholesky_lpdf<true>(yy, mm, L)
-                   : stan::math::multi_normal_cholesky_lpdf<false>(yy, mm, L);
+        if (cholesky)
+          return propto
+                     ? stan::math::multi_normal_cholesky_lpdf<true>(yy, mm, M)
+                     : stan::math::multi_normal_cholesky_lpdf<false>(yy, mm, M);
+        return propto ? stan::math::multi_normal_lpdf<true>(yy, mm, M)
+                      : stan::math::multi_normal_lpdf<false>(yy, mm, M);
       };
       if (observations == 1 && locations == 1)
         r.r = {density(ys[0], mus[0])};
@@ -2927,7 +2948,8 @@ class MirInterp {
         e.name == "binomial_lpmf" || e.name == "poisson_lpmf" ||
         e.name == "poisson_log_lpmf" || e.name == "bernoulli_logit_lpmf" ||
         e.name == "binomial_logit_lpmf" || e.name == "hypergeometric_lpmf" ||
-        e.name == "discrete_range_lpmf") {
+        e.name == "discrete_range_lpmf" || e.name == "neg_binomial_2_lpmf" ||
+        e.name == "neg_binomial_2_log_lpmf") {
       if (shared_id >= 0 &&
           e.args.size() != (size_t)program_density_arity(shared_id))
         fail(e.name + " takes " +
@@ -2977,6 +2999,11 @@ class MirInterp {
                                                  ic(3, i));
         else if (e.name == "discrete_range_lpmf")
           acc += stan::math::discrete_range_lpmf(ic(0, i), ic(1, i), ic(2, i));
+        else if (e.name == "neg_binomial_2_lpmf")
+          acc += stan::math::neg_binomial_2_lpmf(ic(0, i), sc(1, i), sc(2, i));
+        else if (e.name == "neg_binomial_2_log_lpmf")
+          acc +=
+              stan::math::neg_binomial_2_log_lpmf(ic(0, i), sc(1, i), sc(2, i));
         else if (e.name == "student_t_lpdf")
           acc += stan::math::student_t_lpdf(sc(0, i), sc(1, i), sc(2, i),
                                             sc(3, i));

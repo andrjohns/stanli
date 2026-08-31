@@ -423,6 +423,186 @@ void test_interpreted_gq() {
   }
 }
 
+// gumbel_rng, dirichlet_rng and beta_binomial_rng have no graph opcode, so
+// the whole generated-quantities section runs on WaInterp. Drive it and
+// check every draw matches stan-math on a parallel WaRng consumed in the
+// same source order: gumbel first, then the whole-vector dirichlet, then
+// the integer beta_binomial.
+void test_interpreted_extra_rng() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("N", 10);
+  const std::string text = slurp("tests/fixtures/gqrng_extra.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL gqrng_extra: expected an attached interpreter\n");
+    return;
+  }
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  base["N"] = data.at("N");
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry sig;
+  sig.r = {1.3};
+  params["sigma"] = sig;
+
+  WaRng rng(7), ref(7);
+  const std::vector<double> row = wi.eval(params, rng);
+  expect_eq("gqrng_extra header", joined(wi.columns()),
+            "sigma,g,d.1,d.2,d.3,bb");
+  if (row.size() != 6) {
+    ++failures;
+    std::printf("FAIL gqrng_extra: row size %zu\n", row.size());
+    return;
+  }
+  auto& g = ref.gen();
+  const double want_g = stan::math::gumbel_rng(0.5, 1.3, g);
+  Eigen::VectorXd alpha(3);
+  alpha << 1.0, 2.0, 3.0;
+  const Eigen::VectorXd want_d = stan::math::dirichlet_rng(alpha, g);
+  const int want_bb = stan::math::beta_binomial_rng(10, 2.0, 3.0, g);
+
+  auto expect_val = [&](const char* what, double got, double want) {
+    if (got != want) {
+      ++failures;
+      std::printf("FAIL gqrng_extra %s: got %.17g want %.17g\n", what, got,
+                  want);
+    }
+  };
+  expect_val("sigma passthrough", row[0], 1.3);
+  expect_val("gumbel draw", row[1], want_g);
+  expect_val("dirichlet[0]", row[2], want_d[0]);
+  expect_val("dirichlet[1]", row[3], want_d[1]);
+  expect_val("dirichlet[2]", row[4], want_d[2]);
+  expect_val("beta_binomial draw", row[5], (double)want_bb);
+  if (std::abs((row[2] + row[3] + row[4]) - 1.0) > 1e-12) {
+    ++failures;
+    std::printf("FAIL gqrng_extra: dirichlet draw is not a simplex\n");
+  }
+}
+
+// neg_binomial_2_lpmf and multi_normal_lpdf as value-returning densities in
+// a runtime-control region: no graph opcode, so the whole section runs on
+// WaInterp. Check the accumulated values against stan-math directly.
+void test_interpreted_gq_densities() {
+  using namespace stanli;
+  DataMap data = DataMap::from_json_file("tests/fixtures/gqdensity.json");
+  const std::string text = slurp("tests/fixtures/gqdensity.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL gqdensity: expected an attached interpreter\n");
+    return;
+  }
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  for (const char* key : {"K", "counts", "y", "Sigma"})
+    base[key] = data.at(key);
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry mu;
+  mu.dims = {2};
+  mu.r = {0.4, -0.7};
+  params["mu"] = mu;
+  WaRng rng(11);
+  const std::vector<double> row = wi.eval(params, rng);
+  expect_eq("gqdensity header", joined(wi.columns()), "mu.1,mu.2,nb,mvn,i");
+
+  const std::vector<int> counts = {3, 0};
+  double want_nb = 0.0;
+  for (int k = 0; k < 2; ++k)
+    want_nb += stan::math::neg_binomial_2_lpmf(counts[k], 2.0, 1.5);
+  Eigen::VectorXd y(2), m(2);
+  y << 0.5, -1.0;
+  m << 0.4, -0.7;
+  Eigen::MatrixXd S(2, 2);
+  S << 2.0, 0.3, 0.3, 1.0;
+  const double want_mvn = 2.0 * stan::math::multi_normal_lpdf(y, m, S);
+
+  auto expect_close = [&](const char* what, double got, double want) {
+    if (std::abs(got - want) > 1e-12) {
+      ++failures;
+      std::printf("FAIL gqdensity %s: got %.17g want %.17g\n", what, got, want);
+    }
+  };
+  expect_close("neg_binomial_2 accumulation", row[2], want_nb);
+  expect_close("multi_normal accumulation", row[3], want_mvn);
+}
+
+// multiply_lower_tri_self_transpose in a runtime-control region: no graph
+// opcode, so the section runs on WaInterp. The function zeros A's upper
+// triangle before forming L L', so a full A * A' would disagree on every
+// entry that touches a dropped element.
+void test_interpreted_multiply_lower_tri() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("M", 3);
+  const std::string text = slurp("tests/fixtures/mlt.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL mlt: expected an attached interpreter\n");
+    return;
+  }
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  base["M"] = data.at("M");
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+  // Column-major A with a non-zero upper triangle that must be ignored.
+  const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry A;
+  A.dims = {3, 3};
+  A.r.assign(a, a + 9);
+  params["A"] = A;
+  WaRng rng(3);
+  const std::vector<double> row = wi.eval(params, rng);
+
+  Eigen::MatrixXd Am(3, 3);
+  for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r) Am(r, c) = a[c * 3 + r];
+  const Eigen::MatrixXd want =
+      stan::math::multiply_lower_tri_self_transpose(Am);
+  for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r) {
+      const double got = row.at((size_t)(9 + c * 3 + r));
+      if (std::abs(got - want(r, c)) > 1e-12) {
+        ++failures;
+        std::printf("FAIL mlt P(%d,%d): got %.17g want %.17g\n", r, c, got,
+                    want(r, c));
+      }
+    }
+}
+
 // An array of matrices carries two layouts at once: the array index is
 // outermost with each element contiguous, and within an element the storage
 // is column-major. Reading m[k, i, j] with one row-major stride computation
@@ -3861,6 +4041,9 @@ int main() {
   test_gq_bare_fill_is_nan();
   test_gq_name_shadowing();
   test_interpreted_gq();
+  test_interpreted_extra_rng();
+  test_interpreted_gq_densities();
+  test_interpreted_multiply_lower_tri();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();
