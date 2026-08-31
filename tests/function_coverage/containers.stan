@@ -19,7 +19,7 @@ functions {
   real probe(matrix x) {
     real out = 0;
     for (j in 1:cols(x)) for (i in 1:rows(x))
-      out += (1 + i * 0.125 + j * 0.0625) * x[i,j];
+      out += (1 + (i + (j - 1) * rows(x)) * 0.125) * x[i,j];
     return out;
   }
   real probe(array[] real x) {

@@ -19,7 +19,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "harnesses"))
 sys.path.insert(0, str(REPO / "tests" / "function_coverage"))
 from conformance.generate import generated_inventory
-from conformance.signatures import parse_signature
+from conformance.signatures import inventory_from_dump
 from recipes import GROUPS, HELPERS, PREAMBLE
 
 DEST = REPO / "tests" / "function_coverage"
@@ -29,17 +29,13 @@ def render():
     baseline = json.loads(gzip.decompress(
         (REPO / "docs/conformance-baseline.json.gz").read_bytes()))
     rows = baseline["classifications"]
-    # Use the pinned, checked-in canonical signatures. Their grammar differs
-    # only in the arrow from stanc's dump; no compiler executable is needed
-    # for the fast freshness gate.
-    signatures = tuple(parse_signature(k.replace("=>", " => "))
-                       for k in rows if not k.startswith("construct:"))
-    # Inventory identity is irrelevant to rendering; these exact signatures
-    # and baseline classifications are the reviewed selection authority.
-    class Inventory:
-        pass
-    inventory = Inventory()
-    inventory.signatures = signatures
+    # Canonical IDs use the same grammar as stanc's signature dump. These
+    # checked-in signatures and classifications are the selection authority;
+    # no compiler executable is needed for the fast freshness gate.
+    inventory = inventory_from_dump(
+        "\n".join(k for k in rows if not k.startswith("construct:")),
+        "checked-in conformance baseline")
+    signatures = inventory.signatures
     candidates = {}
     for spec in generated_inventory(inventory):
         if rows.get(spec.inventory_id, {}).get("status") != "verified":
