@@ -19,12 +19,15 @@
 // 3. An empty slice never lowers its callee. The fixture's callee rejects,
 //    so a lowering that reached it leaves an OP_REJECT in the graph.
 #include <stanli/compile.hpp>
+#include <stanli/message_sink.hpp>
 #include <stanli/optable.hpp>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -76,10 +79,111 @@ int count_opcode(const stanli::Graph& g, uint16_t opcode) {
   return n;
 }
 
+void argument_evaluation() {
+  using namespace stanli;
+  const std::string mir =
+      slurp("tests/fixtures/reduce_sum_arguments.tmir.sexp");
+  for (int in_td : {0, 1})
+    for (int n : {0, 2})
+      for (int grain : {0, 1})
+        for (int refuse : {0, 1}) {
+          const std::string tag = "arguments td=" + std::to_string(in_td) +
+                                  " n=" + std::to_string(n) +
+                                  " grain=" + std::to_string(grain) +
+                                  " refuse=" + std::to_string(refuse);
+          DataMap data =
+              DataMap::from_json("{\"N\":" + std::to_string(n) +
+                                 ",\"y\":" + (n == 0 ? "[]" : "[0.5,-0.2]") +
+                                 ",\"grainsize\":" + std::to_string(grain) +
+                                 ",\"refuse\":" + std::to_string(refuse) +
+                                 ",\"in_td\":" + std::to_string(in_td) + "}");
+          std::vector<std::string> lines;
+          std::string error;
+          bool evaluating = false;
+          bool domain_error = false;
+          set_message_sink([&](const char* text, size_t len) {
+            lines.emplace_back(text, len);
+          });
+          try {
+            CompiledModel cm = compile_model(mir, data);
+            if (!in_td)
+              expect(tag + " no effects while lowering", lines.empty());
+            Executor ex(std::move(cm.graph));
+            cm.bind(ex);
+            ex.params_data()[0] = 0.25;
+            double grad;
+            evaluating = true;
+            expect(tag + " finite lp", std::isfinite(ex.gradient(&grad)));
+            if (!in_td) {
+              const auto first = lines;
+              lines.clear();
+              ex.gradient(&grad);
+              expect(tag + " effects once per evaluation", lines == first);
+            }
+          } catch (const std::domain_error& e) {
+            domain_error = true;
+            error = e.what();
+          } catch (const std::exception& e) {
+            error = e.what();
+          }
+          set_message_sink(nullptr);
+          expect(tag + " rejection", !error.empty() == (grain == 0 || refuse));
+          if (!error.empty()) {
+            expect(tag + " error: " + error,
+                   error.find(refuse ? "shared argument rejected"
+                                     : "grainsize") != std::string::npos);
+            expect(tag + " correct execution phase", evaluating == !in_td);
+            if (!in_td) expect(tag + " runtime domain_error", domain_error);
+          }
+          // C++ leaves argument order unspecified; require both evaluations
+          // exactly once before entering the partial-sum body or validating.
+          expect(tag + " grain evaluated once",
+                 std::count(lines.begin(), lines.end(),
+                            "grain=" + std::to_string(grain)) == 1);
+          expect(tag + " shared evaluated once",
+                 std::count(lines.begin(), lines.end(), "shared=0.25") == 1);
+          const bool body_runs = n > 0 && grain > 0 && !refuse;
+          expect(tag + " partial body only when required",
+                 lines.size() == (body_runs ? 3u : 2u));
+          if (body_runs && !lines.empty())
+            expect(tag + " whole-slice bounds",
+                   lines.back() == "partial bounds=1:2");
+        }
+}
+
+void shapes_and_overloads() {
+  using namespace stanli;
+  CompiledModel cm = compile_model(
+      slurp("tests/fixtures/reduce_sum_shapes.tmir.sexp"), DataMap{});
+  Executor ex(std::move(cm.graph));
+  cm.bind(ex);
+  expect("shape fixture parameter count", ex.n_params() == 4);
+  if (ex.n_params() != 4) return;
+  for (double scale : {-0.5, 0.0, 1.3}) {
+    double total = 0;
+    for (int i = 0; i < 4; ++i) {
+      ex.params_data()[i] = scale * (i + 1);
+      if (i < 3) total += ex.params_data()[i];
+    }
+    const double b = ex.params_data()[3];
+    double grad[4];
+    const double lp = ex.gradient(grad);
+    // The independent polynomial oracle is 3*b*sum(z) + 6*b. The tiny
+    // absolute tolerance allows the different addition groupings only.
+    expect("nested/overloaded lp", std::abs(lp - b * (3 * total + 6)) < 1e-12);
+    for (int i = 0; i < 3; ++i)
+      expect("active sliced gradient", std::abs(grad[i] - 3 * b) < 1e-12);
+    expect("shared gradient", std::abs(grad[3] - (3 * total + 6)) < 1e-12);
+  }
+}
+
 }  // namespace
 
 int main() {
   using namespace stanli;
+
+  argument_evaluation();
+  shapes_and_overloads();
 
   DataMap data = DataMap::from_json_file("tests/fixtures/reduce_sum.json");
   CompiledModel cm =

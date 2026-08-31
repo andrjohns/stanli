@@ -990,10 +990,15 @@ class MirInterp {
     if (e.args[0].kind != mir::Expr::Var)
       fail("reduce_sum: the partial-sum argument is not a function name",
            e.raw);
-    if (as_int(e.args[2]) < 1)
-      fail("reduce_sum: grainsize must be positive", e.raw);
-
     Value slice = eval(e.args[1]);
+    const long grainsize = as_int(e.args[2]);
+    std::vector<Value> shared;
+    shared.reserve(e.args.size() - 3);
+    for (size_t i = 3; i < e.args.size(); ++i)
+      shared.push_back(eval(e.args[i]));
+    // Even an empty slice evaluates every actual argument. Validation is
+    // inside the Stan Math call, after those evaluations and their effects.
+    stan::math::check_positive("reduce_sum", "grainsize", grainsize);
     const int64_t n =
         slice.dims.empty() ? (int64_t)slice.r.size() : slice.dims.front();
     Value sum;
@@ -1031,7 +1036,7 @@ class MirInterp {
     sub.env_[f->arg_names[1]] = std::move(start);
     sub.env_[f->arg_names[2]] = std::move(end);
     for (size_t i = 3; i < e.args.size(); ++i)
-      sub.env_[f->arg_names[i]] = eval(e.args[i]);
+      sub.env_[f->arg_names[i]] = std::move(shared[i - 3]);
     try {
       for (const auto& st : f->body) sub.exec(st);
     } catch (ReturnV& r) {

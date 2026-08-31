@@ -3110,7 +3110,8 @@ struct Lowering {
   // in the caller's scope, bound under the parameter names in a shadowed
   // scope, and the body lowers like any other statements (loops unroll,
   // data-only conditions resolve). Return throws the result value out.
-  Val lower_call_udf(const mir::Expr& e) {
+  Val lower_call_udf(const mir::Expr& e,
+                     const std::function<void()>& before_body = {}) {
     auto it = fun_defs.find(e.name);
     if (it == fun_defs.end()) fail("unknown function " + e.name, e.raw);
     const mir::FunDef& f = *it->second;
@@ -3146,6 +3147,9 @@ struct Lowering {
           (binds[i].v.autodiff || !binds[i].v.si.param_free))
         fail(e.name + ": data-only argument depends on a parameter", e.raw);
     }
+    // Higher-order calls may validate after evaluating all actual arguments
+    // but before entering the user body (reduce_sum's grainsize check).
+    if (before_body) before_body();
     if (++udf_depth > 64) {
       --udf_depth;
       fail("UDF recursion too deep in " + e.name);
@@ -3581,35 +3585,34 @@ struct Lowering {
     if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Real)
       fail("reduce_sum: result is not a real", e.raw);
 
-    // Stan Math checks the grainsize at runtime, and it is always data, so a
-    // grainsize that folds is checked here instead. One that does not fold is
-    // left alone rather than refusing a model CmdStan runs: grainsize is a
-    // scheduling hint and cannot change the serial sum.
-    std::optional<long> grainsize;
-    try {
-      grainsize = eval_int(e.args[2]);
-    } catch (const CompileError&) {
-    }
-    if (grainsize && *grainsize < 1)
-      fail("reduce_sum: grainsize must be positive, got " +
-               std::to_string(*grainsize),
-           e.raw);
-
-    // An empty slice returns zero without the callee running at all, and a
-    // zero-length local can have declaration geometry but no materialized
-    // slot, so ask decls before asking for a value. The empty map_rect
-    // branch above has the same shape and the same reason.
-    if (e.args[1].kind == mir::Expr::Var) {
-      const auto declared = decls.find(e.args[1].name);
-      if (declared != decls.end() && is_array(declared->second.si) &&
-          array_shape(declared->second.si).dims.front() == 0)
-        return constant(0.0);
-    }
     Val slice = lower_expr(e.args[1]);
     if (!is_array(slice.si))
       fail("reduce_sum: the sliced argument is not an array", e.raw);
+    // Grainsize does not choose a partition here, but evaluating it and
+    // checking positivity are still observable. Do not swallow a failed
+    // compile-time probe or execute effectful expressions while lowering.
+    const Val grainsize = lower_expr(e.args[2]);
+    if (e.args[2].unsized.depth != 0 ||
+        e.args[2].unsized.leaf != mir::UnsizedLeaf::Int ||
+        !is_scalar(grainsize))
+      fail("reduce_sum: grainsize is not an integer scalar", e.raw);
+    const auto check_grainsize = [&] {
+      auto spec = std::make_shared<BoundCheckSpec>();
+      spec->name = "reduce_sum grainsize";
+      spec->bound_is_scalar = true;
+      spec->shapes_match = true;
+      (void)emit_value(OP_CHECK_LOWER, {grainsize, constant(1.0)}, 1);
+      g.ops.back().udata = spec.get();
+      g.udata_pool.push_back(std::move(spec));
+    };
     const int64_t n = array_shape(slice.si).dims.front();
-    if (n == 0) return constant(0.0);
+    if (n == 0) {
+      // C++ evaluates shared arguments before reduce_sum can return zero.
+      // Only the partial-sum body is skipped for an empty slice.
+      for (size_t i = 3; i < e.args.size(); ++i) (void)lower_expr(e.args[i]);
+      check_grainsize();
+      return constant(0.0);
+    }
 
     bool propto = false;
     const std::string base =
@@ -3671,7 +3674,7 @@ struct Lowering {
 
     Val result{-1, false, {}};
     try {
-      result = lower_call_udf(call);
+      result = lower_call_udf(call, check_grainsize);
     } catch (...) {
       scope.erase(bound);
       decls.erase(bound);

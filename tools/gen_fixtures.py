@@ -15,6 +15,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # cannot generate different corpora.
 O0_FIXTURES = {
     "paramcond_intarray",
+    "reduce_sum_arguments",
     "runtime_int_array_udf",
     "structured_matrix_ops",
     "udf_conditional_return",
