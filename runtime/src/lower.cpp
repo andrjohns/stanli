@@ -4361,8 +4361,7 @@ struct Lowering {
     if (e.name == "normal_id_glm_lpdf" && e.args.size() == 5) {
       Val y = lower_expr(e.args[0]);
       Val X = lower_expr(e.args[1]);
-      if (!is_matrix(X.si) || !X.si.param_free)
-        fail("normal_id_glm: X must be a data matrix", e.raw);
+      if (!is_matrix(X.si)) fail("normal_id_glm: X must be a matrix", e.raw);
       Val alpha = lower_expr(e.args[2]);
       Val beta = lower_expr(e.args[3]);
       Val sigma = lower_expr(e.args[4]);

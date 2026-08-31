@@ -2945,6 +2945,46 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // normal_id_glm_lpdf with a parameter design matrix X: the lowering used
+  // to require a data X. The kernel now promotes X to var and scatters its
+  // adjoints from the scratch section between y and alpha. Check every
+  // gradient (X, beta, alpha, sigma) against the var path.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/glmparamx.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/glmparamx.tmir.sexp"), d);
+    check(lm.n_unconstrained == 12, "glmparamx 12 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[12];
+    for (int k = 0; k < 12; ++k) q[k] = 0.15 * (k + 1) - 0.8;
+    for (int k = 0; k < 12; ++k) lex.params_data()[k] = q[k];
+    double grad[12];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> p(12);
+    for (int k = 0; k < 12; ++k) p(k) = q[k];
+    // Layout: X (4x2 col-major), beta (2), alpha, sigma>0.
+    Eigen::Matrix<var, -1, -1> X(4, 2);
+    for (int c = 0; c < 2; ++c)
+      for (int r = 0; r < 4; ++r) X(r, c) = p(c * 4 + r);
+    Eigen::Matrix<var, -1, 1> beta(2);
+    beta << p(8), p(9);
+    var alpha = p(10);
+    var jac = 0.0;
+    var sigma = stan::math::lb_constrain<true>(p(11), 0.0, jac);
+    Eigen::VectorXd y(4);
+    y << 0.5, -1.0, 2.0, 0.3;
+    var acc =
+        stan::math::normal_id_glm_lpdf<false>(y, X, alpha, beta, sigma) + jac;
+    acc.grad();
+    expect_eq("glmparamx lp", lp, acc.val());
+    for (int k = 0; k < 12; ++k)
+      expect_eq("glmparamx g" + std::to_string(k), grad[k], p(k).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {
