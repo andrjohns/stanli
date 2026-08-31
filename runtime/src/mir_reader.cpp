@@ -728,6 +728,11 @@ Stmt read_stmt(const Node& n) {
   } else if (head == "SList") {
     s.kind = Stmt::SList;
     read_stmt_list(p[1], s.body);
+  } else if (head == "Profile") {
+    // (Profile name (stmts)): the name is only for stanc's own profiling
+    // output, which stanli does not produce, so unwrap to a plain block.
+    s.kind = Stmt::Block;
+    read_stmt_list(p[2], s.body);
   } else if (head == "For") {
     s.kind = Stmt::For;
     if (const Node* lv = field(p, "loopvar")) s.loopvar = (*lv)[1].atom;

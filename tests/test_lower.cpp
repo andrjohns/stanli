@@ -2985,6 +2985,30 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // profile("name") { ... } wraps ordinary statements purely for stanc's own
+  // timing output; the reader unwraps it to a plain block, so this should
+  // compile and grade exactly as if the wrapper were absent.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/profile.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/profile.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "profile 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.4;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var x = 0.4;
+    var acc = stan::math::normal_lpdf<false>(x, 0.0, 1.0) +
+              stan::math::normal_lpdf<false>(0.7, x, 1.0);
+    acc.grad();
+    expect_eq("profile lp", lp, acc.val());
+    expect_eq("profile g0", grad[0], x.adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {
