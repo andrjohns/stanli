@@ -3480,7 +3480,8 @@ struct Lowering {
   }
 
   bool prod_native_surface(const mir::Expr& e) const {
-    if (e.kind == mir::Expr::Var || prod_transpose_of(e, mir::Expr::Var))
+    if (e.kind == mir::Expr::Var || prod_transpose_of(e, mir::Expr::Var) ||
+        mir::unwrap_range_slice(e).kind == mir::Expr::Var)
       return true;
     if (e.kind != mir::Expr::FunApp || e.fn_lib != mir::Expr::Lib::StanLib ||
         e.args.size() != 2 || e.name != "Minus__")

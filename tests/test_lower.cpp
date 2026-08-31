@@ -3235,6 +3235,46 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // prod of a contiguous `v[lo:hi]` range slice of a parameter vector or
+  // row-vector (unsupported_prod, generalized): same gap as the extrema
+  // classifier above, in the surface/grouping classifiers `prod` lowering
+  // uses instead.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/sliceprod.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/sliceprod.tmir.sexp"), d);
+    check(count_opcode(lm, OP_PROD_VEC) == 2, "sliceprod opcode census");
+    for (const Op& op : lm.graph.ops)
+      if (op.opcode == OP_PROD_VEC)
+        check(op.variant == 2, "sliceprod packet grouping, active");
+    check(lm.n_unconstrained == 8, "sliceprod 8 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[] = {0.4, -0.2, 0.9, 0.1, -0.5, 0.3, 0.8, -0.7};
+    std::copy(q, q + 8, lex.params_data());
+    double grad[8];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(4);
+    Eigen::Matrix<var, 1, -1> r(4);
+    for (int i = 0; i < 4; ++i) x(i) = q[i];
+    for (int i = 0; i < 4; ++i) r(i) = q[4 + i];
+    var vprod = stan::math::prod(x.segment(0, 3));
+    var rprod = stan::math::prod(r.segment(1, 3));
+    var acc = stan::math::std_normal_lpdf<true>(x) +
+              stan::math::std_normal_lpdf<true>(r) +
+              stan::math::normal_lpdf<false>(vprod, 0.0, 1.0) +
+              stan::math::normal_lpdf<false>(rprod, 0.0, 1.0);
+    acc.grad();
+    expect_eq("sliceprod lp", lp, acc.val());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("sliceprod gx" + std::to_string(i), grad[i], x(i).adj());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("sliceprod gr" + std::to_string(i), grad[4 + i], r(i).adj());
+    stan::math::recover_memory();
+  }
+
   // A parameter sized by a transformed-data for-loop accumulator
   // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
   // transformed-data interpreter used to lose the accumulator's int-ness on

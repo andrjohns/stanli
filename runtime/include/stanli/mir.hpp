@@ -83,6 +83,18 @@ inline bool is_matrix_row_value(const Expr& value) {
   return implicit_all || explicit_all;
 }
 
+// A `v[lo:hi]` range slice is `Indexed(v, IndexBetween(lo, hi))`: one
+// contiguous span of the same dense, stride-1 storage `v` has, with nothing
+// else applied. Peeling it back to the variable lets any classifier that
+// already trusts a bare variable's owning-storage provenance trust the slice
+// just as much.
+inline const Expr& unwrap_range_slice(const Expr& e) {
+  if (e.kind == Expr::Indexed && e.args.size() == 2 &&
+      e.args[1].kind == Expr::FunApp && e.args[1].name == "IndexBetween")
+    return e.args[0];
+  return e;
+}
+
 enum class ProdGrouping : uint8_t { Legacy, Packet, Scalar };
 
 // Classify only the syntax whose Eigen evaluator provenance has been audited.
@@ -90,7 +102,8 @@ enum class ProdGrouping : uint8_t { Legacy, Packet, Scalar };
 // not a guess about an arbitrary expression's Eigen flags.
 inline ProdGrouping prod_grouping(const Expr& product_arg) {
   if (is_matrix_row_value(product_arg)) return ProdGrouping::Scalar;
-  if (product_arg.kind == Expr::Var) return ProdGrouping::Packet;
+  if (unwrap_range_slice(product_arg).kind == Expr::Var)
+    return ProdGrouping::Packet;
   if (product_arg.kind == Expr::FunApp &&
       product_arg.fn_lib == Expr::Lib::StanLib &&
       (product_arg.name == "Transpose__" || product_arg.name == "transpose") &&
@@ -141,15 +154,7 @@ inline ExtremaKind extrema_kind(const Expr& call) {
       call.args.size() != 1 || call.type_ != "UReal" ||
       call.unsized.leaf != UnsizedLeaf::Real || call.unsized.depth != 0)
     return ExtremaKind::Legacy;
-  const Expr* base = &call.args[0];
-  // `v[lo:hi]` is `Indexed(v, IndexBetween(lo, hi))`: one contiguous range
-  // applied directly to the variable, not to an array element or a matrix
-  // row/column, so it never loses the dense, stride-1 storage a bare
-  // variable has.
-  if (base->kind == Expr::Indexed && base->args.size() == 2 &&
-      base->args[1].kind == Expr::FunApp &&
-      base->args[1].name == "IndexBetween")
-    base = &base->args[0];
+  const Expr* base = &unwrap_range_slice(call.args[0]);
   const bool vector_arg = base->kind == Expr::Var && base->type_ == "UVector" &&
                           base->unsized.leaf == UnsizedLeaf::Vector &&
                           base->unsized.depth == 0;
