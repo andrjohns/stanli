@@ -39,6 +39,12 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def source_digest(path):
+    # Git may check text files out as CRLF on Windows. Only normalize that
+    # checkout transformation; compiler binaries still use the raw digest.
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def parse(text):
     fields = {}
     for line in text.splitlines():
@@ -62,7 +68,7 @@ def parse(text):
 
 def record_one(name, args):
     source = FIXTURES / (name + ".stan")
-    identity = hashlib.sha256((digest(source) + digest(REPO / "tools/ref_driver.cpp")
+    identity = hashlib.sha256((source_digest(source) + source_digest(REPO / "tools/ref_driver.cpp")
                               + json.dumps(args.toolchain, sort_keys=True)).encode()).hexdigest()[:16]
     cache = args.build / "function-refs" / (name + "-" + identity)
     cache.mkdir(parents=True, exist_ok=True)
@@ -72,12 +78,12 @@ def record_one(name, args):
         run(compile_cmd(args.cmdstan, hpp, REPO / "tools/ref_driver.cpp", exe))
     points = [parse(run([exe, args.data, p])) for p in range(3)]
     print(f"recorded {name}", flush=True)
-    return name, {"source_sha256": digest(source), "points": points}
+    return name, {"source_sha256": source_digest(source), "points": points}
 
 
 def compare(name, reference, args):
     source = FIXTURES / (name + ".stan")
-    if reference["source_sha256"] != digest(source):
+    if reference["source_sha256"] != source_digest(source):
         raise ValueError(name + ": source changed; re-record the CmdStan reference")
     if len(reference["points"]) != 3:
         raise ValueError(name + ": expected exactly three reference points")
