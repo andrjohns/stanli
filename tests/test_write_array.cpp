@@ -549,6 +549,60 @@ void test_interpreted_gq_densities() {
   expect_close("multi_normal accumulation", row[3], want_mvn);
 }
 
+// multiply_lower_tri_self_transpose in a runtime-control region: no graph
+// opcode, so the section runs on WaInterp. The function zeros A's upper
+// triangle before forming L L', so a full A * A' would disagree on every
+// entry that touches a dropped element.
+void test_interpreted_multiply_lower_tri() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("M", 3);
+  const std::string text = slurp("tests/fixtures/mlt.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL mlt: expected an attached interpreter\n");
+    return;
+  }
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  base["M"] = data.at("M");
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+  // Column-major A with a non-zero upper triangle that must be ignored.
+  const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry A;
+  A.dims = {3, 3};
+  A.r.assign(a, a + 9);
+  params["A"] = A;
+  WaRng rng(3);
+  const std::vector<double> row = wi.eval(params, rng);
+
+  Eigen::MatrixXd Am(3, 3);
+  for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r) Am(r, c) = a[c * 3 + r];
+  const Eigen::MatrixXd want =
+      stan::math::multiply_lower_tri_self_transpose(Am);
+  for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r) {
+      const double got = row.at((size_t)(9 + c * 3 + r));
+      if (std::abs(got - want(r, c)) > 1e-12) {
+        ++failures;
+        std::printf("FAIL mlt P(%d,%d): got %.17g want %.17g\n", r, c, got,
+                    want(r, c));
+      }
+    }
+}
+
 // An array of matrices carries two layouts at once: the array index is
 // outermost with each element contiguous, and within an element the storage
 // is column-major. Reading m[k, i, j] with one row-major stride computation
@@ -3989,6 +4043,7 @@ int main() {
   test_interpreted_gq();
   test_interpreted_extra_rng();
   test_interpreted_gq_densities();
+  test_interpreted_multiply_lower_tri();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();

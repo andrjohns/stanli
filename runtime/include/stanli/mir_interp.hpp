@@ -2204,25 +2204,33 @@ class MirInterp {
         }
       return r;
     }
-    if (e.name == "crossprod" && e.args.size() == 1) {
+    if ((e.name == "crossprod" ||
+         e.name == "multiply_lower_tri_self_transpose") &&
+        e.args.size() == 1) {
       using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
-      if (a.dims.size() != 2) fail("crossprod: needs a matrix", e.raw);
+      if (a.dims.size() != 2) fail(e.name + ": needs a matrix", e.raw);
       const int64_t rows = a.dims[0], cols = a.dims[1];
       if (rows < 0 || cols < 0 ||
           (rows != 0 && cols > std::numeric_limits<int64_t>::max() / rows) ||
           rows * cols != static_cast<int64_t>(a.r.size()))
-        fail("crossprod: matrix shape does not match storage", e.raw);
+        fail(e.name + ": matrix shape does not match storage", e.raw);
       Mat matrix(rows, cols);
       for (int64_t j = 0; j < cols; ++j)
         for (int64_t i = 0; i < rows; ++i)
           matrix(i, j) = a.r[(size_t)(j * rows + i)];
-      const Mat product = stan::math::crossprod(matrix);
-      r.dims = {cols, cols};
-      r.r.resize((size_t)(cols * cols));
-      for (int64_t j = 0; j < cols; ++j)
-        for (int64_t i = 0; i < cols; ++i)
-          r.r[(size_t)(j * cols + i)] = product(i, j);
+      // crossprod is A' A (cols x cols); multiply_lower_tri_self_transpose
+      // takes the lower triangle of A and forms L L' (rows x rows).
+      const Mat product =
+          e.name == "crossprod"
+              ? Mat(stan::math::crossprod(matrix))
+              : Mat(stan::math::multiply_lower_tri_self_transpose(matrix));
+      const int64_t out = e.name == "crossprod" ? cols : rows;
+      r.dims = {out, out};
+      r.r.resize((size_t)(out * out));
+      for (int64_t j = 0; j < out; ++j)
+        for (int64_t i = 0; i < out; ++i)
+          r.r[(size_t)(j * out + i)] = product(i, j);
       return r;
     }
     if (e.name == "diag_matrix" && e.args.size() == 1) {
