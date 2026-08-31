@@ -2710,6 +2710,31 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // zeros_*/ones_* constructors: data-sized, so transformed data folds the
+  // integer array and identity matrix in the interpreter while the log
+  // density broadcasts a ones/zeros vector in the graph. The constant terms
+  // (s = 0 + N + 0 + N) and the zeros row-vector contribute nothing, so a
+  // wrong fill would show up as a nonzero lp or gradient.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/zeros_ones.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/zeros_ones.tmir.sexp"), d);
+    check(lm.n_unconstrained == 3, "zeros_ones 3 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[3] = {0.4, -1.1, 0.7};
+    for (int k = 0; k < 3; ++k) lex.params_data()[k] = q[k];
+    double grad[3];
+    const double lp = lex.gradient(grad);
+
+    // s = sum(zeros) + sum(ones_row) + zeros_int[0] + trace(I) = 0+3+0+3.
+    const double want_lp = (q[0] + q[1] + q[2]) + 6.0;
+    expect_eq("zeros_ones lp", lp, want_lp);
+    for (int k = 0; k < 3; ++k)
+      expect_eq("zeros_ones g" + std::to_string(k), grad[k], 1.0);
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

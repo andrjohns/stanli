@@ -4537,6 +4537,14 @@ struct Lowering {
       const long n = eval_int(e.args[1]);
       return emit_value(OP_REP_VEC, {a}, n, view_of(e.type_));
     }
+    if ((e.name == "zeros_vector" || e.name == "zeros_row_vector" ||
+         e.name == "ones_vector" || e.name == "ones_row_vector") &&
+        e.args.size() == 1) {
+      // A broadcast of the constant fill, exactly as rep_vector lowers.
+      const long n = eval_int(e.args[0]);
+      const double fill = e.name.rfind("ones", 0) == 0 ? 1.0 : 0.0;
+      return emit_value(OP_REP_VEC, {constant(fill)}, n, view_of(e.type_));
+    }
     if (e.name == "log_sum_exp" || e.name == "sum") {
       // One argument is the reduction; two is the elementwise form below.
       if (e.name == "log_sum_exp" && e.args.size() == 2)

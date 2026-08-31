@@ -2321,6 +2321,29 @@ class MirInterp {
       r.dims = {n};
       return r;
     }
+    // The zeros_*/ones_* constructors are rep_vector with a fixed fill.
+    // zeros_int_array/ones_array carry integer provenance.
+    if ((e.name == "zeros_vector" || e.name == "zeros_row_vector" ||
+         e.name == "ones_vector" || e.name == "ones_row_vector" ||
+         e.name == "zeros_int_array" || e.name == "ones_array") &&
+        e.args.size() == 1) {
+      const long n = as_int(e.args[0]);
+      const bool is_ones = e.name.rfind("ones", 0) == 0;
+      r.r.assign(n, T(is_ones ? 1.0 : 0.0));
+      r.dims = {n};
+      if (e.name == "zeros_int_array" || e.name == "ones_array") {
+        r.is_int = true;
+        r.i.assign(n, is_ones ? 1 : 0);
+      }
+      return r;
+    }
+    if (e.name == "identity_matrix" && e.args.size() == 1) {
+      const long n = as_int(e.args[0]);
+      r.r.assign((size_t)(n * n), T(0.0));
+      for (long k = 0; k < n; ++k) r.r[(size_t)(k * n + k)] = T(1.0);
+      r.dims = {n, n};
+      return r;
+    }
     // The linspaced_* family is data-only -- stanc's signatures reject
     // AutoDiffable bounds -- so every use is a constant the interpreter can
     // fold, and no graph opcode is needed. Delegate to stan-math instead of
