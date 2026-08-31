@@ -6334,33 +6334,37 @@ struct Lowering {
             return;
           }
           // A full array-index prefix followed by an explicit `:` for every
-          // leaf dimension: H[i, :, :] on array[N] matrix[R, C] (or the
-          // vector/row_vector analog with one trailing `:`) spells the same
-          // whole-element replacement as H[i] = rhs, just with the leaf's
-          // own extent written out. Not `all_single` (the trailing indices
-          // are All, not Single), so it falls outside the block above.
+          // remaining dimension: H[i, :, :] on array[N] matrix[R, C] (a
+          // container leaf), or y_approx[i, :] on a plain array[N, S] real
+          // (the remaining dimension is just another array axis, no
+          // container leaf at all) -- either way this spells the same
+          // whole-remainder replacement flat_addr's "whole elements" case
+          // already gives an implicit-rest prefix. Not `all_single` (the
+          // trailing indices are All, not omitted or Single), so it falls
+          // outside the block above.
           if (dd) {
-            const ViewKind leaf = array_shape(prev_v.si).leaf;
-            const size_t lr = (size_t)leaf_rank(leaf);
-            const size_t n_arr = dd->size() - lr;
-            bool ok = lr > 0 && s.lhs_idx.size() == n_arr + lr;
-            for (size_t d = 0; ok && d < n_arr; ++d)
-              if (s.lhs_idx[d].name != "IndexSingle") ok = false;
-            for (size_t d = n_arr; ok && d < s.lhs_idx.size(); ++d)
-              if (s.lhs_idx[d].name != "IndexAll") ok = false;
-            if (ok) {
+            size_t prefix_len = 0;
+            while (prefix_len < s.lhs_idx.size() &&
+                   s.lhs_idx[prefix_len].name == "IndexSingle")
+              ++prefix_len;
+            bool trailing_all = true;
+            for (size_t d = prefix_len; d < s.lhs_idx.size(); ++d)
+              if (s.lhs_idx[d].name != "IndexAll") trailing_all = false;
+            if (prefix_len > 0 && trailing_all && prefix_len < dd->size() &&
+                s.lhs_idx.size() == dd->size()) {
               std::vector<int64_t> ix;
-              ix.reserve(n_arr);
-              for (size_t d = 0; d < n_arr; ++d) {
+              ix.reserve(prefix_len);
+              for (size_t d = 0; d < prefix_len; ++d) {
                 const int64_t one = eval_int(s.lhs_idx[d].args[0]);
                 check_index(one, (*dd)[d], "array assignment index", s.raw);
                 ix.push_back(one - 1);
               }
-              const Addr a = flat_addr(*dd, leaf == ViewKind::Matrix, ix);
+              const bool mat = array_shape(prev_v.si).leaf == ViewKind::Matrix;
+              const Addr a = flat_addr(*dd, mat, ix);
               require_binding(
                   rhs_v, a.len,
-                  indexed_view(prev_v.si, n_arr, a.len, s.rhs.type_), s.lhs,
-                  s.raw);
+                  indexed_view(prev_v.si, prefix_len, a.len, s.rhs.type_),
+                  s.lhs, s.raw);
               Val nv = emit_value(OP_SET_SLICE, {prev_v, rhs_v},
                                   g.slots[prev].len, out_si, {(int)a.off});
               propagate_int_update(nv, prev_v, rhs_v, a.off, 1);

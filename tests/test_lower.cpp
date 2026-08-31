@@ -3098,6 +3098,33 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // m[1, :] = r: an explicit `:` for the one remaining dimension after a
+  // single-index prefix, on a plain flat array[2, 3] real -- no container
+  // leaf at all, unlike idxassign above. Covers
+  // unsupported_inline_ode_index_assignment's UDF-body write shape.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/rowassign2d.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/rowassign2d.tmir.sexp"), d);
+    check(lm.n_unconstrained == 3, "rowassign2d 3 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[3] = {0.3, -0.7, 1.1};
+    for (int k = 0; k < 3; ++k) lex.params_data()[k] = q[k];
+    double grad[3];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> r(3);
+    for (int k = 0; k < 3; ++k) r(k) = q[k];
+    var acc = r(0) + r(1) + r(2) + stan::math::normal_lpdf<true>(r, 0.0, 1.0);
+    acc.grad();
+    expect_eq("rowassign2d lp", lp, acc.val());
+    for (int k = 0; k < 3; ++k)
+      expect_eq("rowassign2d g" + std::to_string(k), grad[k], r(k).adj());
+    stan::math::recover_memory();
+  }
+
   // A parameter sized by a transformed-data for-loop accumulator
   // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
   // transformed-data interpreter used to lose the accumulator's int-ness on
