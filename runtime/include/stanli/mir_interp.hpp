@@ -2306,6 +2306,45 @@ class MirInterp {
       r.dims = {n};
       return r;
     }
+    // The linspaced_* family is data-only -- stanc's signatures reject
+    // AutoDiffable bounds -- so every use is a constant the interpreter can
+    // fold, and no graph opcode is needed. Delegate to stan-math instead of
+    // open-coding the spacing: the integer overload inherits Eigen's rule
+    // that `high` is lowered until the range divides evenly, which is easy
+    // to reproduce subtly wrong, and each overload names itself in the
+    // domain errors CmdStan reports for a negative size or high < low.
+    if (e.name == "linspaced_int_array" && e.args.size() == 3) {
+      const std::vector<int> values = stan::math::linspaced_int_array(
+          (int)as_int(e.args[0]), (int)as_int(e.args[1]),
+          (int)as_int(e.args[2]));
+      r.is_int = true;
+      r.dims = {(int64_t)values.size()};
+      r.i.assign(values.begin(), values.end());
+      r.r.reserve(values.size());
+      for (const int x : values) r.r.push_back(T((double)x));
+      return r;
+    }
+    if ((e.name == "linspaced_array" || e.name == "linspaced_vector" ||
+         e.name == "linspaced_row_vector") &&
+        e.args.size() == 3) {
+      const int n = (int)as_int(e.args[0]);
+      const double lo = val(eval(e.args[1]).r.at(0));
+      const double hi = val(eval(e.args[2]).r.at(0));
+      const auto emit = [&](const auto& values) {
+        const int64_t len = (int64_t)values.size();
+        r.dims = {len};
+        r.r.reserve((size_t)len);
+        for (int64_t k = 0; k < len; ++k) r.r.push_back(T(values[k]));
+      };
+      if (e.name == "linspaced_array") {
+        emit(stan::math::linspaced_array(n, lo, hi));
+      } else if (e.name == "linspaced_vector") {
+        emit(Eigen::VectorXd(stan::math::linspaced_vector(n, lo, hi)));
+      } else {
+        emit(Eigen::RowVectorXd(stan::math::linspaced_row_vector(n, lo, hi)));
+      }
+      return r;
+    }
     if (e.name == "Equals__")
       return cmp([](double x, double y) { return x == y; });
     if (e.name == "NEquals__")

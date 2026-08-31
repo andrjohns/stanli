@@ -2588,6 +2588,48 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // The linspaced_* family is data-only, so transformed data folds it to
+  // constants that the log density then multiplies parameters by. Pin all
+  // four overloads against stan-math rather than against transcribed
+  // literals: the integer spacing inherits Eigen's rule that `high` drops
+  // until the range divides evenly (K=5 over [2,3] repeats, and K=1 yields
+  // `high`, not `low`), which is exactly what open-coding gets wrong.
+  {
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/linspaced.tmir.sexp"), DataMap());
+    check(lm.n_unconstrained == 7, "linspaced 7 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[7] = {0.4, -1.1, 0.7, 0.2, -0.5, 1.3, 0.9};
+    for (int i = 0; i < 7; ++i) lex.params_data()[i] = q[i];
+    double grad[7];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> p(7);
+    for (int i = 0; i < 7; ++i) p(i) = q[i];
+    const Eigen::Matrix<var, -1, 1> x = p.head(4);
+    const Eigen::Matrix<var, -1, 1> y = p.tail(3);
+
+    const std::vector<int> ia = stan::math::linspaced_int_array(4, 1, 7);
+    const std::vector<int> ir = stan::math::linspaced_int_array(5, 2, 3);
+    const std::vector<int> io = stan::math::linspaced_int_array(1, 3, 9);
+    const std::vector<double> ra = stan::math::linspaced_array(3, -1.5, 2.5);
+    const Eigen::VectorXd v = stan::math::linspaced_vector(4, 0.0, 1.0);
+    const Eigen::RowVectorXd rv = stan::math::linspaced_row_vector(3, 2.0, 8.0);
+
+    var acc = stan::math::dot_product(x, v) + (rv * y);
+    for (int n = 0; n < 4; ++n) acc += ia[n] * x(n);
+    for (int n = 0; n < 3; ++n) acc += ra[n] * y(n);
+    for (int n = 0; n < 5; ++n) acc += ir[n];
+    acc += io[0];
+    acc.grad();
+    expect_eq("linspaced lp", lp, acc.val());
+    for (int i = 0; i < 7; ++i)
+      expect_eq("linspaced g" + std::to_string(i), grad[i], p(i).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {
