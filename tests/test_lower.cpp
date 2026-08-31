@@ -2889,6 +2889,37 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // gp_exp_quad_cov with a parameter x: the lowering used to refuse a
+  // non-data first argument. gp_cov_bwd now rebuilds the points from the
+  // promoted input, so x's adjoints propagate. Check every gradient
+  // (x, alpha, rho) against the var path with the same constrains.
+  {
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/gpcov.tmir.sexp"), DataMap());
+    check(lm.n_unconstrained == 5, "gpcov 5 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[5] = {0.3, -0.7, 1.1, -0.2, 0.4};
+    for (int k = 0; k < 5; ++k) lex.params_data()[k] = q[k];
+    double grad[5];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> qv(5);
+    for (int k = 0; k < 5; ++k) qv(k) = q[k];
+    var jac = 0.0;
+    std::vector<var> x{qv(0), qv(1), qv(2)};
+    var alpha = stan::math::lb_constrain<true>(qv(3), 0.0, jac);
+    var rho = stan::math::lb_constrain<true>(qv(4), 0.0, jac);
+    Eigen::Matrix<var, -1, -1> K = stan::math::gp_exp_quad_cov(x, alpha, rho);
+    var acc = stan::math::sum(K) + K(0, 1) * K(1, 2) + jac;
+    acc.grad();
+    expect_eq("gpcov lp", lp, acc.val());
+    for (int k = 0; k < 5; ++k)
+      expect_eq("gpcov g" + std::to_string(k), grad[k], qv(k).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

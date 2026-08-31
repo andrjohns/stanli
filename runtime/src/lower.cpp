@@ -5029,8 +5029,8 @@ struct Lowering {
       Val x = lower_expr(e.args[0]);
       Val alpha = lower_expr(e.args[1]);
       Val rho = lower_expr(e.args[2]);
-      if (!x.si.param_free)
-        fail("gp_exp_quad_cov: parameter inputs unsupported", e.raw);
+      // x may be data or a parameter: gp_cov_bwd rebuilds the points from
+      // the promoted input, so a parameter x gets its adjoints too.
       // x is array[N] real (D == 1) or array[N] vector[D], stored
       // array-major, so D falls out of the declared dims.
       int64_t D = 1;

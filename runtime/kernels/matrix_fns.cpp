@@ -82,8 +82,14 @@ void gp_cov_fwd(KernelCtx& ctx) {
   MapM(ctx.out.data, N, N) = c;
 }
 void gp_cov_bwd(KernelCtx& ctx) {
-  auto pts = gp_points(ctx);
+  // x may be a parameter: rebuild the points from the promoted xs[0] so its
+  // adjoints flow back too. nary_bwd copies back whatever input carries an
+  // adjoint slot, so a data x simply contributes nothing here.
+  const int64_t N = ctx.idata[0], D = ctx.idata[1];
   nary_bwd(ctx, [&](std::vector<VarV>& xs) {
+    std::vector<VarV> pts(N, VarV(D));
+    for (int64_t n = 0; n < N; ++n)
+      for (int64_t d = 0; d < D; ++d) pts[n](d) = xs[0](n * D + d);
     return stan::math::gp_exp_quad_cov(pts, xs[1](0), xs[2](0));
   });
 }
