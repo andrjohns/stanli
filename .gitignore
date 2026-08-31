@@ -67,3 +67,4 @@ conformance-cache/
 # match a symlink.
 model-census-cache
 model-census.json
+/tests/function_coverage/*.hpp

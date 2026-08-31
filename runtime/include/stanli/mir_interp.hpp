@@ -21,6 +21,7 @@
 #define STANLI_MIR_INTERP_HPP
 
 #include <stanli/compile.hpp>
+#include <stanli/container_shape.hpp>
 #include <stanli/data.hpp>
 #include <stanli/message_sink.hpp>
 #include <stanli/mir.hpp>
@@ -2077,6 +2078,22 @@ class MirInterp {
         r.r.push_back(m.r.at((size_t)((j - 1) * R + (i - 1) + k)));
       return r;
     }
+    if (e.name == "block" && e.args.size() == 5) {
+      Value m = eval(e.args[0]);
+      if (m.dims.size() != 2) fail("block: needs a matrix", e.raw);
+      const long i = as_int(e.args[1]), j = as_int(e.args[2]),
+                 nr = as_int(e.args[3]), nc = as_int(e.args[4]);
+      const int64_t R = m.dims[0];
+      check_block_shape(R, m.dims[1], i, j, nr, nc);
+      r.dims = {nr, nc};
+      r.r.reserve((size_t)(nr * nc));
+      // Source and result are both column-major, so filling the result in
+      // storage order walks one source column at a time, R apart.
+      for (long c = 0; c < nc; ++c)
+        for (long k = 0; k < nr; ++k)
+          r.r.push_back(m.r.at((size_t)((j - 1 + c) * R + (i - 1 + k))));
+      return r;
+    }
     if (e.name == "col" && e.args.size() == 2) {
       Value m = eval(e.args[0]);
       if (m.dims.size() != 2) fail("col: needs a matrix", e.raw);
@@ -2117,6 +2134,33 @@ class MirInterp {
         r.r.push_back(a.r.at((size_t)(off + k)));
         if (a.is_int) r.i.push_back(a.i.at((size_t)(off + k)));
       }
+      return r;
+    }
+    if (e.name == "reverse" && e.args.size() == 1) {
+      Value a = eval(e.args[0]);
+      r = a;
+      const auto reverse_outer = [&](auto* values) {
+        // Vectors and row-vectors have one logical axis and one flat buffer.
+        // Arrays use DataMap's first-index-fast storage, so reversing an
+        // array means reversing dimension zero once for every suffix lane,
+        // not reversing the complete buffer (which would also reverse each
+        // container-valued element).
+        if (e.args[0].unsized.depth == 0) {
+          std::reverse(values->begin(), values->end());
+          return;
+        }
+        if (a.dims.empty()) fail("reverse: array has no dimensions", e.raw);
+        const int64_t outer = a.dims.front();
+        if (outer < 0 || (outer != 0 && values->size() % (size_t)outer != 0))
+          fail("reverse: array shape does not match storage", e.raw);
+        if (outer == 0) return;
+        for (size_t offset = 0; offset < values->size();
+             offset += (size_t)outer)
+          std::reverse(values->begin() + offset,
+                       values->begin() + offset + outer);
+      };
+      reverse_outer(&r.r);
+      if (r.is_int) reverse_outer(&r.i);
       return r;
     }
     // squared_distance is dot_self of the difference, which is how the
@@ -2352,6 +2396,69 @@ class MirInterp {
       r.dims = {n};
       return r;
     }
+    // The zeros_*/ones_* constructors are rep_vector with a fixed fill.
+    // Only zeros_int_array carries integer provenance; ones_array is real.
+    if ((e.name == "zeros_vector" || e.name == "zeros_row_vector" ||
+         e.name == "ones_vector" || e.name == "ones_row_vector" ||
+         e.name == "zeros_int_array" || e.name == "ones_array") &&
+        e.args.size() == 1) {
+      const long n = as_int(e.args[0]);
+      const bool is_ones = e.name.rfind("ones", 0) == 0;
+      (void)checked_container_size({n}, e.name);
+      r.r.assign(n, T(is_ones ? 1.0 : 0.0));
+      r.dims = {n};
+      if (e.name == "zeros_int_array") {
+        r.is_int = true;
+        r.i.assign(n, is_ones ? 1 : 0);
+      }
+      return r;
+    }
+    if (e.name == "identity_matrix" && e.args.size() == 1) {
+      const long n = as_int(e.args[0]);
+      r.r.assign((size_t)checked_container_size({n, n}, e.name), T(0.0));
+      for (long k = 0; k < n; ++k) r.r[(size_t)(k * n + k)] = T(1.0);
+      r.dims = {n, n};
+      return r;
+    }
+    // The linspaced_* family is data-only -- stanc's signatures reject
+    // AutoDiffable bounds -- so every use is a constant the interpreter can
+    // fold, and no graph opcode is needed. Delegate to stan-math instead of
+    // open-coding the spacing: the integer overload inherits Eigen's rule
+    // that `high` is lowered until the range divides evenly, which is easy
+    // to reproduce subtly wrong, and each overload names itself in the
+    // domain errors CmdStan reports for a negative size or high < low.
+    if (e.name == "linspaced_int_array" && e.args.size() == 3) {
+      const std::vector<int> values = stan::math::linspaced_int_array(
+          (int)as_int(e.args[0]), (int)as_int(e.args[1]),
+          (int)as_int(e.args[2]));
+      r.is_int = true;
+      r.dims = {(int64_t)values.size()};
+      r.i.assign(values.begin(), values.end());
+      r.r.reserve(values.size());
+      for (const int x : values) r.r.push_back(T((double)x));
+      return r;
+    }
+    if ((e.name == "linspaced_array" || e.name == "linspaced_vector" ||
+         e.name == "linspaced_row_vector") &&
+        e.args.size() == 3) {
+      const int n = (int)as_int(e.args[0]);
+      const double lo = val(eval(e.args[1]).r.at(0));
+      const double hi = val(eval(e.args[2]).r.at(0));
+      const auto emit = [&](const auto& values) {
+        const int64_t len = (int64_t)values.size();
+        r.dims = {len};
+        r.r.reserve((size_t)len);
+        for (int64_t k = 0; k < len; ++k) r.r.push_back(T(values[k]));
+      };
+      if (e.name == "linspaced_array") {
+        emit(stan::math::linspaced_array(n, lo, hi));
+      } else if (e.name == "linspaced_vector") {
+        emit(Eigen::VectorXd(stan::math::linspaced_vector(n, lo, hi)));
+      } else {
+        emit(Eigen::RowVectorXd(stan::math::linspaced_row_vector(n, lo, hi)));
+      }
+      return r;
+    }
     if (e.name == "Equals__")
       return cmp([](double x, double y) { return x == y; });
     if (e.name == "NEquals__")
@@ -2364,12 +2471,14 @@ class MirInterp {
       return cmp([](double x, double y) { return x < y; });
     if (e.name == "Leq__")
       return cmp([](double x, double y) { return x <= y; });
-    if (e.name == "PNot__")
+    if (e.name == "PNot__" || e.name == "logical_negation")
       return un([](const T& x) { return T(val(x) == 0.0 ? 1.0 : 0.0); });
-    if (e.name == "is_nan") {
+    if (e.name == "is_nan" || e.name == "is_inf") {
       Value a = eval(e.args[0]);
-      if (a.r.size() != 1) fail("is_nan: needs a scalar", e.raw);
-      const int answer = std::isnan(val(a.r[0])) ? 1 : 0;
+      if (a.r.size() != 1) fail(e.name + ": needs a scalar", e.raw);
+      const double value = val(a.r[0]);
+      const int answer =
+          e.name == "is_nan" ? std::isnan(value) : std::isinf(value);
       r.is_int = true;
       r.i = {answer};
       r.r = {T((double)answer)};
@@ -2524,6 +2633,35 @@ class MirInterp {
       Value a = eval(e.args[0]);
       a.dims = {(int64_t)a.r.size()};
       a.is_int = false;
+      return a;
+    }
+    if (e.name == "to_matrix" && (e.args.size() == 1 || e.args.size() == 3)) {
+      Value a = eval(e.args[0]);
+      a.is_int = false;
+      a.i.clear();
+      // First-index-fast array storage is already column-major over the
+      // resulting matrix axes. Unlike the graph's outer-major arrays, this
+      // interpreter must not transpose it. Stan Math infers zero columns
+      // when the outer array is empty, regardless of its declared suffix.
+      const bool from_2d_array =
+          e.args.size() == 1 && a.dims.size() == 2 && e.args[0].unsized.depth;
+      if (from_2d_array) {
+        if (a.dims[0] == 0) a.dims[1] = 0;
+        return a;
+      }
+      if (e.args.size() == 3) {
+        const int64_t rows = as_int(e.args[1]), cols = as_int(e.args[2]);
+        if (checked_container_size({rows, cols}, e.name) != (int64_t)a.r.size())
+          fail("to_matrix: requested shape does not match source length",
+               e.raw);
+        a.dims = {rows, cols};
+      } else if (a.dims.size() == 2) {
+        // to_matrix(matrix) is the identity.
+      } else if (e.args[0].unsized.leaf == mir::UnsizedLeaf::RowVector) {
+        a.dims = {1, (int64_t)a.r.size()};
+      } else {
+        a.dims = {(int64_t)a.r.size(), 1};
+      }
       return a;
     }
     if (e.name == "to_array_1d") {
@@ -2848,13 +2986,27 @@ class MirInterp {
       r.r = {acc};
       return r;
     }
-    if (e.name == "rep_array" && e.args.size() == 2) {
+    if (e.name == "rep_array" && e.args.size() >= 2 && e.args.size() <= 4) {
       Value v = eval(e.args[0]);
-      const long n = as_int(e.args[1]);
+      for (size_t k = 1; k < e.args.size(); ++k)
+        r.dims.push_back(as_int(e.args[k]));
+      // The element keeps its own shape; rep_array only prepends the new
+      // outer dimension(s). Interpreter storage is first-index-fast, so the
+      // prepended axes vary fastest: element cell k lands at stride `copies`
+      // across the result, not as a contiguous block.
+      const int64_t copies = checked_container_size(r.dims, e.name);
       r.is_int = v.is_int;
-      r.dims = {n};
-      r.r.assign(n, v.r.at(0));
-      if (v.is_int) r.i.assign(n, v.i.at(0));
+      for (const int64_t d : v.dims) r.dims.push_back(d);
+      const size_t width = std::max(v.r.size(), v.i.size());
+      const int64_t size =
+          checked_container_size({copies, (int64_t)width}, e.name);
+      r.r.assign((size_t)size, T(0.0));
+      if (v.is_int) r.i.assign((size_t)size, 0);
+      for (size_t k = 0; k < width; ++k)
+        for (long c = 0; c < copies; ++c) {
+          r.r[k * (size_t)copies + (size_t)c] = v.r.at(k);
+          if (v.is_int) r.i[k * (size_t)copies + (size_t)c] = v.i.at(k);
+        }
       return r;
     }
     if (e.name == "csr_extract_w" && e.args.size() == 1) {
@@ -2867,6 +3019,27 @@ class MirInterp {
       const auto weights = stan::math::csr_extract_w(matrix);
       r.r.assign(weights.data(), weights.data() + weights.size());
       r.dims = {(int64_t)r.r.size()};
+      return r;
+    }
+    // csr_extract_v (column indices) and csr_extract_u (row-start offsets)
+    // are the integer companions to csr_extract_w. stan-math needs a
+    // concrete (double) sparse view, so evaluate the value_of matrix.
+    if ((e.name == "csr_extract_v" || e.name == "csr_extract_u") &&
+        e.args.size() == 1) {
+      Value a = eval(e.args[0]);
+      if (a.dims.size() != 2)
+        fail(e.name + ": argument must be a matrix", e.raw);
+      Eigen::MatrixXd matrix(a.dims[0], a.dims[1]);
+      for (int64_t k = 0; k < (int64_t)a.r.size(); ++k)
+        matrix.data()[k] = val(a.r[(size_t)k]);
+      const std::vector<int> idx = e.name == "csr_extract_v"
+                                       ? stan::math::csr_extract_v(matrix)
+                                       : stan::math::csr_extract_u(matrix);
+      r.is_int = true;
+      r.dims = {(int64_t)idx.size()};
+      r.i.assign(idx.begin(), idx.end());
+      r.r.reserve(idx.size());
+      for (const int x : idx) r.r.push_back(T((double)x));
       return r;
     }
     if (e.name == "append_array" && e.args.size() == 2) {

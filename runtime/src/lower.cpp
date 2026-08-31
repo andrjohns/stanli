@@ -3903,7 +3903,8 @@ struct Lowering {
         (!scalar_outcome && !array_outcome) || !is_vector(arg.si))
       fail(e.name + ": MIR type does not match lowered values", e.raw);
     if (!e.args[0].data_only || !outcome.si.param_free ||
-        (udf_depth == 0 && e.args[1].data_only == arg.autodiff))
+        (udf_depth == 0 &&
+         arg.autodiff != (!in_write_array && !e.args[1].data_only)))
       fail(e.name + ": MIR adlevel contradicts lowered dependencies", e.raw);
     auto spec = std::make_shared<CategoricalSpec>();
     spec->logit = logit;
@@ -4374,6 +4375,7 @@ struct Lowering {
         {"EltTimes__", OP_MUL},
         {"EltDivide__", OP_DIV},
         {"Pow__", OP_POW},
+        {"EltPow__", OP_POW},
         {"pow", OP_POW},
         // The named spellings of the same operators. `divide` is the one
         // that is not simply the operator renamed: `rv / A` is a solve,
@@ -4707,6 +4709,49 @@ struct Lowering {
       const long n = eval_int(e.args[1]);
       return emit_value(OP_REP_VEC, {a}, n, view_of(e.type_));
     }
+    if (e.name == "rep_array" && e.args.size() >= 2 && e.args.size() <= 4) {
+      // The element keeps its shape; rep_array prepends up to three outer
+      // dimensions and tiles the element buffer once per outer cell. That
+      // is a gather that walks 0..w-1 repeatedly.
+      Val a = lower_expr(e.args[0]);
+      const int64_t w = g.slots[a.slot].len;
+      std::vector<int64_t> dims;
+      for (size_t k = 1; k < e.args.size(); ++k)
+        dims.push_back(eval_int(e.args[k]));
+      const int64_t copies = checked_container_size(dims, e.name);
+      ViewKind leaf = ViewKind::Flat;
+      if (is_matrix(a.si)) {
+        dims.push_back(a.si.rows);
+        dims.push_back(a.si.cols);
+        leaf = ViewKind::Matrix;
+      } else if (is_vector(a.si)) {
+        dims.push_back(w);
+        leaf = ViewKind::Vector;
+      } else if (is_row_vector(a.si)) {
+        dims.push_back(w);
+        leaf = ViewKind::RowVector;
+      } else if (is_array(a.si)) {
+        const ArrayShape& sh = array_shape(a.si);
+        dims.insert(dims.end(), sh.dims.begin(), sh.dims.end());
+        leaf = sh.leaf;
+      }
+      const int64_t size = checked_container_size({copies, w}, e.name);
+      std::vector<int> gather;
+      gather.reserve((size_t)size);
+      for (int64_t k = 0; k < size; ++k)
+        gather.push_back(checked_immediate(k % w, "rep_array gather offset"));
+      return emit_value(OP_GATHER, {a}, size,
+                        array_view(dims, leaf, a.si.param_free), gather);
+    }
+    if ((e.name == "zeros_vector" || e.name == "zeros_row_vector" ||
+         e.name == "ones_vector" || e.name == "ones_row_vector") &&
+        e.args.size() == 1) {
+      // A broadcast of the constant fill, exactly as rep_vector lowers.
+      const long n = eval_int(e.args[0]);
+      const double fill = e.name.rfind("ones", 0) == 0 ? 1.0 : 0.0;
+      (void)checked_container_size({n}, e.name);
+      return emit_value(OP_REP_VEC, {constant(fill)}, n, view_of(e.type_));
+    }
     if (e.name == "log_sum_exp" || e.name == "sum") {
       // One argument is the reduction; two is the elementwise form below.
       if (e.name == "log_sum_exp" && e.args.size() == 2)
@@ -4939,6 +4984,7 @@ struct Lowering {
       std::vector<int64_t> dims;
       if (is_array(a.si)) dims = array_shape(a.si).dims;
       if (dims.size() != 2) fail("to_matrix: unknown source shape", e.raw);
+      if (dims[0] == 0) dims[1] = 0;
       // array-major (row-major) source -> col-major matrix of the same
       // logical shape: transpose the storage.
       si = matrix_view(dims[0], dims[1], a.si.param_free);
@@ -5197,6 +5243,26 @@ struct Lowering {
       return emit_value(OP_SLICE, {a}, n, view_of(e.type_),
                         {(int)((j - 1) * a.si.rows + i - 1)});
     }
+    if (e.name == "block" && e.args.size() == 5) {
+      // block(M, i, j, nr, nc) = M[i .. i+nr-1, j .. j+nc-1]. Each result
+      // column is contiguous in col-major storage, but consecutive result
+      // columns sit M.rows apart, so a 2-D window needs a gather rather
+      // than the single slice sub_col gets.
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail("block on a slot without matrix shape");
+      const long i = eval_int(e.args[1]);
+      const long j = eval_int(e.args[2]);
+      const long nr = eval_int(e.args[3]);
+      const long nc = eval_int(e.args[4]);
+      check_block_shape(a.si.rows, a.si.cols, i, j, nr, nc);
+      std::vector<int> gather;
+      gather.reserve((size_t)(nr * nc));
+      for (long c = 0; c < nc; ++c)
+        for (long k = 0; k < nr; ++k)
+          gather.push_back(checked_immediate(
+              (j - 1 + c) * a.si.rows + (i - 1 + k), "block gather offset"));
+      return emit_value(OP_GATHER, {a}, nr * nc, matrix_view(nr, nc), gather);
+    }
     if (e.name == "col" && e.args.size() == 2) {
       Val a = lower_expr(e.args[0]);
       if (!is_matrix(a.si)) fail("col on a slot without matrix shape");
@@ -5226,6 +5292,36 @@ struct Lowering {
       const long n = eval_int(e.args[1]);
       const long off = e.name == "head" ? 0 : g.slots[a.slot].len - n;
       return emit_value(OP_SLICE, {a}, n, view_of(e.type_), {(int)off});
+    }
+    if (e.name == "reverse" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      const int64_t len = g.slots[a.slot].len;
+      std::vector<int> gather;
+      gather.reserve((size_t)len);
+      if (is_array(a.si)) {
+        // Graph arrays keep each outer element contiguous. Reverse those
+        // complete chunks so an array of vectors/matrices retains the order
+        // inside every element.
+        const ArrayShape& shape = array_shape(a.si);
+        if (shape.dims.empty()) fail("reverse: array has no dimensions", e.raw);
+        const int64_t outer = shape.dims.front();
+        const std::vector<int64_t> suffix(shape.dims.begin() + 1,
+                                          shape.dims.end());
+        const int64_t width = checked_product(suffix, "reverse array element");
+        if (checked_product(shape.dims, "reverse array") != len)
+          fail("reverse: array shape does not match storage", e.raw);
+        for (int64_t i = outer; i-- > 0;)
+          for (int64_t k = 0; k < width; ++k)
+            gather.push_back(
+                checked_immediate(i * width + k, "reverse gather offset"));
+      } else {
+        if (!is_vector(a.si) && !is_row_vector(a.si))
+          fail("reverse: argument is not a vector, row-vector, or array",
+               e.raw);
+        for (int64_t i = len; i-- > 0;)
+          gather.push_back(checked_immediate(i, "reverse gather offset"));
+      }
+      return emit_value(OP_GATHER, {a}, len, a.si, gather);
     }
     return std::nullopt;
   }

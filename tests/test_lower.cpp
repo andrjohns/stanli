@@ -2534,6 +2534,361 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // reverse on both sides of the data boundary: transformed data reverses a
+  // literal, an integer array and an array of vectors in the interpreter,
+  // while the log density reverses a parameter vector, row-vector and array
+  // of vectors as gathers in the graph. Reversing twice is the identity, so
+  // every term pairs a reversed parameter against data reversed once, and
+  // the array cases pin the axis: `reverse` flips only the outer dimension,
+  // and each element vector must survive with its own order intact. The two
+  // sides disagree on storage -- DataMap is first-index-fast, graph arrays
+  // are outer-major -- so the same source function needs two lowerings.
+  {
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/reverse.tmir.sexp"), DataMap());
+    check(lm.n_unconstrained == 10, "reverse 10 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[10] = {0.5, -1.2, 0.8, 0.3, 1.4, -0.7, 0.9, -0.2, 0.6, 1.1};
+    for (int i = 0; i < 10; ++i) lex.params_data()[i] = q[i];
+    double grad[10];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> p(10);
+    for (int i = 0; i < 10; ++i) p(i) = q[i];
+    Eigen::Matrix<var, -1, 1> x = p.head(3);
+    Eigen::Matrix<var, 1, -1> rx = p.segment(3, 3).transpose();
+    // ax is array[2] vector[2]; the writer lists whole elements in order.
+    std::vector<Eigen::Matrix<var, -1, 1>> ax(2, Eigen::Matrix<var, -1, 1>(2));
+    for (int n = 0; n < 2; ++n)
+      for (int i = 0; i < 2; ++i) ax[n](i) = p(6 + n * 2 + i);
+
+    Eigen::VectorXd literal(3);
+    literal << 1.0, 2.0, 3.0;
+    // Eigen's reverse is lazy, so the transformed-data value needs its own
+    // destination; reversing into `literal` would alias and self-overwrite.
+    const Eigen::VectorXd td = stan::math::reverse(literal);
+    const std::vector<int> ti = stan::math::reverse(std::vector<int>{1, 2, 3});
+    Eigen::VectorXd ta0(2), ta1(2);
+    ta0 << 1.0, 2.0;
+    ta1 << 3.0, 4.0;
+    const std::vector<Eigen::VectorXd> ta =
+        stan::math::reverse(std::vector<Eigen::VectorXd>{ta0, ta1});
+    const std::vector<Eigen::Matrix<var, -1, 1>> rax = stan::math::reverse(ax);
+
+    var acc = stan::math::dot_product(stan::math::reverse(x), td) +
+              stan::math::reverse(rx) * td;
+    for (int n = 0; n < 2; ++n)
+      acc += ti[n] * stan::math::dot_product(rax[n], ta[n]);
+    acc.grad();
+    expect_eq("reverse lp", lp, acc.val());
+    for (int i = 0; i < 10; ++i)
+      expect_eq("reverse g" + std::to_string(i), grad[i], p(i).adj());
+    stan::math::recover_memory();
+  }
+
+  // The linspaced_* family is data-only, so transformed data folds it to
+  // constants that the log density then multiplies parameters by. Pin all
+  // four overloads against stan-math rather than against transcribed
+  // literals: the integer spacing inherits Eigen's rule that `high` drops
+  // until the range divides evenly (K=5 over [2,3] repeats, and K=1 yields
+  // `high`, not `low`), which is exactly what open-coding gets wrong.
+  {
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/linspaced.tmir.sexp"), DataMap());
+    check(lm.n_unconstrained == 7, "linspaced 7 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[7] = {0.4, -1.1, 0.7, 0.2, -0.5, 1.3, 0.9};
+    for (int i = 0; i < 7; ++i) lex.params_data()[i] = q[i];
+    double grad[7];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> p(7);
+    for (int i = 0; i < 7; ++i) p(i) = q[i];
+    const Eigen::Matrix<var, -1, 1> x = p.head(4);
+    const Eigen::Matrix<var, -1, 1> y = p.tail(3);
+
+    const std::vector<int> ia = stan::math::linspaced_int_array(4, 1, 7);
+    const std::vector<int> ir = stan::math::linspaced_int_array(5, 2, 3);
+    const std::vector<int> io = stan::math::linspaced_int_array(1, 3, 9);
+    const std::vector<double> ra = stan::math::linspaced_array(3, -1.5, 2.5);
+    const Eigen::VectorXd v = stan::math::linspaced_vector(4, 0.0, 1.0);
+    const Eigen::RowVectorXd rv = stan::math::linspaced_row_vector(3, 2.0, 8.0);
+
+    var acc = stan::math::dot_product(x, v) + (rv * y);
+    for (int n = 0; n < 4; ++n) acc += ia[n] * x(n);
+    for (int n = 0; n < 3; ++n) acc += ra[n] * y(n);
+    for (int n = 0; n < 5; ++n) acc += ir[n];
+    acc += io[0];
+    acc.grad();
+    expect_eq("linspaced lp", lp, acc.val());
+    for (int i = 0; i < 7; ++i)
+      expect_eq("linspaced g" + std::to_string(i), grad[i], p(i).adj());
+    stan::math::recover_memory();
+  }
+
+  // block() on both sides of the data boundary. A 2-D window is the case
+  // sub_col's single slice cannot express: each result column is
+  // contiguous, but consecutive columns sit M.rows apart, so the lowering
+  // gathers. The two windows overlap in the source and differ in shape, so
+  // a transposed or row-major offset would still fill the right number of
+  // slots while reading the wrong ones.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/blockfn.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/blockfn.tmir.sexp"), d);
+    check(lm.n_unconstrained == 20, "blockfn 20 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[20];
+    for (int k = 0; k < 20; ++k) q[k] = 0.1 * (k + 1) - 0.7;
+    for (int k = 0; k < 20; ++k) lex.params_data()[k] = q[k];
+    double grad[20];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> flat(20);
+    for (int k = 0; k < 20; ++k) flat(k) = q[k];
+    // Parameters arrive col-major, matching the matrix's storage order.
+    Eigen::Matrix<var, -1, -1> p(4, 5);
+    for (int c = 0; c < 5; ++c)
+      for (int rr = 0; rr < 4; ++rr) p(rr, c) = flat(c * 4 + rr);
+    Eigen::MatrixXd m(4, 5);
+    for (int rr = 0; rr < 4; ++rr)
+      for (int c = 0; c < 5; ++c) m(rr, c) = rr * 5 + c + 1;
+
+    const Eigen::MatrixXd td = stan::math::block(m, 2, 3, 2, 3);
+    var acc = stan::math::sum(stan::math::elt_multiply(
+                  stan::math::block(p, 2, 3, 2, 3), td)) +
+              stan::math::sum(stan::math::block(p, 1, 4, 3, 2));
+    acc.grad();
+    expect_eq("blockfn lp", lp, acc.val());
+    for (int k = 0; k < 20; ++k)
+      expect_eq("blockfn g" + std::to_string(k), grad[k], flat(k).adj());
+    stan::math::recover_memory();
+  }
+
+  // to_matrix: transformed data reshapes a data vector and converts a
+  // 2-D array in the interpreter,
+  // while the log density reshapes a parameter vector in the graph. The
+  // 3 x 2 vs 2 x 3 shapes and the a * c product would all still typecheck
+  // under a wrong (row-major) fill, so the reference pins the ordering.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/tomatrix.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/tomatrix.tmir.sexp"), d);
+    check(lm.n_unconstrained == 6, "tomatrix 6 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[6];
+    for (int k = 0; k < 6; ++k) q[k] = 0.2 * (k + 1) - 0.5;
+    for (int k = 0; k < 6; ++k) lex.params_data()[k] = q[k];
+    double grad[6];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(6);
+    for (int k = 0; k < 6; ++k) x(k) = q[k];
+    Eigen::VectorXd v(6);
+    v << 1, 2, 3, 4, 5, 6;
+    Eigen::MatrixXd ar(2, 3);
+    ar << 10, 20, 30, 40, 50, 60;
+    const Eigen::MatrixXd a = stan::math::to_matrix(v, 2, 3);
+    const Eigen::MatrixXd b = ar;
+    const Eigen::RowVectorXd w = stan::math::to_row_vector(a);
+    Eigen::Matrix<var, -1, -1> c = stan::math::to_matrix(x, 3, 2);
+    var acc = stan::math::sum(stan::math::multiply(a, c)) + stan::math::sum(b) +
+              stan::math::dot_product(x, stan::math::to_vector(b)) +
+              stan::math::sum(w) +
+              stan::math::dot_product(x, stan::math::to_vector(a));
+    acc.grad();
+    expect_eq("tomatrix lp", lp, acc.val());
+    for (int k = 0; k < 6; ++k)
+      expect_eq("tomatrix g" + std::to_string(k), grad[k], x(k).adj());
+    stan::math::recover_memory();
+  }
+
+  // Compare acceptance against Stan Math independently of the flat gather
+  // offsets. In particular, a row overrun may still fit in the source slot.
+  {
+    const std::string text = slurp("tests/fixtures/block_bounds.tmir.sexp");
+    const Eigen::MatrixXd reference = Eigen::MatrixXd::Ones(2, 3);
+    for (int row : {0, 1, 2, 3})
+      for (int col : {0, 1, 3, 4})
+        for (int nr : {0, 1, 2, 3})
+          for (int nc : {0, 1, 2}) {
+            bool expected = true, accepted = true;
+            try {
+              const Eigen::MatrixXd block =
+                  stan::math::block(reference, row, col, nr, nc);
+              (void)block;
+            } catch (const std::exception&) {
+              expected = false;
+            }
+            DataMap data;
+            data.set_int("row", row);
+            data.set_int("col", col);
+            data.set_int("nr", nr);
+            data.set_int("nc", nc);
+            try {
+              CompiledModel cm = compile_model(text, data);
+              Executor ex(std::move(cm.graph));
+              cm.bind(ex);
+              std::fill_n(ex.params_data(), 6, 1.0);
+              double grad[6];
+              const double lp = ex.gradient(grad);
+              if (expected) {
+                expect_eq("block boundary lp", lp, nr * nc);
+                for (int c = 0; c < 3; ++c)
+                  for (int r = 0; r < 2; ++r)
+                    expect_eq("block boundary gradient", grad[c * 2 + r],
+                              r >= row - 1 && r < row - 1 + nr &&
+                                      c >= col - 1 && c < col - 1 + nc
+                                  ? 1.0
+                                  : 0.0);
+              }
+            } catch (const std::exception&) {
+              accepted = false;
+            }
+            check(accepted == expected,
+                  "block graph acceptance " + std::to_string(row) + "," +
+                      std::to_string(col) + "," + std::to_string(nr) + "," +
+                      std::to_string(nc));
+          }
+  }
+
+  // Nonuniform coefficients distinguish each matrix lane. Container-valued
+  // replication/reversal must preserve the inner axes in both engines;
+  // the fixture's generated quantities also join the cross-path suite.
+  {
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/container_shapes.tmir.sexp"), DataMap{});
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const double weights[6] = {1, 4, 3.5, 5, 3, 8};
+    for (double scale : {-0.25, 0.0, 0.5}) {
+      double want = 0;
+      for (int k = 0; k < 6; ++k) {
+        ex.params_data()[k] = scale * (k + 1);
+        want += weights[k] * ex.params_data()[k];
+      }
+      double grad[6];
+      expect_eq("container shapes lp", ex.gradient(grad), want);
+      for (int k = 0; k < 6; ++k)
+        expect_eq("container shapes gradient", grad[k], weights[k]);
+    }
+  }
+
+  // zeros_*/ones_* constructors: data-sized, so transformed data folds the
+  // integer array and identity matrix in the interpreter while the log
+  // density broadcasts a ones/zeros vector in the graph. The constant terms
+  // (s = 0 + N + 0 + N) and the zeros row-vector contribute nothing, so a
+  // wrong fill would show up as a nonzero lp or gradient.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/zeros_ones.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/zeros_ones.tmir.sexp"), d);
+    check(lm.n_unconstrained == 3, "zeros_ones 3 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[3] = {0.4, -1.1, 0.7};
+    for (int k = 0; k < 3; ++k) lex.params_data()[k] = q[k];
+    double grad[3];
+    const double lp = lex.gradient(grad);
+
+    // s = sum(zeros) + sum(ones_row) + zeros_int[0] + trace(I) = 0+3+0+3.
+    const double want_lp = (q[0] + q[1] + q[2]) + 6.0;
+    expect_eq("zeros_ones lp", lp, want_lp);
+    for (int k = 0; k < 3; ++k)
+      expect_eq("zeros_ones g" + std::to_string(k), grad[k], 1.0);
+    stan::math::recover_memory();
+  }
+
+  // csr_extract_v / csr_extract_u: the integer companions to
+  // csr_extract_w, folded in the interpreter over a row-major sparse view.
+  // A = [[10,0,20,0],[0,30,0,0],[0,0,40,50]] has w=[10,20,30,40,50],
+  // v=[1,3,2,3,4] (1-indexed column ids), u=[1,3,4,6] (1-indexed row
+  // starts, length rows+1). The log density only reads w, so the gradient
+  // pins w's order and the constant lp pins the two index arrays.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/csrextract.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/csrextract.tmir.sexp"), d);
+    check(lm.n_unconstrained == 5, "csrextract 5 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[5] = {0.4, -1.1, 0.7, 0.2, -0.5};
+    for (int k = 0; k < 5; ++k) lex.params_data()[k] = q[k];
+    double grad[5];
+    const double lp = lex.gradient(grad);
+
+    const double w[5] = {10, 20, 30, 40, 50};
+    double dot = 0.0;
+    for (int k = 0; k < 5; ++k) dot += q[k] * w[k];
+    // usum = 1+3+4+6 = 14, vsum = 1+3+2+3+4 = 13.
+    expect_eq("csrextract lp", lp, dot + 27.0);
+    for (int k = 0; k < 5; ++k)
+      expect_eq("csrextract g" + std::to_string(k), grad[k], w[k]);
+    stan::math::recover_memory();
+  }
+
+  // rep_array tiling a parameter vector and a scalar. The element keeps its
+  // shape; rep_array prepends the outer axes. Graph arrays are outer-major
+  // so the lowering tiles the element buffer, while the interpreter (first-
+  // index-fast) strides it -- the cross_path fixture pins that the two
+  // agree. Here: lp = 3 * sum(a) + 2 * s, so grad a = {3,3,3}, grad s = 2.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/reparray.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/reparray.tmir.sexp"), d);
+    check(lm.n_unconstrained == 4, "reparray 4 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[4] = {0.4, -1.1, 0.7, 0.9};
+    for (int k = 0; k < 4; ++k) lex.params_data()[k] = q[k];
+    double grad[4];
+    const double lp = lex.gradient(grad);
+
+    expect_eq("reparray lp", lp, 3.0 * (q[0] + q[1] + q[2]) + 2.0 * q[3]);
+    expect_eq("reparray ga0", grad[0], 3.0);
+    expect_eq("reparray ga1", grad[1], 3.0);
+    expect_eq("reparray ga2", grad[2], 3.0);
+    expect_eq("reparray gs", grad[3], 2.0);
+    stan::math::recover_memory();
+  }
+
+  // .^ (EltPow__): the elementwise-power operator was missing from the
+  // binary-op table even though scalar Pow__ and the interpreter already
+  // had it. Both operand orders exercise the base and exponent gradients.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/eltpow.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/eltpow.tmir.sexp"), d);
+    check(lm.n_unconstrained == 3, "eltpow 3 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[3] = {0.6, 1.4, 0.9};
+    for (int k = 0; k < 3; ++k) lex.params_data()[k] = q[k];
+    double grad[3];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(3);
+    for (int k = 0; k < 3; ++k) x(k) = q[k];
+    Eigen::VectorXd base(3);
+    base << 2.0, 3.0, 1.5;
+    var acc = stan::math::sum(stan::math::pow(x, base)) +
+              stan::math::sum(stan::math::pow(base, x));
+    acc.grad();
+    expect_eq("eltpow lp", lp, acc.val());
+    for (int k = 0; k < 3; ++k)
+      expect_eq("eltpow g" + std::to_string(k), grad[k], x(k).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {
