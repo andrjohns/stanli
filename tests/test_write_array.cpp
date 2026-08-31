@@ -492,6 +492,63 @@ void test_interpreted_extra_rng() {
   }
 }
 
+// neg_binomial_2_lpmf and multi_normal_lpdf as value-returning densities in
+// a runtime-control region: no graph opcode, so the whole section runs on
+// WaInterp. Check the accumulated values against stan-math directly.
+void test_interpreted_gq_densities() {
+  using namespace stanli;
+  DataMap data = DataMap::from_json_file("tests/fixtures/gqdensity.json");
+  const std::string text = slurp("tests/fixtures/gqdensity.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL gqdensity: expected an attached interpreter\n");
+    return;
+  }
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  for (const char* key : {"K", "counts", "y", "Sigma"})
+    base[key] = data.at(key);
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry mu;
+  mu.dims = {2};
+  mu.r = {0.4, -0.7};
+  params["mu"] = mu;
+  WaRng rng(11);
+  const std::vector<double> row = wi.eval(params, rng);
+  expect_eq("gqdensity header", joined(wi.columns()), "mu.1,mu.2,nb,mvn,i");
+
+  const std::vector<int> counts = {3, 0};
+  double want_nb = 0.0;
+  for (int k = 0; k < 2; ++k)
+    want_nb += stan::math::neg_binomial_2_lpmf(counts[k], 2.0, 1.5);
+  Eigen::VectorXd y(2), m(2);
+  y << 0.5, -1.0;
+  m << 0.4, -0.7;
+  Eigen::MatrixXd S(2, 2);
+  S << 2.0, 0.3, 0.3, 1.0;
+  const double want_mvn = 2.0 * stan::math::multi_normal_lpdf(y, m, S);
+
+  auto expect_close = [&](const char* what, double got, double want) {
+    if (std::abs(got - want) > 1e-12) {
+      ++failures;
+      std::printf("FAIL gqdensity %s: got %.17g want %.17g\n", what, got, want);
+    }
+  };
+  expect_close("neg_binomial_2 accumulation", row[2], want_nb);
+  expect_close("multi_normal accumulation", row[3], want_mvn);
+}
+
 // An array of matrices carries two layouts at once: the array index is
 // outermost with each element contiguous, and within an element the storage
 // is column-major. Reading m[k, i, j] with one row-major stride computation
@@ -3931,6 +3988,7 @@ int main() {
   test_gq_name_shadowing();
   test_interpreted_gq();
   test_interpreted_extra_rng();
+  test_interpreted_gq_densities();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();
