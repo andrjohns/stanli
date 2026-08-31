@@ -3591,7 +3591,12 @@ struct Lowering {
     // Grainsize does not choose a partition here, but evaluating it and
     // checking positivity are still observable. Do not swallow a failed
     // compile-time probe or execute effectful expressions while lowering.
-    const Val grainsize = lower_expr(e.args[2]);
+    // Keep pure data integer operations on the interpreter path: operations
+    // such as divide(int, int) need not have a runtime graph kernel. Failed
+    // folding still lowers (or refuses) the expression; it never drops it.
+    const auto folded_grainsize = fold_const(e.args[2]);
+    const Val grainsize =
+        folded_grainsize ? *folded_grainsize : lower_expr(e.args[2]);
     if (e.args[2].unsized.depth != 0 ||
         e.args[2].unsized.leaf != mir::UnsizedLeaf::Int ||
         !is_scalar(grainsize))

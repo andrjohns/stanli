@@ -55,7 +55,8 @@ model {
   // and the empty slice.
   target += reduce_sum(partial_sum_lupdf, y, grainsize, mu, sigma);
   target += reduce_sum(partial_sum_lpdf, y, grainsize, mu, sigma);
-  target += reduce_sum_static(bounded_lupdf, y, 2, x, b);
+  // A pure integer grainsize may use operations without a graph kernel.
+  target += reduce_sum_static(bounded_lupdf, y, divide(N + 2, 2), x, b);
   target += reduce_sum(never_lupdf, nothing, 1, mu);
   mu ~ normal(scale, 1.0);
 }
