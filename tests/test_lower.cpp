@@ -2630,6 +2630,47 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // block() on both sides of the data boundary. A 2-D window is the case
+  // sub_col's single slice cannot express: each result column is
+  // contiguous, but consecutive columns sit M.rows apart, so the lowering
+  // gathers. The two windows overlap in the source and differ in shape, so
+  // a transposed or row-major offset would still fill the right number of
+  // slots while reading the wrong ones.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/blockfn.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/blockfn.tmir.sexp"), d);
+    check(lm.n_unconstrained == 20, "blockfn 20 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[20];
+    for (int k = 0; k < 20; ++k) q[k] = 0.1 * (k + 1) - 0.7;
+    for (int k = 0; k < 20; ++k) lex.params_data()[k] = q[k];
+    double grad[20];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> flat(20);
+    for (int k = 0; k < 20; ++k) flat(k) = q[k];
+    // Parameters arrive col-major, matching the matrix's storage order.
+    Eigen::Matrix<var, -1, -1> p(4, 5);
+    for (int c = 0; c < 5; ++c)
+      for (int rr = 0; rr < 4; ++rr) p(rr, c) = flat(c * 4 + rr);
+    Eigen::MatrixXd m(4, 5);
+    for (int rr = 0; rr < 4; ++rr)
+      for (int c = 0; c < 5; ++c) m(rr, c) = rr * 5 + c + 1;
+
+    const Eigen::MatrixXd td = stan::math::block(m, 2, 3, 2, 3);
+    var acc = stan::math::sum(stan::math::elt_multiply(
+                  stan::math::block(p, 2, 3, 2, 3), td)) +
+              stan::math::sum(stan::math::block(p, 1, 4, 3, 2));
+    acc.grad();
+    expect_eq("blockfn lp", lp, acc.val());
+    for (int k = 0; k < 20; ++k)
+      expect_eq("blockfn g" + std::to_string(k), grad[k], flat(k).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

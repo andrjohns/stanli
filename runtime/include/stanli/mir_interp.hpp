@@ -2004,6 +2004,21 @@ class MirInterp {
         r.r.push_back(m.r.at((size_t)((j - 1) * R + (i - 1) + k)));
       return r;
     }
+    if (e.name == "block" && e.args.size() == 5) {
+      Value m = eval(e.args[0]);
+      if (m.dims.size() != 2) fail("block: needs a matrix", e.raw);
+      const long i = as_int(e.args[1]), j = as_int(e.args[2]),
+                 nr = as_int(e.args[3]), nc = as_int(e.args[4]);
+      const int64_t R = m.dims[0];
+      r.dims = {nr, nc};
+      r.r.reserve((size_t)(nr * nc));
+      // Source and result are both column-major, so filling the result in
+      // storage order walks one source column at a time, R apart.
+      for (long c = 0; c < nc; ++c)
+        for (long k = 0; k < nr; ++k)
+          r.r.push_back(m.r.at((size_t)((j - 1 + c) * R + (i - 1 + k))));
+      return r;
+    }
     if (e.name == "col" && e.args.size() == 2) {
       Value m = eval(e.args[0]);
       if (m.dims.size() != 2) fail("col: needs a matrix", e.raw);

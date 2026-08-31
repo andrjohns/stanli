@@ -5027,6 +5027,25 @@ struct Lowering {
       return emit_value(OP_SLICE, {a}, n, view_of(e.type_),
                         {(int)((j - 1) * a.si.rows + i - 1)});
     }
+    if (e.name == "block" && e.args.size() == 5) {
+      // block(M, i, j, nr, nc) = M[i .. i+nr-1, j .. j+nc-1]. Each result
+      // column is contiguous in col-major storage, but consecutive result
+      // columns sit M.rows apart, so a 2-D window needs a gather rather
+      // than the single slice sub_col gets.
+      Val a = lower_expr(e.args[0]);
+      if (!is_matrix(a.si)) fail("block on a slot without matrix shape");
+      const long i = eval_int(e.args[1]);
+      const long j = eval_int(e.args[2]);
+      const long nr = eval_int(e.args[3]);
+      const long nc = eval_int(e.args[4]);
+      std::vector<int> gather;
+      gather.reserve((size_t)(nr * nc));
+      for (long c = 0; c < nc; ++c)
+        for (long k = 0; k < nr; ++k)
+          gather.push_back(checked_immediate(
+              (j - 1 + c) * a.si.rows + (i - 1 + k), "block gather offset"));
+      return emit_value(OP_GATHER, {a}, nr * nc, matrix_view(nr, nc), gather);
+    }
     if (e.name == "col" && e.args.size() == 2) {
       Val a = lower_expr(e.args[0]);
       if (!is_matrix(a.si)) fail("col on a slot without matrix shape");
