@@ -2671,6 +2671,45 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // to_matrix: transformed data reshapes a data vector and transposes a
+  // 2-D array (the one source that arrives row-major) in the interpreter,
+  // while the log density reshapes a parameter vector in the graph. The
+  // 3 x 2 vs 2 x 3 shapes and the a * c product would all still typecheck
+  // under a wrong (row-major) fill, so the reference pins the ordering.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/tomatrix.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/tomatrix.tmir.sexp"), d);
+    check(lm.n_unconstrained == 6, "tomatrix 6 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[6];
+    for (int k = 0; k < 6; ++k) q[k] = 0.2 * (k + 1) - 0.5;
+    for (int k = 0; k < 6; ++k) lex.params_data()[k] = q[k];
+    double grad[6];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(6);
+    for (int k = 0; k < 6; ++k) x(k) = q[k];
+    Eigen::VectorXd v(6);
+    v << 1, 2, 3, 4, 5, 6;
+    Eigen::MatrixXd ar(2, 3);
+    ar << 10, 20, 30, 40, 50, 60;
+    const Eigen::MatrixXd a = stan::math::to_matrix(v, 2, 3);
+    const Eigen::MatrixXd b = ar;
+    const Eigen::RowVectorXd w = stan::math::to_row_vector(a);
+    Eigen::Matrix<var, -1, -1> c = stan::math::to_matrix(x, 3, 2);
+    var acc = stan::math::sum(stan::math::multiply(a, c)) + stan::math::sum(b) +
+              stan::math::sum(w) +
+              stan::math::dot_product(x, stan::math::to_vector(a));
+    acc.grad();
+    expect_eq("tomatrix lp", lp, acc.val());
+    for (int k = 0; k < 6; ++k)
+      expect_eq("tomatrix g" + std::to_string(k), grad[k], x(k).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

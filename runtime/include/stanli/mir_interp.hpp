@@ -2534,6 +2534,38 @@ class MirInterp {
       a.is_int = false;
       return a;
     }
+    if (e.name == "to_matrix" && (e.args.size() == 1 || e.args.size() == 3)) {
+      Value a = eval(e.args[0]);
+      a.is_int = false;
+      // A 2-D array arrived first-index-fastest (row-major); every other
+      // source is already column-major, so only that case restripes.
+      const bool from_2d_array =
+          e.args.size() == 1 && a.dims.size() == 2 && e.args[0].unsized.depth;
+      if (from_2d_array) {
+        const int64_t R = a.dims[0], C = a.dims[1];
+        decltype(a.r) col(a.r.size());
+        for (int64_t i = 0; i < R; ++i)
+          for (int64_t j = 0; j < C; ++j)
+            col[(size_t)(j * R + i)] = a.r.at((size_t)(i * C + j));
+        a.r = std::move(col);
+        a.dims = {R, C};
+        return a;
+      }
+      if (e.args.size() == 3) {
+        const int64_t rows = as_int(e.args[1]), cols = as_int(e.args[2]);
+        if (rows * cols != (int64_t)a.r.size())
+          fail("to_matrix: requested shape does not match source length",
+               e.raw);
+        a.dims = {rows, cols};
+      } else if (a.dims.size() == 2) {
+        // to_matrix(matrix) is the identity.
+      } else if (e.args[0].unsized.leaf == mir::UnsizedLeaf::RowVector) {
+        a.dims = {1, (int64_t)a.r.size()};
+      } else {
+        a.dims = {(int64_t)a.r.size(), 1};
+      }
+      return a;
+    }
     if (e.name == "to_array_1d") {
       // Flattening is the identity on this storage.
       Value a = eval(e.args[0]);
