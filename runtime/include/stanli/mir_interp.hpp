@@ -321,7 +321,21 @@ class MirInterp {
           return;
         }
         if (st.lhs_idx.empty()) {
-          env_[st.lhs] = eval(st.rhs);
+          Value v = eval(st.rhs);
+          // A plain `int` name stays int for its whole lifetime; the RHS's
+          // own arithmetic (e.g. `sumnt2 += nts[i] * nts[i]`) does not, since
+          // MirInterp's binary ops answer in real registers. Re-declaring an
+          // int with an int-valued init already coerces (above); a later
+          // whole-variable reassignment needs the same coercion, or the next
+          // eval_int on this name (a parameter or array size, say) sees a
+          // real entry and fails as unknown.
+          const Value* existing = find(st.lhs);
+          if (existing && existing->is_int && !v.is_int) {
+            v.is_int = true;
+            v.i.clear();
+            for (const T& x : v.r) v.i.push_back((int)val(x));
+          }
+          env_[st.lhs] = std::move(v);
           return;
         }
         Value* en = find(st.lhs);

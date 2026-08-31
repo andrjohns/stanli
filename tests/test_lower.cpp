@@ -2985,6 +2985,34 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // A parameter sized by a transformed-data for-loop accumulator
+  // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
+  // transformed-data interpreter used to lose the accumulator's int-ness on
+  // the first whole-variable reassignment, so its later use as a size
+  // expression looked like an unresolvable runtime value. nots=3,
+  // nts=[1,2,3] makes sumnt2 = 1+4+9 = 14.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/tdintsize.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/tdintsize.tmir.sexp"), d);
+    check(lm.n_unconstrained == 14, "tdintsize 14 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    for (int k = 0; k < 14; ++k) lex.params_data()[k] = 0.1 * (k + 1) - 0.7;
+    double grad[14];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(14);
+    for (int k = 0; k < 14; ++k) x(k) = 0.1 * (k + 1) - 0.7;
+    var acc = stan::math::normal_lpdf<true>(x, 0.0, 1.0);
+    acc.grad();
+    expect_eq("tdintsize lp", lp, acc.val());
+    for (int k = 0; k < 14; ++k)
+      expect_eq("tdintsize g" + std::to_string(k), grad[k], x(k).adj());
+    stan::math::recover_memory();
+  }
+
   // profile("name") { ... } wraps ordinary statements purely for stanc's own
   // timing output; the reader unwraps it to a plain block, so this should
   // compile and grade exactly as if the wrapper were absent.
