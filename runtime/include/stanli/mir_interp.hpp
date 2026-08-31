@@ -2911,13 +2911,28 @@ class MirInterp {
       r.r = {acc};
       return r;
     }
-    if (e.name == "rep_array" && e.args.size() == 2) {
+    if (e.name == "rep_array" && (e.args.size() == 2 || e.args.size() == 3)) {
       Value v = eval(e.args[0]);
       const long n = as_int(e.args[1]);
+      const long m = e.args.size() == 3 ? as_int(e.args[2]) : 1;
+      // The element keeps its own shape; rep_array only prepends the new
+      // outer dimension(s). Interpreter storage is first-index-fast, so the
+      // prepended axes vary fastest: element cell k lands at stride `copies`
+      // across the result, not as a contiguous block.
+      const long copies = e.args.size() == 3 ? n * m : n;
       r.is_int = v.is_int;
-      r.dims = {n};
-      r.r.assign(n, v.r.at(0));
-      if (v.is_int) r.i.assign(n, v.i.at(0));
+      r.dims.clear();
+      r.dims.push_back(n);
+      if (e.args.size() == 3) r.dims.push_back(m);
+      for (const int64_t d : v.dims) r.dims.push_back(d);
+      const size_t width = std::max(v.r.size(), v.i.size());
+      r.r.assign((size_t)copies * v.r.size(), T(0.0));
+      if (v.is_int) r.i.assign((size_t)copies * v.i.size(), 0);
+      for (size_t k = 0; k < width; ++k)
+        for (long c = 0; c < copies; ++c) {
+          r.r[k * (size_t)copies + (size_t)c] = v.r.at(k);
+          if (v.is_int) r.i[k * (size_t)copies + (size_t)c] = v.i.at(k);
+        }
       return r;
     }
     if (e.name == "csr_extract_w" && e.args.size() == 1) {

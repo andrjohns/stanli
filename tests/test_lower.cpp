@@ -2763,6 +2763,31 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // rep_array tiling a parameter vector and a scalar. The element keeps its
+  // shape; rep_array prepends the outer axes. Graph arrays are outer-major
+  // so the lowering tiles the element buffer, while the interpreter (first-
+  // index-fast) strides it -- the cross_path fixture pins that the two
+  // agree. Here: lp = 3 * sum(a) + 2 * s, so grad a = {3,3,3}, grad s = 2.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/reparray.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/reparray.tmir.sexp"), d);
+    check(lm.n_unconstrained == 4, "reparray 4 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[4] = {0.4, -1.1, 0.7, 0.9};
+    for (int k = 0; k < 4; ++k) lex.params_data()[k] = q[k];
+    double grad[4];
+    const double lp = lex.gradient(grad);
+
+    expect_eq("reparray lp", lp, 3.0 * (q[0] + q[1] + q[2]) + 2.0 * q[3]);
+    expect_eq("reparray ga0", grad[0], 3.0);
+    expect_eq("reparray ga1", grad[1], 3.0);
+    expect_eq("reparray ga2", grad[2], 3.0);
+    expect_eq("reparray gs", grad[3], 2.0);
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {

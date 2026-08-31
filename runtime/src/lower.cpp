@@ -4537,6 +4537,41 @@ struct Lowering {
       const long n = eval_int(e.args[1]);
       return emit_value(OP_REP_VEC, {a}, n, view_of(e.type_));
     }
+    if (e.name == "rep_array" && (e.args.size() == 2 || e.args.size() == 3)) {
+      // The element keeps its shape; rep_array prepends one or two outer
+      // dimensions and tiles the element buffer once per outer cell. That
+      // is a gather that walks 0..w-1 repeatedly.
+      Val a = lower_expr(e.args[0]);
+      const int64_t n = eval_int(e.args[1]);
+      const int64_t m = e.args.size() == 3 ? eval_int(e.args[2]) : 1;
+      const int64_t w = g.slots[a.slot].len;
+      std::vector<int64_t> dims{n};
+      if (e.args.size() == 3) dims.push_back(m);
+      ViewKind leaf = ViewKind::Flat;
+      if (is_matrix(a.si)) {
+        dims.push_back(a.si.rows);
+        dims.push_back(a.si.cols);
+        leaf = ViewKind::Matrix;
+      } else if (is_vector(a.si)) {
+        dims.push_back(w);
+        leaf = ViewKind::Vector;
+      } else if (is_row_vector(a.si)) {
+        dims.push_back(w);
+        leaf = ViewKind::RowVector;
+      } else if (is_array(a.si)) {
+        const ArrayShape& sh = array_shape(a.si);
+        dims.insert(dims.end(), sh.dims.begin(), sh.dims.end());
+        leaf = sh.leaf;
+      }
+      const int64_t copies = e.args.size() == 3 ? n * m : n;
+      std::vector<int> gather;
+      gather.reserve((size_t)(copies * w));
+      for (int64_t c = 0; c < copies; ++c)
+        for (int64_t k = 0; k < w; ++k)
+          gather.push_back(checked_immediate(k, "rep_array gather offset"));
+      return emit_value(OP_GATHER, {a}, copies * w,
+                        array_view(dims, leaf, a.si.param_free), gather);
+    }
     if ((e.name == "zeros_vector" || e.name == "zeros_row_vector" ||
          e.name == "ones_vector" || e.name == "ones_row_vector") &&
         e.args.size() == 1) {
