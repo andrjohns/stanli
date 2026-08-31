@@ -973,6 +973,78 @@ class MirInterp {
     return from_entry(*dp);
   }
 
+  // reduce_sum(f, sliced, grainsize, shared...) sums f over the terms of a
+  // partition of `sliced`, and its contract is that the partition is
+  // unobservable. Stan Math without STAN_THREADS takes that freedom to its
+  // limit and makes exactly one call over the whole slice, returning zero
+  // for an empty one (prim/functor/reduce_sum.hpp); stanli has no threading,
+  // so both engines make that same single call. lower.cpp's
+  // lower_reduce_sum is the graph-side half of this and carries the full
+  // account.
+  Value call_reduce_sum(const mir::Expr& e) {
+    if (e.args.size() < 3)
+      fail(
+          "reduce_sum: expected a partial-sum function, a sliced argument, "
+          "and a grainsize",
+          e.raw);
+    if (e.args[0].kind != mir::Expr::Var)
+      fail("reduce_sum: the partial-sum argument is not a function name",
+           e.raw);
+    Value slice = eval(e.args[1]);
+    const long grainsize = as_int(e.args[2]);
+    std::vector<Value> shared;
+    shared.reserve(e.args.size() - 3);
+    for (size_t i = 3; i < e.args.size(); ++i)
+      shared.push_back(eval(e.args[i]));
+    // Even an empty slice evaluates every actual argument. Validation is
+    // inside the Stan Math call, after those evaluations and their effects.
+    stan::math::check_positive("reduce_sum", "grainsize", grainsize);
+    const int64_t n =
+        slice.dims.empty() ? (int64_t)slice.r.size() : slice.dims.front();
+    Value sum;
+    sum.r = {0.0};
+    if (n == 0) return sum;
+
+    bool propto = false;
+    const std::string base =
+        mir::reduce_sum_partial_name(e.args[0].name, &propto);
+    const std::vector<mir::UnsizedView> views =
+        mir::reduce_sum_partial_views(e);
+    const mir::FunDef* f = mir::resolve_reduce_sum_partial(funs_, base, views);
+    if (f == nullptr)
+      fail("reduce_sum: unknown partial-sum function " + base, e.raw);
+    if (f->arg_names.size() != views.size())
+      fail("reduce_sum: " + base + " arity does not match the call", e.raw);
+    if (udf_depth_ > 64) fail("UDF recursion too deep");
+
+    MirInterp sub(funs_, where_, hooks_);
+    sub.udf_depth_ = udf_depth_ + 1;
+    // As in CmdStan, an `_lupdf` functor inherits the caller's normalization
+    // and an `_lpdf` one forces the normalized density.
+    sub.propto_ctx_ = propto_ctx_ && propto;
+    sub.env_[f->arg_names[0]] = std::move(slice);
+    Value start;
+    start.is_int = true;
+    start.i = {1};
+    start.r = {1.0};
+    if (n > std::numeric_limits<int32_t>::max())
+      fail("reduce_sum: slice bound exceeds the Stan integer range", e.raw);
+    Value end;
+    end.is_int = true;
+    end.i = {static_cast<int>(n)};
+    end.r = {(double)n};
+    sub.env_[f->arg_names[1]] = std::move(start);
+    sub.env_[f->arg_names[2]] = std::move(end);
+    for (size_t i = 3; i < e.args.size(); ++i)
+      sub.env_[f->arg_names[i]] = std::move(shared[i - 3]);
+    try {
+      for (const auto& st : f->body) sub.exec(st);
+    } catch (ReturnV& r) {
+      return std::move(r.v);
+    }
+    fail("reduce_sum: " + base + " returned no value", e.raw);
+  }
+
   Value call_udf(const mir::Expr& e) {
     auto it = funs_.find(e.name);
     if (it == funs_.end()) fail("unknown function " + e.name, e.raw);
@@ -1263,6 +1335,7 @@ class MirInterp {
   Value eval_fun(const mir::Expr& e) {
     Value r;
     if (e.fn_lib == mir::Expr::Lib::UserDefined) return call_udf(e);
+    if (mir::is_reduce_sum(e)) return call_reduce_sum(e);
     const auto is_scalar = [](const Value& v) {
       return v.dims.empty() && v.r.size() == 1;
     };

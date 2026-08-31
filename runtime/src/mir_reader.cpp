@@ -250,6 +250,14 @@ void validate_funapp_arity(const Expr& e) {
     require_arity(e, 5);
     return;
   }
+  if (e.name == "reduce_sum" || e.name == "reduce_sum_static") {
+    // A partial-sum function, the sliced argument, and a grainsize, then any
+    // number of shared arguments.
+    if (e.args.size() < 3)
+      malformed("reduce_sum call: expected at least 3 arguments, got " +
+                std::to_string(e.args.size()));
+    return;
+  }
   if (e.name == "algebra_solver") {
     require_arity(e, 5, 8);
     return;
