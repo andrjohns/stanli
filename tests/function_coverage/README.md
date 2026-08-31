@@ -46,8 +46,10 @@ python3 tools/gen_function_models.py
 python3 tools/check_function_models.py --build build-rel --record --jobs 2
 ```
 
-The reference artifact records compiler/dependency identities and exact model
-source hashes. Recording is independent of stanli's answers: all CmdStan rows
-are saved before replay, and a mismatch still fails. Never change references
-to match a stanli regression. The generated sources and reference artifact
-are committed so normal CI needs no CmdStan build or reference download.
+The reference artifact records compiler/dependency identities and model source
+hashes with CRLF normalized to LF, so Windows checkouts use the same references.
+Compiler binary hashes remain byte exact. Recording is independent of stanli's
+answers: all CmdStan rows are saved before replay, and a mismatch still fails.
+Never change references to match a stanli regression. The generated sources
+and reference artifact are committed so normal CI needs no CmdStan build or
+reference download.
