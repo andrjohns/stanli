@@ -455,6 +455,18 @@ bool WaInterp::rng_fun(MirInterp<double>& in, const mir::Expr& e,
     return true;
   }
 
+  // Whole-vector concentration argument, one simplex draw.
+  if (base == "dirichlet") {
+    const auto& alpha = av.at(0);
+    const int64_t K = (int64_t)alpha.r.size();
+    Eigen::VectorXd a(K);
+    for (int64_t i = 0; i < K; ++i) a[i] = alpha.r[(size_t)i];
+    const Eigen::VectorXd draw = stan::math::dirichlet_rng(a, g);
+    out->dims = {K};
+    out->r.assign(draw.data(), draw.data() + K);
+    return true;
+  }
+
   // Whole-vector argument, one categorical draw.
   if (base == "categorical" || base == "categorical_logit") {
     int k = 0;
@@ -511,6 +523,12 @@ bool WaInterp::rng_fun(MirInterp<double>& in, const mir::Expr& e,
       v = stan::math::student_t_rng(sc(0, i), sc(1, i), sc(2, i), g);
     } else if (base == "weibull") {
       v = stan::math::weibull_rng(sc(0, i), sc(1, i), g);
+    } else if (base == "gumbel") {
+      v = stan::math::gumbel_rng(sc(0, i), sc(1, i), g);
+    } else if (base == "beta_binomial") {
+      vi = stan::math::beta_binomial_rng(static_cast<int>(sc(0, i)), sc(1, i),
+                                         sc(2, i), g);
+      iv = true;
     } else if (base == "bernoulli") {
       const double args[] = {sc(0, i)};
       vi =

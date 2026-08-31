@@ -423,6 +423,75 @@ void test_interpreted_gq() {
   }
 }
 
+// gumbel_rng, dirichlet_rng and beta_binomial_rng have no graph opcode, so
+// the whole generated-quantities section runs on WaInterp. Drive it and
+// check every draw matches stan-math on a parallel WaRng consumed in the
+// same source order: gumbel first, then the whole-vector dirichlet, then
+// the integer beta_binomial.
+void test_interpreted_extra_rng() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("N", 10);
+  const std::string text = slurp("tests/fixtures/gqrng_extra.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL gqrng_extra: expected an attached interpreter\n");
+    return;
+  }
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  base["N"] = data.at("N");
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry sig;
+  sig.r = {1.3};
+  params["sigma"] = sig;
+
+  WaRng rng(7), ref(7);
+  const std::vector<double> row = wi.eval(params, rng);
+  expect_eq("gqrng_extra header", joined(wi.columns()),
+            "sigma,g,d.1,d.2,d.3,bb");
+  if (row.size() != 6) {
+    ++failures;
+    std::printf("FAIL gqrng_extra: row size %zu\n", row.size());
+    return;
+  }
+  auto& g = ref.gen();
+  const double want_g = stan::math::gumbel_rng(0.5, 1.3, g);
+  Eigen::VectorXd alpha(3);
+  alpha << 1.0, 2.0, 3.0;
+  const Eigen::VectorXd want_d = stan::math::dirichlet_rng(alpha, g);
+  const int want_bb = stan::math::beta_binomial_rng(10, 2.0, 3.0, g);
+
+  auto expect_val = [&](const char* what, double got, double want) {
+    if (got != want) {
+      ++failures;
+      std::printf("FAIL gqrng_extra %s: got %.17g want %.17g\n", what, got,
+                  want);
+    }
+  };
+  expect_val("sigma passthrough", row[0], 1.3);
+  expect_val("gumbel draw", row[1], want_g);
+  expect_val("dirichlet[0]", row[2], want_d[0]);
+  expect_val("dirichlet[1]", row[3], want_d[1]);
+  expect_val("dirichlet[2]", row[4], want_d[2]);
+  expect_val("beta_binomial draw", row[5], (double)want_bb);
+  if (std::abs((row[2] + row[3] + row[4]) - 1.0) > 1e-12) {
+    ++failures;
+    std::printf("FAIL gqrng_extra: dirichlet draw is not a simplex\n");
+  }
+}
+
 // An array of matrices carries two layouts at once: the array index is
 // outermost with each element contiguous, and within an element the storage
 // is column-major. Reading m[k, i, j] with one row-major stride computation
@@ -3861,6 +3930,7 @@ int main() {
   test_gq_bare_fill_is_nan();
   test_gq_name_shadowing();
   test_interpreted_gq();
+  test_interpreted_extra_rng();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();
