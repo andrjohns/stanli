@@ -725,6 +725,61 @@ int main(int argc, char** argv) {
               nested_int_literal.r == std::vector<double>({1, 3, 2, 4}),
           "nested integer literals retain shape and integer provenance");
 
+    auto reverse = [](mir::Expr value, std::string type,
+                      mir::UnsizedView view) {
+      mir::Expr e;
+      e.kind = mir::Expr::FunApp;
+      e.fn_lib = mir::Expr::Lib::StanLib;
+      e.name = "reverse";
+      e.type_ = std::move(type);
+      e.unsized = view;
+      e.data_only = true;
+      e.args = {std::move(value)};
+      return e;
+    };
+    mir::Expr vector;
+    vector.kind = mir::Expr::Var;
+    vector.name = "reverse_vector";
+    vector.type_ = "UVector";
+    vector.unsized = {0, mir::UnsizedLeaf::Vector};
+    vector.data_only = true;
+    DataMap::Entry vector_value;
+    vector_value.dims = {3};
+    vector_value.r = {1, 2, 3};
+    interp.env()[vector.name] = std::move(vector_value);
+    const DataMap::Entry reversed_vector = interp.eval(
+        reverse(std::move(vector), "UVector", {0, mir::UnsizedLeaf::Vector}));
+    check(reversed_vector.dims == std::vector<int64_t>({3}) &&
+              reversed_vector.r == std::vector<double>({3, 2, 1}),
+          "reverse flips a vector's complete buffer");
+
+    const DataMap::Entry reversed_nested_ints =
+        interp.eval(reverse(int_array({int_array({integer(1), integer(2)}, 1),
+                                       int_array({integer(3), integer(4)}, 1)},
+                                      2),
+                            "UArray", {2, mir::UnsizedLeaf::Int}));
+    check(reversed_nested_ints.is_int &&
+              reversed_nested_ints.dims == std::vector<int64_t>({2, 2}) &&
+              reversed_nested_ints.i == std::vector<int>({3, 1, 4, 2}) &&
+              reversed_nested_ints.r == std::vector<double>({3, 1, 4, 2}),
+          "reverse flips only the outer array dimension and keeps ints");
+
+    mir::Expr empty_array;
+    empty_array.kind = mir::Expr::Var;
+    empty_array.name = "empty_reverse_array";
+    empty_array.type_ = "(UArray UVector)";
+    empty_array.unsized = {1, mir::UnsizedLeaf::Vector};
+    empty_array.data_only = true;
+    DataMap::Entry empty_value;
+    empty_value.dims = {0, 3};
+    interp.env()[empty_array.name] = std::move(empty_value);
+    const DataMap::Entry reversed_empty =
+        interp.eval(reverse(std::move(empty_array), "(UArray UVector)",
+                            {1, mir::UnsizedLeaf::Vector}));
+    check(reversed_empty.r.empty() &&
+              reversed_empty.dims == std::vector<int64_t>({0, 3}),
+          "reverse preserves empty array geometry");
+
     // These are the five mixed-index reads in mother.stan's optimized
     // generated-quantities MIR. The runtime value has one unified
     // first-index-fast layout: outer array, matrix row, matrix column.

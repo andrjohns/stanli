@@ -5057,6 +5057,36 @@ struct Lowering {
       const long off = e.name == "head" ? 0 : g.slots[a.slot].len - n;
       return emit_value(OP_SLICE, {a}, n, view_of(e.type_), {(int)off});
     }
+    if (e.name == "reverse" && e.args.size() == 1) {
+      Val a = lower_expr(e.args[0]);
+      const int64_t len = g.slots[a.slot].len;
+      std::vector<int> gather;
+      gather.reserve((size_t)len);
+      if (is_array(a.si)) {
+        // Graph arrays keep each outer element contiguous. Reverse those
+        // complete chunks so an array of vectors/matrices retains the order
+        // inside every element.
+        const ArrayShape& shape = array_shape(a.si);
+        if (shape.dims.empty()) fail("reverse: array has no dimensions", e.raw);
+        const int64_t outer = shape.dims.front();
+        const std::vector<int64_t> suffix(shape.dims.begin() + 1,
+                                          shape.dims.end());
+        const int64_t width = checked_product(suffix, "reverse array element");
+        if (checked_product(shape.dims, "reverse array") != len)
+          fail("reverse: array shape does not match storage", e.raw);
+        for (int64_t i = outer; i-- > 0;)
+          for (int64_t k = 0; k < width; ++k)
+            gather.push_back(
+                checked_immediate(i * width + k, "reverse gather offset"));
+      } else {
+        if (!is_vector(a.si) && !is_row_vector(a.si))
+          fail("reverse: argument is not a vector, row-vector, or array",
+               e.raw);
+        for (int64_t i = len; i-- > 0;)
+          gather.push_back(checked_immediate(i, "reverse gather offset"));
+      }
+      return emit_value(OP_GATHER, {a}, len, a.si, gather);
+    }
     return std::nullopt;
   }
 

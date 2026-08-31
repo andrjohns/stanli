@@ -2046,6 +2046,33 @@ class MirInterp {
       }
       return r;
     }
+    if (e.name == "reverse" && e.args.size() == 1) {
+      Value a = eval(e.args[0]);
+      r = a;
+      const auto reverse_outer = [&](auto* values) {
+        // Vectors and row-vectors have one logical axis and one flat buffer.
+        // Arrays use DataMap's first-index-fast storage, so reversing an
+        // array means reversing dimension zero once for every suffix lane,
+        // not reversing the complete buffer (which would also reverse each
+        // container-valued element).
+        if (e.args[0].unsized.depth == 0) {
+          std::reverse(values->begin(), values->end());
+          return;
+        }
+        if (a.dims.empty()) fail("reverse: array has no dimensions", e.raw);
+        const int64_t outer = a.dims.front();
+        if (outer < 0 || (outer != 0 && values->size() % (size_t)outer != 0))
+          fail("reverse: array shape does not match storage", e.raw);
+        if (outer == 0) return;
+        for (size_t offset = 0; offset < values->size();
+             offset += (size_t)outer)
+          std::reverse(values->begin() + offset,
+                       values->begin() + offset + outer);
+      };
+      reverse_outer(&r.r);
+      if (r.is_int) reverse_outer(&r.i);
+      return r;
+    }
     // squared_distance is dot_self of the difference, which is how the
     // graph lowers it too (lower.cpp); the two spellings agreeing keeps
     // transformed data and the log density on the same summation order.

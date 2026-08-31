@@ -2534,6 +2534,60 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // reverse on both sides of the data boundary: transformed data reverses a
+  // literal, an integer array and an array of vectors in the interpreter,
+  // while the log density reverses a parameter vector, row-vector and array
+  // of vectors as gathers in the graph. Reversing twice is the identity, so
+  // every term pairs a reversed parameter against data reversed once, and
+  // the array cases pin the axis: `reverse` flips only the outer dimension,
+  // and each element vector must survive with its own order intact. The two
+  // sides disagree on storage -- DataMap is first-index-fast, graph arrays
+  // are outer-major -- so the same source function needs two lowerings.
+  {
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/reverse.tmir.sexp"), DataMap());
+    check(lm.n_unconstrained == 10, "reverse 10 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[10] = {0.5, -1.2, 0.8, 0.3, 1.4, -0.7, 0.9, -0.2, 0.6, 1.1};
+    for (int i = 0; i < 10; ++i) lex.params_data()[i] = q[i];
+    double grad[10];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> p(10);
+    for (int i = 0; i < 10; ++i) p(i) = q[i];
+    Eigen::Matrix<var, -1, 1> x = p.head(3);
+    Eigen::Matrix<var, 1, -1> rx = p.segment(3, 3).transpose();
+    // ax is array[2] vector[2]; the writer lists whole elements in order.
+    std::vector<Eigen::Matrix<var, -1, 1>> ax(2, Eigen::Matrix<var, -1, 1>(2));
+    for (int n = 0; n < 2; ++n)
+      for (int i = 0; i < 2; ++i) ax[n](i) = p(6 + n * 2 + i);
+
+    Eigen::VectorXd literal(3);
+    literal << 1.0, 2.0, 3.0;
+    // Eigen's reverse is lazy, so the transformed-data value needs its own
+    // destination; reversing into `literal` would alias and self-overwrite.
+    const Eigen::VectorXd td = stan::math::reverse(literal);
+    const std::vector<int> ti = stan::math::reverse(std::vector<int>{1, 2, 3});
+    Eigen::VectorXd ta0(2), ta1(2);
+    ta0 << 1.0, 2.0;
+    ta1 << 3.0, 4.0;
+    const std::vector<Eigen::VectorXd> ta =
+        stan::math::reverse(std::vector<Eigen::VectorXd>{ta0, ta1});
+    const std::vector<Eigen::Matrix<var, -1, 1>> rax = stan::math::reverse(ax);
+
+    var acc = stan::math::dot_product(stan::math::reverse(x), td) +
+              stan::math::reverse(rx) * td;
+    for (int n = 0; n < 2; ++n)
+      acc += ti[n] * stan::math::dot_product(rax[n], ta[n]);
+    acc.grad();
+    expect_eq("reverse lp", lp, acc.val());
+    for (int i = 0; i < 10; ++i)
+      expect_eq("reverse g" + std::to_string(i), grad[i], p(i).adj());
+    stan::math::recover_memory();
+  }
+
   // Simplex + dirichlet: gradient vs the var path (simplex_constrain and
   // dirichlet_lpdf composed exactly as the lowering emits them).
   {
