@@ -101,7 +101,9 @@ GROUPS = {
         "mdivide_right": "mdivide_right(x', s)",
         "mdivide_right_spd": "mdivide_right_spd(x', s)",
         "mdivide_right_tri_low": "mdivide_right_tri_low(x', l)",
-        "multiply_lower_tri_self_transpose": "multiply_lower_tri_self_transpose(l)",
+        # `s`, not the Cholesky factor `l`: the upper triangle stan-math drops
+        # has to be non-zero for the probe to tell tril(A) A' from A A'.
+        "multiply_lower_tri_self_transpose": "multiply_lower_tri_self_transpose(s)",
         "num_elements": "num_elements(m)", "prod": "prod(v)",
         "quad_form": "quad_form(s, x)",
         "quad_form_diag": "quad_form_diag(s, x)",
@@ -209,5 +211,8 @@ GROUPS = {
         "multi_normal_cholesky_rng": "multi_normal_cholesky_rng(x, l)",
         "categorical_rng": "categorical_rng(p)",
         "categorical_logit_rng": "categorical_logit_rng(x)",
+        "gumbel_rng": "gumbel_rng(theta[1], 1.3)",
+        "dirichlet_rng": "dirichlet_rng(v)",
+        "beta_binomial_rng": "beta_binomial_rng(5, 2.0, 3.0)",
     },
 }

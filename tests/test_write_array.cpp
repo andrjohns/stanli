@@ -423,22 +423,44 @@ void test_interpreted_gq() {
   }
 }
 
-// gumbel_rng, dirichlet_rng and beta_binomial_rng have no graph opcode, so
-// the whole generated-quantities section runs on WaInterp. Drive it and
-// check every draw matches stan-math on a parallel WaRng consumed in the
-// same source order: gumbel first, then the whole-vector dirichlet, then
-// the integer beta_binomial.
-void test_interpreted_extra_rng() {
+// gumbel_rng, dirichlet_rng and beta_binomial_rng all now have graph
+// opcodes, so the whole generated-quantities section compiles completely --
+// no WaInterp fallback. Drive the compiled graph and check every draw
+// matches stan-math on a parallel WaRng consumed in the same source order:
+// gumbel first, then the whole-vector dirichlet, then the integer
+// beta_binomial. A separately constructed WaInterp on the same MIR is the
+// second witness, so a graph/interpreter divergence cannot hide behind
+// agreement with only one of the two.
+void test_compiled_extra_rng() {
   using namespace stanli;
   DataMap data;
   data.set_int("N", 10);
   const std::string text = slurp("tests/fixtures/gqrng_extra.tmir.sexp");
   CompiledModel cm = compile_model(text, data);
-  if (!cm.write_array || !cm.write_array->interp) {
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
     ++failures;
-    std::printf("FAIL gqrng_extra: expected an attached interpreter\n");
+    std::printf(
+        "FAIL gqrng_extra did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
+  expect_eq("gqrng_extra columns", joined(cm.write_array->columns),
+            "sigma,g,d.1,d.2,d.3,bb");
+
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  wex.params_data()[0] = std::log(1.3);  // sigma's unconstrained log_sd form
+  const auto graph_row = [&](WaRng& rng) {
+    wex.run_forward_only(EvalState{&rng});
+    std::vector<double> row;
+    for (const auto& c : cm.write_array->columns) {
+      const double* p = wex.value_ptr(c.slot);
+      for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+    }
+    return row;
+  };
+
   auto program =
       std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
   std::map<std::string, DataMap::Entry> base;
@@ -457,10 +479,13 @@ void test_interpreted_extra_rng() {
   sig.r = {1.3};
   params["sigma"] = sig;
 
-  WaRng rng(7), ref(7);
-  const std::vector<double> row = wi.eval(params, rng);
-  expect_eq("gqrng_extra header", joined(wi.columns()),
-            "sigma,g,d.1,d.2,d.3,bb");
+  WaRng graph_rng(7), interp_rng(7), ref(7);
+  const std::vector<double> row = graph_row(graph_rng);
+  const std::vector<double> interp_row = wi.eval(params, interp_rng);
+  if (row != interp_row) {
+    ++failures;
+    std::printf("FAIL gqrng_extra: graph and interpreter rows differ\n");
+  }
   if (row.size() != 6) {
     ++failures;
     std::printf("FAIL gqrng_extra: row size %zu\n", row.size());
@@ -489,6 +514,150 @@ void test_interpreted_extra_rng() {
   if (std::abs((row[2] + row[3] + row[4]) - 1.0) > 1e-12) {
     ++failures;
     std::printf("FAIL gqrng_extra: dirichlet draw is not a simplex\n");
+  }
+}
+
+// RNG draws inside a runtime-control region: the section compiles to the
+// register machine, which runs the graph's own OP_RNG kernel through
+// Program::CALL. The interpreter is the reference for what the section used
+// to do -- same draws, same order, same positions in one stream -- and
+// stan-math for what each draw is.
+void test_compiled_region_rng() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("K", 3);
+  const std::string text = slurp("tests/fixtures/gqrngregion.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf(
+        "FAIL gqrngregion did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+  expect_eq("gqrngregion columns", joined(cm.write_array->columns),
+            "sigma,e,n,d.1,d.2,d.3,mn.1,mn.2,mn.3,i");
+
+  const double sigma = 1.4;
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  wex.params_data()[0] = std::log(sigma);  // sigma's unconstrained form
+  WaRng graph_rng(11);
+  wex.run_forward_only(EvalState{&graph_rng});
+  std::vector<double> row;
+  for (const auto& c : cm.write_array->columns) {
+    const double* p = wex.value_ptr(c.slot);
+    for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+  }
+
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  base["K"] = data.at("K");
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry sig;
+  sig.r = {sigma};
+  params["sigma"] = sig;
+  WaRng interp_rng(11);
+  const std::vector<double> interp_row = wi.eval(params, interp_rng);
+  if (row != interp_row) {
+    ++failures;
+    std::printf("FAIL gqrngregion: graph and interpreter rows differ\n");
+  }
+  if (row.size() != 10) {
+    ++failures;
+    std::printf("FAIL gqrngregion: row size %zu\n", row.size());
+    return;
+  }
+
+  WaRng ref(11);
+  auto& g = ref.gen();
+  const double want_e = stan::math::exponential_rng(sigma, g);
+  const double want_n = stan::math::normal_rng(0.5, sigma, g);
+  const Eigen::VectorXd want_d =
+      stan::math::dirichlet_rng(Eigen::VectorXd::Constant(3, 1.5), g);
+  const Eigen::VectorXd want_mn = stan::math::multi_normal_rng(
+      Eigen::VectorXd::Constant(3, 0.25),
+      Eigen::MatrixXd(Eigen::VectorXd::Constant(3, sigma).asDiagonal()), g);
+
+  auto expect_val = [&](const char* what, double got, double want) {
+    if (got != want) {
+      ++failures;
+      std::printf("FAIL gqrngregion %s: got %.17g want %.17g\n", what, got,
+                  want);
+    }
+  };
+  expect_val("sigma passthrough", row[0], sigma);
+  expect_val("exponential draw", row[1], want_e);
+  expect_val("normal draw", row[2], want_n);
+  for (int i = 0; i < 3; ++i) {
+    expect_val("dirichlet draw", row[(size_t)(3 + i)], want_d[i]);
+    expect_val("multi_normal draw", row[(size_t)(6 + i)], want_mn[i]);
+  }
+  // The loop counter is a generated quantity like any other, and the region
+  // has to carry its final value out rather than the initializer.
+  expect_val("loop counter", row[9], 2.0);
+}
+
+// The same, with a region whose inputs are all data -- exactly what constant
+// folding looks for. Folding an effect would run it once while compiling and
+// hand every later evaluation the same stored number, so check end to end
+// that two draws stay two draws and two rows stay two rows.
+void test_region_rng_is_not_folded() {
+  using namespace stanli;
+  DataMap data = DataMap::from_json_file("tests/fixtures/gqrngfold.json");
+  const std::string text = slurp("tests/fixtures/gqrngfold.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf(
+        "FAIL gqrngfold did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  WaRng rng(5);
+  const auto draw_row = [&]() {
+    wex.run_forward_only(EvalState{&rng});
+    std::vector<double> row;
+    for (const auto& c : cm.write_array->columns) {
+      const double* p = wex.value_ptr(c.slot);
+      for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+    }
+    return row;
+  };
+  const std::vector<double> first = draw_row();
+  const std::vector<double> second = draw_row();
+
+  WaRng ref(5);
+  auto& g = ref.gen();
+  auto expect_val = [&](const char* what, double got, double want) {
+    if (got != want) {
+      ++failures;
+      std::printf("FAIL gqrngfold %s: got %.17g want %.17g\n", what, got, want);
+    }
+  };
+  for (const std::vector<double>* row : {&first, &second}) {
+    expect_val("d1", (*row)[0], stan::math::exponential_rng(2.0, g));
+    expect_val("d2", (*row)[1], stan::math::exponential_rng(2.0, g));
+  }
+  // Stated directly as well as through stan-math: a folded region would
+  // repeat one stored value in both columns of both rows.
+  if (first[0] == first[1] || first == second) {
+    ++failures;
+    std::printf("FAIL gqrngfold: the region's draws were folded away\n");
   }
 }
 
@@ -549,21 +718,39 @@ void test_interpreted_gq_densities() {
   expect_close("multi_normal accumulation", row[3], want_mvn);
 }
 
-// multiply_lower_tri_self_transpose in a runtime-control region: no graph
-// opcode, so the section runs on WaInterp. The function zeros A's upper
-// triangle before forming L L', so a full A * A' would disagree on every
-// entry that touches a dropped element.
-void test_interpreted_multiply_lower_tri() {
+// multiply_lower_tri_self_transpose in a runtime-control region. The register
+// machine carries it now, so the whole section compiles; the interpreter runs
+// beside it here because both still have to agree. The function zeros A's
+// upper triangle before forming L L', so a full A * A' would disagree on
+// every entry that touches a dropped element.
+void test_compiled_multiply_lower_tri() {
   using namespace stanli;
   DataMap data;
   data.set_int("M", 3);
   const std::string text = slurp("tests/fixtures/mlt.tmir.sexp");
   CompiledModel cm = compile_model(text, data);
-  if (!cm.write_array || !cm.write_array->interp) {
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
     ++failures;
-    std::printf("FAIL mlt: expected an attached interpreter\n");
+    std::printf(
+        "FAIL mlt did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
+  // Column-major A with a non-zero upper triangle that must be ignored.
+  const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
+
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  std::copy(a, a + 9, wex.params_data());
+  WaRng graph_rng(3);
+  wex.run_forward_only(EvalState{&graph_rng});
+  std::vector<double> row;
+  for (const auto& c : cm.write_array->columns) {
+    const double* p = wex.value_ptr(c.slot);
+    for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+  }
+
   auto program =
       std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
   std::map<std::string, DataMap::Entry> base;
@@ -577,15 +764,17 @@ void test_interpreted_multiply_lower_tri() {
     base[flag] = one;
   }
   WaInterp wi(program, std::move(base));
-  // Column-major A with a non-zero upper triangle that must be ignored.
-  const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
   std::map<std::string, DataMap::Entry> params;
   DataMap::Entry A;
   A.dims = {3, 3};
   A.r.assign(a, a + 9);
   params["A"] = A;
-  WaRng rng(3);
-  const std::vector<double> row = wi.eval(params, rng);
+  WaRng interp_rng(3);
+  const std::vector<double> interp_row = wi.eval(params, interp_rng);
+  if (row != interp_row) {
+    ++failures;
+    std::printf("FAIL mlt: graph and interpreter rows differ\n");
+  }
 
   Eigen::MatrixXd Am(3, 3);
   for (int c = 0; c < 3; ++c)
@@ -595,7 +784,7 @@ void test_interpreted_multiply_lower_tri() {
   for (int c = 0; c < 3; ++c)
     for (int r = 0; r < 3; ++r) {
       const double got = row.at((size_t)(9 + c * 3 + r));
-      if (std::abs(got - want(r, c)) > 1e-12) {
+      if (got != want(r, c)) {
         ++failures;
         std::printf("FAIL mlt P(%d,%d): got %.17g want %.17g\n", r, c, got,
                     want(r, c));
@@ -2095,12 +2284,12 @@ void test_compiled_scalar_rng() {
   int rng_ops = 0;
   for (const Op& op : cm.write_array->graph.ops)
     if (op.opcode == OP_RNG) ++rng_ops;
-  if (rng_ops != 6) {
+  if (rng_ops != 8) {
     ++failures;
-    std::printf("FAIL scalar rng: got %d OP_RNG, want 6\n", rng_ops);
+    std::printf("FAIL scalar rng: got %d OP_RNG, want 8\n", rng_ops);
   }
   expect_eq("scalar rng columns", joined(cm.write_array->columns),
-            "x,p,u,b,n,l,k");
+            "x,p,u,b,n,l,k,gm,ex");
 
   Executor wex(std::move(cm.write_array->graph));
   cm.write_array->bind(wex);
@@ -4041,9 +4230,11 @@ int main() {
   test_gq_bare_fill_is_nan();
   test_gq_name_shadowing();
   test_interpreted_gq();
-  test_interpreted_extra_rng();
+  test_compiled_extra_rng();
+  test_compiled_region_rng();
+  test_region_rng_is_not_folded();
   test_interpreted_gq_densities();
-  test_interpreted_multiply_lower_tri();
+  test_compiled_multiply_lower_tri();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();

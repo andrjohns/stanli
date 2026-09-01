@@ -31,6 +31,7 @@
     "beta_binomial_lccdf",
     "beta_binomial_lcdf",
     "beta_binomial_lpmf",
+    "beta_binomial_rng",
     "beta_cdf",
     "beta_lccdf",
     "beta_lcdf",
@@ -90,6 +91,7 @@
     "dims",
     "dirichlet_lpdf",
     "dirichlet_multinomial_lpmf",
+    "dirichlet_rng",
     "discrete_range_lpmf",
     "divide",
     "dot_product",
@@ -140,6 +142,7 @@
     "gumbel_lccdf",
     "gumbel_lcdf",
     "gumbel_lpdf",
+    "gumbel_rng",
     "head",
     "hypergeometric_lpmf",
     "hypot",
@@ -606,7 +609,10 @@
         "multi_normal_rng",
         "multi_normal_cholesky_rng",
         "categorical_rng",
-        "categorical_logit_rng"
+        "categorical_logit_rng",
+        "gumbel_rng",
+        "dirichlet_rng",
+        "beta_binomial_rng"
       ],
       "parameters": 8
     },
@@ -1130,7 +1136,7 @@
       ]
     }
   },
-  "name_count": 412,
+  "name_count": 415,
   "recognized_but_unsupported": {
     "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout.",
     "integrate_1d": "Mentioned only in effect analysis; no runtime implementation exists."

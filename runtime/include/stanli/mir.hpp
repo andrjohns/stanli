@@ -83,6 +83,18 @@ inline bool is_matrix_row_value(const Expr& value) {
   return implicit_all || explicit_all;
 }
 
+// A `v[lo:hi]` range slice is `Indexed(v, IndexBetween(lo, hi))`: one
+// contiguous span of the same dense, stride-1 storage `v` has, with nothing
+// else applied. Peeling it back to the variable lets any classifier that
+// already trusts a bare variable's owning-storage provenance trust the slice
+// just as much.
+inline const Expr& unwrap_range_slice(const Expr& e) {
+  if (e.kind == Expr::Indexed && e.args.size() == 2 &&
+      e.args[1].kind == Expr::FunApp && e.args[1].name == "IndexBetween")
+    return e.args[0];
+  return e;
+}
+
 enum class ProdGrouping : uint8_t { Legacy, Packet, Scalar };
 
 // Classify only the syntax whose Eigen evaluator provenance has been audited.
@@ -90,7 +102,8 @@ enum class ProdGrouping : uint8_t { Legacy, Packet, Scalar };
 // not a guess about an arbitrary expression's Eigen flags.
 inline ProdGrouping prod_grouping(const Expr& product_arg) {
   if (is_matrix_row_value(product_arg)) return ProdGrouping::Scalar;
-  if (product_arg.kind == Expr::Var) return ProdGrouping::Packet;
+  if (unwrap_range_slice(product_arg).kind == Expr::Var)
+    return ProdGrouping::Packet;
   if (product_arg.kind == Expr::FunApp &&
       product_arg.fn_lib == Expr::Lib::StanLib &&
       (product_arg.name == "Transpose__" || product_arg.name == "transpose") &&
@@ -126,11 +139,14 @@ inline ProdGrouping prod_grouping(const Expr& product_arg) {
 }
 
 // One-argument min/max is overloaded across scalars, arrays, matrices, and
-// Eigen expressions.  Only a named Eigen vector has the owning-storage
-// evaluator provenance audited by the generated-quantities extrema opcode.
-// Keeping the function kind in the classifier makes every excluded or
-// malformed call an explicit Legacy result instead of inferring semantics
-// from a loosely typed argument.
+// Eigen expressions.  A named Eigen vector, or a contiguous `v[lo:hi]` range
+// slice of one, has the owning-storage evaluator provenance audited by the
+// generated-quantities extrema opcode: both are a genuine sub-span of the
+// same dense storage, so the address-independent grouping the opcode uses
+// for a bare variable applies to the slice unchanged. Keeping the function
+// kind in the classifier makes every excluded or malformed call an explicit
+// Legacy result instead of inferring semantics from a loosely typed
+// argument.
 enum class ExtremaKind : uint8_t { Legacy, Min, Max };
 
 inline ExtremaKind extrema_kind(const Expr& call) {
@@ -138,13 +154,13 @@ inline ExtremaKind extrema_kind(const Expr& call) {
       call.args.size() != 1 || call.type_ != "UReal" ||
       call.unsized.leaf != UnsizedLeaf::Real || call.unsized.depth != 0)
     return ExtremaKind::Legacy;
-  const Expr& arg = call.args[0];
-  const bool vector_arg = arg.kind == Expr::Var && arg.type_ == "UVector" &&
-                          arg.unsized.leaf == UnsizedLeaf::Vector &&
-                          arg.unsized.depth == 0;
+  const Expr* base = &unwrap_range_slice(call.args[0]);
+  const bool vector_arg = base->kind == Expr::Var && base->type_ == "UVector" &&
+                          base->unsized.leaf == UnsizedLeaf::Vector &&
+                          base->unsized.depth == 0;
   const bool row_vector_arg =
-      arg.kind == Expr::Var && arg.type_ == "URowVector" &&
-      arg.unsized.leaf == UnsizedLeaf::RowVector && arg.unsized.depth == 0;
+      base->kind == Expr::Var && base->type_ == "URowVector" &&
+      base->unsized.leaf == UnsizedLeaf::RowVector && base->unsized.depth == 0;
   if (!vector_arg && !row_vector_arg) return ExtremaKind::Legacy;
   if (call.name == "min") return ExtremaKind::Min;
   if (call.name == "max") return ExtremaKind::Max;

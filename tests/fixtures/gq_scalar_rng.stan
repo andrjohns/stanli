@@ -11,4 +11,6 @@ generated quantities {
   real n = normal_rng(x, 1.2);
   real l = lognormal_rng(0.2, 0.7);
   int<lower=2, upper=7> k = 2 + binomial_rng(5, inv_logit(x));
+  real gm = gumbel_rng(0.5, 1.3);
+  real ex = exponential_rng(1.6);
 }

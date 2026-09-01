@@ -2985,6 +2985,463 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // beta[:, 1, 1]: an outer array range kept in full, with fixed row/column
+  // indices into every element's matrix (array[2] matrix[2,2]). The fixture
+  // binds the slice to an array local before summing it, so its logical array
+  // view is checked along with the value and every gradient against the var
+  // path.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/idxarray3d.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/idxarray3d.tmir.sexp"), d);
+    check(lm.n_unconstrained == 8, "idxarray3d 8 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[8];
+    for (int k = 0; k < 8; ++k) q[k] = 0.1 * (k + 1) - 0.4;
+    for (int k = 0; k < 8; ++k) lex.params_data()[k] = q[k];
+    double grad[8];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    // Column-major within each matrix, array-major overall. Filled by
+    // element rather than Eigen's comma initializer, which always reads
+    // row-major regardless of the matrix's own storage order.
+    Eigen::Matrix<var, -1, -1> b1(2, 2), b2(2, 2);
+    for (int j = 0; j < 2; ++j)
+      for (int i = 0; i < 2; ++i) {
+        b1(i, j) = q[j * 2 + i];
+        b2(i, j) = q[4 + j * 2 + i];
+      }
+    var acc =
+        stan::math::normal_lpdf<true>(stan::math::to_vector(b1), 0.0, 1.0) +
+        stan::math::normal_lpdf<true>(stan::math::to_vector(b2), 0.0, 1.0) +
+        b1(0, 0) + b2(0, 0);
+    acc.grad();
+    expect_eq("idxarray3d lp", lp, acc.val());
+    Eigen::Matrix<var, -1, -1> both[2] = {b1, b2};
+    for (int e = 0, k = 0; e < 2; ++e)
+      for (int j = 0; j < 2; ++j)
+        for (int i = 0; i < 2; ++i, ++k)
+          expect_eq("idxarray3d g" + std::to_string(k), grad[k],
+                    both[e](i, j).adj());
+    stan::math::recover_memory();
+  }
+
+  // state_probs[1, 1, 1:2]: a full array-index prefix pins one row_vector
+  // leaf element (array[2, 2] row_vector[3]), then a trailing range reads
+  // inside it. Check the gathered sum and every gradient against the var
+  // path.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/idxrowvec.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/idxrowvec.tmir.sexp"), d);
+    check(lm.n_unconstrained == 12, "idxrowvec 12 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[12];
+    for (int k = 0; k < 12; ++k) q[k] = 0.1 * (k + 1) - 0.6;
+    for (int k = 0; k < 12; ++k) lex.params_data()[k] = q[k];
+    double grad[12];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    // Array-major (row, then column), each row_vector[3] contiguous.
+    Eigen::Matrix<var, 1, -1> sp[2][2];
+    for (int i = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j) {
+        Eigen::Matrix<var, 1, -1> v(3);
+        const int base = (i * 2 + j) * 3;
+        v << q[base], q[base + 1], q[base + 2];
+        sp[i][j] = v;
+      }
+    var acc = sp[0][0](0) + sp[0][0](1);
+    for (int i = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j)
+        acc += stan::math::normal_lpdf<true>(sp[i][j], 0.0, 1.0);
+    acc.grad();
+    expect_eq("idxrowvec lp", lp, acc.val());
+    for (int i = 0, k = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j)
+        for (int c = 0; c < 3; ++c, ++k)
+          expect_eq("idxrowvec g" + std::to_string(k), grad[k],
+                    sp[i][j](c).adj());
+    stan::math::recover_memory();
+  }
+
+  // H[1, :, :] = seed * theta: an explicit `:` for every leaf dimension
+  // after a full array-index prefix, on array[2] matrix[2, 2] H. Checks lp
+  // and the gradient against the var path built from the same statements
+  // (H[1] = theta*I, H[2] = I, both normal(0,1) on to_vector, plus
+  // theta ~ normal(0,1)).
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/idxassign.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/idxassign.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "idxassign 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = -0.6;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var theta = -0.6;
+    Eigen::Matrix<var, -1, -1> seed =
+        Eigen::Matrix<double, -1, -1>::Identity(2, 2);
+    Eigen::Matrix<var, -1, -1> h1 = seed * theta, h2 = seed;
+    var acc =
+        stan::math::normal_lpdf<true>(stan::math::to_vector(h1), 0.0, 1.0) +
+        stan::math::normal_lpdf<true>(stan::math::to_vector(h2), 0.0, 1.0) +
+        stan::math::normal_lpdf<true>(theta, 0.0, 1.0);
+    acc.grad();
+    expect_eq("idxassign lp", lp, acc.val());
+    expect_eq("idxassign g0", grad[0], theta.adj());
+    stan::math::recover_memory();
+  }
+
+  // m[1, :] = r: an explicit `:` for the one remaining dimension after a
+  // single-index prefix, on a plain flat array[2, 3] real -- no container
+  // leaf at all, unlike idxassign above. Covers
+  // unsupported_inline_ode_index_assignment's UDF-body write shape.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/rowassign2d.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/rowassign2d.tmir.sexp"), d);
+    check(lm.n_unconstrained == 3, "rowassign2d 3 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double q[3] = {0.3, -0.7, 1.1};
+    for (int k = 0; k < 3; ++k) lex.params_data()[k] = q[k];
+    double grad[3];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> r(3);
+    for (int k = 0; k < 3; ++k) r(k) = q[k];
+    var acc = r(0) + r(1) + r(2) + stan::math::normal_lpdf<true>(r, 0.0, 1.0);
+    acc.grad();
+    expect_eq("rowassign2d lp", lp, acc.val());
+    for (int k = 0; k < 3; ++k)
+      expect_eq("rowassign2d g" + std::to_string(k), grad[k], r(k).adj());
+    stan::math::recover_memory();
+  }
+
+  // unsupported_undeclared_inline_solve, verbatim (see the fixture comment):
+  // a triply-nested inlined UDF chain whose innermost while loop has a
+  // compile-time-dead early-return branch (`if (N == 0) return 0;`, N is
+  // always >= 1 here). The graph lowering folds that branch away, so the
+  // while loop's carved runtime-control region has to write its own
+  // inlined return-temp with no live-in binding to import. `y` never
+  // reaches target, so lp is exactly normal(0,1) on theta regardless of
+  // whether the ODE math inside is right; this checks that it still
+  // compiles and grades correctly.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/inlinesolve.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/inlinesolve.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "inlinesolve 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = -1.664154007900521;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var theta = -1.664154007900521;
+    var acc = stan::math::normal_lpdf<true>(theta, 0.0, 1.0);
+    acc.grad();
+    expect_eq("inlinesolve lp", lp, acc.val());
+    expect_eq("inlinesolve g0", grad[0], theta.adj());
+    stan::math::recover_memory();
+  }
+
+  // reject() with a literal-only message, inside a UDF's data-dependent
+  // branch (unsupported_FnReject, verbatim). z >= 0 never takes the reject
+  // arm, so lp is exactly normal(0, 1) on z; the model's effective support
+  // is z >= 0 (checked() rejects the rest), which is what makes it proper.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/rejectguard.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/rejectguard.tmir.sexp"), d);
+    check(lm.n_unconstrained == 1, "rejectguard 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.7;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    var z = 0.7;
+    var acc = stan::math::normal_lpdf<false>(z, 0.0, 1.0);
+    acc.grad();
+    expect_eq("rejectguard lp", lp, acc.val());
+    expect_eq("rejectguard g0", grad[0], z.adj());
+    stan::math::recover_memory();
+  }
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/rejectguard.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/rejectguard.tmir.sexp"), d);
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = -0.115;
+    double grad[1];
+    bool threw = false;
+    try {
+      lex.gradient(grad);
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    check(threw, "rejectguard throws for negative z");
+  }
+
+  // min/max of a contiguous `v[lo:hi]` range slice of a parameter vector or
+  // row-vector (unsupported_minmax_expression, generalized): the classifier
+  // used to accept only a bare vector variable for the native OP_EXTREMA_VEC
+  // opcode, so a sliced argument fell all the way back to WaInterp, which has
+  // no log_prob path at all.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/sliceminmax.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/sliceminmax.tmir.sexp"), d);
+    check(count_opcode(lm, OP_EXTREMA_VEC) == 4,
+          "sliceminmax extrema opcode census");
+    check(lm.n_unconstrained == 8, "sliceminmax 8 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[] = {0.4, -0.2, 0.9, 0.1, -0.5, 0.3, 0.8, -0.7};
+    std::copy(q, q + 8, lex.params_data());
+    double grad[8];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(4);
+    Eigen::Matrix<var, 1, -1> r(4);
+    for (int i = 0; i < 4; ++i) x(i) = q[i];
+    for (int i = 0; i < 4; ++i) r(i) = q[4 + i];
+    var vspan =
+        stan::math::max(x.segment(0, 3)) - stan::math::min(x.segment(0, 3));
+    var rspan =
+        stan::math::max(r.segment(1, 3)) - stan::math::min(r.segment(1, 3));
+    var acc = stan::math::std_normal_lpdf<true>(x) +
+              stan::math::std_normal_lpdf<true>(r) +
+              stan::math::normal_lpdf<false>(vspan, 0.0, 1.0) +
+              stan::math::normal_lpdf<false>(rspan, 0.0, 1.0);
+    acc.grad();
+    expect_eq("sliceminmax lp", lp, acc.val());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("sliceminmax gx" + std::to_string(i), grad[i], x(i).adj());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("sliceminmax gr" + std::to_string(i), grad[4 + i], r(i).adj());
+    stan::math::recover_memory();
+  }
+
+  // prod of a contiguous `v[lo:hi]` range slice of a parameter vector or
+  // row-vector (unsupported_prod, generalized): same gap as the extrema
+  // classifier above, in the surface/grouping classifiers `prod` lowering
+  // uses instead.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/sliceprod.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/sliceprod.tmir.sexp"), d);
+    check(count_opcode(lm, OP_PROD_VEC) == 2, "sliceprod opcode census");
+    for (const Op& op : lm.graph.ops)
+      if (op.opcode == OP_PROD_VEC)
+        check(op.variant == 2, "sliceprod packet grouping, active");
+    check(lm.n_unconstrained == 8, "sliceprod 8 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[] = {0.4, -0.2, 0.9, 0.1, -0.5, 0.3, 0.8, -0.7};
+    std::copy(q, q + 8, lex.params_data());
+    double grad[8];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(4);
+    Eigen::Matrix<var, 1, -1> r(4);
+    for (int i = 0; i < 4; ++i) x(i) = q[i];
+    for (int i = 0; i < 4; ++i) r(i) = q[4 + i];
+    var vprod = stan::math::prod(x.segment(0, 3));
+    var rprod = stan::math::prod(r.segment(1, 3));
+    var acc = stan::math::std_normal_lpdf<true>(x) +
+              stan::math::std_normal_lpdf<true>(r) +
+              stan::math::normal_lpdf<false>(vprod, 0.0, 1.0) +
+              stan::math::normal_lpdf<false>(rprod, 0.0, 1.0);
+    acc.grad();
+    expect_eq("sliceprod lp", lp, acc.val());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("sliceprod gx" + std::to_string(i), grad[i], x(i).adj());
+    for (int i = 0; i < 4; ++i)
+      expect_eq("sliceprod gr" + std::to_string(i), grad[4 + i], r(i).adj());
+    stan::math::recover_memory();
+  }
+
+  // A container-valued normal_lpdf inside a data-dependent while loop
+  // (unsupported_normal_lpdf_container, verbatim): the loop forces the call
+  // through the register machine's runtime-control region compiler, whose
+  // DENSITY opcode only ever bound one scalar per argument. DENSITY_VEC adds
+  // the container form, calling stan-math's own vectorized normal_lpdf over
+  // an Eigen::Map per container argument -- the same call CmdStan's
+  // generated code makes -- rather than summing N scalar calls by hand,
+  // which would round differently. No parameters, so the model has one lp:
+  // N identical calls (the loop body does not touch y/mu/sigma), matched
+  // against N stan::math::normal_lpdf<false> calls over the same data.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/densityvec.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/densityvec.tmir.sexp"), d);
+    check(lm.n_unconstrained == 0, "densityvec 0 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    const double ky[] = {0.5, -1.2, 2.0};
+    const double kmu[] = {0.1, -0.3, 1.5};
+    const double ksigma[] = {1.0, 0.7, 2.2};
+    Eigen::Map<const Eigen::VectorXd> y(ky, 3);
+    Eigen::Map<const Eigen::RowVectorXd> mu(kmu, 3);
+    Eigen::Map<const Eigen::RowVectorXd> sigma(ksigma, 3);
+    const double reference = 3 * stan::math::normal_lpdf<false>(y, mu, sigma);
+    expect_eq("densityvec lp", lp, reference);
+  }
+
+  // The same, with a parameter feeding one container argument (`mu`, via
+  // `rep_row_vector`): DENSITY_VEC has to run correctly as var replay too,
+  // not just reproduce a data-only lp.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/densityvecgrad.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/densityvecgrad.tmir.sexp"), d);
+    check(count_opcode(lm, OP_ISLAND) >= 1, "densityvecgrad has an island");
+    check(lm.n_unconstrained == 1, "densityvecgrad 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.6;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    const double ky[] = {0.5, -1.2, 2.0};
+    const double ksigma[] = {1.0, 0.7, 2.2};
+    Eigen::Map<const Eigen::VectorXd> y(ky, 3);
+    Eigen::Map<const Eigen::RowVectorXd> sigma(ksigma, 3);
+    var a = 0.6;
+    Eigen::Matrix<var, 1, -1> mu = Eigen::Matrix<var, 1, -1>::Constant(3, a);
+    var acc = 3 * stan::math::normal_lpdf<false>(y, mu, sigma) +
+              stan::math::std_normal_lpdf<true>(a);
+    acc.grad();
+    expect_eq("densityvecgrad lp", lp, acc.val());
+    expect_eq("densityvecgrad g0", grad[0], a.adj());
+    stan::math::recover_memory();
+  }
+
+  // multiply_lower_tri_self_transpose on a matrix parameter whose upper
+  // triangle is not zero (unsupported_multiply_lower_tri_self_transpose).
+  // The graph used to spell it TRANSPOSE + GEMM, which is A * A' and reads
+  // the entries stan-math drops; a dedicated opcode calls the same overload
+  // CmdStan does, so both the value and the triangular pullback match.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/mltmask.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/mltmask.tmir.sexp"), d);
+    check(count_opcode(lm, OP_MULT_LOWER_TRI_SELF_TRANSPOSE) == 1,
+          "mltmask opcode census");
+    check(count_opcode(lm, OP_GEMM) == 0, "mltmask does not reach GEMM");
+    check(lm.n_unconstrained == 9, "mltmask 9 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    // Column-major, with a deliberately large upper triangle: A * A' would
+    // differ from the answer in the first entry alone by 5^2 + 9^2.
+    const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
+    std::copy(a, a + 9, lex.params_data());
+    double grad[9];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> A(3, 3);
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k) A(r, c) = a[k];
+    auto P = stan::math::multiply_lower_tri_self_transpose(A);
+    var acc = P(0, 0) - P(1, 2) + P(2, 1) +
+              stan::math::std_normal_lpdf<true>(
+                  Eigen::Matrix<var, -1, 1>(stan::math::to_vector(A)));
+    acc.grad();
+    expect_eq("mltmask lp", lp, acc.val());
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k)
+        expect_eq("mltmask g" + std::to_string(k), grad[k], A(r, c).adj());
+    stan::math::recover_memory();
+  }
+
+  // The same call inside a while loop: the region compiles to the register
+  // machine, where one MULT_LOWER_TRI_SELF_TRANSPOSE instruction re-executed
+  // under var rebuilds stan-math's own tape. Expanding it into scalar MULs
+  // the way crossprod does would read the dropped triangle and accumulate
+  // the input adjoints in tape order rather than through the pullback.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/mltgrad.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/mltgrad.tmir.sexp"), d);
+    check(count_opcode(lm, OP_ISLAND) >= 1, "mltgrad has an island");
+    check(lm.n_unconstrained == 9, "mltgrad 9 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
+    std::copy(a, a + 9, lex.params_data());
+    double grad[9];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> A(3, 3);
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k) A(r, c) = a[k];
+    var acc = 0.0;
+    // The instruction sits in the loop body, so the product is formed once
+    // per iteration; one call scaled by two would be a different tape.
+    for (int it = 0; it < 2; ++it) {
+      auto P = stan::math::multiply_lower_tri_self_transpose(A);
+      acc += P(0, 0) - P(1, 2) + P(2, 1);
+    }
+    acc += stan::math::std_normal_lpdf<true>(
+        Eigen::Matrix<var, -1, 1>(stan::math::to_vector(A)));
+    acc.grad();
+    expect_eq("mltgrad lp", lp, acc.val());
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k)
+        expect_eq("mltgrad g" + std::to_string(k), grad[k], A(r, c).adj());
+    stan::math::recover_memory();
+  }
+
+  // A parameter sized by a transformed-data for-loop accumulator
+  // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
+  // transformed-data interpreter used to lose the accumulator's int-ness on
+  // the first whole-variable reassignment, so its later use as a size
+  // expression looked like an unresolvable runtime value. nots=3,
+  // nts=[1,2,3] makes sumnt2 = 1+4+9 = 14.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/tdintsize.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/tdintsize.tmir.sexp"), d);
+    check(lm.n_unconstrained == 14, "tdintsize 14 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    for (int k = 0; k < 14; ++k) lex.params_data()[k] = 0.1 * (k + 1) - 0.7;
+    double grad[14];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> x(14);
+    for (int k = 0; k < 14; ++k) x(k) = 0.1 * (k + 1) - 0.7;
+    var acc = stan::math::normal_lpdf<true>(x, 0.0, 1.0);
+    acc.grad();
+    expect_eq("tdintsize lp", lp, acc.val());
+    for (int k = 0; k < 14; ++k)
+      expect_eq("tdintsize g" + std::to_string(k), grad[k], x(k).adj());
+    stan::math::recover_memory();
+  }
+
   // profile("name") { ... } wraps ordinary statements purely for stanc's own
   // timing output; the reader unwraps it to a plain block, so this should
   // compile and grade exactly as if the wrapper were absent.

@@ -677,6 +677,35 @@ void crossprod_bwd(KernelCtx& ctx) {
   });
 }
 
+// ---- multiply_lower_tri_self_transpose(L): out = tril(L) * tril(L)' -------
+// idata = {rows, cols}; variant bit 0 records an autodiff result. The upper
+// triangle is dropped, not read: a plain L * L' agrees only when L already
+// has zeros above the diagonal, which a cholesky_factor_* parameter does and
+// an ordinary matrix does not. As with crossprod the two stan-math overloads
+// group the arithmetic differently -- the double one accumulates each entry
+// as a dot product over the shared head of two columns, the reverse-mode one
+// masks first and forms a triangular-times-dense product -- so a forward-only
+// evaluation takes the former and a gradient evaluation the latter.
+void mlt_self_transpose_fwd(KernelCtx& ctx) {
+  const int64_t rows = ctx.idata[0], cols = ctx.idata[1];
+  const CMapM a(ctx.in[0].data, rows, cols);
+  if ((ctx.variant & 1u) && !values_only()) {
+    const MatD masked = a.triangularView<Eigen::Lower>();
+    MapM(ctx.out.data, rows, rows) =
+        masked.triangularView<Eigen::Lower>() * masked.transpose();
+  } else {
+    MapM(ctx.out.data, rows, rows) =
+        stan::math::multiply_lower_tri_self_transpose(a);
+  }
+}
+void mlt_self_transpose_bwd(KernelCtx& ctx) {
+  const int64_t rows = ctx.idata[0], cols = ctx.idata[1];
+  nary_bwd(ctx, [rows, cols](std::vector<VarV>& xs) {
+    Eigen::Map<VarM> a(xs[0].data(), rows, cols);
+    return stan::math::multiply_lower_tri_self_transpose(a);
+  });
+}
+
 // ---- matrix solves: `A \ B` and `B / A` -----------------------------------
 // Argument order is the operator's, so in = {A, B} for the left solve and
 // {B, A} for the right one; idata = {n, k} with n the divisor's order and k
@@ -1490,6 +1519,9 @@ void register_matrix_kernels() {
                   Kernel{mnprec_fwd, mnprec_bwd, nullptr});
   register_kernel(OP_GEMM, Kernel{gemm_fwd, gemm_bwd, nullptr});
   register_kernel(OP_CROSSPROD, Kernel{crossprod_fwd, crossprod_bwd, nullptr});
+  register_kernel(
+      OP_MULT_LOWER_TRI_SELF_TRANSPOSE,
+      Kernel{mlt_self_transpose_fwd, mlt_self_transpose_bwd, nullptr});
   register_kernel(OP_MDIVIDE_LEFT,
                   Kernel{solve_fwd<true>, solve_bwd<true>, nullptr});
   register_kernel(OP_MDIVIDE_RIGHT,

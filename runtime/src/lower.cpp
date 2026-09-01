@@ -1801,6 +1801,61 @@ struct Lowering {
           SlotInfo si = indexed_view(base.si, n_idx, a.len, e.type_);
           return emit_value(OP_SLICE, {base}, a.len, si, {(int)a.off});
         }
+        // A full array-index prefix pins one vector/row_vector leaf element;
+        // exactly one trailing range/all index then reads inside that leaf.
+        // The prefix is not all-single-index in stanc's own sense (the trailing
+        // index is a range), so this falls outside the block above even
+        // though every array position is fixed. Graph storage keeps the
+        // pinned leaf contiguous, so this is one contiguous read from its
+        // start once flat_addr locates it.
+        if (bdims && (array_shape(base.si).leaf == ViewKind::Vector ||
+                      array_shape(base.si).leaf == ViewKind::RowVector)) {
+          const size_t n_arr = bdims->size() - 1;
+          const mir::Expr& last = e.args.back();
+          bool prefix_single =
+              e.args.size() == n_arr + 2 &&
+              (last.name == "IndexBetween" || last.name == "IndexAll");
+          for (size_t d = 0; prefix_single && d < n_arr; ++d)
+            if (e.args[1 + d].name != "IndexSingle") prefix_single = false;
+          if (prefix_single) {
+            std::vector<int64_t> ix;
+            ix.reserve(n_arr);
+            for (size_t d = 0; d < n_arr; ++d) {
+              const int64_t one = eval_int(e.args[1 + d].args[0]);
+              check_index(one, (*bdims)[d], "array index", e.raw);
+              ix.push_back(one - 1);
+            }
+            const Addr a = flat_addr(*bdims, false, ix);
+            int64_t lo = 1, hi = a.len;
+            if (last.name == "IndexBetween") {
+              lo = eval_int(last.args[0]);
+              hi = eval_int(last.args[1]);
+              check_range(lo, hi, a.len, "array leaf range", e.raw);
+            }
+            const int64_t len = hi >= lo ? hi - lo + 1 : 0;
+            return emit_value(OP_SLICE, {base}, len, view_of(e.type_),
+                              {(int)(len ? a.off + lo - 1 : a.off)});
+          }
+        }
+        // A single outer-array range kept in full, with fixed row/column
+        // indices into every element's matrix: array[N] matrix[R, C][:, i,
+        // j]. Graph storage keeps each matrix contiguous and array-major, so
+        // this is a strided read of one scalar out of every element.
+        if (e.args.size() == 4 && is_array(base.si) && bdims &&
+            bdims->size() == 3 &&
+            array_shape(base.si).leaf == ViewKind::Matrix &&
+            e.args[1].name == "IndexAll" && e.args[2].name == "IndexSingle" &&
+            e.args[3].name == "IndexSingle") {
+          const int64_t N = (*bdims)[0], R = (*bdims)[1], C = (*bdims)[2];
+          const int64_t ri = eval_int(e.args[2].args[0]);
+          const int64_t cj = eval_int(e.args[3].args[0]);
+          check_index(ri, R, "matrix row", e.raw);
+          check_index(cj, C, "matrix column", e.raw);
+          const int64_t off = (cj - 1) * R + (ri - 1);
+          return emit_value(OP_SLICE_STRIDED, {base}, N,
+                            array_view({N}, ViewKind::Flat, base.si.param_free),
+                            {(int)off, (int)(R * C)});
+        }
         // Row of a column-major data matrix / 2-D array: strided slice.
         if (all_single && e.args.size() == 2 && is_matrix(base.si) &&
             e.type_ != "UReal" && e.type_ != "UInt") {
@@ -1904,6 +1959,10 @@ struct Lowering {
     // inliner's zero-length sentinel and the region's assignment sized it.
     std::vector<Range> out_views;
     bool has_target = false;  // the region contributed to the target
+    // The region compiled a reject(): it has an observable effect even when
+    // every data live-out is empty, so an emitter must not treat it as
+    // having nothing to produce.
+    bool has_reject = false;
   };
 
   // Does `s` increment the target anywhere?
@@ -2050,6 +2109,7 @@ struct Lowering {
                     Range* expr_out, std::shared_ptr<IslandProg>* prog_out) {
     auto prog = std::make_shared<IslandProg>();
     ProgramCompiler c{*prog, fun_defs};
+    c.in_write_array = in_write_array;
     // Non-returning statement calls may print or reject. A register program
     // would replay them during reverse mode, so ProgramCompiler refuses them
     // until necessity islands have an execute-once effect path.
@@ -2190,9 +2250,15 @@ struct Lowering {
     // and every one of them is zero-width: the data made the values empty,
     // as `matrix[0, 0]` from a dimension table does, so there is nothing
     // for the program to carry out. Finding no live-out at all is the
-    // mistake this catches -- a region that lost what it was to produce.
+    // mistake this catches -- a region that lost what it was to produce --
+    // unless the region's entire purpose was a conditional reject(): that
+    // has no data output by design, its value being the exception it may
+    // throw.
+    reg->has_reject = std::any_of(
+        prog->code.begin(), prog->code.end(),
+        [](const Program::Instr& i) { return i.code == Program::REJECT; });
     if (prog->out_regs.empty() && !(e && expr_out->len == 0) &&
-        (s == nullptr || reg->out_names.empty()))
+        (s == nullptr || reg->out_names.empty()) && !reg->has_reject)
       fail("runtime-control region produces nothing", s ? s->raw : e->raw);
     // A region with a runtime branch keeps the var replay -- reversing
     // control flow needs the structured form the flat program has already
@@ -2302,8 +2368,9 @@ struct Lowering {
     // Nothing to carry out and no target to accumulate: every live-out is
     // zero-width, so the region has no observable effect and its values
     // keep the empty shape they already have outside. A `target +=` would
-    // have put its own register here, so this cannot drop one.
-    if (prog->out_regs.empty()) return;
+    // have put its own register here, so this cannot drop one -- and a
+    // reject() has no live-out by design, so it cannot either.
+    if (prog->out_regs.empty() && !reg.has_reject) return;
     std::vector<int> out_slots;
     emit_island(prog, reg, out_lens, &out_slots);
     // Later statements read the island's results, not the old values.
@@ -3259,6 +3326,34 @@ struct Lowering {
     return draw;
   }
 
+  std::optional<Val> lower_dirichlet_rng(const mir::Expr& e) {
+    if (e.name != "dirichlet_rng") return std::nullopt;
+    if (!in_write_array)
+      fail("dirichlet_rng is supported only in generated quantities", e.raw);
+    if (e.args.size() != 1 || e.type_ != "UVector" ||
+        e.unsized.leaf != mir::UnsizedLeaf::Vector || e.unsized.depth != 0)
+      fail("dirichlet_rng: expected one vector result", e.raw);
+    const mir::Expr& alpha_expr = e.args[0];
+    if (alpha_expr.type_ != "UVector" ||
+        alpha_expr.unsized.leaf != mir::UnsizedLeaf::Vector ||
+        alpha_expr.unsized.depth != 0)
+      fail("dirichlet_rng: expected one concentration vector", e.raw);
+
+    Val alpha = lower_expr(alpha_expr);
+    if (!is_vector(alpha.si))
+      fail("dirichlet_rng: argument is not a logical vector", e.raw);
+    const int64_t k = g.slots[alpha.slot].len;
+    if (k <= 0 || k > std::numeric_limits<int>::max())
+      fail("dirichlet_rng: concentration vector must have a positive length",
+           e.raw);
+
+    Val draw = emit_value(OP_RNG, {alpha}, k, view_of(e.type_));
+    g.ops.back().variant = kDirichletRngVariant;
+    draw.si.param_free = false;
+    draw.autodiff = false;
+    return draw;
+  }
+
   std::optional<Val> lower_categorical_rng(const mir::Expr& e) {
     if (e.name != "categorical_rng") return std::nullopt;
     if (!in_write_array)
@@ -3286,19 +3381,11 @@ struct Lowering {
   }
 
   std::optional<Val> lower_scalar_rng(const mir::Expr& e) {
-    static const std::map<std::string, ScalarRng> kFamilies = {
-        {"poisson_log_rng", ScalarRng::PoissonLog},
-        {"uniform_rng", ScalarRng::Uniform},
-        {"bernoulli_rng", ScalarRng::Bernoulli},
-        {"normal_rng", ScalarRng::Normal},
-        {"lognormal_rng", ScalarRng::Lognormal},
-        {"binomial_rng", ScalarRng::Binomial},
-    };
-    const auto found = kFamilies.find(e.name);
-    if (found == kFamilies.end()) return std::nullopt;
+    const ScalarRng* found = scalar_rng_family(e.name);
+    if (found == nullptr) return std::nullopt;
     if (!in_write_array)
       fail(e.name + " is supported only in generated quantities", e.raw);
-    const ScalarRng family = found->second;
+    const ScalarRng family = *found;
     const size_t arity = scalar_rng_arity(family);
     if (e.args.size() != arity || e.unsized.depth != 0)
       fail(e.name + ": expected scalar result and " + std::to_string(arity) +
@@ -3309,13 +3396,13 @@ struct Lowering {
                                              : mir::UnsizedLeaf::Real;
     if (e.unsized.leaf != result_leaf)
       fail(e.name + ": result type does not match RNG family", e.raw);
-    // Unlike the other scalar families, binomial's first argument is a
-    // population count. Valid stanc MIR always marks it UInt; fail closed on
-    // malformed hand-authored MIR rather than silently truncating a real in
-    // the runtime helper's graph-storage conversion.
-    if (family == ScalarRng::Binomial &&
+    // Unlike the other scalar families, binomial's (and beta_binomial's)
+    // first argument is a population count. Valid stanc MIR always marks it
+    // UInt; fail closed on malformed hand-authored MIR rather than silently
+    // truncating a real in the runtime helper's graph-storage conversion.
+    if ((family == ScalarRng::Binomial || family == ScalarRng::BetaBinomial) &&
         e.args[0].unsized.leaf != mir::UnsizedLeaf::Int)
-      fail("binomial_rng: first argument must be int", e.raw);
+      fail(e.name + ": first argument must be int", e.raw);
     std::vector<Val> args;
     args.reserve(arity);
     for (const mir::Expr& arg : e.args) {
@@ -3326,8 +3413,10 @@ struct Lowering {
         fail(e.name + ": container arguments stay on WaInterp", e.raw);
     }
     Val draw = arity == 1 ? emit_value(OP_RNG, {args[0]}, 1, view_of(e.type_))
-                          : emit_value(OP_RNG, {args[0], args[1]}, 1,
-                                       view_of(e.type_));
+               : arity == 2
+                   ? emit_value(OP_RNG, {args[0], args[1]}, 1, view_of(e.type_))
+                   : emit_value(OP_RNG, {args[0], args[1], args[2]}, 1,
+                                view_of(e.type_));
     g.ops.back().variant = static_cast<uint8_t>(family);
     // An effect is never a graph constant, even when all distribution
     // parameters are. This also keeps downstream compile-time demands from
@@ -3415,7 +3504,8 @@ struct Lowering {
   }
 
   bool prod_native_surface(const mir::Expr& e) const {
-    if (e.kind == mir::Expr::Var || prod_transpose_of(e, mir::Expr::Var))
+    if (e.kind == mir::Expr::Var || prod_transpose_of(e, mir::Expr::Var) ||
+        mir::unwrap_range_slice(e).kind == mir::Expr::Var)
       return true;
     if (e.kind != mir::Expr::FunApp || e.fn_lib != mir::Expr::Lib::StanLib ||
         e.args.size() != 2 || e.name != "Minus__")
@@ -3803,6 +3893,7 @@ struct Lowering {
     // The stan-library names split into disjoint groups; each helper owns
     // one and declines the rest.
     if (auto v = lower_multi_normal_rng(e)) return *v;
+    if (auto v = lower_dirichlet_rng(e)) return *v;
     if (auto v = lower_categorical_rng(e)) return *v;
     if (auto v = lower_scalar_rng(e)) return *v;
     if (auto v = lower_density_fn(e)) return *v;
@@ -4961,14 +5052,19 @@ struct Lowering {
                         {(int)a.si.rows, (int)a.si.cols, (int)b.si.cols});
     }
     if (e.name == "multiply_lower_tri_self_transpose" && e.args.size() == 1) {
+      // Not L * L': stan-math drops L's upper triangle first, and only a
+      // cholesky_factor_* value already has zeros there. A TRANSPOSE/GEMM
+      // pair would read the dropped entries and disagree on every result
+      // touching one.
       Val L = lower_expr(e.args[0]);
       if (!is_matrix(L.si)) fail("multiply_lower_tri: needs a matrix", e.raw);
-      SlotInfo tsi = matrix_view(L.si.cols, L.si.rows);
-      Val Lt = emit_value(OP_TRANSPOSE, {L}, g.slots[L.slot].len, tsi,
-                          {(int)L.si.rows, (int)L.si.cols});
-      SlotInfo si = matrix_view(L.si.rows, L.si.rows);
-      return emit_value(OP_GEMM, {L, Lt}, si.rows * si.cols, si,
-                        {(int)L.si.rows, (int)L.si.cols, (int)L.si.rows});
+      SlotInfo si = matrix_view(L.si.rows, L.si.rows, L.si.param_free);
+      Val v = emit_value(
+          OP_MULT_LOWER_TRI_SELF_TRANSPOSE, {L}, L.si.rows * L.si.rows, si,
+          {checked_immediate(L.si.rows, "multiply_lower_tri rows"),
+           checked_immediate(L.si.cols, "multiply_lower_tri cols")});
+      g.ops.back().variant = v.autodiff ? 1u : 0u;
+      return v;
     }
     if (e.name == "to_matrix" && (e.args.size() == 1 || e.args.size() == 3)) {
       // Col-major storage makes reshaping a relabelling. One argument on an
@@ -6278,6 +6374,46 @@ struct Lowering {
             scope[s.lhs] = nv;
             sync_indexed_data_local(s.lhs, nv);
             return;
+          }
+          // A full array-index prefix followed by an explicit `:` for every
+          // remaining dimension: H[i, :, :] on array[N] matrix[R, C] (a
+          // container leaf), or y_approx[i, :] on a plain array[N, S] real
+          // (the remaining dimension is just another array axis, no
+          // container leaf at all) -- either way this spells the same
+          // whole-remainder replacement flat_addr's "whole elements" case
+          // already gives an implicit-rest prefix. Not `all_single` (the
+          // trailing indices are All, not omitted or Single), so it falls
+          // outside the block above.
+          if (dd) {
+            size_t prefix_len = 0;
+            while (prefix_len < s.lhs_idx.size() &&
+                   s.lhs_idx[prefix_len].name == "IndexSingle")
+              ++prefix_len;
+            bool trailing_all = true;
+            for (size_t d = prefix_len; d < s.lhs_idx.size(); ++d)
+              if (s.lhs_idx[d].name != "IndexAll") trailing_all = false;
+            if (prefix_len > 0 && trailing_all && prefix_len < dd->size() &&
+                s.lhs_idx.size() == dd->size()) {
+              std::vector<int64_t> ix;
+              ix.reserve(prefix_len);
+              for (size_t d = 0; d < prefix_len; ++d) {
+                const int64_t one = eval_int(s.lhs_idx[d].args[0]);
+                check_index(one, (*dd)[d], "array assignment index", s.raw);
+                ix.push_back(one - 1);
+              }
+              const bool mat = array_shape(prev_v.si).leaf == ViewKind::Matrix;
+              const Addr a = flat_addr(*dd, mat, ix);
+              require_binding(
+                  rhs_v, a.len,
+                  indexed_view(prev_v.si, prefix_len, a.len, s.rhs.type_),
+                  s.lhs, s.raw);
+              Val nv = emit_value(OP_SET_SLICE, {prev_v, rhs_v},
+                                  g.slots[prev].len, out_si, {(int)a.off});
+              propagate_int_update(nv, prev_v, rhs_v, a.off, 1);
+              scope[s.lhs] = nv;
+              sync_indexed_data_local(s.lhs, nv);
+              return;
+            }
           }
           int64_t flat = 0;
           if (all_single && s.lhs_idx.size() == 1) {
