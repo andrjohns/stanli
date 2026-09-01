@@ -1,5 +1,9 @@
 // Developer benchmark for argument acquisition during lowering and for the
-// exact-grouping write_array reductions that use transient scratch.
+// exact-grouping write_array reductions that use transient scratch. Example:
+//   build/bench_call_arguments prep \
+//     tests/fixtures/call_argument_cache.tmir.sexp 1000000 11 1
+//   build/bench_call_arguments reduce \
+//     tests/fixtures/gq_phase_benchmark.tmir.sexp 1000000 11 10
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
 #include <stanli/wa_interp.hpp>
@@ -82,7 +86,8 @@ static stanli::DataMap prep_data(int64_t n) {
   return data;
 }
 
-static int bench_prep(const std::string& mir, int64_t n, int samples) {
+static int bench_prep(const std::string& mir, int64_t n, int samples,
+                      int reps) {
   const stanli::DataMap data = prep_data(n);
   std::vector<double> times;
   std::vector<double> bytes;
@@ -94,15 +99,18 @@ static int bench_prep(const std::string& mir, int64_t n, int samples) {
     tracked_bytes = 0;
     tracked_calls = 0;
     track_allocations = true;
-    double ns = elapsed_ns([&] {
-      stanli::CompiledModel model = stanli::compile_model(mir, data);
-      sink += static_cast<double>(model.graph.ops.size() + model.fills.size());
+    const double ns = elapsed_ns([&] {
+      for (int rep = 0; rep < reps; ++rep) {
+        stanli::CompiledModel model = stanli::compile_model(mir, data);
+        sink +=
+            static_cast<double>(model.graph.ops.size() + model.fills.size());
+      }
     });
     track_allocations = false;
     if (sample >= 0) {
-      times.push_back(ns);
-      bytes.push_back(static_cast<double>(tracked_bytes));
-      calls.push_back(static_cast<double>(tracked_calls));
+      times.push_back(ns / reps);
+      bytes.push_back(static_cast<double>(tracked_bytes) / reps);
+      calls.push_back(static_cast<double>(tracked_calls) / reps);
     }
   }
   report("prepare_udf", n, std::move(times), "compiled");
@@ -194,7 +202,7 @@ int main(int argc, char** argv) {
   const int samples = std::atoi(argv[4]);
   const int reps = std::atoi(argv[5]);
   if (n < 2 || samples < 1 || reps < 1) return 2;
-  const int result = mode == "prep"     ? bench_prep(mir, n, samples)
+  const int result = mode == "prep"     ? bench_prep(mir, n, samples, reps)
                      : mode == "reduce" ? bench_reduce(mir, n, samples, reps)
                                         : 2;
   std::fprintf(stderr, "sink=%.17g\n", sink);
