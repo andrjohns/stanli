@@ -735,6 +735,9 @@ set_tests_properties(test_prep_profile_reroll_dispositions PROPERTIES
 add_executable(bench_opcost tools/bench_opcost.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(bench_opcost PRIVATE stanli)
+add_executable(bench_call_arguments EXCLUDE_FROM_ALL
+  tools/bench_call_arguments.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_call_arguments PRIVATE stanli)
 # Developer-only Program::CALL dispatch/context benchmark.  It builds a
 # synthetic, model-independent register program so CALL overhead can be
 # measured without attributing a kernel's own arithmetic to the mechanism.
