@@ -381,7 +381,11 @@ struct Lowering {
   // effects from an argument that the consumer never reads.
   struct LoweredArgument {
     struct Cache {
-      std::optional<DataMap::Entry> pure_value;
+      std::optional<DataMap::Entry> owned_pure_value;
+      // Observations live in Lowering::observations, whose std::map entries
+      // remain stable while a call is lowered. Do not duplicate their
+      // vector-owned payload merely to memoize the lookup here.
+      const DataMap::Entry* borrowed_pure_value = nullptr;
       std::optional<std::vector<int>> converted_ints;
       std::optional<long> constant_int;
     };
@@ -402,7 +406,21 @@ struct Lowering {
     }
 
     const DataMap::Entry* pure_value() const {
-      return cached && cached->pure_value ? &*cached->pure_value : nullptr;
+      if (!cached) return nullptr;
+      if (cached->borrowed_pure_value) return cached->borrowed_pure_value;
+      return cached->owned_pure_value ? &*cached->owned_pure_value : nullptr;
+    }
+
+    void borrow_pure_value(const DataMap::Entry& value) {
+      Cache& c = cache();
+      c.owned_pure_value.reset();
+      c.borrowed_pure_value = &value;
+    }
+
+    void own_pure_value(DataMap::Entry value) {
+      Cache& c = cache();
+      c.borrowed_pure_value = nullptr;
+      c.owned_pure_value = std::move(value);
     }
 
     const mir::Expr& expr() const { return *source; }
@@ -427,10 +445,12 @@ struct Lowering {
         pure_checked = true;
         const Val& v = value();
         if (const DataMap::Entry* en = owner->observation(v)) {
-          cache().pure_value = *en;
+          borrow_pure_value(*en);
         } else if (auto evaluated = owner->try_eval_pure(expr())) {
-          cache().pure_value = std::move(*evaluated);
-          owner->observe(v, *cache().pure_value);
+          owner->observe(v, std::move(*evaluated));
+          const DataMap::Entry* en = owner->observation(v);
+          assert(en != nullptr);
+          borrow_pure_value(*en);
         }
       }
       return pure_value();
@@ -443,14 +463,15 @@ struct Lowering {
                       expr().raw);
         if (!pure_checked) {
           pure_checked = true;
-          cache().pure_value = owner->try_eval_pure(expr());
+          if (auto evaluated = owner->try_eval_pure(expr()))
+            own_pure_value(std::move(*evaluated));
         }
         if (!pure_value()) {
           const Val& v = value();
           if (const DataMap::Entry* en = owner->observation(v)) {
-            cache().pure_value = *en;
+            borrow_pure_value(*en);
           } else if (owner->g.slots[v.slot].len == 0) {
-            cache().pure_value.emplace();
+            own_pure_value(DataMap::Entry{});
           } else {
             owner->fail(std::string(role) + " must be known at compile time",
                         expr().raw);
@@ -469,7 +490,8 @@ struct Lowering {
               expr().raw);
         if (!pure_checked) {
           pure_checked = true;
-          cache().pure_value = owner->try_eval_pure(expr());
+          if (auto evaluated = owner->try_eval_pure(expr()))
+            own_pure_value(std::move(*evaluated));
         }
         if (!pure_value()) (void)require_constant_reals(role);
       }
@@ -6386,7 +6408,7 @@ struct Lowering {
         // is an invalid range, and it does not fail loudly: it appended
         // hundreds of garbage doubles to x_r and surfaced much later as
         // "ode parameters and data[927] is nan".
-        const std::vector<double> vals =
+        const std::vector<double>& vals =
             actual.require_constant_reals("ODE data argument");
         ra.len = (int)vals.size();
         spec->x_r.insert(spec->x_r.end(), vals.begin(), vals.end());

@@ -761,6 +761,23 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // A data container passed beside an active actual cannot be folded as one
+  // call. It remains observable while the UDF is inlined and must bind with
+  // the same value and activity as an ordinary data argument.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_real_array("x", {1.25, -0.5, 2.0}, {3});
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/call_argument_cache.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    ex.params_data()[0] = -0.75;
+    double grad = 0.0;
+    expect_eq("call argument cache lp", ex.gradient(&grad), 0.5);
+    expect_eq("call argument cache grad", grad, 1.0);
+  }
+
   // Transformed-data While loop with a short-circuit guard, append_row.
   {
     DataMap d;
