@@ -18,6 +18,7 @@
 #include <stanli/wa_interp.hpp>
 
 #include <stan/math.hpp>
+#include <stan/model/indexing.hpp>
 
 #include <algorithm>
 #include <array>
@@ -2466,7 +2467,7 @@ void test_product_exact_grouping() {
   const Kernel& product = kernel(OP_PROD_VEC);
   if (product.backward == nullptr || product.scratch_size != nullptr) {
     ++failures;
-    std::printf("FAIL product kernel has no differentiable implementation\n");
+    std::printf("FAIL product kernel implementation contract\n");
   }
 
   const double denorm = std::numeric_limits<double>::denorm_min();
@@ -2694,6 +2695,445 @@ void test_product_exact_grouping() {
   if (!distinguished) {
     ++failures;
     std::printf("FAIL matrix-row oracle did not distinguish packet order\n");
+  }
+}
+
+void test_reduction_view_grouping() {
+  using namespace stanli;
+  const Kernel& product = kernel(OP_PROD_VEC);
+  const Kernel& extrema = kernel(OP_EXTREMA_VEC);
+  const int phase_modulus = static_cast<int>(extrema_phase_modulus());
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double tie_pool[] = {0.0, -0.0, 2.0, -3.0, 2.0, nan, -0.0,
+                             0.0, -4.0, 9.0, -4.0, 1.0, nan, -2.0};
+  const int tie_pool_size =
+      static_cast<int>(sizeof(tie_pool) / sizeof(*tie_pool));
+
+  // A graph value has already been materialized, so the reduction opcode
+  // carries the source view's phase explicitly. Compare both native kernels
+  // with Stan Math reducing the original Eigen segment.
+  for (int n = 1; n <= 257; ++n) {
+    for (int offset = 0; offset < phase_modulus; ++offset) {
+      Eigen::VectorXd product_base(offset + n + 2);
+      Eigen::VectorXd extrema_base(offset + n + 2);
+      for (int i = 0; i < product_base.size(); ++i) {
+        const int centered = (i * 37 + n * 11) % 29 - 14;
+        product_base[i] = 1.0 + centered * 0x1p-16;
+        extrema_base[i] = tie_pool[i % tie_pool_size];
+      }
+      const Eigen::VectorXd product_owned = product_base.segment(offset, n);
+      const Eigen::VectorXd extrema_owned = extrema_base.segment(offset, n);
+      const double product_want =
+          stan::math::prod(product_base.segment(offset, n));
+      const double extrema_wants[] = {
+          stan::math::min(extrema_base.segment(offset, n)),
+          stan::math::max(extrema_base.segment(offset, n))};
+
+      int phase = offset;
+      double product_got = 0.0;
+      KernelCtx product_ctx;
+      product_ctx.n_in = 1;
+      product_ctx.in[0] = Desc{const_cast<double*>(product_owned.data()), n};
+      product_ctx.out = Desc{&product_got, 1};
+      product_ctx.variant = 4;
+      product_ctx.idata = &phase;
+      product_ctx.n_idata = 1;
+      product.forward(product_ctx);
+      if (!same_reduction_value(product_got, product_want)) {
+        ++failures;
+        std::printf("FAIL phased product n=%d offset=%d\n", n, offset);
+      }
+
+      for (int maximum = 0; maximum < 2; ++maximum) {
+        double got = 0.0;
+        KernelCtx ctx;
+        ctx.n_in = 1;
+        ctx.in[0] = Desc{const_cast<double*>(extrema_owned.data()), n};
+        ctx.out = Desc{&got, 1};
+        ctx.variant = static_cast<uint8_t>(maximum | 4);
+        ctx.idata = &phase;
+        ctx.n_idata = 1;
+        extrema.forward(ctx);
+        if (!same_reduction_value(got, extrema_wants[maximum])) {
+          ++failures;
+          std::printf("FAIL phased extrema n=%d offset=%d %s\n", n, offset,
+                      maximum ? "max" : "min");
+        }
+      }
+    }
+  }
+
+  // The contract here is exact parity with the original view. Some Eigen
+  // configurations use the same scalar traversal for every tested size, so
+  // requiring a value difference from an unphased reduction would be brittle.
+
+  // Gathered arguments have no packet access. Repeated indices are retained
+  // in index order and the scalar reduction's reverse path must scatter back
+  // through OP_GATHER rather than treating the gather as a copy.
+  bool gather_distinguished = false;
+  for (int n = 1; n <= 20; ++n) {
+    Eigen::VectorXd source(n);
+    for (int i = 0; i < n; ++i) source[i] = tie_pool[i % tie_pool_size];
+    std::vector<int> positions(static_cast<size_t>(n));
+    std::vector<double> gathered(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+      positions[static_cast<size_t>(i)] = n - i;
+      gathered[static_cast<size_t>(i)] = source[n - i - 1];
+    }
+    const stan::model::index_multi index(positions);
+    for (int maximum = 0; maximum < 2; ++maximum) {
+      const double want =
+          maximum
+              ? stan::math::max(stan::model::rvalue(source, "source", index))
+              : stan::math::min(stan::model::rvalue(source, "source", index));
+      double got = 0.0;
+      double selected = 0.0;
+      KernelCtx ctx;
+      ctx.n_in = 1;
+      ctx.in[0] = Desc{gathered.data(), n};
+      ctx.out = Desc{&got, 1};
+      ctx.variant = static_cast<uint8_t>(maximum | 2);
+      ctx.scratch = &selected;
+      extrema.forward(ctx);
+      if (!same_reduction_value(got, want)) {
+        ++failures;
+        std::printf("FAIL gathered extrema n=%d %s\n", n,
+                    maximum ? "max" : "min");
+      }
+      const Eigen::Map<const Eigen::VectorXd> packet(gathered.data(), n);
+      const double packet_want =
+          maximum ? stan::math::max(packet) : stan::math::min(packet);
+      gather_distinguished |= !same_reduction_value(packet_want, want);
+    }
+  }
+  if (!gather_distinguished) {
+    ++failures;
+    std::printf(
+        "FAIL gathered extrema oracle never distinguished packet order\n");
+  }
+
+  {
+    Graph graph;
+    const int source = graph.add_slot(3, true);
+    const int gathered = graph.add_slot(4, false);
+    const int out = graph.add_slot(1, false);
+    graph.add_op(OP_GATHER, {source}, gathered, {2, 2, 0, 2});
+    const int product_op = graph.add_op(OP_PROD_VEC, {gathered}, out);
+    graph.ops[product_op].variant = 1;
+    graph.result_slot = out;
+    Executor executor(std::move(graph));
+    const std::array<double, 3> values = {2.0, 3.0, 5.0};
+    std::copy(values.begin(), values.end(), executor.params_data());
+    double adj[3] = {};
+    const double value = executor.gradient(adj);
+    if (value != 250.0 || adj[0] != 125.0 || adj[1] != 0.0 || adj[2] != 150.0) {
+      ++failures;
+      std::printf("FAIL gathered product adjoints were not accumulated\n");
+    }
+  }
+  {
+    Graph graph;
+    const int source = graph.add_slot(3, true);
+    const int gathered = graph.add_slot(4, false);
+    const int out = graph.add_slot(1, false);
+    graph.add_op(OP_GATHER, {source}, gathered, {1, 1, 2, 0});
+    const int extrema_op = graph.add_op(OP_EXTREMA_VEC, {gathered}, out);
+    graph.ops[extrema_op].variant = 2;
+    graph.result_slot = out;
+    Executor executor(std::move(graph));
+    const std::array<double, 3> values = {5.0, 2.0, 7.0};
+    std::copy(values.begin(), values.end(), executor.params_data());
+    double adj[3] = {};
+    const double value = executor.gradient(adj);
+    if (value != 2.0 || adj[0] != 0.0 || adj[1] != 1.0 || adj[2] != 0.0) {
+      ++failures;
+      std::printf(
+          "FAIL gathered extrema adjoint did not route through gather\n");
+    }
+  }
+}
+
+void test_layout_materialization_boundaries() {
+  using namespace stanli;
+  const std::string text =
+      slurp("tests/fixtures/gq_layout_materialization.tmir.sexp");
+  DataMap data;
+  data.set_int_array("idx", {1, 2, 3, 4, 5});
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf(
+        "FAIL layout materialization fixture did not compile: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+
+  int packet_products = 0, phased_products = 0, scalar_extrema = 0;
+  for (const Op& op : cm.write_array->graph.ops) {
+    if (op.opcode == OP_PROD_VEC) {
+      packet_products += op.variant == 0;
+      phased_products += op.variant == 4 && op.n_idata == 1 &&
+                         op.idata != nullptr && op.idata[0] == 1;
+    }
+    scalar_extrema += op.opcode == OP_EXTREMA_VEC && op.variant == 2;
+  }
+  if (packet_products != 4 || phased_products != 1 || scalar_extrema != 1) {
+    ++failures;
+    std::printf(
+        "FAIL materialization variants: packet=%d phased=%d scalar_min=%d\n",
+        packet_products, phased_products, scalar_extrema);
+  }
+
+  const std::vector<double> x = {1e200, 1e200, 1e-200, 1e-200, 3.0};
+  const std::vector<double> av0 = {0.5, -0.25, 2.0, -1.0, 4.0};
+  const std::vector<double> av1 = x;
+  Executor graph(std::move(cm.write_array->graph));
+  cm.write_array->bind(graph);
+  if (graph.n_params() != 15) {
+    ++failures;
+    std::printf("FAIL materialization parameter width: got %lld want 15\n",
+                static_cast<long long>(graph.n_params()));
+    return;
+  }
+  std::copy(x.begin(), x.end(), graph.params_data());
+  std::copy(av0.begin(), av0.end(), graph.params_data() + x.size());
+  std::copy(av1.begin(), av1.end(),
+            graph.params_data() + x.size() + av0.size());
+  graph.run_forward_only();
+  std::map<std::string, double> got;
+  const std::vector<std::string> names =
+      CompiledModel::csv_names(cm.write_array->columns);
+  size_t position = 0;
+  for (const auto& column : cm.write_array->columns) {
+    const double* values = graph.value_ptr(column.slot);
+    for (int64_t i = 0; i < column.len; ++i)
+      got[names[position++]] = values[column.storage_index(i)];
+  }
+
+  Eigen::VectorXd owned(5);
+  std::copy(x.begin(), x.end(), owned.data());
+  const double owned_product = stan::math::prod(owned);
+  const double tail_product = stan::math::prod(owned.segment(1, 4));
+  const std::map<std::string, double> want = {
+      {"initialized_prod", owned_product}, {"assigned_prod", owned_product},
+      {"returned_prod", owned_product},    {"inner_prod", owned_product},
+      {"inner_tail_prod", tail_product},
+  };
+  for (const auto& expected : want) {
+    const auto actual = got.find(expected.first);
+    if (actual != got.end() &&
+        same_reduction_value(actual->second, expected.second))
+      continue;
+    ++failures;
+    std::printf("FAIL materialization value %s\n", expected.first.c_str());
+  }
+
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  base["idx"] = data.at("idx");
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp interp(program, std::move(base));
+  std::map<std::string, DataMap::Entry> params;
+  params["x"].r = x;
+  params["x"].dims = {5};
+  for (size_t i = 0; i < av0.size(); ++i) {
+    params["av"].r.push_back(av0[i]);
+    params["av"].r.push_back(av1[i]);
+  }
+  params["av"].dims = {2, 5};
+  WaRng rng(1234);
+  const std::vector<double> interpreted = interp.eval(params, rng);
+  if (interpreted.size() != names.size()) {
+    ++failures;
+    std::printf("FAIL materialization interpreter row width\n");
+  } else {
+    for (size_t i = 0; i < names.size(); ++i) {
+      const auto actual = got.find(names[i]);
+      if (actual != got.end() &&
+          same_reduction_value(actual->second, interpreted[i]))
+        continue;
+      ++failures;
+      std::printf("FAIL materialization graph/interpreter %s\n",
+                  names[i].c_str());
+    }
+  }
+
+  const std::string udf_text =
+      slurp("tests/fixtures/gq_udf_return_layout.tmir.sexp");
+  CompiledModel udf = compile_model(udf_text, data);
+  int udf_packet_products = 0;
+  if (udf.write_array)
+    for (const Op& op : udf.write_array->graph.ops)
+      udf_packet_products += op.opcode == OP_PROD_VEC && op.variant == 0;
+  if (!udf.write_array || udf.write_array->interp ||
+      !udf.write_array->truncated.empty() || udf_packet_products != 1) {
+    ++failures;
+    std::printf("FAIL container UDF return did not compile as owning: %s\n",
+                udf.write_array ? udf.write_array->truncated.c_str()
+                                : "no write_array");
+  } else {
+    Executor udf_graph(std::move(udf.write_array->graph));
+    udf.write_array->bind(udf_graph);
+    std::copy(x.begin(), x.end(), udf_graph.params_data());
+    udf_graph.run_forward_only();
+    const std::vector<std::string> udf_names =
+        CompiledModel::csv_names(udf.write_array->columns);
+    const auto returned =
+        std::find(udf_names.begin(), udf_names.end(), "returned_prod");
+    bool matched = false;
+    if (returned != udf_names.end()) {
+      const size_t target = static_cast<size_t>(returned - udf_names.begin());
+      size_t cursor = 0;
+      for (const auto& column : udf.write_array->columns) {
+        for (int64_t i = 0; i < column.len; ++i, ++cursor) {
+          if (cursor != target) continue;
+          matched = same_reduction_value(
+              udf_graph.value_ptr(column.slot)[column.storage_index(i)],
+              owned_product);
+        }
+      }
+    }
+    if (!matched) {
+      ++failures;
+      std::printf("FAIL container UDF return product value\n");
+    }
+  }
+}
+
+void test_main_index_layout_metadata() {
+  using namespace stanli;
+  const std::string text =
+      slurp("tests/fixtures/gq_main_index_layout.tmir.sexp");
+  DataMap data;
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf(
+        "FAIL main index layout fixture did not compile: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+
+  int phased_products = 0, packet_extrema = 0;
+  for (const Op& op : cm.write_array->graph.ops) {
+    phased_products += op.opcode == OP_PROD_VEC && op.variant == 4 &&
+                       op.n_idata == 1 && op.idata != nullptr &&
+                       op.idata[0] == 1;
+    packet_extrema += op.opcode == OP_EXTREMA_VEC && op.variant == 0;
+  }
+  if (phased_products != 1 || packet_extrema != 1) {
+    ++failures;
+    std::printf(
+        "FAIL main index layout variants: phased_prod=%d "
+        "packet_min=%d\n",
+        phased_products, packet_extrema);
+  }
+
+  Executor graph(std::move(cm.write_array->graph));
+  cm.write_array->bind(graph);
+  if (graph.n_params() != 32) {
+    ++failures;
+    std::printf("FAIL main index layout parameter width: got %lld want 32\n",
+                static_cast<long long>(graph.n_params()));
+    return;
+  }
+  std::vector<double> params(32);
+  for (size_t i = 0; i < params.size(); ++i)
+    params[i] = static_cast<double>(i + 1);
+  std::copy(params.begin(), params.end(), graph.params_data());
+  graph.run_forward_only();
+
+  std::map<std::string, double> got;
+  const std::vector<std::string> names =
+      CompiledModel::csv_names(cm.write_array->columns);
+  size_t position = 0;
+  for (const auto& column : cm.write_array->columns) {
+    const double* values = graph.value_ptr(column.slot);
+    for (int64_t i = 0; i < column.len; ++i)
+      got[names[position++]] = values[column.storage_index(i)];
+  }
+
+  Eigen::VectorXd nested_range(4);
+  std::copy(params.begin() + 11, params.begin() + 15, nested_range.data());
+  const std::map<std::string, double> want = {
+      {"nested_range_prod", stan::math::prod(nested_range)},
+      {"matrix_cell_min", std::min({params[20], params[24], params[28]})},
+  };
+  for (const auto& expected : want) {
+    const auto actual = got.find(expected.first);
+    if (actual != got.end() &&
+        same_reduction_value(actual->second, expected.second))
+      continue;
+    ++failures;
+    std::printf("FAIL main index layout value %s\n", expected.first.c_str());
+  }
+}
+
+void test_matrix_transpose_extrema_fallback() {
+  using namespace stanli;
+  const std::string text =
+      slurp("tests/fixtures/gq_matrix_transpose_extrema.tmir.sexp");
+  DataMap data;
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || !cm.write_array->interp ||
+      cm.write_array->truncated.find("grouping is not native") ==
+          std::string::npos) {
+    ++failures;
+    std::printf(
+        "FAIL matrix transpose extrema did not fail closed: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const std::vector<double> values = {0.0, -0.0, 2.0, -3.0, 2.0,
+                                      nan, -0.0, 0.0, -4.0, 9.0};
+  Eigen::Matrix<double, 5, 2> matrix;
+  std::copy(values.begin(), values.end(), matrix.data());
+  const double want = stan::math::min(matrix.transpose());
+
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp interp(program, std::move(base));
+  std::map<std::string, DataMap::Entry> params;
+  params["m"].r = values;
+  params["m"].dims = {5, 2};
+  WaRng rng(1234);
+  const std::vector<double> row = interp.eval(params, rng);
+  const std::vector<std::string> names =
+      CompiledModel::csv_names(interp.columns());
+  const auto found = std::find(names.begin(), names.end(), "transpose_min");
+  if (found == names.end() ||
+      !same_reduction_value(row[static_cast<size_t>(found - names.begin())],
+                            want)) {
+    ++failures;
+    const double got = found == names.end()
+                           ? std::numeric_limits<double>::quiet_NaN()
+                           : row[static_cast<size_t>(found - names.begin())];
+    std::printf(
+        "FAIL matrix transpose extrema interpreter value: got=%llx "
+        "want=%llx\n",
+        static_cast<unsigned long long>(reduction_bits(got)),
+        static_cast<unsigned long long>(reduction_bits(want)));
   }
 }
 
@@ -2979,6 +3419,43 @@ static void expect_extrema_interp(const std::string& text, const char* what) {
   using namespace stanli;
   try {
     CompiledModel cm = compile_model(text, extrema_guard_data());
+    if (cm.write_array && cm.write_array->interp) return;
+    ++failures;
+    std::printf(
+        "FAIL %s: got %s\n", what,
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+  } catch (const std::exception& e) {
+    ++failures;
+    std::printf("FAIL %s: mutation did not parse/compile: %s\n", what,
+                e.what());
+  }
+}
+
+static void expect_extrema_compiled(const std::string& text,
+                                    const stanli::DataMap& data,
+                                    const char* what) {
+  using namespace stanli;
+  try {
+    CompiledModel cm = compile_model(text, data);
+    if (cm.write_array && !cm.write_array->interp &&
+        cm.write_array->truncated.empty())
+      return;
+    ++failures;
+    std::printf(
+        "FAIL %s: got %s\n", what,
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+  } catch (const std::exception& e) {
+    ++failures;
+    std::printf("FAIL %s: did not compile: %s\n", what, e.what());
+  }
+}
+
+static void expect_extrema_fixture_interp(const std::string& fixture,
+                                          const stanli::DataMap& data,
+                                          const char* what) {
+  using namespace stanli;
+  try {
+    CompiledModel cm = compile_model(slurp(fixture), data);
     if (cm.write_array && cm.write_array->interp &&
         cm.write_array->truncated.find("expression surface") !=
             std::string::npos)
@@ -2989,8 +3466,26 @@ static void expect_extrema_interp(const std::string& text, const char* what) {
         cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
   } catch (const std::exception& e) {
     ++failures;
-    std::printf("FAIL %s: mutation did not parse/compile: %s\n", what,
-                e.what());
+    std::printf("FAIL %s: fixture did not parse/compile: %s\n", what, e.what());
+  }
+}
+
+static void expect_extrema_fixture_compiled(const std::string& fixture,
+                                            const stanli::DataMap& data,
+                                            const char* what) {
+  using namespace stanli;
+  try {
+    CompiledModel cm = compile_model(slurp(fixture), data);
+    if (cm.write_array && !cm.write_array->interp &&
+        cm.write_array->truncated.empty())
+      return;
+    ++failures;
+    std::printf(
+        "FAIL %s: got %s\n", what,
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+  } catch (const std::exception& e) {
+    ++failures;
+    std::printf("FAIL %s: fixture did not compile: %s\n", what, e.what());
   }
 }
 
@@ -3041,26 +3536,26 @@ void test_gq_extrema_lowering_guards() {
       "DataOnly))))";
   std::string expression = base;
   expression.replace(arg_at, vector_node.size(), exp_vector);
-  expect_extrema_interp(expression, "min(exp(x)) stays interpreted");
+  expect_extrema_compiled(expression, extrema_guard_data(), "min(exp(x))");
 
   const std::string indexed =
       "((pattern\n"
       "            (Indexed\n"
-      "             (" +
+      "             " +
       vector_node +
       "\n"
-      "              ((Between\n"
-      "                ((pattern (Lit Int 1))\n"
-      "                 (meta ((type_ UInt) (loc <opaque>) (adlevel "
+      "             ((Between\n"
+      "               ((pattern (Lit Int 2))\n"
+      "                (meta ((type_ UInt) (loc <opaque>) (adlevel "
       "DataOnly))))\n"
-      "                ((pattern (Lit Int 3))\n"
-      "                 (meta ((type_ UInt) (loc <opaque>) (adlevel "
-      "DataOnly)))))))))\n"
+      "               ((pattern (Lit Int 5))\n"
+      "                (meta ((type_ UInt) (loc <opaque>) (adlevel "
+      "DataOnly))))))))\n"
       "           (meta ((type_ UVector) (loc <opaque>) (adlevel "
       "DataOnly))))";
   std::string view = base;
   view.replace(arg_at, vector_node.size(), indexed);
-  expect_extrema_interp(view, "min(x[1:3]) stays interpreted");
+  expect_extrema_compiled(view, extrema_guard_data(), "min(x[2:5])");
 
   std::string zero_args = base;
   zero_args.erase(arg_at, vector_node.size());
@@ -3098,7 +3593,7 @@ void test_gq_extrema_lowering_guards() {
   } else {
     udf.replace(inlined, stan_min.size(),
                 "(FunApp (UserDefined vector_min FnPlain)");
-    expect_extrema_interp(udf, "dynamic UDF extrema stays interpreted");
+    expect_extrema_compiled(udf, extrema_guard_data(), "dynamic UDF extrema");
   }
 
   // The same opcode now serves active log_prob reductions through its stored
@@ -3117,6 +3612,20 @@ void test_gq_extrema_lowering_guards() {
     ++failures;
     std::printf("FAIL dynamic log_prob extrema was not compiled\n");
   }
+}
+
+void test_gq_extrema_view_lowering_guards() {
+  using namespace stanli;
+  DataMap row_data;
+  row_data.set_int("N", 5);
+  expect_extrema_fixture_compiled("tests/fixtures/gq_extrema_row.tmir.sexp",
+                                  row_data, "strided matrix-row extrema");
+
+  DataMap gather_data;
+  gather_data.set_int("N", 5);
+  gather_data.set_int_array("idx", {5, 2, 2, 1, 4});
+  expect_extrema_fixture_compiled("tests/fixtures/gq_extrema_gather.tmir.sexp",
+                                  gather_data, "gathered extrema");
 }
 
 void test_compiled_gq_reductions() {
@@ -3287,6 +3796,25 @@ static void expect_reduction_interp(const std::string& text,
   }
 }
 
+static void expect_reduction_compiled(const std::string& text,
+                                      const stanli::DataMap& data,
+                                      const char* what) {
+  using namespace stanli;
+  try {
+    CompiledModel cm = compile_model(text, data);
+    if (cm.write_array && !cm.write_array->interp &&
+        cm.write_array->truncated.empty())
+      return;
+    ++failures;
+    std::printf(
+        "FAIL %s: got %s\n", what,
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+  } catch (const std::exception& e) {
+    ++failures;
+    std::printf("FAIL %s: did not compile: %s\n", what, e.what());
+  }
+}
+
 static std::vector<double> eval_reduction_interp(
     const std::string& text, std::vector<std::string>* names) {
   using namespace stanli;
@@ -3406,9 +3934,7 @@ void test_gq_reduction_lowering_guards() {
   } else {
     DataMap no_data;
     CompiledModel cm = compile_model(matrix_expression, no_data);
-    if (!cm.write_array || !cm.write_array->interp ||
-        cm.write_array->truncated.find("expression surface") ==
-            std::string::npos) {
+    if (!cm.write_array || !cm.write_array->interp) {
       ++failures;
       std::printf("FAIL matrix-expression product base did not fall back\n");
     }
@@ -3428,8 +3954,8 @@ void test_gq_reduction_lowering_guards() {
   } else {
     dynamic_udf.replace(inlined_prod, stan_prod.size(),
                         "(FunApp (UserDefined vector_product FnPlain)");
-    expect_reduction_interp(dynamic_udf, "expression surface",
-                            "dynamic UDF product stays interpreted");
+    expect_reduction_compiled(dynamic_udf, reduction_data(),
+                              "dynamic UDF product");
   }
 
   const size_t assignment = base.find("(Assignment ((LVariable pr)");
@@ -3463,9 +3989,9 @@ void test_gq_reduction_lowering_guards() {
     if (!replace_reduction_after(mutated, prod_call, vector_meta, replacement,
                                  bad.label))
       continue;
-    const std::string label =
-        std::string("product ") + bad.label + " input stays interpreted";
-    expect_reduction_interp(mutated, "vector or row-vector", label.c_str());
+    expect_reduction_compiled(
+        mutated, reduction_data(),
+        (std::string("product ") + bad.label + " uses lowered layout").c_str());
   }
 
   std::string container_result = base;
@@ -3503,7 +4029,7 @@ void test_gq_reduction_lowering_guards() {
   std::string empty = base;
   if (replace_reduction_after(empty, prod_call, vector_node, empty_vector,
                               "empty product"))
-    expect_reduction_interp(empty, "expression surface",
+    expect_reduction_interp(empty, "",
                             "empty dynamic product stays interpreted");
 
   const std::string segment =
@@ -3523,8 +4049,7 @@ void test_gq_reduction_lowering_guards() {
   std::string direct_view = base;
   if (replace_reduction_after(direct_view, prod_call, vector_node, segment,
                               "segment product"))
-    expect_reduction_interp(direct_view, "expression surface",
-                            "segment product stays interpreted");
+    expect_reduction_compiled(direct_view, reduction_data(), "segment product");
 
   const std::string transposed_segment =
       "((pattern\n"
@@ -3537,8 +4062,8 @@ void test_gq_reduction_lowering_guards() {
   std::string wrapped_view = base;
   if (replace_reduction_after(wrapped_view, prod_call, vector_node,
                               transposed_segment, "transposed segment product"))
-    expect_reduction_interp(wrapped_view, "expression surface",
-                            "transposed segment product stays interpreted");
+    expect_reduction_compiled(wrapped_view, reduction_data(),
+                              "transposed segment product");
 
   // A transpose of a bare vector is an address-zero row-vector view in
   // CmdStan and remains in scope for the native path.
@@ -3575,8 +4100,7 @@ void test_gq_reduction_lowering_guards() {
   std::string exp_product = base;
   if (replace_reduction_after(exp_product, prod_call, vector_node, exp_vector,
                               "exp product"))
-    expect_reduction_interp(exp_product, "expression surface",
-                            "prod(exp(x)) stays interpreted");
+    expect_reduction_compiled(exp_product, reduction_data(), "prod(exp(x))");
 
   const std::string scalar_one =
       "((pattern (Lit Real 1.0))\n"
@@ -3637,16 +4161,15 @@ void test_gq_reduction_lowering_guards() {
     }
   }
 
-  // Eigen's IndexedView for a gather also clears PacketAccess.  It is outside
-  // this tranche's exact native grammar, so an outer subtraction containing
-  // one must stay on the interpreter rather than materialize then packetize.
+  // Eigen's IndexedView for a gather clears PacketAccess. The layout carried
+  // by the materialized graph value therefore selects scalar grouping.
   const std::string gather_vector =
       "((pattern\n"
       "            (Indexed\n"
-      "             (" +
+      "             " +
       vector_node +
       "\n"
-      "              (MultiIndex\n"
+      "              ((MultiIndex\n"
       "               ((pattern (Var counts))\n"
       "                (meta ((type_ (UArray UInt)) (loc <opaque>) "
       "(adlevel DataOnly))))))))\n"
@@ -3663,8 +4186,15 @@ void test_gq_reduction_lowering_guards() {
   std::string gathered_product = base;
   if (replace_reduction_after(gathered_product, prod_call, vector_node,
                               gather_minus, "gather product"))
-    expect_reduction_interp(gathered_product, "expression surface",
-                            "prod(1-x[idx]) stays interpreted");
+    expect_reduction_compiled(gathered_product, reduction_data(),
+                              "prod(1-x[idx])");
+
+  // The bare gathered vector uses the same scalar grouping.
+  std::string bare_gathered_product = base;
+  if (replace_reduction_after(bare_gathered_product, prod_call, vector_node,
+                              gather_vector, "bare gather product"))
+    expect_reduction_compiled(bare_gathered_product, reduction_data(),
+                              "prod(x[idx])");
 
   const std::string unsafe_minus =
       "((pattern\n"
@@ -3677,8 +4207,7 @@ void test_gq_reduction_lowering_guards() {
   std::string nested_math = base;
   if (replace_reduction_after(nested_math, prod_call, vector_node, unsafe_minus,
                               "nested vector math product"))
-    expect_reduction_interp(nested_math, "expression surface",
-                            "prod(1-exp(x)) stays interpreted");
+    expect_reduction_compiled(nested_math, reduction_data(), "prod(1-exp(x))");
 
   // A dynamic product in log_prob uses the same opcode with stored partials.
   std::string reverse = base;
@@ -4249,9 +4778,14 @@ int main() {
   test_binomial_rng_lowering_guards();
   test_compiled_scalar_rng();
   test_product_exact_grouping();
+  test_reduction_view_grouping();
+  test_layout_materialization_boundaries();
+  test_main_index_layout_metadata();
+  test_matrix_transpose_extrema_fallback();
   test_extrema_exact_grouping();
   test_compiled_gq_extrema();
   test_gq_extrema_lowering_guards();
+  test_gq_extrema_view_lowering_guards();
   test_compiled_gq_reductions();
   test_gq_reduction_lowering_guards();
   test_runtime_int_sum_is_not_compile_time();

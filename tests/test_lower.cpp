@@ -761,6 +761,23 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // A data container passed beside an active actual cannot be folded as one
+  // call. It remains observable while the UDF is inlined and must bind with
+  // the same value and activity as an ordinary data argument.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_real_array("x", {1.25, -0.5, 2.0}, {3});
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/call_argument_cache.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    ex.params_data()[0] = -0.75;
+    double grad = 0.0;
+    expect_eq("call argument cache lp", ex.gradient(&grad), 0.5);
+    expect_eq("call argument cache grad", grad, 1.0);
+  }
+
   // Transformed-data While loop with a short-circuit guard, append_row.
   {
     DataMap d;
@@ -1533,6 +1550,29 @@ int main() {
     for (int i = 0; i < 6; ++i)
       expect_eq("idx gM" + std::to_string(i), grad[3 + i], M(i).adj());
     stan::math::recover_memory();
+  }
+
+  // A gathered container remains an ordinary graph value for downstream
+  // arithmetic. Duplicate selectors must accumulate through OP_GATHER's
+  // scatter-add backward rather than overwrite the repeated source entry.
+  {
+    DataMap d;
+    d.set_int_array("idx", {5, 2, 2});
+    CompiledModel gm =
+        compile_model(slurp("tests/fixtures/viewa_outer_gather.tmir.sexp"), d);
+    check(count_opcode(gm, OP_GATHER) == 1,
+          "duplicate outer gather has one explicit gather");
+    Executor gex(std::move(gm.graph));
+    gm.bind(gex);
+    const double q[5] = {0.25, -0.5, 0.75, -1.0, 1.5};
+    for (int i = 0; i < 5; ++i) gex.params_data()[i] = q[i];
+    double gradient[5] = {};
+    expect_eq("duplicate outer gather lp", gex.gradient(gradient),
+              q[4] + 110.0 * q[1]);
+    const double want_gradient[5] = {0.0, 110.0, 0.0, 0.0, 1.0};
+    for (int i = 0; i < 5; ++i)
+      expect_eq("duplicate outer gather g" + std::to_string(i), gradient[i],
+                want_gradient[i]);
   }
 
   // A logical view belongs to the name binding, not to the flat parameter
@@ -4659,6 +4699,10 @@ int main() {
     d.set_real_array("mat", matv, {2, 3});
     CompiledModel lm =
         compile_model(slurp("tests/fixtures/lsepair.tmir.sexp"), d);
+    check(count_opcode(lm, OP_LSE2) > 0,
+          "lsepair: two-argument log_sum_exp uses its direct opcode");
+    check(count_opcode(lm, OP_LOG_DIFF_EXP) > 0,
+          "lsepair: log_diff_exp uses its direct opcode");
     Executor lex(std::move(lm.graph));
     lm.bind(lex);
     // Declaration order: a[3], b.

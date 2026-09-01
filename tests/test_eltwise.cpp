@@ -2,11 +2,15 @@
 // C++ backend would emit for the same MIR node. lp = sum(op(args)).
 #include "graph_helpers.hpp"
 
+#include <stanli/expression_layout.hpp>
+#include <stanli/mir.hpp>
 #include <stan/math.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -62,8 +66,165 @@ static void check_case(const std::string& tag, uint16_t opcode, int64_t out_len,
   stan::math::recover_memory();
 }
 
+static uint64_t layout_bits(double value) {
+  uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+static void test_expression_layout_policy() {
+  using stanli::ExpressionLayout;
+  using stanli::expression_layout::contiguous;
+  using stanli::expression_layout::elementwise;
+
+  if (contiguous(ExpressionLayout::unknown(), 3).known() ||
+      contiguous(ExpressionLayout::direct(7), 5) !=
+          ExpressionLayout::direct(12) ||
+      contiguous(ExpressionLayout::packet(), 5) != ExpressionLayout::packet() ||
+      contiguous(ExpressionLayout::direct(std::numeric_limits<int64_t>::max()),
+                 1)
+          .known()) {
+    ++failures;
+    std::printf("FAIL expression layout contiguous policy\n");
+  }
+  if (elementwise(true, true, true, true) != ExpressionLayout::scalar() ||
+      elementwise(false, true, true, true) != ExpressionLayout::packet() ||
+      elementwise(false, false, true, true) != ExpressionLayout::scalar() ||
+      elementwise(false, true, false, true).known() ||
+      elementwise(false, true, true, false) != ExpressionLayout::scalar()) {
+    ++failures;
+    std::printf("FAIL expression layout elementwise policy\n");
+  }
+
+  using stanli::mir::Expr;
+  using stanli::mir::UnsizedLeaf;
+  Expr vector;
+  vector.kind = Expr::Var;
+  vector.unsized.leaf = UnsizedLeaf::Vector;
+  vector.type_ = "UVector";
+  Expr multi;
+  multi.kind = Expr::FunApp;
+  multi.name = "IndexMulti";
+  Expr gather;
+  gather.kind = Expr::Indexed;
+  gather.unsized.leaf = UnsizedLeaf::Vector;
+  gather.type_ = "UVector";
+  gather.args = {vector, multi};
+  Expr exp_gather;
+  exp_gather.kind = Expr::FunApp;
+  exp_gather.fn_lib = Expr::Lib::StanLib;
+  exp_gather.name = "exp";
+  exp_gather.unsized.leaf = UnsizedLeaf::Vector;
+  exp_gather.type_ = "UVector";
+  exp_gather.args = {gather};
+  Expr start;
+  start.kind = Expr::LitInt;
+  start.lit_i = 2;
+  start.unsized.leaf = UnsizedLeaf::Int;
+  Expr count = start;
+  Expr segment_gather;
+  segment_gather.kind = Expr::FunApp;
+  segment_gather.fn_lib = Expr::Lib::StanLib;
+  segment_gather.name = "segment";
+  segment_gather.unsized.leaf = UnsizedLeaf::Vector;
+  segment_gather.type_ = "UVector";
+  segment_gather.args = {gather, start, count};
+  Expr matrix = vector;
+  matrix.unsized.leaf = UnsizedLeaf::Matrix;
+  matrix.type_ = "UMatrix";
+  Expr transpose;
+  transpose.kind = Expr::FunApp;
+  transpose.fn_lib = Expr::Lib::StanLib;
+  transpose.name = "Transpose__";
+  transpose.unsized.leaf = UnsizedLeaf::Matrix;
+  transpose.type_ = "UMatrix";
+  transpose.args = {matrix};
+  Expr udf_return = vector;
+  udf_return.kind = Expr::FunApp;
+  udf_return.fn_lib = Expr::Lib::UserDefined;
+  Expr array_vector = vector;
+  array_vector.unsized.depth = 1;
+  Expr single = multi;
+  single.name = "IndexSingle";
+  Expr inner = vector;
+  inner.kind = Expr::Indexed;
+  inner.args = {array_vector, single};
+  Expr between = multi;
+  between.name = "IndexBetween";
+  between.args = {start, count};
+  Expr inner_range = inner;
+  inner_range.args = {array_vector, single, between};
+  if (stanli::mir::source_expression_layout(exp_gather) !=
+          ExpressionLayout::scalar() ||
+      stanli::mir::source_expression_layout(segment_gather) !=
+          ExpressionLayout::scalar() ||
+      stanli::mir::source_expression_layout(transpose).known() ||
+      stanli::mir::source_expression_layout(udf_return) !=
+          ExpressionLayout::direct() ||
+      stanli::mir::source_expression_layout(inner) !=
+          ExpressionLayout::direct() ||
+      stanli::mir::source_expression_layout(inner_range) !=
+          ExpressionLayout::direct(1)) {
+    ++failures;
+    std::printf("FAIL MIR source expression layout policy\n");
+  }
+
+  // Pin the policy to two actual Stan Math reduction expressions. An owning
+  // vector exposes packet access; a row of a matrix is strided and reduces in
+  // scalar coefficient order. The generated values deliberately search for a
+  // bit-level distinction between those two expressions on the host Eigen
+  // packet width.
+  const int packet_width = std::max(
+      1, static_cast<int>(Eigen::internal::packet_traits<double>::size));
+  const int n = 2 * packet_width + 1;
+  Eigen::VectorXd owning(n);
+  VecV active(n);
+  bool distinguished = packet_width == 1;
+  uint64_t state = 0x4d4154524958524fULL;
+  double packet_ref = 0.0;
+  double scalar_ref = 0.0;
+  for (int trial = 0; trial < 4096 && !distinguished; ++trial) {
+    for (int i = 0; i < n; ++i) {
+      state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+      const double p = 0.01 + 0.98 * static_cast<double>(state >> 11) /
+                                  static_cast<double>(uint64_t{1} << 53);
+      owning[i] = 1.0 - p;
+      active[i] = owning[i];
+    }
+    packet_ref = stan::math::prod(
+        owning.unaryExpr(Eigen::internal::core_cast_op<double, double>()));
+    scalar_ref = stan::math::prod(active).val();
+    distinguished =
+        packet_width == 1 || layout_bits(packet_ref) != layout_bits(scalar_ref);
+  }
+  if (!distinguished && packet_width != 1) {
+    ++failures;
+    std::printf(
+        "FAIL expression layout grouping oracle did not distinguish "
+        "(width %d, packet %016llx, scalar %016llx)\n",
+        packet_width, static_cast<unsigned long long>(layout_bits(packet_ref)),
+        static_cast<unsigned long long>(layout_bits(scalar_ref)));
+  } else {
+    const ExpressionLayout packet_layout = elementwise(false, true, true, true);
+    const ExpressionLayout scalar_layout = ExpressionLayout::scalar();
+    const double packet_result =
+        packet_layout.kind == ExpressionLayout::Kind::Packet ? packet_ref
+                                                             : scalar_ref;
+    const double scalar_result =
+        scalar_layout.kind == ExpressionLayout::Kind::Scalar ? scalar_ref
+                                                             : packet_ref;
+    if (layout_bits(packet_result) != layout_bits(packet_ref) ||
+        layout_bits(scalar_result) != layout_bits(scalar_ref)) {
+      ++failures;
+      std::printf("FAIL expression layout selected wrong Stan Math grouping\n");
+    }
+  }
+  stan::math::recover_memory();
+}
+
 int main() {
   using namespace stanli;
+  test_expression_layout_policy();
   const int N = 4;
 
   // Binary: all shape combos. Scalars are length-1 slots; the var reference

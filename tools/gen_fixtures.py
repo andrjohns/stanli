@@ -14,6 +14,8 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # away. Keep the policy centralized here so CMake and the manual wrapper
 # cannot generate different corpora.
 O0_FIXTURES = {
+    "call_argument_cache",
+    "gq_udf_return_layout",
     "paramcond_intarray",
     "reduce_sum_arguments",
     "runtime_int_array_udf",
