@@ -1470,6 +1470,27 @@ struct ProgramCompiler {
       return matrix_gram(expr(e.args[0]), false);
     if (e.name == "crossprod" && e.args.size() == 1)
       return matrix_gram(expr(e.args[0]), true);
+    if (e.name == "multiply_lower_tri_self_transpose" && e.args.size() == 1) {
+      // One instruction rather than the scalar sums matrix_gram emits above:
+      // the upper triangle has to be dropped before the product, and the
+      // reverse-mode overload's pullback symmetrises the output adjoint and
+      // masks the result. Scalar MULs would reproduce neither.
+      const Range m = expr(e.args[0]);
+      if (m.kind != ViewKind::Matrix)
+        bail("multiply_lower_tri_self_transpose requires a matrix");
+      if (m.rows != 0 && m.rows > kMaxRegs / m.rows)
+        bail("multiply_lower_tri_self_transpose result is too large");
+      const int64_t width = m.rows * m.rows;
+      const int r = alloc((int)width);
+      if (width != 0)
+        p.code.push_back(Program::Instr{Program::MULT_LOWER_TRI_SELF_TRANSPOSE,
+                                        r, m.reg, (int32_t)m.rows,
+                                        (int32_t)m.cols, m.len});
+      Range out{r, (int)width};
+      out.kind = ViewKind::Matrix;
+      out.rows = out.cols = m.rows;
+      return out;
+    }
     if (e.name == "add_diag" && e.args.size() == 2) {
       const Range input = expr(e.args[0]);
       const Range diagonal = expr(e.args[1]);

@@ -5060,14 +5060,19 @@ struct Lowering {
                         {(int)a.si.rows, (int)a.si.cols, (int)b.si.cols});
     }
     if (e.name == "multiply_lower_tri_self_transpose" && e.args.size() == 1) {
+      // Not L * L': stan-math drops L's upper triangle first, and only a
+      // cholesky_factor_* value already has zeros there. A TRANSPOSE/GEMM
+      // pair would read the dropped entries and disagree on every result
+      // touching one.
       Val L = lower_expr(e.args[0]);
       if (!is_matrix(L.si)) fail("multiply_lower_tri: needs a matrix", e.raw);
-      SlotInfo tsi = matrix_view(L.si.cols, L.si.rows);
-      Val Lt = emit_value(OP_TRANSPOSE, {L}, g.slots[L.slot].len, tsi,
-                          {(int)L.si.rows, (int)L.si.cols});
-      SlotInfo si = matrix_view(L.si.rows, L.si.rows);
-      return emit_value(OP_GEMM, {L, Lt}, si.rows * si.cols, si,
-                        {(int)L.si.rows, (int)L.si.cols, (int)L.si.rows});
+      SlotInfo si = matrix_view(L.si.rows, L.si.rows, L.si.param_free);
+      Val v = emit_value(
+          OP_MULT_LOWER_TRI_SELF_TRANSPOSE, {L}, L.si.rows * L.si.rows, si,
+          {checked_immediate(L.si.rows, "multiply_lower_tri rows"),
+           checked_immediate(L.si.cols, "multiply_lower_tri cols")});
+      g.ops.back().variant = v.autodiff ? 1u : 0u;
+      return v;
     }
     if (e.name == "to_matrix" && (e.args.size() == 1 || e.args.size() == 3)) {
       // Col-major storage makes reshaping a relabelling. One argument on an

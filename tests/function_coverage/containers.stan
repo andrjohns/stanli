@@ -90,7 +90,7 @@ transformed parameters {
   observed[37] = probe(mdivide_right(x', s)); // mdivide_right
   observed[38] = probe(mdivide_right_spd(x', s)); // mdivide_right_spd
   observed[39] = probe(mdivide_right_tri_low(x', l)); // mdivide_right_tri_low
-  observed[40] = probe(multiply_lower_tri_self_transpose(l)); // multiply_lower_tri_self_transpose
+  observed[40] = probe(multiply_lower_tri_self_transpose(s)); // multiply_lower_tri_self_transpose
   observed[41] = probe(num_elements(m)); // num_elements
   observed[42] = probe(prod(v)); // prod
   observed[43] = probe(quad_form(s, x)); // quad_form

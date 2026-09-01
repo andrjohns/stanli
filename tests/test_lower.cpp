@@ -3335,6 +3335,83 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // multiply_lower_tri_self_transpose on a matrix parameter whose upper
+  // triangle is not zero (unsupported_multiply_lower_tri_self_transpose).
+  // The graph used to spell it TRANSPOSE + GEMM, which is A * A' and reads
+  // the entries stan-math drops; a dedicated opcode calls the same overload
+  // CmdStan does, so both the value and the triangular pullback match.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/mltmask.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/mltmask.tmir.sexp"), d);
+    check(count_opcode(lm, OP_MULT_LOWER_TRI_SELF_TRANSPOSE) == 1,
+          "mltmask opcode census");
+    check(count_opcode(lm, OP_GEMM) == 0, "mltmask does not reach GEMM");
+    check(lm.n_unconstrained == 9, "mltmask 9 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    // Column-major, with a deliberately large upper triangle: A * A' would
+    // differ from the answer in the first entry alone by 5^2 + 9^2.
+    const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
+    std::copy(a, a + 9, lex.params_data());
+    double grad[9];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> A(3, 3);
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k) A(r, c) = a[k];
+    auto P = stan::math::multiply_lower_tri_self_transpose(A);
+    var acc = P(0, 0) - P(1, 2) + P(2, 1) +
+              stan::math::std_normal_lpdf<true>(
+                  Eigen::Matrix<var, -1, 1>(stan::math::to_vector(A)));
+    acc.grad();
+    expect_eq("mltmask lp", lp, acc.val());
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k)
+        expect_eq("mltmask g" + std::to_string(k), grad[k], A(r, c).adj());
+    stan::math::recover_memory();
+  }
+
+  // The same call inside a while loop: the region compiles to the register
+  // machine, where one MULT_LOWER_TRI_SELF_TRANSPOSE instruction re-executed
+  // under var rebuilds stan-math's own tape. Expanding it into scalar MULs
+  // the way crossprod does would read the dropped triangle and accumulate
+  // the input adjoints in tape order rather than through the pullback.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/mltgrad.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/mltgrad.tmir.sexp"), d);
+    check(count_opcode(lm, OP_ISLAND) >= 1, "mltgrad has an island");
+    check(lm.n_unconstrained == 9, "mltgrad 9 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
+    std::copy(a, a + 9, lex.params_data());
+    double grad[9];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> A(3, 3);
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k) A(r, c) = a[k];
+    var acc = 0.0;
+    // The instruction sits in the loop body, so the product is formed once
+    // per iteration; one call scaled by two would be a different tape.
+    for (int it = 0; it < 2; ++it) {
+      auto P = stan::math::multiply_lower_tri_self_transpose(A);
+      acc += P(0, 0) - P(1, 2) + P(2, 1);
+    }
+    acc += stan::math::std_normal_lpdf<true>(
+        Eigen::Matrix<var, -1, 1>(stan::math::to_vector(A)));
+    acc.grad();
+    expect_eq("mltgrad lp", lp, acc.val());
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k)
+        expect_eq("mltgrad g" + std::to_string(k), grad[k], A(r, c).adj());
+    stan::math::recover_memory();
+  }
+
   // A parameter sized by a transformed-data for-loop accumulator
   // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
   // transformed-data interpreter used to lose the accumulator's int-ness on

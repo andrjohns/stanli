@@ -116,6 +116,7 @@ enum ProgramOpFlag : uint16_t {
                            kProgramRangeOutput | kProgramNoAdjoint)          \
   X(QUAD_FORM_SYM, kProgramRangeA | kProgramRangeB | kProgramReadB |         \
                        kProgramRangeOutput | kProgramNoAdjoint)              \
+  X(MULT_LOWER_TRI_SELF_TRANSPOSE, kProgramRangeA | kProgramNoAdjoint)       \
   X(DENSITY, 0)                                                              \
   X(CALL, 0)                                                                 \
   X(REJECT, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)         \
@@ -254,6 +255,10 @@ inline constexpr int program_output_len(const Program::Instr& instr) {
   if (instr.code == Program::DIAG_PRE_MULTIPLY ||
       instr.code == Program::DIAG_POST_MULTIPLY)
     return static_cast<int>(static_cast<int64_t>(instr.c) * instr.len);
+  // Squares a rows x cols argument into a rows x rows result, so `len`
+  // measures the input run (kProgramRangeA) and the output is its own size.
+  if (instr.code == Program::MULT_LOWER_TRI_SELF_TRANSPOSE)
+    return static_cast<int>(static_cast<int64_t>(instr.b) * instr.b);
   const ProgramOpSpec& spec = program_code_spec(instr.code);
   return spec.has(kProgramNoOutput)      ? 0
          : spec.has(kProgramRangeOutput) ? instr.len
@@ -491,6 +496,25 @@ void run_program_impl(const Program& p, T* reg) {
           out = stan::math::diag_pre_multiply(v, m);
         else
           out = stan::math::diag_post_multiply(m, v);
+        break;
+      }
+      case Program::MULT_LOWER_TRI_SELF_TRANSPOSE: {
+        using MatT = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+        const int32_t rows = I.b, cols = I.c;
+        if (rows == 0) break;
+        // A rows x 0 argument has no lower triangle to multiply, and
+        // stan-math answers with the zero matrix rather than reading it.
+        if (cols == 0) {
+          for (int32_t k = 0; k < rows * rows; ++k) reg[I.dst + k] = T(0.0);
+          break;
+        }
+        // Materialise rather than hand stan-math a Map: the reverse-mode
+        // overload copies its argument into arena storage, which wants a
+        // plain matrix type. One call keeps the upper-triangle mask and the
+        // triangular pullback exactly as CmdStan would have them.
+        const MatT input = Eigen::Map<const MatT>(reg + I.a, rows, cols);
+        Eigen::Map<MatT> output(reg + I.dst, rows, rows);
+        output = stan::math::multiply_lower_tri_self_transpose(input);
         break;
       }
       case Program::MATRIX_EXP: {

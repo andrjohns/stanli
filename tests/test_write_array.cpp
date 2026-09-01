@@ -574,21 +574,39 @@ void test_interpreted_gq_densities() {
   expect_close("multi_normal accumulation", row[3], want_mvn);
 }
 
-// multiply_lower_tri_self_transpose in a runtime-control region: no graph
-// opcode, so the section runs on WaInterp. The function zeros A's upper
-// triangle before forming L L', so a full A * A' would disagree on every
-// entry that touches a dropped element.
-void test_interpreted_multiply_lower_tri() {
+// multiply_lower_tri_self_transpose in a runtime-control region. The register
+// machine carries it now, so the whole section compiles; the interpreter runs
+// beside it here because both still have to agree. The function zeros A's
+// upper triangle before forming L L', so a full A * A' would disagree on
+// every entry that touches a dropped element.
+void test_compiled_multiply_lower_tri() {
   using namespace stanli;
   DataMap data;
   data.set_int("M", 3);
   const std::string text = slurp("tests/fixtures/mlt.tmir.sexp");
   CompiledModel cm = compile_model(text, data);
-  if (!cm.write_array || !cm.write_array->interp) {
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
     ++failures;
-    std::printf("FAIL mlt: expected an attached interpreter\n");
+    std::printf(
+        "FAIL mlt did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
+  // Column-major A with a non-zero upper triangle that must be ignored.
+  const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
+
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  std::copy(a, a + 9, wex.params_data());
+  WaRng graph_rng(3);
+  wex.run_forward_only(EvalState{&graph_rng});
+  std::vector<double> row;
+  for (const auto& c : cm.write_array->columns) {
+    const double* p = wex.value_ptr(c.slot);
+    for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+  }
+
   auto program =
       std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
   std::map<std::string, DataMap::Entry> base;
@@ -602,15 +620,17 @@ void test_interpreted_multiply_lower_tri() {
     base[flag] = one;
   }
   WaInterp wi(program, std::move(base));
-  // Column-major A with a non-zero upper triangle that must be ignored.
-  const double a[9] = {1.0, 0.4, -0.2, 5.0, 2.0, 0.7, 9.0, 8.0, 3.0};
   std::map<std::string, DataMap::Entry> params;
   DataMap::Entry A;
   A.dims = {3, 3};
   A.r.assign(a, a + 9);
   params["A"] = A;
-  WaRng rng(3);
-  const std::vector<double> row = wi.eval(params, rng);
+  WaRng interp_rng(3);
+  const std::vector<double> interp_row = wi.eval(params, interp_rng);
+  if (row != interp_row) {
+    ++failures;
+    std::printf("FAIL mlt: graph and interpreter rows differ\n");
+  }
 
   Eigen::MatrixXd Am(3, 3);
   for (int c = 0; c < 3; ++c)
@@ -620,7 +640,7 @@ void test_interpreted_multiply_lower_tri() {
   for (int c = 0; c < 3; ++c)
     for (int r = 0; r < 3; ++r) {
       const double got = row.at((size_t)(9 + c * 3 + r));
-      if (std::abs(got - want(r, c)) > 1e-12) {
+      if (got != want(r, c)) {
         ++failures;
         std::printf("FAIL mlt P(%d,%d): got %.17g want %.17g\n", r, c, got,
                     want(r, c));
@@ -4068,7 +4088,7 @@ int main() {
   test_interpreted_gq();
   test_compiled_extra_rng();
   test_interpreted_gq_densities();
-  test_interpreted_multiply_lower_tri();
+  test_compiled_multiply_lower_tri();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();
