@@ -2538,6 +2538,42 @@ class MirInterp {
           native.surface == mir::ExtremaSurface::RealMatrix ||
           native.surface == mir::ExtremaSurface::RealArray;
       if (native.kind != mir::ExtremaKind::Legacy && real_container) {
+        // A bare matrix transpose is deliberately refused by graph lowering:
+        // Eigen's transpose evaluator has a packet order that cannot be
+        // reconstructed from a materialized col-major transpose. Preserve
+        // that evaluator here as the fallback contract, including its
+        // platform-dependent NaN and signed-zero selection.
+        const mir::Expr& operand = e.args[0];
+        const bool bare_matrix_transpose =
+            (operand.name == "Transpose__" || operand.name == "transpose") &&
+            operand.args.size() == 1 &&
+            operand.args[0].kind == mir::Expr::Var &&
+            operand.args[0].unsized.depth == 0 &&
+            operand.args[0].unsized.leaf == mir::UnsizedLeaf::Matrix;
+        if (bare_matrix_transpose) {
+          Value source = eval(operand.args[0]);
+          if (source.dims.size() != 2 || source.dims[0] < 0 ||
+              source.dims[1] < 0 ||
+              (source.dims[0] != 0 &&
+               source.dims[1] >
+                   std::numeric_limits<int64_t>::max() / source.dims[0]) ||
+              source.dims[0] * source.dims[1] !=
+                  static_cast<int64_t>(source.r.size()))
+            fail("min/max matrix transpose has invalid dimensions", e.raw);
+          if (source.r.empty()) {
+            r.r = {native.kind == mir::ExtremaKind::Min
+                       ? T(std::numeric_limits<double>::infinity())
+                       : T(-std::numeric_limits<double>::infinity())};
+            return r;
+          }
+          using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+          const Eigen::Map<const Mat> matrix(source.r.data(), source.dims[0],
+                                             source.dims[1]);
+          r.r = {native.kind == mir::ExtremaKind::Min
+                     ? stan::math::min(matrix.transpose())
+                     : stan::math::max(matrix.transpose())};
+          return r;
+        }
         Value a = eval(e.args[0]);
         if (a.r.empty()) {
           r.r = {native.kind == mir::ExtremaKind::Min

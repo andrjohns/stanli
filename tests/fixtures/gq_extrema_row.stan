@@ -1,6 +1,5 @@
-// Phase 0 characterization: a matrix row is a strided Eigen view. The
-// current generated-quantities native extrema surface deliberately refuses
-// it, so the write_array path must stay on WaInterp.
+// A matrix row is a strided Eigen view. The native path retains its scalar
+// coefficient traversal for the generated-quantities reduction.
 data {
   int<lower=1> N;
 }

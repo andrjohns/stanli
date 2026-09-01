@@ -3158,7 +3158,14 @@ void test_matrix_transpose_extrema_fallback() {
       !same_reduction_value(row[static_cast<size_t>(found - names.begin())],
                             want)) {
     ++failures;
-    std::printf("FAIL matrix transpose extrema interpreter value\n");
+    const double got = found == names.end()
+                           ? std::numeric_limits<double>::quiet_NaN()
+                           : row[static_cast<size_t>(found - names.begin())];
+    std::printf(
+        "FAIL matrix transpose extrema interpreter value: got=%llx "
+        "want=%llx\n",
+        static_cast<unsigned long long>(reduction_bits(got)),
+        static_cast<unsigned long long>(reduction_bits(want)));
   }
 }
 
