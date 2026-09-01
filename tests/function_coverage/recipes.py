@@ -209,5 +209,8 @@ GROUPS = {
         "multi_normal_cholesky_rng": "multi_normal_cholesky_rng(x, l)",
         "categorical_rng": "categorical_rng(p)",
         "categorical_logit_rng": "categorical_logit_rng(x)",
+        "gumbel_rng": "gumbel_rng(theta[1], 1.3)",
+        "dirichlet_rng": "dirichlet_rng(v)",
+        "beta_binomial_rng": "beta_binomial_rng(5, 2.0, 3.0)",
     },
 }

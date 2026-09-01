@@ -51,7 +51,7 @@ generated quantities {
   matrix[2,2] corr = [[1, rho], [rho, 1]];
   matrix[2,2] lcorr = cholesky_decompose(corr);
   vector[2] p = softmax(x);
-  vector[25] observed;
+  vector[28] observed;
   observed[1] = probe(normal_rng(theta[1], 1.3)); // normal_rng
   observed[2] = probe(std_normal_rng()); // std_normal_rng
   observed[3] = probe(lognormal_rng(theta[1], 1.3)); // lognormal_rng
@@ -77,4 +77,7 @@ generated quantities {
   observed[23] = probe(multi_normal_cholesky_rng(x, l)); // multi_normal_cholesky_rng
   observed[24] = probe(categorical_rng(p)); // categorical_rng
   observed[25] = probe(categorical_logit_rng(x)); // categorical_logit_rng
+  observed[26] = probe(gumbel_rng(theta[1], 1.3)); // gumbel_rng
+  observed[27] = probe(dirichlet_rng(v)); // dirichlet_rng
+  observed[28] = probe(beta_binomial_rng(5, 2.0, 3.0)); // beta_binomial_rng
 }

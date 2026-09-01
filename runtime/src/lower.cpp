@@ -3324,6 +3324,34 @@ struct Lowering {
     return draw;
   }
 
+  std::optional<Val> lower_dirichlet_rng(const mir::Expr& e) {
+    if (e.name != "dirichlet_rng") return std::nullopt;
+    if (!in_write_array)
+      fail("dirichlet_rng is supported only in generated quantities", e.raw);
+    if (e.args.size() != 1 || e.type_ != "UVector" ||
+        e.unsized.leaf != mir::UnsizedLeaf::Vector || e.unsized.depth != 0)
+      fail("dirichlet_rng: expected one vector result", e.raw);
+    const mir::Expr& alpha_expr = e.args[0];
+    if (alpha_expr.type_ != "UVector" ||
+        alpha_expr.unsized.leaf != mir::UnsizedLeaf::Vector ||
+        alpha_expr.unsized.depth != 0)
+      fail("dirichlet_rng: expected one concentration vector", e.raw);
+
+    Val alpha = lower_expr(alpha_expr);
+    if (!is_vector(alpha.si))
+      fail("dirichlet_rng: argument is not a logical vector", e.raw);
+    const int64_t k = g.slots[alpha.slot].len;
+    if (k <= 0 || k > std::numeric_limits<int>::max())
+      fail("dirichlet_rng: concentration vector must have a positive length",
+           e.raw);
+
+    Val draw = emit_value(OP_RNG, {alpha}, k, view_of(e.type_));
+    g.ops.back().variant = kDirichletRngVariant;
+    draw.si.param_free = false;
+    draw.autodiff = false;
+    return draw;
+  }
+
   std::optional<Val> lower_categorical_rng(const mir::Expr& e) {
     if (e.name != "categorical_rng") return std::nullopt;
     if (!in_write_array)
@@ -3358,6 +3386,8 @@ struct Lowering {
         {"normal_rng", ScalarRng::Normal},
         {"lognormal_rng", ScalarRng::Lognormal},
         {"binomial_rng", ScalarRng::Binomial},
+        {"gumbel_rng", ScalarRng::Gumbel},
+        {"beta_binomial_rng", ScalarRng::BetaBinomial},
     };
     const auto found = kFamilies.find(e.name);
     if (found == kFamilies.end()) return std::nullopt;
@@ -3374,13 +3404,13 @@ struct Lowering {
                                              : mir::UnsizedLeaf::Real;
     if (e.unsized.leaf != result_leaf)
       fail(e.name + ": result type does not match RNG family", e.raw);
-    // Unlike the other scalar families, binomial's first argument is a
-    // population count. Valid stanc MIR always marks it UInt; fail closed on
-    // malformed hand-authored MIR rather than silently truncating a real in
-    // the runtime helper's graph-storage conversion.
-    if (family == ScalarRng::Binomial &&
+    // Unlike the other scalar families, binomial's (and beta_binomial's)
+    // first argument is a population count. Valid stanc MIR always marks it
+    // UInt; fail closed on malformed hand-authored MIR rather than silently
+    // truncating a real in the runtime helper's graph-storage conversion.
+    if ((family == ScalarRng::Binomial || family == ScalarRng::BetaBinomial) &&
         e.args[0].unsized.leaf != mir::UnsizedLeaf::Int)
-      fail("binomial_rng: first argument must be int", e.raw);
+      fail(e.name + ": first argument must be int", e.raw);
     std::vector<Val> args;
     args.reserve(arity);
     for (const mir::Expr& arg : e.args) {
@@ -3391,8 +3421,10 @@ struct Lowering {
         fail(e.name + ": container arguments stay on WaInterp", e.raw);
     }
     Val draw = arity == 1 ? emit_value(OP_RNG, {args[0]}, 1, view_of(e.type_))
-                          : emit_value(OP_RNG, {args[0], args[1]}, 1,
-                                       view_of(e.type_));
+               : arity == 2
+                   ? emit_value(OP_RNG, {args[0], args[1]}, 1, view_of(e.type_))
+                   : emit_value(OP_RNG, {args[0], args[1], args[2]}, 1,
+                                view_of(e.type_));
     g.ops.back().variant = static_cast<uint8_t>(family);
     // An effect is never a graph constant, even when all distribution
     // parameters are. This also keeps downstream compile-time demands from
@@ -3869,6 +3901,7 @@ struct Lowering {
     // The stan-library names split into disjoint groups; each helper owns
     // one and declines the rest.
     if (auto v = lower_multi_normal_rng(e)) return *v;
+    if (auto v = lower_dirichlet_rng(e)) return *v;
     if (auto v = lower_categorical_rng(e)) return *v;
     if (auto v = lower_scalar_rng(e)) return *v;
     if (auto v = lower_density_fn(e)) return *v;

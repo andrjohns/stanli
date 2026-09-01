@@ -423,22 +423,44 @@ void test_interpreted_gq() {
   }
 }
 
-// gumbel_rng, dirichlet_rng and beta_binomial_rng have no graph opcode, so
-// the whole generated-quantities section runs on WaInterp. Drive it and
-// check every draw matches stan-math on a parallel WaRng consumed in the
-// same source order: gumbel first, then the whole-vector dirichlet, then
-// the integer beta_binomial.
-void test_interpreted_extra_rng() {
+// gumbel_rng, dirichlet_rng and beta_binomial_rng all now have graph
+// opcodes, so the whole generated-quantities section compiles completely --
+// no WaInterp fallback. Drive the compiled graph and check every draw
+// matches stan-math on a parallel WaRng consumed in the same source order:
+// gumbel first, then the whole-vector dirichlet, then the integer
+// beta_binomial. A separately constructed WaInterp on the same MIR is the
+// second witness, so a graph/interpreter divergence cannot hide behind
+// agreement with only one of the two.
+void test_compiled_extra_rng() {
   using namespace stanli;
   DataMap data;
   data.set_int("N", 10);
   const std::string text = slurp("tests/fixtures/gqrng_extra.tmir.sexp");
   CompiledModel cm = compile_model(text, data);
-  if (!cm.write_array || !cm.write_array->interp) {
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
     ++failures;
-    std::printf("FAIL gqrng_extra: expected an attached interpreter\n");
+    std::printf(
+        "FAIL gqrng_extra did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
+  expect_eq("gqrng_extra columns", joined(cm.write_array->columns),
+            "sigma,g,d.1,d.2,d.3,bb");
+
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  wex.params_data()[0] = std::log(1.3);  // sigma's unconstrained log_sd form
+  const auto graph_row = [&](WaRng& rng) {
+    wex.run_forward_only(EvalState{&rng});
+    std::vector<double> row;
+    for (const auto& c : cm.write_array->columns) {
+      const double* p = wex.value_ptr(c.slot);
+      for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+    }
+    return row;
+  };
+
   auto program =
       std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
   std::map<std::string, DataMap::Entry> base;
@@ -457,10 +479,13 @@ void test_interpreted_extra_rng() {
   sig.r = {1.3};
   params["sigma"] = sig;
 
-  WaRng rng(7), ref(7);
-  const std::vector<double> row = wi.eval(params, rng);
-  expect_eq("gqrng_extra header", joined(wi.columns()),
-            "sigma,g,d.1,d.2,d.3,bb");
+  WaRng graph_rng(7), interp_rng(7), ref(7);
+  const std::vector<double> row = graph_row(graph_rng);
+  const std::vector<double> interp_row = wi.eval(params, interp_rng);
+  if (row != interp_row) {
+    ++failures;
+    std::printf("FAIL gqrng_extra: graph and interpreter rows differ\n");
+  }
   if (row.size() != 6) {
     ++failures;
     std::printf("FAIL gqrng_extra: row size %zu\n", row.size());
@@ -2095,12 +2120,12 @@ void test_compiled_scalar_rng() {
   int rng_ops = 0;
   for (const Op& op : cm.write_array->graph.ops)
     if (op.opcode == OP_RNG) ++rng_ops;
-  if (rng_ops != 6) {
+  if (rng_ops != 7) {
     ++failures;
-    std::printf("FAIL scalar rng: got %d OP_RNG, want 6\n", rng_ops);
+    std::printf("FAIL scalar rng: got %d OP_RNG, want 7\n", rng_ops);
   }
   expect_eq("scalar rng columns", joined(cm.write_array->columns),
-            "x,p,u,b,n,l,k");
+            "x,p,u,b,n,l,k,gm");
 
   Executor wex(std::move(cm.write_array->graph));
   cm.write_array->bind(wex);
@@ -4041,7 +4066,7 @@ int main() {
   test_gq_bare_fill_is_nan();
   test_gq_name_shadowing();
   test_interpreted_gq();
-  test_interpreted_extra_rng();
+  test_compiled_extra_rng();
   test_interpreted_gq_densities();
   test_interpreted_multiply_lower_tri();
   test_constant_folded_gq_column();

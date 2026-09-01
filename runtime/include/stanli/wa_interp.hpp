@@ -65,14 +65,17 @@ enum class ScalarRng : uint8_t {
   Normal,
   Lognormal,
   Binomial,
+  Gumbel,
+  BetaBinomial,
 };
 
 // OP_RNG's first non-scalar-argument variant. Keep it outside ScalarRng:
 // scalar_rng_draw's `nargs` counts scalar doubles, whereas categorical has
 // one logical argument containing an arbitrary number of probabilities.
 inline constexpr uint8_t kCategoricalRngVariant =
-    static_cast<uint8_t>(ScalarRng::Binomial) + 1;
+    static_cast<uint8_t>(ScalarRng::BetaBinomial) + 1;
 inline constexpr uint8_t kMultiNormalRngVariant = kCategoricalRngVariant + 1;
+inline constexpr uint8_t kDirichletRngVariant = kMultiNormalRngVariant + 1;
 
 size_t scalar_rng_arity(ScalarRng family);
 bool scalar_rng_is_int(ScalarRng family);
@@ -83,6 +86,8 @@ void multi_normal_rng_draw(const double* location, size_t location_size,
                            const double* covariance, size_t covariance_size,
                            size_t covariance_rows, size_t covariance_cols,
                            double* output, size_t output_size, WaRng& rng);
+void dirichlet_rng_draw(const double* alpha, size_t alpha_size, double* output,
+                        size_t output_size, WaRng& rng);
 
 // The columns only exist after one evaluation, so every driver that wants
 // them at construction time has to probe. These two are that probe, shared

@@ -486,9 +486,9 @@ void test_constrain_compiled_rng() {
     return;
   }
   expect_eq_str("compiled scalar RNG names", bs_param_names(m, true, true),
-                "x,p,u,b,n,l,k");
-  if (bs_param_num(m, true, true) != 7) {
-    fail("compiled scalar RNG column count is not seven");
+                "x,p,u,b,n,l,k,gm");
+  if (bs_param_num(m, true, true) != 8) {
+    fail("compiled scalar RNG column count is not eight");
     bs_model_destruct(m);
     return;
   }
@@ -502,7 +502,7 @@ void test_constrain_compiled_rng() {
     bs_model_destruct(m);
     return;
   }
-  std::vector<double> a1(7), b1(7), a2(7), b2(7);
+  std::vector<double> a1(8), b1(8), a2(8), b2(8);
   const int a1rc = bs_param_constrain(m, true, true, q, a1.data(), a, &err);
   const int b1rc = bs_param_constrain(m, true, true, q, b1.data(), b, &err);
   const int a2rc = bs_param_constrain(m, true, true, q, a2.data(), a, &err);
