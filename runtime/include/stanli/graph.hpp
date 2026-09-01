@@ -184,6 +184,11 @@ class Executor {
   int64_t adjoint_storage_size() const {
     return static_cast<int64_t>(adjoints_.size());
   }
+  // Persistent reverse data plus one shared region for the largest
+  // forward-only scratch user.
+  int64_t scratch_storage_size() const {
+    return static_cast<int64_t>(scratch_.size());
+  }
   // The bound graph, so a second executor over the same model can be
   // built without re-lowering. Multi-chain sampling needs one executor
   // per chain -- the arenas are mutable per-evaluation state -- and

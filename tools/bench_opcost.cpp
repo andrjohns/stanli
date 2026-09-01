@@ -10,6 +10,7 @@
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
 
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -116,8 +117,14 @@ int main(int argc, char** argv) {
   double mu_adj = 0, sig_adj = 0, output_adj = 1.0;
   const Kernel& k = kernel(OP_NORMAL_LPDF);
   const Op& direct_op = exd.graph().ops.front();
-  const int64_t scratch_len =
+  const int64_t persistent_scratch =
       k.scratch_size ? k.scratch_size(direct_op, exd.graph().slots.data()) : 0;
+  const int64_t transient_scratch =
+      k.transient_scratch_size
+          ? k.transient_scratch_size(direct_op, exd.graph().slots.data())
+          : 0;
+  assert(persistent_scratch == 0 || transient_scratch == 0);
+  const int64_t scratch_len = persistent_scratch + transient_scratch;
   std::vector<double> scratch(static_cast<size_t>(scratch_len));
   KernelCtx ctx{};
   ctx.n_in = 3;

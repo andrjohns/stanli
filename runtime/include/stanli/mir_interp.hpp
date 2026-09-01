@@ -23,6 +23,7 @@
 #include <stanli/compile.hpp>
 #include <stanli/container_shape.hpp>
 #include <stanli/data.hpp>
+#include <stanli/extrema_grouping.hpp>
 #include <stanli/message_sink.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/optable.hpp>  // STANLI_SCALAR_UNARY_LIST
@@ -2315,18 +2316,31 @@ class MirInterp {
           e.args[0].unsized.depth == 0 &&
           (e.args[0].unsized.leaf == mir::UnsizedLeaf::Vector ||
            e.args[0].unsized.leaf == mir::UnsizedLeaf::RowVector);
-      const mir::ProdGrouping grouping = udf_depth_ == 0
-                                             ? mir::prod_grouping(e.args[0])
-                                             : mir::ProdGrouping::Legacy;
-      if (!eigen_container || grouping == mir::ProdGrouping::Legacy) {
+      const ExpressionLayout layout =
+          udf_depth_ == 0 ? mir::source_expression_layout(e.args[0])
+                          : ExpressionLayout::unknown();
+      if (!eigen_container || !layout.known()) {
         T product = T(1.0);
         for (const T& value : a.r) product *= value;
         r.r = {product};
         return r;
       }
-      if (grouping == mir::ProdGrouping::Scalar) {
+      if (layout.kind == ExpressionLayout::Kind::Scalar) {
         T product = a.r[0];
         for (size_t i = 1; i < a.r.size(); ++i) product *= a.r[i];
+        r.r = {product};
+        return r;
+      }
+      if (layout.kind == ExpressionLayout::Kind::Direct &&
+          layout.element_offset != 0) {
+        if constexpr (std::is_same_v<T, double>) {
+          std::vector<double> scratch(extrema_phase_scratch(a.r.size()));
+          r.r = {prod_phased(a.r.data(), static_cast<int64_t>(a.r.size()),
+                             layout.element_offset, scratch.data())};
+          return r;
+        }
+        T product = T(1.0);
+        for (const T& value : a.r) product *= value;
         r.r = {product};
         return r;
       }
@@ -2514,17 +2528,50 @@ class MirInterp {
       return r;
     }
     if (e.name == "max" || e.name == "min") {
-      const bool owning_vector_context =
+      const bool owning_container_context =
           where_ == "write_array" || where_ == "prepare_data";
-      const mir::ExtremaKind native_kind =
-          owning_vector_context && udf_depth_ == 0 ? mir::extrema_kind(e)
-                                                   : mir::ExtremaKind::Legacy;
-      if (native_kind != mir::ExtremaKind::Legacy) {
+      const mir::ExtremaCall native =
+          owning_container_context && udf_depth_ == 0 ? mir::extrema_call(e)
+                                                      : mir::ExtremaCall{};
+      const bool real_container =
+          native.surface == mir::ExtremaSurface::RealVector ||
+          native.surface == mir::ExtremaSurface::RealMatrix ||
+          native.surface == mir::ExtremaSurface::RealArray;
+      if (native.kind != mir::ExtremaKind::Legacy && real_container) {
         Value a = eval(e.args[0]);
         if (a.r.empty()) {
-          r.r = {native_kind == mir::ExtremaKind::Min
+          r.r = {native.kind == mir::ExtremaKind::Min
                      ? T(std::numeric_limits<double>::infinity())
                      : T(-std::numeric_limits<double>::infinity())};
+          return r;
+        }
+        const ExpressionLayout layout =
+            mir::source_expression_layout(e.args[0]);
+        if (layout.kind == ExpressionLayout::Kind::Direct &&
+            layout.element_offset != 0) {
+          if constexpr (std::is_same_v<T, double>) {
+            std::vector<double> scratch(extrema_phase_scratch(a.r.size()));
+            r.r = {T(extrema_phased(
+                a.r.data(), static_cast<int64_t>(a.r.size()),
+                layout.element_offset, native.kind == mir::ExtremaKind::Max,
+                scratch.data()))};
+            return r;
+          }
+        }
+        if (!layout.packet_access()) {
+          // Indexed views have no packet traversal.  Keep the same strict
+          // comparison and ascending coefficient order as Eigen's default
+          // redux path; this also covers matrix rows and gathers.
+          const auto vmax = [](const T& x, const T& y) {
+            return val(x) < val(y) ? y : x;
+          };
+          const auto vmin = [](const T& x, const T& y) {
+            return val(y) < val(x) ? y : x;
+          };
+          T m = a.r.at(0);
+          for (const T& x : a.r)
+            m = native.kind == mir::ExtremaKind::Max ? vmax(m, x) : vmin(m, x);
+          r.r = {m};
           return r;
         }
         // The std::vector backing an interpreted value has no aligned-owning
@@ -2535,7 +2582,7 @@ class MirInterp {
         const Eigen::Map<const Vec> input(a.r.data(), a.r.size());
         const auto owning_grouping =
             input.unaryExpr(Eigen::internal::core_cast_op<T, T>());
-        r.r = {native_kind == mir::ExtremaKind::Min
+        r.r = {native.kind == mir::ExtremaKind::Min
                    ? stan::math::min(owning_grouping)
                    : stan::math::max(owning_grouping)};
         return r;

@@ -307,7 +307,8 @@ void Executor::bind_() {
     assert(result_adjoint_offset_ >= 0);
   }
 
-  int64_t scratch = 0;
+  int64_t persistent_scratch = 0;
+  int64_t transient_scratch = 0;
   // Scratch layout is binding state, not graph structure. Only the bound
   // context pointers survive this function; copies compute their own layout.
   std::vector<int64_t> scratch_offsets;
@@ -320,10 +321,27 @@ void Executor::bind_() {
       // to do from this string.
       throw std::runtime_error(std::string("opcode not registered: ") +
                                opcode_name(op.opcode));
-    scratch_offsets.push_back(scratch);
-    scratch += k.scratch_size ? k.scratch_size(op, graph_.slots.data()) : 0;
+    const int64_t persistent =
+        k.scratch_size ? k.scratch_size(op, graph_.slots.data()) : 0;
+    const int64_t transient = k.transient_scratch_size
+                                  ? k.transient_scratch_size(
+                                        op, graph_.slots.data())
+                                  : 0;
+    assert(persistent >= 0 && transient >= 0);
+    assert(persistent == 0 || transient == 0);
+    if (transient > 0) {
+      // Resolve this sentinel to the shared tail after the persistent arena's
+      // final size is known.
+      scratch_offsets.push_back(-1);
+      transient_scratch = std::max(transient_scratch, transient);
+    } else {
+      scratch_offsets.push_back(persistent_scratch);
+      persistent_scratch += persistent;
+    }
   }
-  scratch_.assign(scratch, 0.0);
+  scratch_.assign(persistent_scratch + transient_scratch, 0.0);
+  for (int64_t& offset : scratch_offsets)
+    if (offset < 0) offset = persistent_scratch;
 
   // Assemble every kernel context once, now that all three arenas are sized
   // and every offset is final. Reassembling one per op per sweep cost a
