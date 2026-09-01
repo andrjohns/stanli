@@ -1,0 +1,100 @@
+#ifndef STANLI_STRUCTURED_LOOP_HPP
+#define STANLI_STRUCTURED_LOOP_HPP
+
+#include <stanli/graph.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace stanli {
+
+// Fixed logical extents, runtime selections. Matrices keep column-major
+// storage inside outer-major arrays. Selector values occupy one packed input.
+struct DynamicIndexSpec {
+  struct Axis {
+    enum Kind { Single, All, Multi, Range } kind = Single;
+    int64_t extent = 0, stride = 0, count = 0, input_offset = 0;
+    // Runtime logical base extent. -1 means the full fixed capacity.
+    int64_t extent_input_offset = -1;
+    // -1 keeps count fixed. Multi reads an explicit logical count; Range
+    // reads its inclusive runtime endpoint and derives max(0, hi-lo+1).
+    int64_t count_input_offset = -1;
+  };
+  std::vector<Axis> axes;
+  bool matrix_leaf = false;
+  int64_t selected_size = 0;
+};
+
+// One ordered stream: scalar leaves and counted fragments from retained
+// regions. Fragment element zero is an inactive exact reached-leaf count.
+struct TargetReduction {
+  struct Source {
+    int64_t offset = 0, capacity = 0;
+    bool fragment = false;
+  };
+  std::vector<Source> sources;
+  int64_t capacity = 0;
+};
+
+// Immutable control tree over ordinary graph kernels. A node describes code,
+// never a particular iteration. Numeric versions and executed control live in
+// Executor scratch, independently for every executor/evaluation.
+struct StructuredLoop {
+  struct Node {
+    enum Kind {
+      Sequence,
+      KernelCall,
+      Alias,
+      If,
+      For,
+      While,
+      Break,
+      Continue,
+      Target
+    } kind = Sequence;
+    std::vector<Node> children;
+    int op = -1;
+    int dst = -1, src = -1;
+    int condition = -1, iterator = -1, lower = -1, upper = -1;
+    // Dynamic-history scalar indexed updates may reuse one evaluation-local
+    // primal buffer when prepare() proves that this node immediately installs
+    // its result into this binding cell. -1 keeps the ordinary immutable path.
+    int compact_update_cell = -1;
+    int64_t capacity = 0;
+    int64_t frame_size = 0, target_capacity = 0;
+    int64_t kernel_scratch = 0;
+    void (*forward)(KernelCtx&) = nullptr;
+    void (*backward)(KernelCtx&) = nullptr;
+  };
+  struct Import {
+    int slot = -1;
+    int input = -1;
+    int64_t offset = 0;
+  };
+
+  Graph body;  // owns all inner idata and udata
+  std::vector<std::pair<int, std::vector<double>>> fills;
+  std::vector<Import> imports;
+  std::vector<int> outputs;
+  bool has_target = false;
+  bool target_fragment = false;
+  bool dynamic_history = false;
+  Node root;
+  int64_t initial_size = 0, bindings_offset = 0, history_offset = 0;
+  int64_t primal_size = 0, target_refs_offset = 0, target_work_offset = 0;
+  int64_t adjoint_offset = 0, scratch_size = 0;
+  size_t node_count = 0, compact_update_sites = 0;
+
+  // Validate and size without enumerating execution. Throws on malformed
+  // graphs or checked resource limits; builders publish only after success.
+  void prepare(int64_t max_bytes);
+};
+
+void structured_loop_forward(KernelCtx& ctx);
+void structured_loop_backward(KernelCtx& ctx);
+void register_structured_loop_kernel();
+
+}  // namespace stanli
+#endif

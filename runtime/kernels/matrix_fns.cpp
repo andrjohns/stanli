@@ -150,6 +150,32 @@ void matrix_exp_bwd(KernelCtx& ctx) {
     return stan::math::matrix_exp(a);
   });
 }
+int64_t dynamic_square_extent(const KernelCtx& ctx) {
+  if (ctx.n_in != 2 || ctx.in[1].len != 1)
+    throw std::logic_error("dynamic matrix_exp extent is not scalar");
+  const double raw = ctx.in[1].data[0];
+  if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 0)
+    throw std::domain_error("dynamic matrix_exp extent is invalid");
+  const int64_t n = static_cast<int64_t>(raw);
+  if (n != 0 && n > ctx.in[0].len / n)
+    throw std::out_of_range("dynamic matrix_exp extent exceeds capacity");
+  return n;
+}
+void matrix_exp_dynamic_fwd(KernelCtx& ctx) {
+  const int64_t n = dynamic_square_extent(ctx);
+  std::fill(ctx.out.data, ctx.out.data + ctx.out.len, 0.0);
+  if (n != 0)
+    MapM(ctx.out.data, n, n) =
+        stan::math::matrix_exp(CMapM(ctx.in[0].data, n, n));
+}
+void matrix_exp_dynamic_bwd(KernelCtx& ctx) {
+  const int64_t n = dynamic_square_extent(ctx);
+  if (n == 0) return;
+  nary_bwd(ctx, [n](std::vector<VarV>& xs) {
+    Eigen::Map<VarM> a(xs[0].data(), n, n);
+    return stan::math::matrix_exp(a);
+  });
+}
 
 // ---- inverse / inverse_spd / log_determinant -----------------------------
 // All three use Stan Math itself in both sweeps. Inverse and log_determinant
@@ -1503,6 +1529,9 @@ void register_matrix_kernels() {
   register_kernel(OP_CHOLESKY, Kernel{chol_fwd, chol_bwd, nullptr});
   register_kernel(OP_MATRIX_EXP,
                   Kernel{matrix_exp_fwd, matrix_exp_bwd, nullptr});
+  register_kernel(
+      OP_MATRIX_EXP_DYNAMIC,
+      Kernel{matrix_exp_dynamic_fwd, matrix_exp_dynamic_bwd, nullptr});
   register_kernel(OP_INVERSE, Kernel{inverse_fwd, inverse_bwd, nullptr});
   register_kernel(OP_INVERSE_SPD,
                   Kernel{inverse_spd_fwd, inverse_spd_bwd, nullptr});

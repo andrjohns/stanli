@@ -297,6 +297,7 @@ set(STANLI_RUNTIME_SOURCES
   runtime/src/mir_decode.cpp
   runtime/src/portable_mir_v2_reader.cpp
   runtime/src/lower.cpp
+  runtime/src/structured_loop.cpp
   runtime/src/init_interp.cpp
   runtime/src/unconstrain.cpp
   runtime/src/wa_interp.cpp
