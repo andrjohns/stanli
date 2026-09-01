@@ -77,7 +77,7 @@ const Kernel* find_kernel(uint16_t opcode) {
 // the former once and a program invocation reuses one context packet across
 // all of its CALL instructions.
 static void bind_call_fwd_ctx(const Program::Call& call, double* reg,
-                              KernelCtx& ctx) {
+                              KernelCtx& ctx, EvalState* state) {
   ctx.n_in = call.n_in;
   for (int k = 0; k < call.n_in; ++k)
     ctx.in[k] = Desc{reg + call.in[k], call.in_len[k]};
@@ -86,11 +86,14 @@ static void bind_call_fwd_ctx(const Program::Call& call, double* reg,
   ctx.scratch = reg + call.scratch;
   ctx.idata = call.idata.data();
   ctx.n_idata = (int64_t)call.idata.size();
+  // Not a call-site fact: the draw stream belongs to the evaluation, so it
+  // is rebound with the pointer fields rather than resolved once.
+  ctx.eval_state = state;
 }
 
 KernelCtx call_fwd_ctx(const Program::Call& call, double* reg) {
   KernelCtx ctx;
-  bind_call_fwd_ctx(call, reg, ctx);
+  bind_call_fwd_ctx(call, reg, ctx, nullptr);
   return ctx;
 }
 
@@ -104,16 +107,17 @@ bool bind_call(Program::Call& call) {
   return true;
 }
 
-void run_call(const Program::Call& call, double* reg, KernelCtx& ctx) {
+void run_call(const Program::Call& call, double* reg, KernelCtx& ctx,
+              EvalState* state) {
   if (call.forward == nullptr)
     throw std::logic_error("unbound Program::CALL forward");
-  bind_call_fwd_ctx(call, reg, ctx);
+  bind_call_fwd_ctx(call, reg, ctx, state);
   call.forward(ctx);
 }
 
-void run_call(const Program::Call& call, double* reg) {
+void run_call(const Program::Call& call, double* reg, EvalState* state) {
   KernelCtx ctx;
-  run_call(call, reg, ctx);
+  run_call(call, reg, ctx, state);
 }
 
 void register_elementwise_kernels();

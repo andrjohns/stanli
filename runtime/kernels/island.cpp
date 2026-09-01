@@ -53,7 +53,7 @@ void island_fwd_impl(KernelCtx& ctx) {
       for (int i = 0; i < li.len; ++i)
         ctx.scratch[li.reg + i] = ctx.in[input].data[li.offset + i];
     }
-    run_program_impl<ReuseCallCtx>(p, ctx.scratch);
+    run_program_impl<ReuseCallCtx>(p, ctx.scratch, ctx.eval_state);
     for (size_t m = 0; m < p.out_regs.size(); ++m)
       ctx.out.data[m] = ctx.scratch[p.out_regs[m]];
     return;
@@ -66,7 +66,7 @@ void island_fwd_impl(KernelCtx& ctx) {
     in[k] = ctx.scratch + off;
     off += ctx.in[k].len;
   }
-  run_island<double>(p, in, ctx.out.data);
+  run_island<double>(p, in, ctx.out.data, ctx.eval_state);
 }
 
 void island_fwd(KernelCtx& ctx) { island_fwd_impl<false>(ctx); }
@@ -131,6 +131,18 @@ void island_bwd(KernelCtx& ctx) {
 }  // namespace
 
 void island_calls_fwd(KernelCtx& ctx) { island_fwd_impl<true>(ctx); }
+
+bool island_has_effect(const Program& p) {
+  for (const Program::Instr& I : p.code) {
+    if (I.code == Program::REJECT) return true;
+    if (I.code != Program::CALL) continue;
+    // A payload index out of range is malformed rather than pure; refusing
+    // to fold is the safe answer either way.
+    if (I.a < 0 || (size_t)I.a >= p.calls.size()) return true;
+    if (is_effectful_op(p.calls[(size_t)I.a].opcode)) return true;
+  }
+  return false;
+}
 
 void register_island_kernel() {
   register_kernel(OP_ISLAND, Kernel{island_fwd, island_bwd, island_scratch});

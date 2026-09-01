@@ -292,12 +292,17 @@ KernelCtx call_fwd_ctx(const Program::Call& call, double* reg);
 // call unbound, so malformed or unavailable opcodes fail closed.
 bool bind_call(Program::Call& call);
 
-// Run one CALL forward through its pre-resolved function.
-void run_call(const Program::Call& call, double* reg);
+// Run one CALL forward through its pre-resolved function. `state` is the
+// caller's evaluation state, which is how a generated-quantities region
+// reaches the draw stream OP_RNG needs; null for every other caller, and
+// the RNG kernel rejects a null one rather than inventing a stream.
+void run_call(const Program::Call& call, double* reg,
+              EvalState* state = nullptr);
 
 // Reuse a caller-owned transient context. Its pointer fields are rebound per
 // site, while construction/defaulting of the full packet is not paid again.
-void run_call(const Program::Call& call, double* reg, KernelCtx& ctx);
+void run_call(const Program::Call& call, double* reg, KernelCtx& ctx,
+              EvalState* state);
 
 // Run `p` over `reg`, which the caller has seeded and sized to at least
 // p.n_regs. The compilers guarantee every register is written before it is
@@ -311,7 +316,7 @@ struct ProgramCallCtx<true> {
 };
 
 template <bool ReuseCallCtx, typename T>
-void run_program_impl(const Program& p, T* reg) {
+void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
   using VecT = Eigen::Matrix<T, Eigen::Dynamic, 1>;
   ProgramCallCtx<ReuseCallCtx> call_ctx;
   const int64_t n = (int64_t)p.code.size();
@@ -589,9 +594,9 @@ void run_program_impl(const Program& p, T* reg) {
       case Program::CALL:
         if constexpr (std::is_same_v<T, double>) {
           if constexpr (ReuseCallCtx)
-            run_call(p.calls[(size_t)I.a], reg, call_ctx.ctx);
+            run_call(p.calls[(size_t)I.a], reg, call_ctx.ctx, state);
           else
-            run_call(p.calls[(size_t)I.a], reg);
+            run_call(p.calls[(size_t)I.a], reg, state);
         } else {
           // Kernels are double machinery; a program that reaches here
           // under var was carved wrong, and saying so beats corrupting
@@ -629,19 +634,20 @@ void run_program_impl(const Program& p, T* reg) {
 }
 
 template <typename T>
-void run_program(const Program& p, T* reg) {
+void run_program(const Program& p, T* reg, EvalState* state = nullptr) {
   if constexpr (std::is_same_v<T, double>) {
     if (!p.calls.empty()) {
-      run_program_impl<true>(p, reg);
+      run_program_impl<true>(p, reg, state);
       return;
     }
   }
-  run_program_impl<false>(p, reg);
+  run_program_impl<false>(p, reg, state);
 }
 
 template <typename T>
-inline void run_program(const Program& p, std::vector<T>& reg) {
-  run_program(p, reg.data());
+inline void run_program(const Program& p, std::vector<T>& reg,
+                        EvalState* state = nullptr) {
+  run_program(p, reg.data(), state);
 }
 
 }  // namespace stanli

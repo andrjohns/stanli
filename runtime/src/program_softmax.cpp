@@ -143,7 +143,7 @@ void island_softmax3_fwd(KernelCtx& ctx) {
     for (int i = 0; i < li.len; ++i)
       ctx.scratch[li.reg + i] = ctx.in[input].data[li.offset + i];
   }
-  run_program_impl<true>(optimized, ctx.scratch);
+  run_program_impl<true>(optimized, ctx.scratch, ctx.eval_state);
   for (size_t m = 0; m < p.out_regs.size(); ++m)
     ctx.out.data[m] = ctx.scratch[p.out_regs[m]];
 }

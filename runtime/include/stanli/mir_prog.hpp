@@ -21,7 +21,9 @@
 #define STANLI_MIR_PROG_HPP
 
 #include <stanli/mir.hpp>
+#include <stanli/optable.hpp>
 #include <stanli/program.hpp>
+#include <stanli/rng_family.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -97,6 +99,10 @@ struct ProgramCompiler {
   // the region's, which is what makes them the caller's to answer about --
   // being in `reals` only says the region has read one as a value.
   std::set<std::string> extern_bound;
+  // Whether this region belongs to generated quantities. Only there is an
+  // RNG draw legal, and only there is a program guaranteed never to be
+  // replayed under var -- which is what lets it hold a CALL at all.
+  bool in_write_array = false;
   int branch_depth = 0;  // inside a branch on a runtime value
   // A while is a genuinely runtime loop: its condition and state must be
   // evaluated again on every trip, rather than folded once while the program
@@ -1373,6 +1379,90 @@ struct ProgramCompiler {
     return out;
   }
 
+  // Every RNG spelling the region can carry, which is exactly the set the
+  // graph's OP_RNG kernel speaks.
+  static bool rng_call_name(const std::string& name) {
+    return scalar_rng_family(name) != nullptr || name == "categorical_rng" ||
+           name == "multi_normal_rng" || name == "dirichlet_rng";
+  }
+
+  // A draw inside a runtime-control region, spelled as one Program::CALL on
+  // the graph's own OP_RNG kernel rather than transcribed family by family.
+  // The stream, the stan-math call and the argument contract are then the
+  // kernel's, so the region and the graph cannot disagree about what a draw
+  // is or where in the stream it lands. CALL is double-only, which is the
+  // right constraint here rather than a limitation: generated quantities
+  // never runs a gradient, and OP_RNG has no backward for the carver to
+  // generate one from, so the island keeps the replay it will never use.
+  Range rng_call(const mir::Expr& e) {
+    if (!in_write_array)
+      bail(e.name + " is supported only in generated quantities");
+    std::vector<Range> args;
+    args.reserve(e.args.size());
+    for (const mir::Expr& a : e.args) args.push_back(expr(a));
+
+    uint8_t variant = 0;
+    int out_len = 1;
+    ViewKind out_kind = ViewKind::Flat;
+    std::vector<int> idata;
+    if (const ScalarRng* family = scalar_rng_family(e.name)) {
+      // An integer draw is runtime geometry: a size, an index or a branch
+      // condition the region has no way to know. That is the interpreter's
+      // remit, so leave the whole tranche there rather than quietly serving
+      // one out of a double register.
+      if (scalar_rng_is_int(*family))
+        bail(e.name + ": an integer draw stays on WaInterp");
+      if (args.size() != scalar_rng_arity(*family))
+        bail(e.name + ": wrong number of arguments");
+      for (const Range& a : args)
+        if (!is_scalar(a))
+          bail(e.name + ": container arguments stay on WaInterp");
+      variant = static_cast<uint8_t>(*family);
+    } else if (e.name == "categorical_rng") {
+      bail("categorical_rng: an integer draw stays on WaInterp");
+    } else if (e.name == "dirichlet_rng") {
+      if (args.size() != 1 || args[0].kind != ViewKind::Vector ||
+          args[0].len <= 0)
+        bail("dirichlet_rng: expected one concentration vector");
+      variant = kDirichletRngVariant;
+      out_len = args[0].len;
+      out_kind = ViewKind::Vector;
+    } else {
+      if (args.size() != 2 || args[0].kind != ViewKind::Vector ||
+          args[1].kind != ViewKind::Matrix)
+        bail(
+            "multi_normal_rng: expected a location vector and a covariance "
+            "matrix");
+      if (args[1].rows != args[0].len || args[1].cols != args[0].len)
+        bail("multi_normal_rng: covariance shape must match the location");
+      variant = kMultiNormalRngVariant;
+      out_len = args[0].len;
+      out_kind = ViewKind::Vector;
+      idata.push_back(out_len);
+    }
+
+    // Fresh registers, so the result cannot alias an argument -- which the
+    // kernel would otherwise have to be written to tolerate.
+    const int r = alloc(out_len);
+    Program::Call call;
+    call.opcode = OP_RNG;
+    call.variant = variant;
+    call.n_in = (int8_t)args.size();
+    for (size_t k = 0; k < args.size(); ++k) {
+      call.in[k] = args[k].reg;
+      call.in_len[k] = args[k].len;
+    }
+    call.out = r;
+    call.out_len = out_len;
+    call.idata = std::move(idata);
+    if (!bind_call(call)) bail("the RNG kernel is unavailable");
+    p.calls.push_back(std::move(call));
+    p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});
+    Range out{r, out_len};
+    out.kind = out_kind;
+    return out;
+  }
+
   Range matrix_gram(const Range& m, bool transpose_first) {
     if (m.kind != ViewKind::Matrix)
       bail(std::string(transpose_first ? "crossprod" : "tcrossprod") +
@@ -1466,6 +1556,7 @@ struct ProgramCompiler {
       out.cols = value.rows;
       return out;
     }
+    if (rng_call_name(e.name)) return rng_call(e);
     if (e.name == "tcrossprod" && e.args.size() == 1)
       return matrix_gram(expr(e.args[0]), false);
     if (e.name == "crossprod" && e.args.size() == 1)

@@ -20,7 +20,7 @@ namespace stanli {
 namespace {
 
 void rng_fwd(KernelCtx& ctx) {
-  if (ctx.variant > static_cast<uint8_t>(ScalarRng::BetaBinomial) &&
+  if (ctx.variant > static_cast<uint8_t>(ScalarRng::Exponential) &&
       ctx.variant != kCategoricalRngVariant &&
       ctx.variant != kMultiNormalRngVariant &&
       ctx.variant != kDirichletRngVariant)

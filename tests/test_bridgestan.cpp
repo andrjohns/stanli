@@ -486,9 +486,9 @@ void test_constrain_compiled_rng() {
     return;
   }
   expect_eq_str("compiled scalar RNG names", bs_param_names(m, true, true),
-                "x,p,u,b,n,l,k,gm");
-  if (bs_param_num(m, true, true) != 8) {
-    fail("compiled scalar RNG column count is not eight");
+                "x,p,u,b,n,l,k,gm,ex");
+  if (bs_param_num(m, true, true) != 9) {
+    fail("compiled scalar RNG column count is not nine");
     bs_model_destruct(m);
     return;
   }

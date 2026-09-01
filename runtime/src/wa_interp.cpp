@@ -12,10 +12,27 @@
 
 namespace stanli {
 
+const ScalarRng* scalar_rng_family(const std::string& name) {
+  static const std::map<std::string, ScalarRng> kFamilies = {
+      {"poisson_log_rng", ScalarRng::PoissonLog},
+      {"uniform_rng", ScalarRng::Uniform},
+      {"bernoulli_rng", ScalarRng::Bernoulli},
+      {"normal_rng", ScalarRng::Normal},
+      {"lognormal_rng", ScalarRng::Lognormal},
+      {"binomial_rng", ScalarRng::Binomial},
+      {"gumbel_rng", ScalarRng::Gumbel},
+      {"beta_binomial_rng", ScalarRng::BetaBinomial},
+      {"exponential_rng", ScalarRng::Exponential},
+  };
+  const auto found = kFamilies.find(name);
+  return found == kFamilies.end() ? nullptr : &found->second;
+}
+
 size_t scalar_rng_arity(ScalarRng family) {
   switch (family) {
     case ScalarRng::PoissonLog:
     case ScalarRng::Bernoulli:
+    case ScalarRng::Exponential:
       return 1;
     case ScalarRng::Uniform:
     case ScalarRng::Normal:
@@ -58,6 +75,8 @@ double scalar_rng_draw(ScalarRng family, const double* args, size_t nargs,
     case ScalarRng::BetaBinomial:
       return static_cast<double>(stan::math::beta_binomial_rng(
           static_cast<int>(args[0]), args[1], args[2], g));
+    case ScalarRng::Exponential:
+      return stan::math::exponential_rng(args[0], g);
   }
   throw std::logic_error("unknown scalar RNG family");
 }
@@ -530,7 +549,8 @@ bool WaInterp::rng_fun(MirInterp<double>& in, const mir::Expr& e,
     } else if (base == "beta") {
       v = stan::math::beta_rng(sc(0, i), sc(1, i), g);
     } else if (base == "exponential") {
-      v = stan::math::exponential_rng(sc(0, i), g);
+      const double args[] = {sc(0, i)};
+      v = scalar_rng_draw(ScalarRng::Exponential, args, 1, rng);
     } else if (base == "chi_square") {
       v = stan::math::chi_square_rng(sc(0, i), g);
     } else if (base == "cauchy") {

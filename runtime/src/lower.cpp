@@ -2108,6 +2108,7 @@ struct Lowering {
                     Range* expr_out, std::shared_ptr<IslandProg>* prog_out) {
     auto prog = std::make_shared<IslandProg>();
     ProgramCompiler c{*prog, fun_defs};
+    c.in_write_array = in_write_array;
     // Non-returning statement calls may print or reject. A register program
     // would replay them during reverse mode, so ProgramCompiler refuses them
     // until necessity islands have an execute-once effect path.
@@ -3379,21 +3380,11 @@ struct Lowering {
   }
 
   std::optional<Val> lower_scalar_rng(const mir::Expr& e) {
-    static const std::map<std::string, ScalarRng> kFamilies = {
-        {"poisson_log_rng", ScalarRng::PoissonLog},
-        {"uniform_rng", ScalarRng::Uniform},
-        {"bernoulli_rng", ScalarRng::Bernoulli},
-        {"normal_rng", ScalarRng::Normal},
-        {"lognormal_rng", ScalarRng::Lognormal},
-        {"binomial_rng", ScalarRng::Binomial},
-        {"gumbel_rng", ScalarRng::Gumbel},
-        {"beta_binomial_rng", ScalarRng::BetaBinomial},
-    };
-    const auto found = kFamilies.find(e.name);
-    if (found == kFamilies.end()) return std::nullopt;
+    const ScalarRng* found = scalar_rng_family(e.name);
+    if (found == nullptr) return std::nullopt;
     if (!in_write_array)
       fail(e.name + " is supported only in generated quantities", e.raw);
-    const ScalarRng family = found->second;
+    const ScalarRng family = *found;
     const size_t arity = scalar_rng_arity(family);
     if (e.args.size() != arity || e.unsized.depth != 0)
       fail(e.name + ": expected scalar result and " + std::to_string(arity) +

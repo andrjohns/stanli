@@ -517,6 +517,150 @@ void test_compiled_extra_rng() {
   }
 }
 
+// RNG draws inside a runtime-control region: the section compiles to the
+// register machine, which runs the graph's own OP_RNG kernel through
+// Program::CALL. The interpreter is the reference for what the section used
+// to do -- same draws, same order, same positions in one stream -- and
+// stan-math for what each draw is.
+void test_compiled_region_rng() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("K", 3);
+  const std::string text = slurp("tests/fixtures/gqrngregion.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf(
+        "FAIL gqrngregion did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+  expect_eq("gqrngregion columns", joined(cm.write_array->columns),
+            "sigma,e,n,d.1,d.2,d.3,mn.1,mn.2,mn.3,i");
+
+  const double sigma = 1.4;
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  wex.params_data()[0] = std::log(sigma);  // sigma's unconstrained form
+  WaRng graph_rng(11);
+  wex.run_forward_only(EvalState{&graph_rng});
+  std::vector<double> row;
+  for (const auto& c : cm.write_array->columns) {
+    const double* p = wex.value_ptr(c.slot);
+    for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+  }
+
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  base["K"] = data.at("K");
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry sig;
+  sig.r = {sigma};
+  params["sigma"] = sig;
+  WaRng interp_rng(11);
+  const std::vector<double> interp_row = wi.eval(params, interp_rng);
+  if (row != interp_row) {
+    ++failures;
+    std::printf("FAIL gqrngregion: graph and interpreter rows differ\n");
+  }
+  if (row.size() != 10) {
+    ++failures;
+    std::printf("FAIL gqrngregion: row size %zu\n", row.size());
+    return;
+  }
+
+  WaRng ref(11);
+  auto& g = ref.gen();
+  const double want_e = stan::math::exponential_rng(sigma, g);
+  const double want_n = stan::math::normal_rng(0.5, sigma, g);
+  const Eigen::VectorXd want_d =
+      stan::math::dirichlet_rng(Eigen::VectorXd::Constant(3, 1.5), g);
+  const Eigen::VectorXd want_mn = stan::math::multi_normal_rng(
+      Eigen::VectorXd::Constant(3, 0.25),
+      Eigen::MatrixXd(Eigen::VectorXd::Constant(3, sigma).asDiagonal()), g);
+
+  auto expect_val = [&](const char* what, double got, double want) {
+    if (got != want) {
+      ++failures;
+      std::printf("FAIL gqrngregion %s: got %.17g want %.17g\n", what, got,
+                  want);
+    }
+  };
+  expect_val("sigma passthrough", row[0], sigma);
+  expect_val("exponential draw", row[1], want_e);
+  expect_val("normal draw", row[2], want_n);
+  for (int i = 0; i < 3; ++i) {
+    expect_val("dirichlet draw", row[(size_t)(3 + i)], want_d[i]);
+    expect_val("multi_normal draw", row[(size_t)(6 + i)], want_mn[i]);
+  }
+  // The loop counter is a generated quantity like any other, and the region
+  // has to carry its final value out rather than the initializer.
+  expect_val("loop counter", row[9], 2.0);
+}
+
+// The same, with a region whose inputs are all data -- exactly what constant
+// folding looks for. Folding an effect would run it once while compiling and
+// hand every later evaluation the same stored number, so check end to end
+// that two draws stay two draws and two rows stay two rows.
+void test_region_rng_is_not_folded() {
+  using namespace stanli;
+  DataMap data = DataMap::from_json_file("tests/fixtures/gqrngfold.json");
+  const std::string text = slurp("tests/fixtures/gqrngfold.tmir.sexp");
+  CompiledModel cm = compile_model(text, data);
+  if (!cm.write_array || cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf(
+        "FAIL gqrngfold did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  WaRng rng(5);
+  const auto draw_row = [&]() {
+    wex.run_forward_only(EvalState{&rng});
+    std::vector<double> row;
+    for (const auto& c : cm.write_array->columns) {
+      const double* p = wex.value_ptr(c.slot);
+      for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+    }
+    return row;
+  };
+  const std::vector<double> first = draw_row();
+  const std::vector<double> second = draw_row();
+
+  WaRng ref(5);
+  auto& g = ref.gen();
+  auto expect_val = [&](const char* what, double got, double want) {
+    if (got != want) {
+      ++failures;
+      std::printf("FAIL gqrngfold %s: got %.17g want %.17g\n", what, got, want);
+    }
+  };
+  for (const std::vector<double>* row : {&first, &second}) {
+    expect_val("d1", (*row)[0], stan::math::exponential_rng(2.0, g));
+    expect_val("d2", (*row)[1], stan::math::exponential_rng(2.0, g));
+  }
+  // Stated directly as well as through stan-math: a folded region would
+  // repeat one stored value in both columns of both rows.
+  if (first[0] == first[1] || first == second) {
+    ++failures;
+    std::printf("FAIL gqrngfold: the region's draws were folded away\n");
+  }
+}
+
 // neg_binomial_2_lpmf and multi_normal_lpdf as value-returning densities in
 // a runtime-control region: no graph opcode, so the whole section runs on
 // WaInterp. Check the accumulated values against stan-math directly.
@@ -2140,12 +2284,12 @@ void test_compiled_scalar_rng() {
   int rng_ops = 0;
   for (const Op& op : cm.write_array->graph.ops)
     if (op.opcode == OP_RNG) ++rng_ops;
-  if (rng_ops != 7) {
+  if (rng_ops != 8) {
     ++failures;
-    std::printf("FAIL scalar rng: got %d OP_RNG, want 7\n", rng_ops);
+    std::printf("FAIL scalar rng: got %d OP_RNG, want 8\n", rng_ops);
   }
   expect_eq("scalar rng columns", joined(cm.write_array->columns),
-            "x,p,u,b,n,l,k,gm");
+            "x,p,u,b,n,l,k,gm,ex");
 
   Executor wex(std::move(cm.write_array->graph));
   cm.write_array->bind(wex);
@@ -4087,6 +4231,8 @@ int main() {
   test_gq_name_shadowing();
   test_interpreted_gq();
   test_compiled_extra_rng();
+  test_compiled_region_rng();
+  test_region_rng_is_not_folded();
   test_interpreted_gq_densities();
   test_compiled_multiply_lower_tri();
   test_constant_folded_gq_column();
