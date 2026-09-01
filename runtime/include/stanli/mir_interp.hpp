@@ -2334,9 +2334,8 @@ class MirInterp {
       if (layout.kind == ExpressionLayout::Kind::Direct &&
           layout.element_offset != 0) {
         if constexpr (std::is_same_v<T, double>) {
-          std::vector<double> scratch(extrema_phase_scratch(a.r.size()));
           r.r = {prod_phased(a.r.data(), static_cast<int64_t>(a.r.size()),
-                             layout.element_offset, scratch.data())};
+                             layout.element_offset)};
           return r;
         }
         T product = T(1.0);
@@ -2586,11 +2585,9 @@ class MirInterp {
         if (layout.kind == ExpressionLayout::Kind::Direct &&
             layout.element_offset != 0) {
           if constexpr (std::is_same_v<T, double>) {
-            std::vector<double> scratch(extrema_phase_scratch(a.r.size()));
             r.r = {T(extrema_phased(
                 a.r.data(), static_cast<int64_t>(a.r.size()),
-                layout.element_offset, native.kind == mir::ExtremaKind::Max,
-                scratch.data()))};
+                layout.element_offset, native.kind == mir::ExtremaKind::Max))};
             return r;
           }
         }

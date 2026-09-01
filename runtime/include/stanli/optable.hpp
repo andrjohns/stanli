@@ -827,14 +827,8 @@ struct Kernel {
   // Reads ctx.out_adj / out_adj_vec (+ values, scratch), accumulates into
   // ctx.in_adj entries whose data is non-null.
   void (*backward)(KernelCtx&) = nullptr;
-  // Scratch doubles whose contents must survive from forward to backward,
-  // given bound slot shapes. Null means zero.
+  // Scratch doubles needed, given bound slot shapes. Null means zero.
   int64_t (*scratch_size)(const Op&, const Slot* slots) = nullptr;
-  // Scratch used only during a single forward call. Executor operations are
-  // sequential, so all such kernels share one max-sized region instead of
-  // retaining the sum for the executor's lifetime. Backward must not read
-  // this storage, and a variant must not ask for both scratch kinds.
-  int64_t (*transient_scratch_size)(const Op&, const Slot* slots) = nullptr;
 };
 
 // The most common Kernel::scratch_size shape: one scratch double per

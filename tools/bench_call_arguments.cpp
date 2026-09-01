@@ -1,5 +1,5 @@
 // Developer benchmark for argument acquisition during lowering and for the
-// exact-grouping write_array reductions that use transient scratch. Example:
+// exact-grouping write_array reductions. Example:
 //   build/bench_call_arguments prep \
 //     tests/fixtures/call_argument_cache.tmir.sexp 1000000 11 1
 //   build/bench_call_arguments reduce \

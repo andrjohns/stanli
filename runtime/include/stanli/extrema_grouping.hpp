@@ -9,64 +9,82 @@
 
 namespace stanli {
 
-// Bytes Eigen wants a double packet aligned to, or zero when this build has
-// no packet reduction for double.
-inline constexpr std::uintptr_t extrema_packet_alignment() {
-  return static_cast<std::uintptr_t>(
-      Eigen::internal::unpacket_traits<
-          typename Eigen::internal::packet_traits<double>::type>::alignment);
-}
-
 // Number of doubles by which a contiguous view's offset changes the first
 // aligned packet. One means every offset is already lane zero.
 inline constexpr int64_t extrema_phase_modulus() {
-  return extrema_packet_alignment() > sizeof(double)
-             ? static_cast<int64_t>(extrema_packet_alignment() / sizeof(double))
+  using Packet = typename Eigen::internal::packet_traits<double>::type;
+  constexpr int64_t alignment =
+      Eigen::internal::unpacket_traits<Packet>::alignment;
+  return alignment > static_cast<int64_t>(sizeof(double))
+             ? alignment / static_cast<int64_t>(sizeof(double))
              : 1;
 }
 
-inline int64_t extrema_phase_scratch(int64_t len) {
-  return len + 2 * extrema_phase_modulus() + 1;
+// Replay Eigen's LinearVectorizedTraversal using the packet phase of a view
+// beginning `offset` elements into an aligned owning container. Unaligned
+// loads let us retain that grouping without first copying the values to a
+// similarly phased address.
+template <typename Func>
+inline double reduce_phased(const double* data, int64_t len, int64_t offset,
+                            const Func& func) {
+  using Packet = typename Eigen::internal::packet_traits<double>::type;
+  constexpr int64_t packet_size =
+      Eigen::internal::unpacket_traits<Packet>::size;
+  constexpr int64_t phase_modulus = extrema_phase_modulus();
+
+  int64_t aligned_start =
+      (phase_modulus - offset % phase_modulus) % phase_modulus;
+  if (aligned_start >= len) aligned_start = len;
+  const int64_t aligned_size2 =
+      ((len - aligned_start) / (2 * packet_size)) * (2 * packet_size);
+  const int64_t aligned_size =
+      ((len - aligned_start) / packet_size) * packet_size;
+  const int64_t aligned_end2 = aligned_start + aligned_size2;
+  const int64_t aligned_end = aligned_start + aligned_size;
+
+  if (aligned_size == 0) {
+    double result = data[0];
+    for (int64_t i = 1; i < len; ++i) result = func(result, data[i]);
+    return result;
+  }
+
+  Packet packet0 = Eigen::internal::ploadu<Packet>(data + aligned_start);
+  if (aligned_size > packet_size) {
+    Packet packet1 =
+        Eigen::internal::ploadu<Packet>(data + aligned_start + packet_size);
+    for (int64_t i = aligned_start + 2 * packet_size; i < aligned_end2;
+         i += 2 * packet_size) {
+      packet0 =
+          func.packetOp(packet0, Eigen::internal::ploadu<Packet>(data + i));
+      packet1 = func.packetOp(
+          packet1, Eigen::internal::ploadu<Packet>(data + i + packet_size));
+    }
+    packet0 = func.packetOp(packet0, packet1);
+    if (aligned_end > aligned_end2)
+      packet0 = func.packetOp(
+          packet0, Eigen::internal::ploadu<Packet>(data + aligned_end2));
+  }
+
+  double result = func.predux(packet0);
+  for (int64_t i = 0; i < aligned_start; ++i) result = func(result, data[i]);
+  for (int64_t i = aligned_end; i < len; ++i) result = func(result, data[i]);
+  return result;
 }
 
-// Put values at the same packet phase as a view beginning `offset` elements
-// into an aligned owning Eigen container, then let Stan Math perform the
-// reduction. The caller supplies extrema_phase_scratch(len) doubles.
 inline double extrema_phased(const double* data, int64_t len, int64_t offset,
-                             bool maximum, double* scratch) {
-  const int64_t modulus = extrema_phase_modulus();
-  if (modulus <= 1 || scratch == nullptr) {
-    const Eigen::Map<const Eigen::VectorXd> input(data, len);
-    return maximum ? stan::math::max(input) : stan::math::min(input);
-  }
-  double* aligned = scratch;
-  while (reinterpret_cast<std::uintptr_t>(aligned) %
-             extrema_packet_alignment() !=
-         0)
-    ++aligned;
-  double* phased = aligned + offset % modulus;
-  for (int64_t i = 0; i < len; ++i) phased[i] = data[i];
-  const Eigen::Map<const Eigen::VectorXd> input(phased, len);
-  return maximum ? stan::math::max(input) : stan::math::min(input);
+                             bool maximum) {
+  if (maximum)
+    return reduce_phased(
+        data, len, offset,
+        Eigen::internal::scalar_max_op<double, double, Eigen::PropagateFast>());
+  return reduce_phased(
+      data, len, offset,
+      Eigen::internal::scalar_min_op<double, double, Eigen::PropagateFast>());
 }
 
-// Product analogue of extrema_phased. The caller supplies the same sized
-// replay buffer so executor-driven products do not allocate per evaluation.
-inline double prod_phased(const double* data, int64_t len, int64_t offset,
-                          double* scratch) {
-  if (extrema_phase_modulus() <= 1 || scratch == nullptr) {
-    const Eigen::Map<const Eigen::VectorXd> input(data, len);
-    return stan::math::prod(input);
-  }
-  double* aligned = scratch;
-  while (reinterpret_cast<std::uintptr_t>(aligned) %
-             extrema_packet_alignment() !=
-         0)
-    ++aligned;
-  double* phased = aligned + offset % extrema_phase_modulus();
-  for (int64_t i = 0; i < len; ++i) phased[i] = data[i];
-  const Eigen::Map<const Eigen::VectorXd> input(phased, len);
-  return stan::math::prod(input);
+inline double prod_phased(const double* data, int64_t len, int64_t offset) {
+  return reduce_phased(data, len, offset,
+                       Eigen::internal::scalar_product_op<double, double>());
 }
 
 }  // namespace stanli

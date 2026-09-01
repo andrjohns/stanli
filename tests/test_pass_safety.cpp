@@ -449,7 +449,7 @@ static void test_product_pass_barrier() {
   expect("product has a backward kernel",
          find_kernel(OP_PROD_VEC) != nullptr &&
              kernel(OP_PROD_VEC).backward != nullptr &&
-             kernel(OP_PROD_VEC).transient_scratch_size != nullptr);
+             kernel(OP_PROD_VEC).scratch_size == nullptr);
   expect("product is absent from value-free backward traits",
          !backward_ignores_values(OP_PROD_VEC));
   expect("product survives constfold with parameter input",
@@ -506,10 +506,9 @@ static void test_extrema_pass_barrier() {
     island_ops += op.opcode == OP_ISLAND;
   }
   const Kernel* extrema = find_kernel(OP_EXTREMA_VEC);
-  expect("extrema has a backward kernel",
-         extrema != nullptr && extrema->backward != nullptr &&
-             extrema->scratch_size != nullptr &&
-             extrema->transient_scratch_size != nullptr);
+  expect("extrema has a backward kernel", extrema != nullptr &&
+                                              extrema->backward != nullptr &&
+                                              extrema->scratch_size != nullptr);
   expect("extrema is absent from value-free backward traits",
          !backward_ignores_values(OP_EXTREMA_VEC));
   expect("extrema survives constfold with parameter input",

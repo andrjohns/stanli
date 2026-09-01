@@ -2465,12 +2465,9 @@ void test_product_exact_grouping() {
   }
 
   const Kernel& product = kernel(OP_PROD_VEC);
-  if (product.backward == nullptr ||
-      product.transient_scratch_size == nullptr) {
+  if (product.backward == nullptr || product.scratch_size != nullptr) {
     ++failures;
-    std::printf(
-        "FAIL product kernel has no differentiable/transient-scratch "
-        "implementation\n");
+    std::printf("FAIL product kernel implementation contract\n");
   }
 
   const double denorm = std::numeric_limits<double>::denorm_min();
@@ -2715,28 +2712,32 @@ void test_reduction_view_grouping() {
   // A graph value has already been materialized, so the reduction opcode
   // carries the source view's phase explicitly. Compare both native kernels
   // with Stan Math reducing the original Eigen segment.
-  for (int n = 1; n <= 2 * phase_modulus + 3; ++n) {
+  for (int n = 1; n <= 257; ++n) {
     for (int offset = 0; offset < phase_modulus; ++offset) {
-      Eigen::VectorXd base(offset + n + 2);
-      for (int i = 0; i < base.size(); ++i)
-        base[i] = tie_pool[i % tie_pool_size];
-      const Eigen::VectorXd owned = base.segment(offset, n);
-      const double product_want = stan::math::prod(base.segment(offset, n));
-      const double extrema_wants[] = {stan::math::min(base.segment(offset, n)),
-                                      stan::math::max(base.segment(offset, n))};
+      Eigen::VectorXd product_base(offset + n + 2);
+      Eigen::VectorXd extrema_base(offset + n + 2);
+      for (int i = 0; i < product_base.size(); ++i) {
+        const int centered = (i * 37 + n * 11) % 29 - 14;
+        product_base[i] = 1.0 + centered * 0x1p-16;
+        extrema_base[i] = tie_pool[i % tie_pool_size];
+      }
+      const Eigen::VectorXd product_owned = product_base.segment(offset, n);
+      const Eigen::VectorXd extrema_owned = extrema_base.segment(offset, n);
+      const double product_want =
+          stan::math::prod(product_base.segment(offset, n));
+      const double extrema_wants[] = {
+          stan::math::min(extrema_base.segment(offset, n)),
+          stan::math::max(extrema_base.segment(offset, n))};
 
       int phase = offset;
       double product_got = 0.0;
-      std::vector<double> product_scratch(
-          static_cast<size_t>(extrema_phase_scratch(n)));
       KernelCtx product_ctx;
       product_ctx.n_in = 1;
-      product_ctx.in[0] = Desc{const_cast<double*>(owned.data()), n};
+      product_ctx.in[0] = Desc{const_cast<double*>(product_owned.data()), n};
       product_ctx.out = Desc{&product_got, 1};
       product_ctx.variant = 4;
       product_ctx.idata = &phase;
       product_ctx.n_idata = 1;
-      product_ctx.scratch = product_scratch.data();
       product.forward(product_ctx);
       if (!same_reduction_value(product_got, product_want)) {
         ++failures;
@@ -2745,16 +2746,13 @@ void test_reduction_view_grouping() {
 
       for (int maximum = 0; maximum < 2; ++maximum) {
         double got = 0.0;
-        std::vector<double> scratch(
-            static_cast<size_t>(extrema_phase_scratch(n)));
         KernelCtx ctx;
         ctx.n_in = 1;
-        ctx.in[0] = Desc{const_cast<double*>(owned.data()), n};
+        ctx.in[0] = Desc{const_cast<double*>(extrema_owned.data()), n};
         ctx.out = Desc{&got, 1};
         ctx.variant = static_cast<uint8_t>(maximum | 4);
         ctx.idata = &phase;
         ctx.n_idata = 1;
-        ctx.scratch = scratch.data();
         extrema.forward(ctx);
         if (!same_reduction_value(got, extrema_wants[maximum])) {
           ++failures;
@@ -2852,36 +2850,6 @@ void test_reduction_view_grouping() {
       std::printf(
           "FAIL gathered extrema adjoint did not route through gather\n");
     }
-  }
-}
-
-void test_reduction_transient_scratch_reuse() {
-  using namespace stanli;
-  constexpr int n_product = 17;
-  constexpr int n_extrema = 29;
-  Graph graph;
-  const int product_input = graph.add_slot(n_product, true);
-  const int phased_extrema_input = graph.add_slot(n_extrema, true);
-  const int regular_extrema_input = graph.add_slot(5, true);
-  const int product_output = graph.add_slot(1, false);
-  const int phased_extrema_output = graph.add_slot(1, false);
-  const int regular_extrema_output = graph.add_slot(1, false);
-  graph.add_op(OP_PROD_VEC, {product_input}, product_output, {1});
-  graph.ops.back().variant = 4;
-  graph.add_op(OP_EXTREMA_VEC, {phased_extrema_input}, phased_extrema_output,
-               {2});
-  graph.ops.back().variant = 5;
-  graph.add_op(OP_EXTREMA_VEC, {regular_extrema_input}, regular_extrema_output);
-  graph.result_slot = regular_extrema_output;
-
-  Executor executor(std::move(graph));
-  const int64_t want = 1 + std::max(extrema_phase_scratch(n_product),
-                                    extrema_phase_scratch(n_extrema));
-  if (executor.scratch_storage_size() != want) {
-    ++failures;
-    std::printf("FAIL reduction scratch reuse: got %lld want %lld\n",
-                static_cast<long long>(executor.scratch_storage_size()),
-                static_cast<long long>(want));
   }
 }
 
@@ -3172,8 +3140,7 @@ void test_matrix_transpose_extrema_fallback() {
 void test_extrema_exact_grouping() {
   using namespace stanli;
   const Kernel& extrema = kernel(OP_EXTREMA_VEC);
-  if (extrema.backward == nullptr || extrema.scratch_size == nullptr ||
-      extrema.transient_scratch_size == nullptr) {
+  if (extrema.backward == nullptr || extrema.scratch_size == nullptr) {
     ++failures;
     std::printf("FAIL extrema kernel has no differentiable implementation\n");
   }
@@ -4812,7 +4779,6 @@ int main() {
   test_compiled_scalar_rng();
   test_product_exact_grouping();
   test_reduction_view_grouping();
-  test_reduction_transient_scratch_reuse();
   test_layout_materialization_boundaries();
   test_main_index_layout_metadata();
   test_matrix_transpose_extrema_fallback();

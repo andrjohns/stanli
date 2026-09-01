@@ -170,9 +170,7 @@ void prod_vec_fwd(KernelCtx& ctx) {
   assert((ctx.variant & 6u) != 6u);
   if (ctx.variant & 4u) {
     assert(ctx.idata != nullptr && ctx.n_idata == 1);
-    assert(ctx.scratch != nullptr);
-    ctx.out.data[0] =
-        prod_phased(ctx.in[0].data, ctx.in[0].len, ctx.idata[0], ctx.scratch);
+    ctx.out.data[0] = prod_phased(ctx.in[0].data, ctx.in[0].len, ctx.idata[0]);
   } else if (ctx.variant & 3u) {
     double product = ctx.in[0].data[0];
     for (int64_t i = 1; i < ctx.in[0].len; ++i) product *= ctx.in[0].data[i];
@@ -222,8 +220,8 @@ void extrema_vec_fwd(KernelCtx& ctx) {
   }
   if (ctx.variant & 4u) {
     assert(ctx.idata != nullptr && ctx.n_idata == 1);
-    ctx.out.data[0] = extrema_phased(ctx.in[0].data, ctx.in[0].len,
-                                     ctx.idata[0], maximum, ctx.scratch);
+    ctx.out.data[0] =
+        extrema_phased(ctx.in[0].data, ctx.in[0].len, ctx.idata[0], maximum);
     return;
   }
   if (ctx.variant & 2u) {
@@ -270,23 +268,12 @@ void extrema_vec_bwd(KernelCtx& ctx) {
 
 int64_t scalar_scratch(const Op&, const Slot*) { return 1; }
 
-int64_t product_transient_scratch(const Op& op, const Slot* slots) {
-  if ((op.variant & 4u) == 0) return 0;
-  return extrema_phase_scratch(slots[op.in[0]].len);
-}
-
 // One selected coefficient for reverse mode. Phased reductions are emitted
-// only for the forward double path and use the executor's shared transient
-// region instead.
+// only for the forward double path.
 int64_t extrema_scratch(const Op& op, const Slot* slots) {
   (void)slots;
   if ((op.variant & 4u) != 0) return 0;
   return 1;
-}
-
-int64_t extrema_transient_scratch(const Op& op, const Slot* slots) {
-  if ((op.variant & 4u) == 0) return 0;
-  return extrema_phase_scratch(slots[op.in[0]].len);
 }
 
 // OP_INDEX: scalar out = in[flat], idata = {flat}. Backward scatters.
@@ -526,11 +513,9 @@ void register_elementwise_kernels() {
   register_kernel(OP_BCAST_FMA, Kernel{fma_fwd, fma_bwd, nullptr});
   register_kernel(OP_MATVEC, Kernel{matvec_fwd, matvec_bwd, nullptr});
   register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
-  register_kernel(OP_PROD_VEC, Kernel{prod_vec_fwd, prod_vec_bwd, nullptr,
-                                      product_transient_scratch});
+  register_kernel(OP_PROD_VEC, Kernel{prod_vec_fwd, prod_vec_bwd, nullptr});
   register_kernel(OP_EXTREMA_VEC,
-                  Kernel{extrema_vec_fwd, extrema_vec_bwd, extrema_scratch,
-                         extrema_transient_scratch});
+                  Kernel{extrema_vec_fwd, extrema_vec_bwd, extrema_scratch});
   register_kernel(OP_INDEX, Kernel{index_fwd, index_bwd, nullptr});
   register_kernel(OP_SET_INDEX, Kernel{set_index_fwd, set_index_bwd, nullptr});
   register_kernel(OP_SET_INDEX_INPLACE, Kernel{set_index_inplace_fwd,
