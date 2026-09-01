@@ -1852,7 +1852,8 @@ struct Lowering {
           check_index(ri, R, "matrix row", e.raw);
           check_index(cj, C, "matrix column", e.raw);
           const int64_t off = (cj - 1) * R + (ri - 1);
-          return emit_value(OP_SLICE_STRIDED, {base}, N, view_of(e.type_),
+          return emit_value(OP_SLICE_STRIDED, {base}, N,
+                            array_view({N}, ViewKind::Flat, base.si.param_free),
                             {(int)off, (int)(R * C)});
         }
         // Row of a column-major data matrix / 2-D array: strided slice.

@@ -2986,8 +2986,10 @@ int main() {
   }
 
   // beta[:, 1, 1]: an outer array range kept in full, with fixed row/column
-  // indices into every element's matrix (array[2] matrix[2,2]). Check both
-  // the gathered sum and every gradient against the var path.
+  // indices into every element's matrix (array[2] matrix[2,2]). The fixture
+  // binds the slice to an array local before summing it, so its logical array
+  // view is checked along with the value and every gradient against the var
+  // path.
   {
     DataMap d = DataMap::from_json(slurp("tests/fixtures/idxarray3d.json"));
     CompiledModel lm =

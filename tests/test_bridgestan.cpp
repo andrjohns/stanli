@@ -502,7 +502,7 @@ void test_constrain_compiled_rng() {
     bs_model_destruct(m);
     return;
   }
-  std::vector<double> a1(8), b1(8), a2(8), b2(8);
+  std::vector<double> a1(9), b1(9), a2(9), b2(9);
   const int a1rc = bs_param_constrain(m, true, true, q, a1.data(), a, &err);
   const int b1rc = bs_param_constrain(m, true, true, q, b1.data(), b, &err);
   const int a2rc = bs_param_constrain(m, true, true, q, a2.data(), a, &err);
