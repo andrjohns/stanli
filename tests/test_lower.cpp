@@ -3275,6 +3275,66 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // A container-valued normal_lpdf inside a data-dependent while loop
+  // (unsupported_normal_lpdf_container, verbatim): the loop forces the call
+  // through the register machine's runtime-control region compiler, whose
+  // DENSITY opcode only ever bound one scalar per argument. DENSITY_VEC adds
+  // the container form, calling stan-math's own vectorized normal_lpdf over
+  // an Eigen::Map per container argument -- the same call CmdStan's
+  // generated code makes -- rather than summing N scalar calls by hand,
+  // which would round differently. No parameters, so the model has one lp:
+  // N identical calls (the loop body does not touch y/mu/sigma), matched
+  // against N stan::math::normal_lpdf<false> calls over the same data.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/densityvec.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/densityvec.tmir.sexp"), d);
+    check(lm.n_unconstrained == 0, "densityvec 0 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    const double ky[] = {0.5, -1.2, 2.0};
+    const double kmu[] = {0.1, -0.3, 1.5};
+    const double ksigma[] = {1.0, 0.7, 2.2};
+    Eigen::Map<const Eigen::VectorXd> y(ky, 3);
+    Eigen::Map<const Eigen::RowVectorXd> mu(kmu, 3);
+    Eigen::Map<const Eigen::RowVectorXd> sigma(ksigma, 3);
+    const double reference = 3 * stan::math::normal_lpdf<false>(y, mu, sigma);
+    expect_eq("densityvec lp", lp, reference);
+  }
+
+  // The same, with a parameter feeding one container argument (`mu`, via
+  // `rep_row_vector`): DENSITY_VEC has to run correctly as var replay too,
+  // not just reproduce a data-only lp.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/densityvecgrad.json"));
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/densityvecgrad.tmir.sexp"), d);
+    check(count_opcode(lm, OP_ISLAND) >= 1, "densityvecgrad has an island");
+    check(lm.n_unconstrained == 1, "densityvecgrad 1 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    lex.params_data()[0] = 0.6;
+    double grad[1];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    const double ky[] = {0.5, -1.2, 2.0};
+    const double ksigma[] = {1.0, 0.7, 2.2};
+    Eigen::Map<const Eigen::VectorXd> y(ky, 3);
+    Eigen::Map<const Eigen::RowVectorXd> sigma(ksigma, 3);
+    var a = 0.6;
+    Eigen::Matrix<var, 1, -1> mu = Eigen::Matrix<var, 1, -1>::Constant(3, a);
+    var acc = 3 * stan::math::normal_lpdf<false>(y, mu, sigma) +
+              stan::math::std_normal_lpdf<true>(a);
+    acc.grad();
+    expect_eq("densityvecgrad lp", lp, acc.val());
+    expect_eq("densityvecgrad g0", grad[0], a.adj());
+    stan::math::recover_memory();
+  }
+
   // A parameter sized by a transformed-data for-loop accumulator
   // (sumnt2 += nts[i] * nts[i]) rather than a bare data value: the
   // transformed-data interpreter used to lose the accumulator's int-ness on

@@ -1870,21 +1870,63 @@ struct ProgramCompiler {
               "constant and is what the region can reproduce)");
         if ((int)e.args.size() != arity)
           bail(e.name + " takes " + std::to_string(arity) + " arguments here");
-        int argv[kMaxDensityArgs];
+        Range argv[kMaxDensityArgs];
+        bool any_container = false;
         for (int k = 0; k < arity; ++k) {
-          const Range a = expr(e.args[(size_t)k]);
-          // One lp per call: a vectorized density inside a branch would
-          // have to sum over its arguments, which this does not do.
-          if (!is_scalar(a)) bail(e.name + " on a container");
-          argv[k] = a.reg;
+          argv[k] = expr(e.args[(size_t)k]);
+          if (!is_scalar(argv[k])) any_container = true;
         }
+        if (any_container) {
+          // One propto-OFF call, vectorized the way CmdStan's generated
+          // code would call it (stan-math's own broadcasting over an
+          // Eigen::Map per container argument -- program_density_vec),
+          // not `len` scalar calls summed by hand, which would not sum in
+          // the same order. Every container argument recycles to the same
+          // length, Stan's own rule for a vectorized call; and the density
+          // has to be one whose partials tier already pays for the extra
+          // instantiations (program_density.cpp), the same affordability
+          // line the mask-dispatched partials draw.
+          int64_t len = 0;
+          bool ok = program_density_container_capable(dc);
+          for (int k = 0; ok && k < arity; ++k) {
+            const Range& a = argv[k];
+            if (is_scalar(a)) continue;
+            if (a.kind != ViewKind::Vector && a.kind != ViewKind::RowVector) {
+              ok = false;
+            } else if (a.len <= 0) {
+              ok = false;
+            } else if (len == 0) {
+              len = a.len;
+            } else if (len != a.len) {
+              ok = false;
+            }
+          }
+          if (!ok) bail(e.name + " on a container");
+          Program::VecDensity v;
+          v.density_id = (uint16_t)dc;
+          v.arity = (uint8_t)arity;
+          v.len = (int32_t)len;
+          for (int k = 0; k < arity; ++k) {
+            v.arg_reg[k] = argv[k].reg;
+            if (!is_scalar(argv[k])) v.container_mask |= (uint8_t)(1u << k);
+          }
+          const int r = alloc(1);
+          p.vec_densities.push_back(v);
+          p.code.push_back(Program::Instr{Program::DENSITY_VEC, r,
+                                          (int)p.vec_densities.size() - 1, 0, 0,
+                                          0});
+          return {r, 1};
+        }
+        int argv_reg[kMaxDensityArgs];
+        for (int k = 0; k < arity; ++k) argv_reg[k] = argv[k].reg;
         // Three arguments or fewer ride in the instruction; a fourth
         // needs the contiguous form, so copy them into a block.
-        int a0 = argv[0], a1 = arity > 1 ? argv[1] : 0;
-        int a2 = arity > 2 ? argv[2] : 0;
+        int a0 = argv_reg[0], a1 = arity > 1 ? argv_reg[1] : 0;
+        int a2 = arity > 2 ? argv_reg[2] : 0;
         if (arity > 3) {
           a0 = alloc(arity);
-          for (int k = 0; k < arity; ++k) emit(Program::MOV, a0 + k, argv[k]);
+          for (int k = 0; k < arity; ++k)
+            emit(Program::MOV, a0 + k, argv_reg[k]);
           a1 = 0;
           a2 = 0;
         }
