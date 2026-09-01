@@ -289,15 +289,14 @@ struct Compiler {
         return false;
     const int64_t persistent =
         k->scratch_size ? k->scratch_size(op, g.slots.data()) : 0;
-    const int64_t transient = k->transient_scratch_size
-                                  ? k->transient_scratch_size(
-                                        op, g.slots.data())
-                                  : 0;
+    const int64_t transient =
+        k->transient_scratch_size
+            ? k->transient_scratch_size(op, g.slots.data())
+            : 0;
     // Program::Call has one scratch base. Transient variants may use their
     // own call-local range here; program register packing can still reclaim
     // it when its live range ends.
-    if (persistent < 0 || transient < 0 ||
-        (persistent != 0 && transient != 0))
+    if (persistent < 0 || transient < 0 || (persistent != 0 && transient != 0))
       return false;
     call.scratch_len = (int)(persistent + transient);
     call.scratch = call.scratch_len ? alloc(call.scratch_len) : 0;

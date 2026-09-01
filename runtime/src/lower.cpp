@@ -613,8 +613,7 @@ struct Lowering {
       if (name.size() < stem.size() || name.substr(0, stem.size()) != stem)
         continue;
       const std::string_view tail = name.substr(stem.size());
-      return tail == "constrain" || tail == "jacobian" ||
-             tail == "unconstrain";
+      return tail == "constrain" || tail == "jacobian" || tail == "unconstrain";
     }
     return false;
   }
@@ -624,9 +623,8 @@ struct Lowering {
     // These two names are overloaded by arity. Their reduction forms remain
     // bespoke; their binary forms share the regular broadcast emitter.
     if (e.name == "log_sum_exp")
-      return e.args.size() == 2
-                 ? regular_dispatch(RegularKind::Binary, OP_LSE2)
-                 : BuiltinDispatch{};
+      return e.args.size() == 2 ? regular_dispatch(RegularKind::Binary, OP_LSE2)
+                                : BuiltinDispatch{};
     if (e.name == "log_diff_exp")
       return e.args.size() == 2
                  ? regular_dispatch(RegularKind::Binary, OP_LOG_DIFF_EXP)
@@ -637,111 +635,114 @@ struct Lowering {
     // was probed and declined in turn.
     static const std::unordered_map<std::string_view, BuiltinDispatch>
         kBuiltins = {
-        {"map_rect", BuiltinFamily::MapRect},
-        {"multi_normal_rng", BuiltinFamily::MultiNormalRng},
-        {"dirichlet_rng", BuiltinFamily::DirichletRng},
-        {"categorical_rng", BuiltinFamily::CategoricalRng},
-        {"append_array", BuiltinFamily::AppendArray},
-        {"algebra_solver", BuiltinFamily::Algebra},
-        {"ode_bdf", BuiltinFamily::Ode},
-        {"ode_bdf_tol", BuiltinFamily::Ode},
-        {"ode_adams", BuiltinFamily::Ode},
-        {"ode_adams_tol", BuiltinFamily::Ode},
-        {"ode_rk45", BuiltinFamily::Ode},
-        {"ode_rk45_tol", BuiltinFamily::Ode},
-        {"ode_ckrk", BuiltinFamily::Ode},
-        {"ode_ckrk_tol", BuiltinFamily::Ode},
-        {"integrate_ode_rk45", BuiltinFamily::Ode},
-        {"integrate_ode_bdf", BuiltinFamily::Ode},
-        {"integrate_ode_adams", BuiltinFamily::Ode},
-        {"Transpose__", BuiltinFamily::Matrix},
-        {"transpose", BuiltinFamily::Matrix},
-        {"tcrossprod", BuiltinFamily::Matrix},
-        {"crossprod", BuiltinFamily::Matrix},
-        {"diag_pre_multiply", BuiltinFamily::Matrix},
-        {"diag_post_multiply", BuiltinFamily::Matrix},
-        {"multiply_lower_tri_self_transpose", BuiltinFamily::Matrix},
-        {"to_matrix", BuiltinFamily::Matrix},
-        {"to_vector", BuiltinFamily::Matrix},
-        {"to_row_vector", BuiltinFamily::Matrix},
-        {"to_array_1d", BuiltinFamily::Matrix},
-        {"rep_matrix", BuiltinFamily::Matrix},
-        {"gp_exp_quad_cov", BuiltinFamily::Matrix},
-        {"diag_matrix", BuiltinFamily::Matrix},
-        {"cholesky_decompose", BuiltinFamily::Matrix},
-        {"matrix_exp", BuiltinFamily::Matrix},
-        {"inverse", BuiltinFamily::Matrix},
-        {"inverse_spd", BuiltinFamily::Matrix},
-        {"log_determinant", BuiltinFamily::Matrix},
-        {"eigenvalues_sym", BuiltinFamily::Matrix},
-        {"eigenvectors_sym", BuiltinFamily::Matrix},
-        {"quad_form_diag", BuiltinFamily::Matrix},
-        {"quad_form_sym", BuiltinFamily::Matrix},
-        {"quad_form", BuiltinFamily::Matrix},
-        {"add_diag", BuiltinFamily::Matrix},
-        {"append_row", BuiltinFamily::Matrix},
-        {"append_col", BuiltinFamily::Matrix},
-        {"segment", BuiltinFamily::Matrix},
-        {"sub_col", BuiltinFamily::Matrix},
-        {"block", BuiltinFamily::Matrix},
-        {"col", BuiltinFamily::Matrix},
-        {"diagonal", BuiltinFamily::Matrix},
-        {"row", BuiltinFamily::Matrix},
-        {"head", BuiltinFamily::Matrix},
-        {"tail", BuiltinFamily::Matrix},
-        {"reverse", BuiltinFamily::Matrix},
-        {"rows", BuiltinFamily::ShapeQuery},
-        {"cols", BuiltinFamily::ShapeQuery},
-        {"size", BuiltinFamily::ShapeQuery},
-        {"num_elements", BuiltinFamily::ShapeQuery},
+            {"map_rect", BuiltinFamily::MapRect},
+            {"multi_normal_rng", BuiltinFamily::MultiNormalRng},
+            {"dirichlet_rng", BuiltinFamily::DirichletRng},
+            {"categorical_rng", BuiltinFamily::CategoricalRng},
+            {"append_array", BuiltinFamily::AppendArray},
+            {"algebra_solver", BuiltinFamily::Algebra},
+            {"ode_bdf", BuiltinFamily::Ode},
+            {"ode_bdf_tol", BuiltinFamily::Ode},
+            {"ode_adams", BuiltinFamily::Ode},
+            {"ode_adams_tol", BuiltinFamily::Ode},
+            {"ode_rk45", BuiltinFamily::Ode},
+            {"ode_rk45_tol", BuiltinFamily::Ode},
+            {"ode_ckrk", BuiltinFamily::Ode},
+            {"ode_ckrk_tol", BuiltinFamily::Ode},
+            {"integrate_ode_rk45", BuiltinFamily::Ode},
+            {"integrate_ode_bdf", BuiltinFamily::Ode},
+            {"integrate_ode_adams", BuiltinFamily::Ode},
+            {"Transpose__", BuiltinFamily::Matrix},
+            {"transpose", BuiltinFamily::Matrix},
+            {"tcrossprod", BuiltinFamily::Matrix},
+            {"crossprod", BuiltinFamily::Matrix},
+            {"diag_pre_multiply", BuiltinFamily::Matrix},
+            {"diag_post_multiply", BuiltinFamily::Matrix},
+            {"multiply_lower_tri_self_transpose", BuiltinFamily::Matrix},
+            {"to_matrix", BuiltinFamily::Matrix},
+            {"to_vector", BuiltinFamily::Matrix},
+            {"to_row_vector", BuiltinFamily::Matrix},
+            {"to_array_1d", BuiltinFamily::Matrix},
+            {"rep_matrix", BuiltinFamily::Matrix},
+            {"gp_exp_quad_cov", BuiltinFamily::Matrix},
+            {"diag_matrix", BuiltinFamily::Matrix},
+            {"cholesky_decompose", BuiltinFamily::Matrix},
+            {"matrix_exp", BuiltinFamily::Matrix},
+            {"inverse", BuiltinFamily::Matrix},
+            {"inverse_spd", BuiltinFamily::Matrix},
+            {"log_determinant", BuiltinFamily::Matrix},
+            {"eigenvalues_sym", BuiltinFamily::Matrix},
+            {"eigenvectors_sym", BuiltinFamily::Matrix},
+            {"quad_form_diag", BuiltinFamily::Matrix},
+            {"quad_form_sym", BuiltinFamily::Matrix},
+            {"quad_form", BuiltinFamily::Matrix},
+            {"add_diag", BuiltinFamily::Matrix},
+            {"append_row", BuiltinFamily::Matrix},
+            {"append_col", BuiltinFamily::Matrix},
+            {"segment", BuiltinFamily::Matrix},
+            {"sub_col", BuiltinFamily::Matrix},
+            {"block", BuiltinFamily::Matrix},
+            {"col", BuiltinFamily::Matrix},
+            {"diagonal", BuiltinFamily::Matrix},
+            {"row", BuiltinFamily::Matrix},
+            {"head", BuiltinFamily::Matrix},
+            {"tail", BuiltinFamily::Matrix},
+            {"reverse", BuiltinFamily::Matrix},
+            {"rows", BuiltinFamily::ShapeQuery},
+            {"cols", BuiltinFamily::ShapeQuery},
+            {"size", BuiltinFamily::ShapeQuery},
+            {"num_elements", BuiltinFamily::ShapeQuery},
 
-        // Regular elementwise families and their aliases share one emitter.
-        {"Plus__", regular_dispatch(RegularKind::Binary, OP_ADD)},
-        {"Minus__", regular_dispatch(RegularKind::Binary, OP_SUB)},
-        {"Divide__", regular_dispatch(RegularKind::Binary, OP_DIV)},
-        {"EltTimes__", regular_dispatch(RegularKind::Binary, OP_MUL)},
-        {"EltDivide__", regular_dispatch(RegularKind::Binary, OP_DIV)},
-        {"Pow__", regular_dispatch(RegularKind::Binary, OP_POW)},
-        {"EltPow__", regular_dispatch(RegularKind::Binary, OP_POW)},
-        {"pow", regular_dispatch(RegularKind::Binary, OP_POW)},
-        {"add", regular_dispatch(RegularKind::Binary, OP_ADD)},
-        {"subtract", regular_dispatch(RegularKind::Binary, OP_SUB)},
-        {"divide", regular_dispatch(RegularKind::Binary, OP_DIV)},
-        {"elt_multiply", regular_dispatch(RegularKind::Binary, OP_MUL)},
-        {"elt_divide", regular_dispatch(RegularKind::Binary, OP_DIV)},
+            // Regular elementwise families and their aliases share one emitter.
+            {"Plus__", regular_dispatch(RegularKind::Binary, OP_ADD)},
+            {"Minus__", regular_dispatch(RegularKind::Binary, OP_SUB)},
+            {"Divide__", regular_dispatch(RegularKind::Binary, OP_DIV)},
+            {"EltTimes__", regular_dispatch(RegularKind::Binary, OP_MUL)},
+            {"EltDivide__", regular_dispatch(RegularKind::Binary, OP_DIV)},
+            {"Pow__", regular_dispatch(RegularKind::Binary, OP_POW)},
+            {"EltPow__", regular_dispatch(RegularKind::Binary, OP_POW)},
+            {"pow", regular_dispatch(RegularKind::Binary, OP_POW)},
+            {"add", regular_dispatch(RegularKind::Binary, OP_ADD)},
+            {"subtract", regular_dispatch(RegularKind::Binary, OP_SUB)},
+            {"divide", regular_dispatch(RegularKind::Binary, OP_DIV)},
+            {"elt_multiply", regular_dispatch(RegularKind::Binary, OP_MUL)},
+            {"elt_divide", regular_dispatch(RegularKind::Binary, OP_DIV)},
 #define STANLI_DISPATCH_BINARY(code, name, fn) \
   {#name, regular_dispatch(RegularKind::Binary, code)},
-        STANLI_SCALAR_BINARY_LIST(STANLI_DISPATCH_BINARY)
+            STANLI_SCALAR_BINARY_LIST(STANLI_DISPATCH_BINARY)
 #undef STANLI_DISPATCH_BINARY
-        {"multiply_log", regular_dispatch(RegularKind::Binary, OP_LMULTIPLY)},
+                {"multiply_log",
+                 regular_dispatch(RegularKind::Binary, OP_LMULTIPLY)},
 #define STANLI_DISPATCH_INT_FIRST(code, name, fn) \
   {#name, regular_dispatch(RegularKind::BinaryIntFirst, code)},
-        STANLI_SCALAR_BINARY_INT_FIRST_LIST(STANLI_DISPATCH_INT_FIRST)
+            STANLI_SCALAR_BINARY_INT_FIRST_LIST(STANLI_DISPATCH_INT_FIRST)
 #undef STANLI_DISPATCH_INT_FIRST
 #define STANLI_DISPATCH_INT_SECOND(code, name, fn) \
   {#name, regular_dispatch(RegularKind::BinaryIntSecond, code)},
-        STANLI_SCALAR_BINARY_INT_SECOND_LIST(STANLI_DISPATCH_INT_SECOND)
+                STANLI_SCALAR_BINARY_INT_SECOND_LIST(STANLI_DISPATCH_INT_SECOND)
 #undef STANLI_DISPATCH_INT_SECOND
 #define STANLI_DISPATCH_UNARY(code, name, value, delta, topology) \
   {#name, regular_dispatch(RegularKind::Unary, code)},
-        STANLI_SCALAR_UNARY_LIST(STANLI_DISPATCH_UNARY)
+                    STANLI_SCALAR_UNARY_LIST(STANLI_DISPATCH_UNARY)
 #undef STANLI_DISPATCH_UNARY
-        {"PMinus__", regular_dispatch(RegularKind::Unary, OP_NEG)},
-        {"minus", regular_dispatch(RegularKind::Unary, OP_NEG)},
-        {"std_normal_qf", regular_dispatch(RegularKind::Unary, OP_INV_PHI)},
-        {"trigamma", regular_dispatch(RegularKind::Unary, OP_TRIGAMMA)},
-        {"exp", regular_dispatch(RegularKind::Unary, OP_EXPV)},
-        {"log", regular_dispatch(RegularKind::Unary, OP_LOGV)},
-        {"inv_logit", regular_dispatch(RegularKind::Unary, OP_INV_LOGIT)},
-        {"logit", regular_dispatch(RegularKind::Unary, OP_LOGIT)},
-        {"sqrt", regular_dispatch(RegularKind::Unary, OP_SQRT)},
-        {"square", regular_dispatch(RegularKind::Unary, OP_SQUARE)},
-        {"log1m", regular_dispatch(RegularKind::Unary, OP_LOG1M)},
-        {"softmax", regular_dispatch(RegularKind::Unary, OP_SOFTMAX)},
-        {"tanh", regular_dispatch(RegularKind::Unary, OP_TANHV)},
-        {"cumulative_sum", regular_dispatch(RegularKind::Unary, OP_CUMSUM)},
-        {"log_softmax", regular_dispatch(RegularKind::Unary, OP_LOG_SOFTMAX)},
-    };
+                        {"PMinus__",
+                         regular_dispatch(RegularKind::Unary, OP_NEG)},
+            {"minus", regular_dispatch(RegularKind::Unary, OP_NEG)},
+            {"std_normal_qf", regular_dispatch(RegularKind::Unary, OP_INV_PHI)},
+            {"trigamma", regular_dispatch(RegularKind::Unary, OP_TRIGAMMA)},
+            {"exp", regular_dispatch(RegularKind::Unary, OP_EXPV)},
+            {"log", regular_dispatch(RegularKind::Unary, OP_LOGV)},
+            {"inv_logit", regular_dispatch(RegularKind::Unary, OP_INV_LOGIT)},
+            {"logit", regular_dispatch(RegularKind::Unary, OP_LOGIT)},
+            {"sqrt", regular_dispatch(RegularKind::Unary, OP_SQRT)},
+            {"square", regular_dispatch(RegularKind::Unary, OP_SQUARE)},
+            {"log1m", regular_dispatch(RegularKind::Unary, OP_LOG1M)},
+            {"softmax", regular_dispatch(RegularKind::Unary, OP_SOFTMAX)},
+            {"tanh", regular_dispatch(RegularKind::Unary, OP_TANHV)},
+            {"cumulative_sum", regular_dispatch(RegularKind::Unary, OP_CUMSUM)},
+            {"log_softmax",
+             regular_dispatch(RegularKind::Unary, OP_LOG_SOFTMAX)},
+        };
     const auto builtin = kBuiltins.find(e.name);
     if (builtin != kBuiltins.end()) return builtin->second;
     // Keep the scalar-RNG vocabulary in the shared classifier used by the
@@ -753,8 +754,7 @@ struct Lowering {
         ends_with(e.name, "_cdf") || ends_with(e.name, "_ccdf") ||
         ends_with(e.name, "_lcdf") || ends_with(e.name, "_lccdf"))
       return {BuiltinFamily::Density};
-    if (bound_transform_name(e.name))
-      return {BuiltinFamily::BoundTransform};
+    if (bound_transform_name(e.name)) return {BuiltinFamily::BoundTransform};
     return {};
   }
 
@@ -2245,8 +2245,7 @@ struct Lowering {
               fail("array gather out of bounds", e.raw);
             idata.push_back(x - 1);
           }
-          SlotInfo si =
-              array_view({(int64_t)idata.size()}, ViewKind::Flat);
+          SlotInfo si = array_view({(int64_t)idata.size()}, ViewKind::Flat);
           return with_layout(
               emit_value(OP_GATHER, {base}, (int64_t)idata.size(), si, idata),
               owning_layout(si));
@@ -4070,12 +4069,11 @@ struct Lowering {
         fail(e.name + ": container arguments stay on WaInterp", e.raw);
     }
     Val draw = with_layout(
-        arity == 1
-            ? emit_value(OP_RNG, {args[0]}, 1, view_of(e.type_))
-            : arity == 2
-                  ? emit_value(OP_RNG, {args[0], args[1]}, 1, view_of(e.type_))
-                  : emit_value(OP_RNG, {args[0], args[1], args[2]}, 1,
-                               view_of(e.type_)),
+        arity == 1 ? emit_value(OP_RNG, {args[0]}, 1, view_of(e.type_))
+        : arity == 2
+            ? emit_value(OP_RNG, {args[0], args[1]}, 1, view_of(e.type_))
+            : emit_value(OP_RNG, {args[0], args[1], args[2]}, 1,
+                         view_of(e.type_)),
         ExpressionLayout::scalar());
     g.ops.back().variant = static_cast<uint8_t>(family);
     // An effect is never a graph constant, even when all distribution
@@ -4421,8 +4419,8 @@ struct Lowering {
     // element. An empty side contributes no value whose shape could
     // disagree, and the nonempty side supplies the result's suffix.
     if (a_outer != 0 && b_outer != 0 &&
-        !std::equal(ash.dims.begin() + 1, ash.dims.end(),
-                    bsh.dims.begin() + 1, bsh.dims.end()))
+        !std::equal(ash.dims.begin() + 1, ash.dims.end(), bsh.dims.begin() + 1,
+                    bsh.dims.end()))
       fail("append_array: element shapes must match", e.raw);
     if (a_outer > std::numeric_limits<int64_t>::max() - b_outer)
       fail("append_array: outer extent overflows", e.raw);
@@ -4620,8 +4618,7 @@ struct Lowering {
         break;
       case BuiltinFamily::Elementwise:
         if (auto v = lower_eltwise_fn(
-                e, actuals,
-                dispatch.regular ? &*dispatch.regular : nullptr))
+                e, actuals, dispatch.regular ? &*dispatch.regular : nullptr))
           return *v;
         break;
       case BuiltinFamily::Matrix:
@@ -4643,8 +4640,7 @@ struct Lowering {
     // integer was expected; brms's mo() helper writes
     // `rows(scale) * sum(scale[1:i])`, where the same call sits in the
     // middle of arithmetic and reached the failure below instead.
-    if (dispatch.family == BuiltinFamily::ShapeQuery &&
-        e.args.size() == 1) {
+    if (dispatch.family == BuiltinFamily::ShapeQuery && e.args.size() == 1) {
       try {
         return constant((double)eval_int(e));
       } catch (const CompileError&) {
@@ -5336,12 +5332,11 @@ struct Lowering {
                          elementwise_layout({a, b}));
     }
 
-    if (regular != nullptr &&
-        (regular->kind == RegularKind::BinaryIntFirst ||
-         regular->kind == RegularKind::BinaryIntSecond)) {
-      return lower_binary_int(
-          regular->opcode, regular->kind == RegularKind::BinaryIntFirst,
-          actuals);
+    if (regular != nullptr && (regular->kind == RegularKind::BinaryIntFirst ||
+                               regular->kind == RegularKind::BinaryIntSecond)) {
+      return lower_binary_int(regular->opcode,
+                              regular->kind == RegularKind::BinaryIntFirst,
+                              actuals);
     }
 
     if (regular != nullptr && regular->kind == RegularKind::Unary) {
@@ -5350,8 +5345,7 @@ struct Lowering {
       SlotInfo si = a.si;
       // Shape-preserving unaries keep rows/cols (softmax/cumulative_sum
       // are vector-only, so they never carry one).
-      if (regular->opcode != OP_SOFTMAX &&
-          regular->opcode != OP_CUMSUM) {
+      if (regular->opcode != OP_SOFTMAX && regular->opcode != OP_CUMSUM) {
         if (e.type_ == "UMatrix" && !is_matrix(si))
           fail(e.name + ": matrix result has unknown logical extents", e.raw);
         stamp_kind(&si, e.type_);
@@ -5729,8 +5723,7 @@ struct Lowering {
           emit_value(OP_MULT_LOWER_TRI_SELF_TRANSPOSE, {L},
                      L.si.rows * L.si.rows, si,
                      {checked_immediate(L.si.rows, "multiply_lower_tri rows"),
-                      checked_immediate(L.si.cols,
-                                        "multiply_lower_tri cols")}),
+                      checked_immediate(L.si.cols, "multiply_lower_tri cols")}),
           owning_layout(si));
       g.ops.back().variant = v.autodiff ? 1u : 0u;
       return v;
@@ -6438,8 +6431,7 @@ struct Lowering {
   }
 
   // The integrate_ode_* family.
-  std::optional<Val> lower_ode_fn(const mir::Expr& e,
-                                  CallArguments& actuals) {
+  std::optional<Val> lower_ode_fn(const mir::Expr& e, CallArguments& actuals) {
     if (auto v = lower_ode_variadic(e, actuals)) return v;
     std::optional<OdeSpec::Solver> legacy_solver;
     if (e.name == "integrate_ode_rk45")

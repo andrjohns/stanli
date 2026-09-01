@@ -2871,14 +2871,12 @@ void test_reduction_transient_scratch_reuse() {
   graph.add_op(OP_EXTREMA_VEC, {phased_extrema_input}, phased_extrema_output,
                {2});
   graph.ops.back().variant = 5;
-  graph.add_op(OP_EXTREMA_VEC, {regular_extrema_input},
-               regular_extrema_output);
+  graph.add_op(OP_EXTREMA_VEC, {regular_extrema_input}, regular_extrema_output);
   graph.result_slot = regular_extrema_output;
 
   Executor executor(std::move(graph));
-  const int64_t want =
-      1 + std::max(extrema_phase_scratch(n_product),
-                   extrema_phase_scratch(n_extrema));
+  const int64_t want = 1 + std::max(extrema_phase_scratch(n_product),
+                                    extrema_phase_scratch(n_extrema));
   if (executor.scratch_storage_size() != want) {
     ++failures;
     std::printf("FAIL reduction scratch reuse: got %lld want %lld\n",
@@ -2897,9 +2895,9 @@ void test_layout_materialization_boundaries() {
   if (!cm.write_array || cm.write_array->interp ||
       !cm.write_array->truncated.empty()) {
     ++failures;
-    std::printf("FAIL layout materialization fixture did not compile: %s\n",
-                cm.write_array ? cm.write_array->truncated.c_str()
-                               : "no write_array");
+    std::printf(
+        "FAIL layout materialization fixture did not compile: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
 
@@ -2950,10 +2948,8 @@ void test_layout_materialization_boundaries() {
   const double owned_product = stan::math::prod(owned);
   const double tail_product = stan::math::prod(owned.segment(1, 4));
   const std::map<std::string, double> want = {
-      {"initialized_prod", owned_product},
-      {"assigned_prod", owned_product},
-      {"returned_prod", owned_product},
-      {"inner_prod", owned_product},
+      {"initialized_prod", owned_product}, {"assigned_prod", owned_product},
+      {"returned_prod", owned_product},    {"inner_prod", owned_product},
       {"inner_tail_prod", tail_product},
   };
   for (const auto& expected : want) {
@@ -3054,9 +3050,9 @@ void test_main_index_layout_metadata() {
   if (!cm.write_array || cm.write_array->interp ||
       !cm.write_array->truncated.empty()) {
     ++failures;
-    std::printf("FAIL main index layout fixture did not compile: %s\n",
-                cm.write_array ? cm.write_array->truncated.c_str()
-                               : "no write_array");
+    std::printf(
+        "FAIL main index layout fixture did not compile: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
 
@@ -3069,9 +3065,10 @@ void test_main_index_layout_metadata() {
   }
   if (phased_products != 1 || packet_extrema != 1) {
     ++failures;
-    std::printf("FAIL main index layout variants: phased_prod=%d "
-                "packet_min=%d\n",
-                phased_products, packet_extrema);
+    std::printf(
+        "FAIL main index layout variants: phased_prod=%d "
+        "packet_min=%d\n",
+        phased_products, packet_extrema);
   }
 
   Executor graph(std::move(cm.write_array->graph));
@@ -3099,8 +3096,7 @@ void test_main_index_layout_metadata() {
   }
 
   Eigen::VectorXd nested_range(4);
-  std::copy(params.begin() + 11, params.begin() + 15,
-            nested_range.data());
+  std::copy(params.begin() + 11, params.begin() + 15, nested_range.data());
   const std::map<std::string, double> want = {
       {"nested_range_prod", stan::math::prod(nested_range)},
       {"matrix_cell_min", std::min({params[20], params[24], params[28]})},
@@ -3125,9 +3121,9 @@ void test_matrix_transpose_extrema_fallback() {
       cm.write_array->truncated.find("grouping is not native") ==
           std::string::npos) {
     ++failures;
-    std::printf("FAIL matrix transpose extrema did not fail closed: %s\n",
-                cm.write_array ? cm.write_array->truncated.c_str()
-                               : "no write_array");
+    std::printf(
+        "FAIL matrix transpose extrema did not fail closed: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
 

@@ -171,8 +171,8 @@ void prod_vec_fwd(KernelCtx& ctx) {
   if (ctx.variant & 4u) {
     assert(ctx.idata != nullptr && ctx.n_idata == 1);
     assert(ctx.scratch != nullptr);
-    ctx.out.data[0] = prod_phased(ctx.in[0].data, ctx.in[0].len, ctx.idata[0],
-                                  ctx.scratch);
+    ctx.out.data[0] =
+        prod_phased(ctx.in[0].data, ctx.in[0].len, ctx.idata[0], ctx.scratch);
   } else if (ctx.variant & 3u) {
     double product = ctx.in[0].data[0];
     for (int64_t i = 1; i < ctx.in[0].len; ++i) product *= ctx.in[0].data[i];
@@ -526,9 +526,8 @@ void register_elementwise_kernels() {
   register_kernel(OP_BCAST_FMA, Kernel{fma_fwd, fma_bwd, nullptr});
   register_kernel(OP_MATVEC, Kernel{matvec_fwd, matvec_bwd, nullptr});
   register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
-  register_kernel(
-      OP_PROD_VEC,
-      Kernel{prod_vec_fwd, prod_vec_bwd, nullptr, product_transient_scratch});
+  register_kernel(OP_PROD_VEC, Kernel{prod_vec_fwd, prod_vec_bwd, nullptr,
+                                      product_transient_scratch});
   register_kernel(OP_EXTREMA_VEC,
                   Kernel{extrema_vec_fwd, extrema_vec_bwd, extrema_scratch,
                          extrema_transient_scratch});

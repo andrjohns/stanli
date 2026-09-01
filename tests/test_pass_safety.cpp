@@ -506,11 +506,10 @@ static void test_extrema_pass_barrier() {
     island_ops += op.opcode == OP_ISLAND;
   }
   const Kernel* extrema = find_kernel(OP_EXTREMA_VEC);
-  expect("extrema has a backward kernel", extrema != nullptr &&
-                                              extrema->backward != nullptr &&
-                                              extrema->scratch_size != nullptr &&
-                                              extrema->transient_scratch_size !=
-                                                  nullptr);
+  expect("extrema has a backward kernel",
+         extrema != nullptr && extrema->backward != nullptr &&
+             extrema->scratch_size != nullptr &&
+             extrema->transient_scratch_size != nullptr);
   expect("extrema is absent from value-free backward traits",
          !backward_ignores_values(OP_EXTREMA_VEC));
   expect("extrema survives constfold with parameter input",

@@ -323,10 +323,10 @@ void Executor::bind_() {
                                opcode_name(op.opcode));
     const int64_t persistent =
         k.scratch_size ? k.scratch_size(op, graph_.slots.data()) : 0;
-    const int64_t transient = k.transient_scratch_size
-                                  ? k.transient_scratch_size(
-                                        op, graph_.slots.data())
-                                  : 0;
+    const int64_t transient =
+        k.transient_scratch_size
+            ? k.transient_scratch_size(op, graph_.slots.data())
+            : 0;
     assert(persistent >= 0 && transient >= 0);
     assert(persistent == 0 || transient == 0);
     if (transient > 0) {

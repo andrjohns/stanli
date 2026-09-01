@@ -90,15 +90,13 @@ inline bool reduction_container(const Expr& e) {
     return e.unsized.leaf == UnsizedLeaf::Vector ||
            e.unsized.leaf == UnsizedLeaf::RowVector ||
            e.unsized.leaf == UnsizedLeaf::Matrix;
-  return e.unsized.depth == 1 &&
-         (e.unsized.leaf == UnsizedLeaf::Real ||
-          e.unsized.leaf == UnsizedLeaf::Int);
+  return e.unsized.depth == 1 && (e.unsized.leaf == UnsizedLeaf::Real ||
+                                  e.unsized.leaf == UnsizedLeaf::Int);
 }
 
 inline bool language_scalar(const Expr& e) {
-  return e.unsized.depth == 0 &&
-         (e.unsized.leaf == UnsizedLeaf::Int ||
-          e.unsized.leaf == UnsizedLeaf::Real);
+  return e.unsized.depth == 0 && (e.unsized.leaf == UnsizedLeaf::Int ||
+                                  e.unsized.leaf == UnsizedLeaf::Real);
 }
 
 inline bool source_unary_elementwise(const std::string& name) {
@@ -122,9 +120,9 @@ inline bool source_binary_elementwise(const std::string& name) {
   STANLI_SCALAR_BINARY_INT_SECOND_LIST(STANLI_SOURCE_BINARY)
 #undef STANLI_SOURCE_BINARY
   return binary || name == "Plus__" || name == "Minus__" ||
-         name == "EltTimes__" || name == "EltDivide__" ||
-         name == "EltPow__" || name == "add" || name == "subtract" ||
-         name == "elt_multiply" || name == "elt_divide" || name == "plus";
+         name == "EltTimes__" || name == "EltDivide__" || name == "EltPow__" ||
+         name == "add" || name == "subtract" || name == "elt_multiply" ||
+         name == "elt_divide" || name == "plus";
 }
 
 // Conservative source-level counterpart of Lowering::Val::layout for the MIR
@@ -150,19 +148,16 @@ inline ExpressionLayout source_expression_layout(const Expr& e) {
       // A following range then has a phase relative to that leaf, never the
       // flattened offset of the preceding array elements. Non-single outer
       // indices instead build a new std::vector result at offset zero.
-      bool selected_one_leaf =
-          base.unsized.leaf == UnsizedLeaf::Vector ||
-          base.unsized.leaf == UnsizedLeaf::RowVector;
+      bool selected_one_leaf = base.unsized.leaf == UnsizedLeaf::Vector ||
+                               base.unsized.leaf == UnsizedLeaf::RowVector;
       for (uint8_t i = 0; i < base.unsized.depth; ++i)
-        selected_one_leaf =
-            selected_one_leaf && i + 1 < e.args.size() &&
-            e.args[i + 1].kind == Expr::FunApp &&
-            e.args[i + 1].name == "IndexSingle";
+        selected_one_leaf = selected_one_leaf && i + 1 < e.args.size() &&
+                            e.args[i + 1].kind == Expr::FunApp &&
+                            e.args[i + 1].name == "IndexSingle";
       const size_t leaf_index = static_cast<size_t>(base.unsized.depth) + 1;
       if (selected_one_leaf && leaf_index < e.args.size()) {
         const Expr& inner = e.args[leaf_index];
-        if (inner.kind != Expr::FunApp)
-          return ExpressionLayout::unknown();
+        if (inner.kind != Expr::FunApp) return ExpressionLayout::unknown();
         if (inner.name == "IndexMulti") return ExpressionLayout::scalar();
         if ((inner.name == "IndexBetween" || inner.name == "IndexUpfrom") &&
             !inner.args.empty() && inner.args[0].kind == Expr::LitInt &&
