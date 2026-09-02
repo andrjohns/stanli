@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -932,6 +933,36 @@ double handle(int64_t at, bool active) {
   return active ? static_cast<double>(at) : -static_cast<double>(at) - 1;
 }
 
+// Dynamic counted-loop iterators are inactive int32 scalars.  Keep their
+// exact value in a disjoint handle band instead of allocating a value and a
+// generic Ref for every reached iteration.  Ordinary inactive Ref handles
+// occupy [-2^52, -1]; this band occupies the next 2^32 exact integers and
+// remains strictly inside binary64's exact-integer range.
+constexpr int64_t inline_int_count = int64_t{1} << 32;
+constexpr int64_t inline_int_first = exact_limit + 1;
+constexpr int64_t inline_int_last = exact_limit + inline_int_count;
+static_assert(inline_int_last < (int64_t{1} << 53),
+              "inline integer handles must remain exact doubles");
+
+bool is_inline_int(double h) noexcept {
+  return h < -static_cast<double>(exact_limit);
+}
+
+double inline_int_handle(int32_t value) noexcept {
+  const int64_t biased =
+      static_cast<int64_t>(value) -
+      static_cast<int64_t>(std::numeric_limits<int32_t>::min());
+  return -static_cast<double>(inline_int_first + biased);
+}
+
+double inline_int_value(double h) noexcept {
+  // Handles are executor-private and only inline_int_handle constructs this
+  // band.  Decode with exact double arithmetic so the hot callback path needs
+  // no floating-to-integer conversion or repeated canonical-form validation.
+  return static_cast<double>(std::numeric_limits<int32_t>::min()) +
+         (-h - static_cast<double>(inline_int_first));
+}
+
 struct Execution {
   const StructuredLoop& p;
   KernelCtx& outer;
@@ -1222,8 +1253,10 @@ struct DynamicLoopState final : KernelState {
   std::vector<double> inactive_control_values;
   int64_t conceptual_adjoint_size = 0;
   int64_t adjoint_size = 0;
+  uint64_t iterator_values = 0;
   bool loop_invariant_reuse = false;
   bool inactive_control_reuse = false;
+  bool memory_profile = false;
   bool cached_context_in_use = false;
   // A dynamic tape belongs to exactly one completed forward sweep.  Forward
   // invalidates the previous tape before doing any validation or allocation;
@@ -1339,11 +1372,84 @@ struct DynamicLoopState final : KernelState {
     std::vector<Undo>{}.swap(undos);
     conceptual_adjoint_size = 0;
     adjoint_size = 0;
+    iterator_values = 0;
     cached_context_in_use = false;
+    memory_profile = false;
   }
 };
 static_assert(sizeof(DynamicLoopState::Ref) == 24,
               "dynamic structured references must stay compact");
+
+uint64_t profile_bytes(uint64_t count, uint64_t width,
+                       bool& overflow) noexcept {
+  if (width && count > std::numeric_limits<uint64_t>::max() / width) {
+    overflow = true;
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return count * width;
+}
+
+uint64_t profile_add(uint64_t first, uint64_t second, bool& overflow) noexcept {
+  if (first > std::numeric_limits<uint64_t>::max() - second) {
+    overflow = true;
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return first + second;
+}
+
+void report_memory_profile(const StructuredLoop& p,
+                           const DynamicLoopState& state) {
+  bool overflow = false;
+  const uint64_t arena_used =
+      profile_bytes(state.arena.used_values, sizeof(double), overflow);
+  const uint64_t arena_capacity =
+      profile_bytes(state.arena.capacity_values, sizeof(double), overflow);
+  const uint64_t ref_used =
+      profile_bytes(state.refs.size(), sizeof(DynamicLoopState::Ref), overflow);
+  const uint64_t ref_capacity = profile_bytes(
+      state.refs.capacity(), sizeof(DynamicLoopState::Ref), overflow);
+  const uint64_t record_used = profile_bytes(
+      state.records.size(), sizeof(DynamicLoopState::Record), overflow);
+  const uint64_t record_capacity = profile_bytes(
+      state.records.capacity(), sizeof(DynamicLoopState::Record), overflow);
+  const uint64_t undo_used = profile_bytes(
+      state.undos.size(), sizeof(DynamicLoopState::Undo), overflow);
+  const uint64_t undo_capacity = profile_bytes(
+      state.undos.capacity(), sizeof(DynamicLoopState::Undo), overflow);
+  const uint64_t planned_adjoint = profile_bytes(
+      static_cast<uint64_t>(state.adjoint_size), sizeof(double), overflow);
+  const uint64_t iterator_value_bytes =
+      profile_bytes(state.iterator_values, sizeof(double), overflow);
+  const uint64_t iterator_ref_bytes = profile_bytes(
+      state.iterator_values, sizeof(DynamicLoopState::Ref), overflow);
+  const uint64_t iterator_total_bytes =
+      profile_add(iterator_value_bytes, iterator_ref_bytes, overflow);
+  std::fprintf(
+      stderr,
+      "stanli_structured_memory phase=forward region=%p nodes=%zu "
+      "body_kernels=%zu accounting_overflow=%d "
+      "iterator_values=%llu iterator_value_bytes=%llu "
+      "iterator_ref_bytes=%llu iterator_total_bytes=%llu "
+      "arena_used_bytes=%llu arena_capacity_bytes=%llu "
+      "ref_count=%zu ref_used_bytes=%llu ref_capacity_bytes=%llu "
+      "record_count=%zu record_used_bytes=%llu record_capacity_bytes=%llu "
+      "undo_count=%zu undo_used_bytes=%llu undo_capacity_bytes=%llu "
+      "planned_adjoint_bytes=%llu\n",
+      static_cast<const void*>(&p), p.node_count, p.body.ops.size(),
+      overflow ? 1 : 0, static_cast<unsigned long long>(state.iterator_values),
+      static_cast<unsigned long long>(iterator_value_bytes),
+      static_cast<unsigned long long>(iterator_ref_bytes),
+      static_cast<unsigned long long>(iterator_total_bytes),
+      static_cast<unsigned long long>(arena_used),
+      static_cast<unsigned long long>(arena_capacity), state.refs.size(),
+      static_cast<unsigned long long>(ref_used),
+      static_cast<unsigned long long>(ref_capacity), state.records.size(),
+      static_cast<unsigned long long>(record_used),
+      static_cast<unsigned long long>(record_capacity), state.undos.size(),
+      static_cast<unsigned long long>(undo_used),
+      static_cast<unsigned long long>(undo_capacity),
+      static_cast<unsigned long long>(planned_adjoint));
+}
 
 int64_t compact_scalar_update_position(const DynamicIndexSpec& p,
                                        const KernelCtx& c);
@@ -1370,11 +1476,18 @@ struct DynamicExecution {
         outer(c),
         state(dynamic_state(c)) {}
 
-  DynamicLoopState::Ref& ref(double h) {
+  DynamicLoopState::Ref& ordinary_ref(double h) {
     const int64_t id = offset(h);
     if (id < 0 || static_cast<size_t>(id) >= state.refs.size())
       throw std::logic_error("dynamic structured value handle out of range");
     return state.refs[static_cast<size_t>(id)];
+  }
+
+  DynamicLoopState::Ref& ref(double h) {
+    if (is_inline_int(h))
+      throw std::logic_error(
+          "dynamic structured inline integer used as a reference");
+    return ordinary_ref(h);
   }
 
   double make_ref(double* value, int64_t len, bool active, int outer_input = -1,
@@ -1419,8 +1532,34 @@ struct DynamicExecution {
     return handle(id, active);
   }
 
-  double* value(int s) {
-    return ref(state.bindings.at(static_cast<size_t>(s))).value;
+  double scalar_value(double h) {
+    return is_inline_int(h) ? inline_int_value(h) : ordinary_ref(h).value[0];
+  }
+
+  double scalar_value(int slot) {
+    return scalar_value(state.bindings.at(static_cast<size_t>(slot)));
+  }
+
+  void copy_value(double h, int64_t len, double* output) {
+    if (is_inline_int(h)) {
+      if (len != 1)
+        throw std::logic_error(
+            "dynamic structured inline integer has nonscalar extent");
+      output[0] = inline_int_value(h);
+      return;
+    }
+    std::copy_n(ordinary_ref(h).value, len, output);
+  }
+
+  bool value_overlaps(double h, int64_t len, Desc other) {
+    if (is_inline_int(h)) {
+      if (len != 1)
+        throw std::logic_error(
+            "dynamic structured inline integer has nonscalar extent");
+      (void)inline_int_value(h);
+      return false;
+    }
+    return overlaps({ordinary_ref(h).value, len}, other);
   }
 
   void begin_loop_invariant_scope(const Node& n) noexcept {
@@ -1543,10 +1682,10 @@ struct DynamicExecution {
     }
     const Desc output{state.inactive_control_values.data() + cone.value_offset,
                       static_cast<int64_t>(cone.value_count)};
-    for (int slot : cone.external_slots) {
-      const auto& input = ref(state.bindings.at(static_cast<size_t>(slot)));
-      if (overlaps(output, {input.value, p.body.slots[slot].len})) return;
-    }
+    for (int slot : cone.external_slots)
+      if (value_overlaps(state.bindings.at(static_cast<size_t>(slot)),
+                         p.body.slots[slot].len, output))
+        return;
     cone.decision = InactiveControlPlan::Cone::Direct;
   }
 
@@ -1671,7 +1810,7 @@ struct DynamicExecution {
     if (h < 0) return nullptr;
     if (expected_len < 0)
       throw std::logic_error("dynamic structured adjoint has negative length");
-    const auto& r = ref(h);
+    const auto& r = ordinary_ref(h);
     if (r.outer_input >= 0) {
       if (r.outer_input >= outer.n_in || r.adjoint_or_outer_offset < 0)
         throw std::logic_error(
@@ -1773,6 +1912,7 @@ struct DynamicExecution {
   }
 
   KernelCtx& context(const Node& n, double* frame, bool backward,
+                     std::array<double, 6>& inline_inputs,
                      double out_handle = -1, double out2_handle = -1,
                      double* output_override = nullptr) {
     const Op& op = p.body.ops[n.op];
@@ -1794,7 +1934,25 @@ struct DynamicExecution {
       c.state = nullptr;
       for (int k = 0; k < op.n_in; ++k) {
         const double h = frame[k];
-        c.in[k].data = ref(h).value;
+        if (is_inline_int(h)) {
+          if (c.in[k].len != 1)
+            throw std::logic_error(
+                "dynamic structured inline integer has nonscalar input");
+          int alias = -1;
+          for (int j = 0; j < k; ++j)
+            if (frame[j] == h && is_inline_int(frame[j])) {
+              alias = j;
+              break;
+            }
+          if (alias >= 0) {
+            c.in[k].data = c.in[alias].data;
+          } else {
+            inline_inputs[static_cast<size_t>(k)] = inline_int_value(h);
+            c.in[k].data = &inline_inputs[static_cast<size_t>(k)];
+          }
+        } else {
+          c.in[k].data = ordinary_ref(h).value;
+        }
         c.in_adj[k].data = backward ? adj(h, c.in[k].len) : nullptr;
       }
       int64_t pos = op.n_in;
@@ -1825,14 +1983,16 @@ struct DynamicExecution {
   // reentry and restores pointer-free template state after every exception.
   struct ContextLease {
     DynamicExecution& execution;
+    // context() initializes only the entries referenced by inline inputs.
+    std::array<double, 6> inline_inputs;
     KernelCtx* call = nullptr;
 
     ContextLease(DynamicExecution& execution, const Node& n, double* frame,
                  bool backward, double out_handle = -1, double out2_handle = -1,
                  double* output_override = nullptr)
         : execution(execution) {
-      call = &execution.context(n, frame, backward, out_handle, out2_handle,
-                                output_override);
+      call = &execution.context(n, frame, backward, inline_inputs, out_handle,
+                                out2_handle, output_override);
     }
     ContextLease(const ContextLease&) = delete;
     ContextLease& operator=(const ContextLease&) = delete;
@@ -1859,7 +2019,7 @@ struct DynamicExecution {
       bool overlap = false;
       for (int k = 0; k < op.n_in; ++k) {
         const int64_t len = p.body.slots.at(static_cast<size_t>(op.in[k])).len;
-        overlap |= overlaps(output, {ref(handles[k]).value, len});
+        overlap |= value_overlaps(handles[k], len, output);
       }
       if (overlap) return false;
     } catch (...) {
@@ -1886,7 +2046,8 @@ struct DynamicExecution {
       throw std::logic_error("compact structured update arity is invalid");
     const int cell = n.compact_update_cell;
     const double base_handle = state.bindings[static_cast<size_t>(op.in[0])];
-    DynamicLoopState::Ref& base = ref(base_handle);
+    if (is_inline_int(base_handle)) return false;
+    DynamicLoopState::Ref& base = ordinary_ref(base_handle);
     if (state.compact_primal_by_cell[static_cast<size_t>(cell)] != base.value)
       return false;
 
@@ -1988,10 +2149,10 @@ struct DynamicExecution {
             state.bindings[static_cast<size_t>(n.src)];
         return Normal;
       case Node::If:
-        return forward(n.children[value(n.condition)[0] != 0.0 ? 0 : 1]);
+        return forward(n.children[scalar_value(n.condition) != 0.0 ? 0 : 1]);
       case Node::For: {
         begin_loop_invariant_scope(n);
-        const double lo = value(n.lower)[0], hi = value(n.upper)[0];
+        const double lo = scalar_value(n.lower), hi = scalar_value(n.upper);
         if (!std::isfinite(lo) || !std::isfinite(hi) || std::trunc(lo) != lo ||
             std::trunc(hi) != hi || lo < std::numeric_limits<int32_t>::min() ||
             hi < std::numeric_limits<int32_t>::min() ||
@@ -2002,10 +2163,9 @@ struct DynamicExecution {
         if (count > n.capacity)
           throw std::logic_error("structured loop capacity proof failed");
         for (int64_t i = 0; i < count; ++i) {
-          double* iterator = state.arena.allocate(1);
-          *iterator = lo + double(i);
-          state.bindings[static_cast<size_t>(n.iterator)] =
-              make_ref(iterator, 1, false);
+          state.bindings[static_cast<size_t>(n.iterator)] = inline_int_handle(
+              static_cast<int32_t>(static_cast<int64_t>(lo) + i));
+          if (state.memory_profile) ++state.iterator_values;
           if (forward(n.children[0]) == Break) break;
         }
         return Normal;
@@ -2014,7 +2174,7 @@ struct DynamicExecution {
         begin_loop_invariant_scope(n);
         for (int64_t i = 0;; ++i) {
           forward(n.children[0]);
-          if (value(n.condition)[0] == 0.0) break;
+          if (scalar_value(n.condition) == 0.0) break;
           if (i == n.capacity)
             throw std::logic_error("structured while capacity proof failed");
           if (forward(n.children[1]) == Break) break;
@@ -2121,6 +2281,7 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   // A failed replacement forward must never leave either the preceding tape
   // or a partially built replacement resident/available to reverse.
   s.release_tape();
+  s.memory_profile = std::getenv("STANLI_STRUCTURED_MEMORY_PROFILE") != nullptr;
   if (s.loop_invariant_plan) s.loop_invariant_plan->reset_runtime();
   s.loop_invariant_reuse =
       s.loop_invariant_plan &&
@@ -2173,7 +2334,8 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   e.forward(p.root);
   int64_t pos = 0;
   for (int slot : p.outputs) {
-    std::copy_n(e.value(slot), p.body.slots[slot].len, ctx.out.data + pos);
+    e.copy_value(s.bindings[static_cast<size_t>(slot)], p.body.slots[slot].len,
+                 ctx.out.data + pos);
     pos += p.body.slots[slot].len;
   }
   if (p.has_target) {
@@ -2181,14 +2343,14 @@ void dynamic_loop_forward(KernelCtx& ctx) {
       ctx.out.data[pos++] = static_cast<double>(s.target_refs.size());
       for (size_t i = 0; i < s.target_refs.size(); ++i)
         ctx.out.data[pos + static_cast<int64_t>(i)] =
-            e.ref(s.target_refs[i]).value[0];
+            e.scalar_value(s.target_refs[i]);
       std::fill(ctx.out.data + pos + static_cast<int64_t>(s.target_refs.size()),
                 ctx.out.data + pos + p.root.target_capacity, 0.0);
       pos += p.root.target_capacity;
     } else {
       s.target_work.resize(s.target_refs.size());
       for (size_t i = 0; i < s.target_refs.size(); ++i)
-        s.target_work[i] = e.ref(s.target_refs[i]).value[0];
+        s.target_work[i] = e.scalar_value(s.target_refs[i]);
       size_t count = s.target_work.size();
       while (count > 1) {
         size_t next = 0;
@@ -2209,6 +2371,7 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   }
   if (pos != ctx.out.len)
     throw std::logic_error("dynamic structured output size mismatch");
+  if (s.memory_profile) report_memory_profile(p, s);
   s.reverse_ready = true;
   release_on_failure.published = true;
 }

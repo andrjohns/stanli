@@ -436,12 +436,255 @@ static void dynamic_history_tests() {
   compare_gradients(dynamic, legacy, {{.1, .7}, {-.2, .3}, {0, .5}},
                     "dynamic-history target parity",
                     "dynamic-history gradient parity");
+
+  // This fixture feeds the counted iterator directly to an active multiply.
+  // Reverse must therefore recover every historical iterator value from the
+  // retained input handles rather than from one mutable loop cell.
+  test_setenv("STANLI_STRUCTURED_HISTORY_BYTES", "1");
+  const auto counted_dynamic =
+      compile_fixture("structured_counted", 4, Mode::Force);
+  test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
+  const auto counted_legacy =
+      compile_fixture("structured_counted", 4, Mode::Off);
+  check(retained(counted_dynamic) && retained(counted_dynamic)->dynamic_history,
+        "counted iterator test exercises dynamic history");
+  compare_gradients(counted_dynamic, counted_legacy,
+                    {{.1, .7}, {-.2, .3}, {0, .5}},
+                    "dynamic counted-iterator target parity",
+                    "dynamic counted-iterator gradient parity");
+
+  // Exercise iterator-driven nested branches, break, and continue on the
+  // reached-frame tape as well as on the ordinary small fixed-history path.
+  test_setenv("STANLI_STRUCTURED_HISTORY_BYTES", "1");
+  const auto exits_dynamic =
+      compile_fixture("structured_exits", 6, Mode::Force);
+  test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
+  const auto exits_legacy = compile_fixture("structured_exits", 6, Mode::Off);
+  check(retained(exits_dynamic) && retained(exits_dynamic)->dynamic_history,
+        "iterator exit test exercises dynamic history");
+  compare_gradients(exits_dynamic, exits_legacy, {{.1, .7}, {-.2, .3}},
+                    "dynamic iterator-exit target parity",
+                    "dynamic iterator-exit gradient parity");
 }
 
 struct Evaluation {
   double value = 0;
   double gradient[2] = {0, 0};
 };
+
+static Evaluation evaluate(Executor& executor, double theta, double beta);
+
+static std::vector<double> iterator_forward_values;
+static std::vector<double> iterator_reverse_values;
+static bool iterator_throw_once = false;
+
+static void trace_iterator_forward(KernelCtx& context) {
+  iterator_forward_values.push_back(context.in[1].data[0]);
+  if (iterator_throw_once && context.in[1].data[0] == 0) {
+    iterator_throw_once = false;
+    throw std::runtime_error("injected iterator callback failure");
+  }
+  find_kernel(OP_MUL)->forward(context);
+}
+
+static void trace_iterator_backward(KernelCtx& context) {
+  iterator_reverse_values.push_back(context.in[1].data[0]);
+  find_kernel(OP_MUL)->backward(context);
+}
+
+static std::shared_ptr<StructuredLoop> iterator_history_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, -1);
+  const int upper = scalar(*plan, 1);
+  const int iterator = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int result = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+  Node multiply = call(*plan, OP_MUL, {theta, iterator}, term);
+  const int multiply_op = multiply.op;
+  plan->root =
+      sequence({alias(result, zero),
+                counted(lower, upper, iterator, 3,
+                        sequence({std::move(multiply),
+                                  call(*plan, OP_ADD, {result, term}, next),
+                                  alias(result, next)}))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(set_forward(plan->root, multiply_op, trace_iterator_forward),
+        "find iterator trace forward callback");
+  check(set_backward(plan->root, multiply_op, trace_iterator_backward),
+        "find iterator trace backward callback");
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> iterator_escape_plan(
+    int32_t lower_value, int32_t upper_value) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int lower = scalar(*plan, lower_value);
+  const int upper = scalar(*plan, upper_value);
+  const int iterator = plan->body.add_slot(1, false);
+  const int initial = scalar(*plan, 7);
+  const int result = plan->body.add_slot(1, false);
+  const int64_t capacity =
+      upper_value >= lower_value
+          ? static_cast<int64_t>(upper_value) - lower_value + 1
+          : 0;
+  plan->root = sequence(
+      {alias(result, initial),
+       counted(lower, upper, iterator, capacity, alias(result, iterator))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> iterator_target_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  Node target;
+  target.kind = Node::Target;
+  target.src = iterator;
+  plan->root = counted(lower, upper, iterator, 3, std::move(target));
+  plan->has_target = true;
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> nested_iterator_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int two = scalar(*plan, 2);
+  const int outer_iterator = plan->body.add_slot(1, false);
+  const int inner_iterator = plan->body.add_slot(1, false);
+  const int sum = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+  plan->root = sequence(
+      {alias(result, zero),
+       counted(zero, two, outer_iterator, 3,
+               counted(zero, outer_iterator, inner_iterator, 3,
+                       sequence({call(*plan, OP_ADD,
+                                      {outer_iterator, inner_iterator}, sum),
+                                 call(*plan, OP_MUL, {theta, sum}, term),
+                                 call(*plan, OP_ADD, {result, term}, next),
+                                 alias(result, next)})))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> iterator_update_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int base = plan->body.add_slot(3, false);
+  plan->fills.push_back({base, {10, 20, 30}});
+  const int current = plan->body.add_slot(3, false);
+  const int rhs = plan->body.add_slot(1, false);
+  const int updated = plan->body.add_slot(3, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
+  spec->selected_size = 1;
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, rhs}, updated);
+  plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  plan->root =
+      sequence({alias(current, base),
+                counted(lower, upper, iterator, 3,
+                        sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                                  std::move(update), alias(current, updated)})),
+                call(*plan, OP_SUM_VEC, {current}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->compact_update_sites == 1,
+        "iterator update plan selects compact history");
+  return plan;
+}
+
+static void compact_iterator_history_tests() {
+  iterator_forward_values.clear();
+  iterator_reverse_values.clear();
+  Executor history(outer(iterator_history_plan()));
+  const Evaluation traced = evaluate(history, .25, 0);
+  close(traced.value, 0, "inline iterator history value");
+  close(traced.gradient[0], 0, "inline iterator history theta gradient");
+  check(iterator_forward_values == std::vector<double>({-1, 0, 1}),
+        "inline iterator forward values are exact");
+  check(iterator_reverse_values == std::vector<double>({1, 0, -1}),
+        "inline iterator reverse values preserve history");
+
+  Executor retry(outer(iterator_history_plan()));
+  iterator_throw_once = true;
+  bool threw = false;
+  try {
+    (void)evaluate(retry, .25, 0);
+  } catch (const std::runtime_error& error) {
+    threw = std::string(error.what()) == "injected iterator callback failure";
+  }
+  check(threw, "inline iterator preserves callback exception");
+  iterator_forward_values.clear();
+  iterator_reverse_values.clear();
+  const Evaluation retried = evaluate(retry, .25, 0);
+  close(retried.value, traced.value, "inline iterator retry value");
+  close(retried.gradient[0], traced.gradient[0],
+        "inline iterator retry theta gradient");
+  check(iterator_forward_values == std::vector<double>({-1, 0, 1}) &&
+            iterator_reverse_values == std::vector<double>({1, 0, -1}),
+        "inline iterator retry rebuilds historical values");
+
+  for (const auto& bounds : std::vector<std::pair<int32_t, int32_t>>{
+           {std::numeric_limits<int32_t>::min(),
+            std::numeric_limits<int32_t>::min() + 1},
+           {std::numeric_limits<int32_t>::max() - 1,
+            std::numeric_limits<int32_t>::max()},
+           {1, 0}}) {
+    Executor escaped(outer(iterator_escape_plan(bounds.first, bounds.second)));
+    const Evaluation result = evaluate(escaped, 0, 0);
+    const double expected = bounds.second >= bounds.first ? bounds.second : 7;
+    close(result.value, expected, "inline iterator boundary escape value");
+    close(result.gradient[0], 0,
+          "inline iterator boundary escape theta gradient");
+    close(result.gradient[1], 0,
+          "inline iterator boundary escape beta gradient");
+  }
+
+  Executor target(outer(iterator_target_plan()));
+  const Evaluation targeted = evaluate(target, 0, 0);
+  close(targeted.value, 6, "inline iterator target keeps reached values");
+  close(targeted.gradient[0], 0, "inline iterator target theta gradient");
+  close(targeted.gradient[1], 0, "inline iterator target beta gradient");
+
+  Executor nested(outer(nested_iterator_plan()));
+  const Evaluation nested_result = evaluate(nested, .25, 0);
+  close(nested_result.value, 3, "nested inline iterator value");
+  close(nested_result.gradient[0], 12, "nested inline iterator theta gradient");
+  close(nested_result.gradient[1], 0, "nested inline iterator beta gradient");
+
+  Executor update(outer(iterator_update_plan()));
+  const Evaluation updated = evaluate(update, .25, 0);
+  close(updated.value, 1.5, "inline iterator compact-update value");
+  close(updated.gradient[0], 6,
+        "inline iterator compact-update theta gradient");
+  close(updated.gradient[1], 0, "inline iterator compact-update beta gradient");
+}
 
 static std::atomic<int> invariant_first_calls{0};
 static std::atomic<int> invariant_second_calls{0};
@@ -1183,6 +1426,7 @@ int main() {
   direct_index_kernel_tests();
   forced_control_tests();
   dynamic_history_tests();
+  compact_iterator_history_tests();
   loop_invariant_reuse_tests();
   inactive_control_tests();
   dynamic_history_concurrency_tests();
