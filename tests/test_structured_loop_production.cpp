@@ -538,6 +538,10 @@ static void trace_update_backward(KernelCtx& context) {
   find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
 }
 
+static void retained_update_backward(KernelCtx& context) {
+  find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
+}
+
 static std::shared_ptr<StructuredLoop> iterator_history_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
@@ -630,7 +634,8 @@ static std::shared_ptr<StructuredLoop> nested_iterator_plan() {
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> iterator_update_plan() {
+static std::shared_ptr<StructuredLoop> iterator_update_plan(
+    void (*backward)(KernelCtx&) = trace_update_backward) {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int lower = scalar(*plan, 1);
@@ -663,8 +668,9 @@ static std::shared_ptr<StructuredLoop> iterator_update_plan() {
   plan->dynamic_history = true;
   check(plan->compact_update_sites == 1,
         "iterator update plan selects compact history");
-  check(set_backward(plan->root, update_op, trace_update_backward),
-        "find compact-update trace backward callback");
+  if (backward)
+    check(set_backward(plan->root, update_op, backward),
+          "find compact-update replacement backward callback");
   return plan;
 }
 
@@ -738,6 +744,16 @@ static void compact_iterator_history_tests() {
             std::vector<std::array<double, 3>>(
                 {{{.25, .5, .75}}, {{.25, .5, 30}}, {{10, 20, 30}}}),
         "compact-update reverse restores overwritten values in LIFO order");
+
+  Executor frame_free(outer(iterator_update_plan(nullptr)));
+  Executor retained(outer(iterator_update_plan(retained_update_backward)));
+  const Evaluation compact = evaluate(frame_free, .25, 0);
+  const Evaluation reference = evaluate(retained, .25, 0);
+  check(std::memcmp(&compact, &reference, sizeof(Evaluation)) == 0,
+        "frame-free compact reverse has bitwise retained-frame parity");
+  const Evaluation repeated = evaluate(frame_free, .25, 0);
+  check(std::memcmp(&compact, &repeated, sizeof(Evaluation)) == 0,
+        "frame-free compact reverse resets between evaluations");
 }
 
 static std::shared_ptr<StructuredLoop> integer_history_plan() {

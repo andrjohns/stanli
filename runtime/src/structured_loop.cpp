@@ -13,6 +13,7 @@
 #include <new>
 #include <numeric>
 #include <stdexcept>
+#include <type_traits>
 
 namespace stanli {
 namespace {
@@ -1276,6 +1277,7 @@ struct DynamicAllocationProfile {
     uint64_t ordinary_visits = 0;
     uint64_t active_visits = 0;
     uint64_t compact_visits = 0;
+    uint64_t frame_free_compact_visits = 0;
     uint64_t invariant_reuses = 0;
     uint64_t inactive_control_calls = 0;
     uint64_t direct_control_calls = 0;
@@ -1288,6 +1290,7 @@ struct DynamicAllocationProfile {
     uint64_t arena_location_refs = 0;
     uint64_t arena_values = 0;
     uint64_t input_handle_values = 0;
+    uint64_t record_handle_values = 0;
     uint64_t output_values = 0;
     uint64_t scratch_values = 0;
     uint64_t padding_values = 0;
@@ -1415,15 +1418,18 @@ struct DynamicAllocationProfile {
   }
 
   void note_compact(const Op& op, int64_t retained, int64_t output_len,
-                    bool active, bool shared_adjoint) noexcept {
+                    bool active, bool shared_adjoint,
+                    bool frame_free) noexcept {
     Bucket* b = bucket(op);
     if (!b) return;
     const uint64_t frame = count(retained);
     const uint64_t extent = count(output_len);
     add(b->compact_visits, 1);
+    add(b->frame_free_compact_visits, frame_free ? 1 : 0);
     add(b->active_visits, active ? 1 : 0);
     add(b->arena_values, frame);
-    add(b->input_handle_values, count(op.n_in));
+    add(b->input_handle_values, frame);
+    add(b->record_handle_values, frame_free && active ? 1 : 0);
     add(b->refs, 1);
     add(b->active_refs, active ? 1 : 0);
     add(b->referenced_values, extent);
@@ -1452,13 +1458,19 @@ struct DynamicLoopState final : KernelState {
   };
   struct Record {
     const Node* node = nullptr;
-    double* frame = nullptr;
+    // Ordinary and retained compact records store their input frame. A
+    // frame-free active compact record stores only its RHS handle; an inactive
+    // frame-free compact record leaves the pointer null.
+    union {
+      double* frame = nullptr;
+      double rhs_handle;
+    };
     double out = -1;
     // Ordinary calls store the optional second-output handle. Compact updates
     // have no second output and store the overwritten value here instead.
     double out2 = -1;
-    // Compact updates store the overwritten position directly. Ordinary
-    // records use -1.
+    // Retained compact updates store a nonnegative position. Ordinary records
+    // use -1. Frame-free compact updates encode position as -2 - position.
     int64_t undo = -1;
   };
   DynamicArena arena;
@@ -1636,6 +1648,10 @@ struct DynamicLoopState final : KernelState {
 };
 static_assert(sizeof(DynamicLoopState::Ref) == 16,
               "dynamic structured references must stay compact");
+static_assert(sizeof(DynamicLoopState::Record) == 40,
+              "dynamic structured reverse records must stay compact");
+static_assert(std::is_trivially_copyable_v<DynamicLoopState::Record>,
+              "dynamic structured reverse records must copy by value");
 
 uint64_t profile_bytes(uint64_t count, uint64_t width,
                        bool& overflow) noexcept {
@@ -1716,6 +1732,7 @@ void report_memory_profile(const StructuredLoop& p,
   bool allocation_overflow = allocation->overflow;
   uint64_t kernel_arena_values = 0;
   uint64_t input_handle_values = 0;
+  uint64_t record_handle_values = 0;
   uint64_t output_values = 0;
   uint64_t scratch_values = 0;
   uint64_t padding_values = 0;
@@ -1725,6 +1742,7 @@ void report_memory_profile(const StructuredLoop& p,
   uint64_t conceptual_adjoint_values = 0;
   uint64_t physical_adjoint_values = 0;
   uint64_t profiled_records = 0;
+  uint64_t frame_free_compact_visits = 0;
   uint64_t inline_integer_calls = 0;
   uint64_t elided_arena_values = 0;
   uint64_t elided_refs = 0;
@@ -1737,6 +1755,8 @@ void report_memory_profile(const StructuredLoop& p,
                                       allocation_overflow);
     input_handle_values = profile_add(
         input_handle_values, bucket.input_handle_values, allocation_overflow);
+    record_handle_values = profile_add(
+        record_handle_values, bucket.record_handle_values, allocation_overflow);
     output_values =
         profile_add(output_values, bucket.output_values, allocation_overflow);
     scratch_values =
@@ -1756,6 +1776,9 @@ void report_memory_profile(const StructuredLoop& p,
                     allocation_overflow);
     profiled_records =
         profile_add(profiled_records, bucket.records, allocation_overflow);
+    frame_free_compact_visits =
+        profile_add(frame_free_compact_visits, bucket.frame_free_compact_visits,
+                    allocation_overflow);
     inline_integer_calls = profile_add(
         inline_integer_calls, bucket.inline_integer_calls, allocation_overflow);
     elided_arena_values = profile_add(
@@ -1789,13 +1812,15 @@ void report_memory_profile(const StructuredLoop& p,
       "stanli_structured_alloc_summary region=%p accounting_overflow=%d "
       "initial_arena_values=%llu kernel_arena_values=%llu "
       "profiled_arena_values=%llu actual_arena_values=%llu arena_match=%d "
-      "input_handle_values=%llu output_values=%llu scratch_values=%llu "
+      "input_handle_values=%llu record_handle_values=%llu "
+      "output_values=%llu scratch_values=%llu "
       "padding_values=%llu initial_slot_refs=%llu canonical_refs=%llu "
       "import_refs=%llu kernel_refs=%llu profiled_refs=%llu "
       "actual_refs=%zu refs_match=%d active_refs=%llu "
       "referenced_values=%llu conceptual_adjoint_values=%llu "
       "physical_adjoint_values=%llu profiled_records=%llu "
       "actual_records=%zu records_match=%d inline_integer_calls=%llu "
+      "frame_free_compact_visits=%llu "
       "elided_arena_values=%llu elided_refs=%llu "
       "inactive_transient_values=%llu inactive_output_values=%llu "
       "inactive_output_refs=%llu arena_location_refs=%llu\n",
@@ -1806,6 +1831,7 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(state.arena.used_values),
       profiled_arena_values == state.arena.used_values ? 1 : 0,
       static_cast<unsigned long long>(input_handle_values),
+      static_cast<unsigned long long>(record_handle_values),
       static_cast<unsigned long long>(output_values),
       static_cast<unsigned long long>(scratch_values),
       static_cast<unsigned long long>(padding_values),
@@ -1822,6 +1848,7 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(profiled_records), state.records.size(),
       profiled_records == state.records.size() ? 1 : 0,
       static_cast<unsigned long long>(inline_integer_calls),
+      static_cast<unsigned long long>(frame_free_compact_visits),
       static_cast<unsigned long long>(elided_arena_values),
       static_cast<unsigned long long>(elided_refs),
       static_cast<unsigned long long>(inactive_transient_values),
@@ -1839,13 +1866,15 @@ void report_memory_profile(const StructuredLoop& p,
         stderr,
         "stanli_structured_alloc_opcode region=%p opcode=%u name=%s "
         "ordinary_visits=%llu active_visits=%llu compact_visits=%llu "
+        "frame_free_compact_visits=%llu "
         "invariant_reuses=%llu inactive_control_calls=%llu "
         "direct_control_calls=%llu inline_integer_calls=%llu "
         "elided_arena_values=%llu elided_refs=%llu arena_values=%llu "
         "inactive_transient_values=%llu inactive_output_values=%llu "
         "inactive_output_refs=%llu "
         "arena_location_refs=%llu "
-        "input_handle_values=%llu output_values=%llu scratch_values=%llu "
+        "input_handle_values=%llu record_handle_values=%llu "
+        "output_values=%llu scratch_values=%llu "
         "padding_values=%llu refs=%llu active_refs=%llu "
         "referenced_values=%llu conceptual_adjoint_values=%llu "
         "physical_adjoint_values=%llu records=%llu\n",
@@ -1854,6 +1883,7 @@ void report_memory_profile(const StructuredLoop& p,
         static_cast<unsigned long long>(bucket.ordinary_visits),
         static_cast<unsigned long long>(bucket.active_visits),
         static_cast<unsigned long long>(bucket.compact_visits),
+        static_cast<unsigned long long>(bucket.frame_free_compact_visits),
         static_cast<unsigned long long>(bucket.invariant_reuses),
         static_cast<unsigned long long>(bucket.inactive_control_calls),
         static_cast<unsigned long long>(bucket.direct_control_calls),
@@ -1866,6 +1896,7 @@ void report_memory_profile(const StructuredLoop& p,
         static_cast<unsigned long long>(bucket.inactive_output_refs),
         static_cast<unsigned long long>(bucket.arena_location_refs),
         static_cast<unsigned long long>(bucket.input_handle_values),
+        static_cast<unsigned long long>(bucket.record_handle_values),
         static_cast<unsigned long long>(bucket.output_values),
         static_cast<unsigned long long>(bucket.scratch_values),
         static_cast<unsigned long long>(bucket.padding_values),
@@ -1895,6 +1926,7 @@ DynamicLoopState& dynamic_state(KernelCtx& c) {
 
 void compare_forward(KernelCtx& c);
 void int_forward(KernelCtx& c);
+void set_index_backward(KernelCtx& c);
 
 struct DynamicExecution {
   const StructuredLoop& p;
@@ -2586,23 +2618,46 @@ struct DynamicExecution {
                                         c.in[2].len)
                : -1;
 
+    bool frame_free =
+        !active || (shared_adjoint >= 0 && n.backward == set_index_backward);
+    int64_t undo = position;
+    if (frame_free) {
+      if (position > std::numeric_limits<int64_t>::max() - 2) {
+        frame_free = false;
+      } else {
+        undo = -2 - position;
+      }
+    }
+
     // Every allocation that can throw precedes the destructive write. A later
     // failure still drops the entire evaluation-local tape, but this ordering
     // also keeps the state internally coherent under allocation failure.
     const int retained_inputs = op.n_in;
-    double* frame = state.arena.allocate(std::max(1, retained_inputs));
-    std::copy_n(handles, retained_inputs, frame);
+    double* frame = nullptr;
+    if (!frame_free) {
+      frame = state.arena.allocate(std::max(1, retained_inputs));
+      std::copy_n(handles, retained_inputs, frame);
+    }
     const double out = make_ref(c.out.data, c.out.len, active, shared_adjoint);
-    state.records.push_back({&n, frame, out, c.out.data[position], position});
     if (shared_adjoint >= 0 && c.out.len > state.compact_adjoint_work_size)
       throw std::logic_error(
           "compact structured adjoint exceeds preallocated work");
+    DynamicLoopState::Record record;
+    record.node = &n;
+    if (frame_free && active)
+      record.rhs_handle = handles[2];
+    else
+      record.frame = frame;
+    record.out = out;
+    record.out2 = c.out.data[position];
+    record.undo = undo;
+    state.records.push_back(record);
     c.out.data[position] = c.in[2].data[0];
     state.bindings[static_cast<size_t>(op.out)] = out;
     if (state.allocation_profile)
-      state.allocation_profile->note_compact(op, std::max(1, retained_inputs),
-                                             c.out.len, active,
-                                             shared_adjoint >= 0);
+      state.allocation_profile->note_compact(
+          op, frame_free ? 0 : std::max(1, retained_inputs), c.out.len, active,
+          shared_adjoint >= 0, frame_free);
     return true;
   }
 
@@ -2823,24 +2878,76 @@ struct DynamicExecution {
     return true;
   }
 
+  void backward_frame_free_compact(const DynamicLoopState::Record& record,
+                                   int64_t position) {
+    const Op& op = p.body.ops[static_cast<size_t>(record.node->op)];
+    const int64_t output_len = p.body.slots[static_cast<size_t>(op.out)].len;
+    if (record.out < 0 || record.node->backward != set_index_backward ||
+        op.opcode != OP_SET_INDEX_DYNAMIC || op.n_in != 3 || op.out2 >= 0 ||
+        p.body.slots[static_cast<size_t>(op.in[2])].len != 1 || position < 0 ||
+        position >= output_len || output_len <= 0 ||
+        output_len > state.compact_adjoint_work_size ||
+        !state.compact_adjoint_work)
+      throw std::logic_error("frame-free compact structured record is invalid");
+    auto& output = ref(record.out);
+    if (is_import_ref(output) || output.adjoint_or_import < 0)
+      throw std::logic_error(
+          "frame-free compact structured output is not internal");
+    if (!output.value)
+      throw std::logic_error(
+          "frame-free compact structured output is unavailable");
+    double* const shared_adjoint = adj(record.out, output_len);
+    double* const rhs_adjoint = adj(record.rhs_handle, 1);
+    if (!shared_adjoint)
+      throw std::logic_error(
+          "frame-free compact structured adjoint is unavailable");
+
+    double* const conceptual_output = state.compact_adjoint_work.get();
+    if (adjoint_ranges_overlap(record.out, output_len, record.rhs_handle, 1) ||
+        overlaps({conceptual_output, output_len},
+                 {shared_adjoint, output_len}) ||
+        (rhs_adjoint &&
+         overlaps({conceptual_output, output_len}, {rhs_adjoint, 1})))
+      throw std::logic_error(
+          "frame-free compact structured adjoints are not disjoint");
+    // The saved forward position is the tape value. The built-in scalar
+    // update has no selector adjoint; its reverse behavior depends only on
+    // that position, the RHS adjoint, and the ordered output-adjoint scan.
+    std::copy_n(shared_adjoint, output_len, conceptual_output);
+    std::fill_n(shared_adjoint, output_len, 0.0);
+    for (int64_t i = 0; i < output_len; ++i) {
+      if (i == position) {
+        if (rhs_adjoint) rhs_adjoint[0] += conceptual_output[i];
+      } else {
+        shared_adjoint[i] += conceptual_output[i];
+      }
+    }
+  }
+
   void backward() {
     for (size_t i = state.records.size(); i-- > 0;) {
       const auto& record = state.records[i];
-      if (record.undo >= 0) {
+      if (record.undo != -1) {
+        const bool frame_free = record.undo < -1;
+        const int64_t position = frame_free ? -(record.undo + 2) : record.undo;
         auto& output = ref(record.out);
         const int64_t output_len =
             p.body.slots[p.body.ops[record.node->op].out].len;
-        if (record.undo >= output_len)
+        if (position < 0 || position >= output_len)
           throw std::logic_error(
               "compact structured undo position out of range");
         if (record.out >= 0 && record.node->backward) {
-          ContextLease context(*this, *record.node, record.frame, true,
-                               record.out, -1, output.value);
-          KernelCtx& c = context.get();
-          prepare_shared_compact_adjoint(record, c);
-          record.node->backward(c);
+          if (frame_free) {
+            backward_frame_free_compact(record, position);
+          } else {
+            ContextLease context(*this, *record.node, record.frame, true,
+                                 record.out, -1, output.value);
+            KernelCtx& c = context.get();
+            prepare_shared_compact_adjoint(record, c);
+            record.node->backward(c);
+          }
         }
-        output.value[record.undo] = record.out2;
+        output.value[position] = record.out2;
       } else if (record.node->backward) {
         ContextLease context(*this, *record.node, record.frame, true,
                              record.out, record.out2);
