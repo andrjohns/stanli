@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <new>
+#include <numeric>
 #include <stdexcept>
 
 namespace stanli {
@@ -455,6 +457,217 @@ struct DirectControlPlan {
   }
 };
 
+// Prove body operations invariant for a retained for/while scope without
+// moving them across their first reached source position. The first execution
+// remains lazy; later reaches may reuse an inactive result only when every
+// input handle is identical. This preserves zero-trip loops, untaken branches,
+// exception order, and all active reverse history.
+struct LoopInvariantPlan {
+  struct Loop {
+    const Node* node = nullptr;
+    uint64_t generation = 0;
+  };
+  struct LoopIndex {
+    const Node* node = nullptr;
+    uint32_t loop = 0;
+  };
+  struct Site {
+    const Node* node = nullptr;
+    int op = -1;
+    uint32_t loop = 0;
+    std::array<double, 6> cached_inputs{};
+    double cached_out = -1;
+    double cached_out2 = -1;
+    uint64_t cached_generation = 0;
+  };
+
+  std::vector<int32_t> site_by_op;
+  std::vector<Loop> loops;
+  std::vector<LoopIndex> loop_index;
+  std::vector<Site> sites;
+
+  static bool pure_candidate(const StructuredLoop& p, const Node& n) {
+    if (n.kind != Node::KernelCall || n.op < 0 ||
+        static_cast<size_t>(n.op) >= p.body.ops.size() || !n.forward ||
+        n.compact_update_cell >= 0)
+      return false;
+    const uint16_t opcode = p.body.ops[static_cast<size_t>(n.op)].opcode;
+    return !is_effectful_op(opcode) && opcode != OP_ISLAND &&
+           opcode != OP_LOOP;
+  }
+
+  explicit LoopInvariantPlan(const StructuredLoop& p)
+      : site_by_op(p.body.ops.size(), int32_t{-1}) {
+    const size_t slot_count = p.body.slots.size();
+    const size_t op_count = p.body.ops.size();
+    std::vector<uint32_t> op_nodes(op_count, 0);
+    std::vector<const Node*> node_by_op(op_count, nullptr);
+    std::vector<uint8_t> inside_loop(op_count, 0);
+    std::vector<size_t> parent(slot_count);
+    std::iota(parent.begin(), parent.end(), size_t{0});
+    const auto root = [&](size_t slot) {
+      size_t result = slot;
+      while (parent[result] != result) result = parent[result];
+      while (parent[slot] != slot) {
+        const size_t next = parent[slot];
+        parent[slot] = result;
+        slot = next;
+      }
+      return result;
+    };
+    const auto unite = [&](size_t a, size_t b) {
+      const size_t ar = root(a), br = root(b);
+      if (ar != br) parent[br] = ar;
+    };
+
+    std::function<void(const Node&, uint32_t)> inventory =
+        [&](const Node& n, uint32_t loop_depth) {
+          if (n.kind == Node::KernelCall) {
+            if (n.op < 0 || static_cast<size_t>(n.op) >= op_count)
+              throw std::logic_error(
+                  "loop-invariant operation is out of range");
+            ++op_nodes[static_cast<size_t>(n.op)];
+            node_by_op[static_cast<size_t>(n.op)] = &n;
+            if (loop_depth) inside_loop[static_cast<size_t>(n.op)] = 1;
+          } else if (n.kind == Node::Alias) {
+            if (n.src < 0 || n.dst < 0 ||
+                static_cast<size_t>(n.src) >= slot_count ||
+                static_cast<size_t>(n.dst) >= slot_count)
+              throw std::logic_error("loop-invariant alias is out of range");
+            unite(static_cast<size_t>(n.src), static_cast<size_t>(n.dst));
+          } else if (n.kind == Node::For || n.kind == Node::While) {
+            if (loops.size() >= std::numeric_limits<uint32_t>::max())
+              throw std::length_error("too many structured loops");
+            loops.push_back({&n});
+          }
+          const uint32_t child_depth =
+              loop_depth + (n.kind == Node::For || n.kind == Node::While);
+          for (const auto& child : n.children) inventory(child, child_depth);
+        };
+    inventory(p.root, 0);
+
+    loop_index.reserve(loops.size());
+    for (uint32_t i = 0; i < loops.size(); ++i)
+      loop_index.push_back({loops[i].node, i});
+    std::sort(loop_index.begin(), loop_index.end(),
+              [](const LoopIndex& a, const LoopIndex& b) {
+                return std::less<const Node*>{}(a.node, b.node);
+              });
+
+    std::vector<uint8_t> admissible(op_count, 0);
+    for (size_t op = 0; op < op_count; ++op)
+      if (inside_loop[op] && op_nodes[op] == 1 &&
+          pure_candidate(p, *node_by_op[op]))
+        admissible[op] = 1;
+
+    // Preorder places an enclosing loop before its nested loops, so the first
+    // successful assignment gives each site its widest proved safe scope.
+    for (uint32_t loop_id = 0; loop_id < loops.size(); ++loop_id) {
+      const Node& loop = *loops[loop_id].node;
+      std::vector<uint32_t> writers(slot_count, 0);
+      std::vector<uint8_t> contained(op_count, 0);
+      std::vector<uint8_t> compact_roots(slot_count, 0);
+      const auto collect = [&](const auto& self, const Node& n) -> void {
+        switch (n.kind) {
+          case Node::KernelCall: {
+            const Op& op = p.body.ops.at(static_cast<size_t>(n.op));
+            ++writers.at(static_cast<size_t>(op.out));
+            if (op.out2 >= 0) ++writers.at(static_cast<size_t>(op.out2));
+            contained.at(static_cast<size_t>(n.op)) = 1;
+            if (n.compact_update_cell >= 0) {
+              compact_roots.at(
+                  root(static_cast<size_t>(n.compact_update_cell))) = 1;
+              if (op.n_in > 0)
+                compact_roots.at(root(static_cast<size_t>(op.in[0]))) = 1;
+            }
+            break;
+          }
+          case Node::Alias:
+            ++writers.at(static_cast<size_t>(n.dst));
+            break;
+          case Node::For:
+            ++writers.at(static_cast<size_t>(n.iterator));
+            break;
+          default:
+            break;
+        }
+        for (const auto& child : n.children) self(self, child);
+      };
+      collect(collect, loop);
+
+      std::vector<uint8_t> invariant(slot_count, 0);
+      for (size_t slot = 0; slot < slot_count; ++slot)
+        invariant[slot] = writers[slot] == 0 && !compact_roots[root(slot)];
+      bool changed = true;
+      while (changed) {
+        changed = false;
+        for (size_t op_id = 0; op_id < op_count; ++op_id) {
+          if (!contained[op_id] || !admissible[op_id]) continue;
+          const Op& op = p.body.ops[op_id];
+          if (writers[static_cast<size_t>(op.out)] != 1 ||
+              compact_roots[root(static_cast<size_t>(op.out))] ||
+              (op.out2 >= 0 &&
+               (writers[static_cast<size_t>(op.out2)] != 1 ||
+                compact_roots[root(static_cast<size_t>(op.out2))])))
+            continue;
+          bool inputs_invariant = true;
+          for (int k = 0; k < op.n_in; ++k)
+            inputs_invariant &= invariant[static_cast<size_t>(op.in[k])] != 0;
+          if (!inputs_invariant) continue;
+          if (!invariant[static_cast<size_t>(op.out)]) {
+            invariant[static_cast<size_t>(op.out)] = 1;
+            changed = true;
+          }
+          if (op.out2 >= 0 && !invariant[static_cast<size_t>(op.out2)]) {
+            invariant[static_cast<size_t>(op.out2)] = 1;
+            changed = true;
+          }
+        }
+      }
+
+      for (size_t op_id = 0; op_id < op_count; ++op_id) {
+        if (!contained[op_id] || !admissible[op_id] ||
+            site_by_op[op_id] >= 0)
+          continue;
+        const Op& op = p.body.ops[op_id];
+        if (writers[static_cast<size_t>(op.out)] != 1 ||
+            !invariant[static_cast<size_t>(op.out)] ||
+            (op.out2 >= 0 &&
+             (writers[static_cast<size_t>(op.out2)] != 1 ||
+              !invariant[static_cast<size_t>(op.out2)])))
+          continue;
+        bool inputs_invariant = true;
+        for (int k = 0; k < op.n_in; ++k)
+          inputs_invariant &= invariant[static_cast<size_t>(op.in[k])] != 0;
+        if (!inputs_invariant) continue;
+        site_by_op[op_id] = static_cast<int32_t>(sites.size());
+        sites.push_back(
+            {node_by_op[op_id], static_cast<int>(op_id), loop_id});
+      }
+    }
+  }
+
+  int32_t find_loop(const Node& node) const noexcept {
+    const auto at = std::lower_bound(
+        loop_index.begin(), loop_index.end(), &node,
+        [](const LoopIndex& entry, const Node* wanted) {
+          return std::less<const Node*>{}(entry.node, wanted);
+        });
+    return at != loop_index.end() && at->node == &node
+               ? static_cast<int32_t>(at->loop)
+               : int32_t{-1};
+  }
+
+  void reset_runtime() noexcept {
+    for (auto& loop : loops) loop.generation = 0;
+    for (auto& site : sites) {
+      site.cached_inputs.fill(0.0);
+      site.cached_out = site.cached_out2 = -1;
+      site.cached_generation = 0;
+    }
+  }
+};
+
 int64_t offset(double handle) {
   return static_cast<int64_t>(handle >= 0 ? handle : -handle - 1);
 }
@@ -747,8 +960,10 @@ struct DynamicLoopState final : KernelState {
   // pointer and adjoint before each reached forward or reverse callback.
   std::vector<KernelCtx> context_templates;
   std::unique_ptr<DirectControlPlan> direct_control_plan;
+  std::unique_ptr<LoopInvariantPlan> loop_invariant_plan;
   int64_t conceptual_adjoint_size = 0;
   int64_t adjoint_size = 0;
+  bool loop_invariant_reuse = false;
   bool cached_context_in_use = false;
   // A dynamic tape belongs to exactly one completed forward sweep.  Forward
   // invalidates the previous tape before doing any validation or allocation;
@@ -823,6 +1038,14 @@ struct DynamicLoopState final : KernelState {
       // Direct-control reuse is an optional optimization. Classifier
       // allocation or proof failure must not reduce ordinary model coverage.
       direct_control_plan.reset();
+    }
+    try {
+      loop_invariant_plan = std::make_unique<LoopInvariantPlan>(p);
+      if (loop_invariant_plan->sites.empty()) loop_invariant_plan.reset();
+    } catch (...) {
+      // Invariant reuse is optional. A classifier allocation or proof failure
+      // leaves the ordinary retained executor authoritative.
+      loop_invariant_plan.reset();
     }
   }
 
@@ -921,6 +1144,87 @@ struct DynamicExecution {
 
   double* value(int s) {
     return ref(state.bindings.at(static_cast<size_t>(s))).value;
+  }
+
+  void begin_loop_invariant_scope(const Node& n) noexcept {
+    auto* plan = state.loop_invariant_plan.get();
+    if (!plan || !state.loop_invariant_reuse) return;
+    const int32_t id = plan->find_loop(n);
+    if (id < 0 || static_cast<size_t>(id) >= plan->loops.size() ||
+        plan->loops[static_cast<size_t>(id)].node != &n) {
+      state.loop_invariant_reuse = false;
+      return;
+    }
+    auto& generation = plan->loops[static_cast<size_t>(id)].generation;
+    if (generation == std::numeric_limits<uint64_t>::max()) {
+      state.loop_invariant_reuse = false;
+      return;
+    }
+    ++generation;
+  }
+
+  LoopInvariantPlan::Site* loop_invariant_site(const Node& n) noexcept {
+    auto* plan = state.loop_invariant_plan.get();
+    if (!plan || !state.loop_invariant_reuse || n.op < 0 ||
+        static_cast<size_t>(n.op) >= plan->site_by_op.size())
+      return nullptr;
+    const int32_t id = plan->site_by_op[static_cast<size_t>(n.op)];
+    if (id < 0 || static_cast<size_t>(id) >= plan->sites.size()) return nullptr;
+    auto& site = plan->sites[static_cast<size_t>(id)];
+    if (site.node != &n || site.loop >= plan->loops.size()) {
+      state.loop_invariant_reuse = false;
+      return nullptr;
+    }
+    return &site;
+  }
+
+  bool reuse_loop_invariant(const Node& n) noexcept {
+    auto* site = loop_invariant_site(n);
+    if (!site) return false;
+    auto* plan = state.loop_invariant_plan.get();
+    auto& loop = plan->loops[site->loop];
+    if (loop.generation == 0) {
+      state.loop_invariant_reuse = false;
+      return false;
+    }
+    const Op& op = p.body.ops[static_cast<size_t>(n.op)];
+    bool active = n.backward != nullptr;
+    bool any_active_input = false;
+    for (int k = 0; k < op.n_in; ++k)
+      any_active_input |=
+          state.bindings[static_cast<size_t>(op.in[k])] >= 0;
+    active &= any_active_input;
+    if (active || site->cached_generation != loop.generation) return false;
+    for (int k = 0; k < op.n_in; ++k)
+      if (site->cached_inputs[static_cast<size_t>(k)] !=
+          state.bindings[static_cast<size_t>(op.in[k])])
+        return false;
+    state.bindings[static_cast<size_t>(op.out)] = site->cached_out;
+    if (op.out2 >= 0)
+      state.bindings[static_cast<size_t>(op.out2)] = site->cached_out2;
+    return true;
+  }
+
+  void publish_loop_invariant(const Node& n) noexcept {
+    auto* site = loop_invariant_site(n);
+    if (!site) return;
+    auto* plan = state.loop_invariant_plan.get();
+    auto& loop = plan->loops[site->loop];
+    if (loop.generation == 0) {
+      state.loop_invariant_reuse = false;
+      return;
+    }
+    const Op& op = p.body.ops[static_cast<size_t>(n.op)];
+    const double out = state.bindings[static_cast<size_t>(op.out)];
+    const double out2 =
+        op.out2 >= 0 ? state.bindings[static_cast<size_t>(op.out2)] : -1;
+    if (out >= 0 || (op.out2 >= 0 && out2 >= 0)) return;
+    for (int k = 0; k < op.n_in; ++k)
+      site->cached_inputs[static_cast<size_t>(k)] =
+          state.bindings[static_cast<size_t>(op.in[k])];
+    site->cached_out = out;
+    site->cached_out2 = out2;
+    site->cached_generation = loop.generation;
   }
 
   DirectControlPlan::Site* direct_control_site(const Node& n) noexcept {
@@ -1235,7 +1539,11 @@ struct DynamicExecution {
         return Normal;
       case Node::KernelCall: {
         const Op& op = p.body.ops[n.op];
-        if (op.opcode == OP_COMPARE && direct_control(n)) return Normal;
+        if (reuse_loop_invariant(n)) return Normal;
+        if (op.opcode == OP_COMPARE && direct_control(n)) {
+          publish_loop_invariant(n);
+          return Normal;
+        }
         if (compact_update(n)) return Normal;
         double* frame = state.arena.allocate(retained_frame_values(n));
         for (int k = 0; k < op.n_in; ++k)
@@ -1260,6 +1568,7 @@ struct DynamicExecution {
           state.compact_primal_by_cell[static_cast<size_t>(
               n.compact_update_cell)] = c.out.data;
         }
+        publish_loop_invariant(n);
         return Normal;
       }
       case Node::Alias:
@@ -1269,6 +1578,7 @@ struct DynamicExecution {
       case Node::If:
         return forward(n.children[value(n.condition)[0] != 0.0 ? 0 : 1]);
       case Node::For: {
+        begin_loop_invariant_scope(n);
         const double lo = value(n.lower)[0], hi = value(n.upper)[0];
         if (!std::isfinite(lo) || !std::isfinite(hi) || std::trunc(lo) != lo ||
             std::trunc(hi) != hi || lo < std::numeric_limits<int32_t>::min() ||
@@ -1289,6 +1599,7 @@ struct DynamicExecution {
         return Normal;
       }
       case Node::While:
+        begin_loop_invariant_scope(n);
         for (int64_t i = 0;; ++i) {
           forward(n.children[0]);
           if (value(n.condition)[0] == 0.0) break;
@@ -1398,6 +1709,10 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   // A failed replacement forward must never leave either the preceding tape
   // or a partially built replacement resident/available to reverse.
   s.release_tape();
+  if (s.loop_invariant_plan) s.loop_invariant_plan->reset_runtime();
+  s.loop_invariant_reuse =
+      s.loop_invariant_plan &&
+      std::getenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE") == nullptr;
   struct ReleaseOnFailure {
     DynamicLoopState& state;
     bool published = false;

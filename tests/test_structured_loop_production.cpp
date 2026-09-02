@@ -86,6 +86,34 @@ static Node counted(int lower, int upper, int iterator, int64_t capacity,
   return node;
 }
 
+static Node branch(int condition, Node yes, Node no) {
+  Node node;
+  node.kind = Node::If;
+  node.condition = condition;
+  node.children = {std::move(yes), std::move(no)};
+  return node;
+}
+
+static Node while_loop(int condition, int64_t capacity, Node condition_body,
+                       Node body) {
+  Node node;
+  node.kind = Node::While;
+  node.condition = condition;
+  node.capacity = capacity;
+  node.children = {std::move(condition_body), std::move(body)};
+  return node;
+}
+
+static bool set_forward(Node& node, int op, void (*forward)(KernelCtx&)) {
+  if (node.kind == Node::KernelCall && node.op == op) {
+    node.forward = forward;
+    return true;
+  }
+  for (auto& child : node.children)
+    if (set_forward(child, op, forward)) return true;
+  return false;
+}
+
 static std::shared_ptr<StructuredLoop> recurrence(int trips) {
   auto plan = std::make_shared<StructuredLoop>();
   for (int i = 0; i < 7; ++i) plan->body.add_slot(1, false);
@@ -278,6 +306,196 @@ struct Evaluation {
   double gradient[2] = {0, 0};
 };
 
+static std::atomic<int> invariant_first_calls{0};
+static std::atomic<int> invariant_second_calls{0};
+static std::atomic<int> invariant_active_calls{0};
+static std::atomic<int> invariant_variant_calls{0};
+
+static void count_invariant_first(KernelCtx& context) {
+  ++invariant_first_calls;
+  find_kernel(OP_ADD)->forward(context);
+}
+static void count_invariant_second(KernelCtx& context) {
+  ++invariant_second_calls;
+  find_kernel(OP_MUL)->forward(context);
+}
+static void count_invariant_second_add(KernelCtx& context) {
+  ++invariant_second_calls;
+  find_kernel(OP_ADD)->forward(context);
+}
+static void count_invariant_active(KernelCtx& context) {
+  ++invariant_active_calls;
+  find_kernel(OP_ADD)->forward(context);
+}
+static void count_invariant_variant(KernelCtx& context) {
+  ++invariant_variant_calls;
+  find_kernel(OP_ADD)->forward(context);
+}
+
+static std::shared_ptr<StructuredLoop> invariant_plan(int trips) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, trips);
+  const int iterator = plan->body.add_slot(1, false);
+  const int two = scalar(*plan, 2);
+  const int three = scalar(*plan, 3);
+  const int invariant_first = plan->body.add_slot(1, false);
+  const int invariant_second = plan->body.add_slot(1, false);
+  const int active = plan->body.add_slot(1, false);
+  const int variant = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+  Node first = call(*plan, OP_ADD, {two, three}, invariant_first);
+  const int first_op = first.op;
+  Node second = call(*plan, OP_MUL, {invariant_first, two}, invariant_second);
+  const int second_op = second.op;
+  Node active_call = call(*plan, OP_ADD, {result, invariant_second}, active);
+  const int active_op = active_call.op;
+  Node variant_call = call(*plan, OP_ADD, {iterator, two}, variant);
+  const int variant_op = variant_call.op;
+  plan->root = sequence(
+      {alias(result, theta),
+       counted(lower, upper, iterator, std::max(0, trips),
+               sequence({std::move(first), std::move(second),
+                         std::move(active_call), alias(result, active),
+                         std::move(variant_call)}))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(set_forward(plan->root, first_op, count_invariant_first),
+        "find first invariant callback");
+  check(set_forward(plan->root, second_op, count_invariant_second),
+        "find transitive invariant callback");
+  check(set_forward(plan->root, active_op, count_invariant_active),
+        "find active callback");
+  check(set_forward(plan->root, variant_op, count_invariant_variant),
+        "find iterator-dependent callback");
+  return plan;
+}
+
+static Evaluation evaluate_invariant(Executor& executor, double theta) {
+  executor.params_data()[0] = theta;
+  executor.params_data()[1] = 0;
+  Evaluation result;
+  result.value = executor.gradient(result.gradient);
+  return result;
+}
+
+static void loop_invariant_reuse_tests() {
+  test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
+  auto plan = invariant_plan(3);
+  Executor enabled(outer(plan));
+  invariant_first_calls = invariant_second_calls = 0;
+  invariant_active_calls = invariant_variant_calls = 0;
+  const Evaluation first = evaluate_invariant(enabled, .25);
+  check(invariant_first_calls == 1 && invariant_second_calls == 1,
+        "inactive invariant chain executes once per loop invocation");
+  check(invariant_active_calls == 3,
+        "active loop work retains every reverse record");
+  check(invariant_variant_calls == 3,
+        "iterator-dependent work is not reused");
+  const Evaluation second = evaluate_invariant(enabled, .25);
+  check(invariant_first_calls == 2 && invariant_second_calls == 2,
+        "invariant cache resets for a new forward evaluation");
+  check(std::memcmp(&first, &second, sizeof(Evaluation)) == 0,
+        "repeated invariant evaluation is bitwise stable");
+
+  test_setenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE", "1");
+  Executor disabled(outer(plan));
+  invariant_first_calls = invariant_second_calls = 0;
+  invariant_active_calls = invariant_variant_calls = 0;
+  const Evaluation baseline = evaluate_invariant(disabled, .25);
+  test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
+  check(invariant_first_calls == 3 && invariant_second_calls == 3,
+        "invariant ablation executes every reached callback");
+  check(std::memcmp(&first, &baseline, sizeof(Evaluation)) == 0,
+        "invariant reuse has bitwise same-binary parity");
+
+  auto zero = invariant_plan(0);
+  Executor zero_executor(outer(zero));
+  invariant_first_calls = invariant_second_calls = 0;
+  const Evaluation zero_result = evaluate_invariant(zero_executor, .25);
+  check(invariant_first_calls == 0 && invariant_second_calls == 0,
+        "zero-trip loop does not pre-execute invariants");
+  close(zero_result.value, .25, "zero-trip invariant value");
+
+  // A downstream site can run before a conditional invariant is first
+  // reached. Exact input-handle matching must refresh it when that definition
+  // appears, then permit reuse.
+  auto late = std::make_shared<StructuredLoop>();
+  const int late_theta = late->body.add_slot(1, false);
+  const int late_lower = scalar(*late, 1);
+  const int late_upper = scalar(*late, 3);
+  const int late_iterator = late->body.add_slot(1, false);
+  const int late_one = scalar(*late, 1);
+  const int late_condition = late->body.add_slot(1, false);
+  const int late_source = late->body.add_slot(1, false);
+  const int late_result = late->body.add_slot(1, false);
+  late->imports = {{late_theta, 0, 0}};
+  Node comparison = call(*late, OP_COMPARE, {late_iterator, late_one},
+                         late_condition);
+  late->body.ops[static_cast<size_t>(comparison.op)].variant = 2;
+  Node late_definition = call(*late, OP_ADD, {late_one, late_one}, late_source);
+  const int late_definition_op = late_definition.op;
+  Node late_use = call(*late, OP_ADD, {late_source, late_one}, late_result);
+  const int late_use_op = late_use.op;
+  late->root = counted(
+      late_lower, late_upper, late_iterator, 3,
+      sequence({std::move(comparison),
+                branch(late_condition, std::move(late_definition), sequence({})),
+                std::move(late_use)}));
+  late->outputs = {late_result};
+  late->prepare(1 << 20);
+  late->dynamic_history = true;
+  check(set_forward(late->root, late_definition_op, count_invariant_first),
+        "find late invariant definition");
+  check(set_forward(late->root, late_use_op, count_invariant_second_add),
+        "find late invariant consumer");
+  invariant_first_calls = invariant_second_calls = 0;
+  Executor late_executor(outer(late));
+  const Evaluation late_result_value = evaluate_invariant(late_executor, 0);
+  close(late_result_value.value, 3,
+        "invariant cache observes a late conditional definition");
+  check(invariant_first_calls == 1 && invariant_second_calls == 2,
+        "changed input handles refresh a downstream invariant cache");
+
+  auto while_plan = std::make_shared<StructuredLoop>();
+  const int while_theta = while_plan->body.add_slot(1, false);
+  const int while_counter = scalar(*while_plan, 0);
+  const int while_one = scalar(*while_plan, 1);
+  const int while_three = scalar(*while_plan, 3);
+  const int while_condition = while_plan->body.add_slot(1, false);
+  const int while_next = while_plan->body.add_slot(1, false);
+  const int while_invariant = while_plan->body.add_slot(1, false);
+  const int while_result = while_plan->body.add_slot(1, false);
+  while_plan->imports = {{while_theta, 0, 0}};
+  Node while_compare = call(*while_plan, OP_COMPARE,
+                            {while_three, while_counter}, while_condition);
+  while_plan->body.ops[static_cast<size_t>(while_compare.op)].variant = 2;
+  Node while_constant =
+      call(*while_plan, OP_ADD, {while_one, while_one}, while_invariant);
+  const int while_constant_op = while_constant.op;
+  while_plan->root = while_loop(
+      while_condition, 3, std::move(while_compare),
+      sequence({std::move(while_constant),
+                call(*while_plan, OP_ADD, {while_counter, while_one}, while_next),
+                alias(while_counter, while_next),
+                alias(while_result, while_invariant)}));
+  while_plan->outputs = {while_result};
+  while_plan->prepare(1 << 20);
+  while_plan->dynamic_history = true;
+  check(set_forward(while_plan->root, while_constant_op,
+                    count_invariant_first),
+        "find while invariant callback");
+  invariant_first_calls = 0;
+  Executor while_executor(outer(while_plan));
+  const Evaluation while_result_value = evaluate_invariant(while_executor, 0);
+  close(while_result_value.value, 2, "while invariant result");
+  check(invariant_first_calls == 1,
+        "while body reuses its inactive invariant result");
+}
+
 static Evaluation evaluate(Executor& executor, double theta, double beta) {
   executor.params_data()[0] = theta;
   executor.params_data()[1] = beta;
@@ -449,11 +667,13 @@ int main() {
   runtime_trip_tests();
   forced_control_tests();
   dynamic_history_tests();
+  loop_invariant_reuse_tests();
   dynamic_history_concurrency_tests();
   dynamic_history_failure_tests();
   automatic_policy_tests();
   test_unsetenv("STANLI_STRUCTURED_LOOPS");
   test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
+  test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
   if (failures == 0) std::printf("test_structured_loop_production OK\n");
   return failures != 0;
 }
