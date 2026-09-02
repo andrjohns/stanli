@@ -24,6 +24,7 @@
 #include <stanli/mir.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/program.hpp>
+#include <stanli/regular_builtin.hpp>
 #include <stanli/rng_family.hpp>
 
 #include <algorithm>
@@ -107,8 +108,7 @@ struct ProgramCompiler {
   // being in `reals` only says the region has read one as a value.
   std::set<std::string> extern_bound;
   // Whether this region belongs to generated quantities. Only there is an
-  // RNG draw legal, and only there is a program guaranteed never to be
-  // replayed under var -- which is what lets it hold a CALL at all.
+  // RNG draw legal.
   bool in_write_array = false;
   int branch_depth = 0;  // inside a branch on a runtime value
   // A while is a genuinely runtime loop: its condition and state must be
@@ -1039,8 +1039,8 @@ struct ProgramCompiler {
       r.rows = r.cols = 0;
     } else if (type == "UMatrix" && r.kind != ViewKind::Matrix) {
       bail("matrix expression has unknown logical extents");
-    } else if (type == "UArray") {
-      bail("array expressions are unsupported by the register program");
+    } else if (type == "UArray" && r.kind != ViewKind::Array) {
+      bail("array expression has an unknown logical view");
     }
     return r;
   }
@@ -1470,10 +1470,8 @@ struct ProgramCompiler {
   // the graph's own OP_RNG kernel rather than transcribed family by family.
   // The stream, the stan-math call and the argument contract are then the
   // kernel's, so the region and the graph cannot disagree about what a draw
-  // is or where in the stream it lands. CALL is double-only, which is the
-  // right constraint here rather than a limitation: generated quantities
-  // never runs a gradient, and OP_RNG has no backward for the carver to
-  // generate one from, so the island keeps the replay it will never use.
+  // is or where in the stream it lands. Generated quantities never runs a
+  // gradient, and OP_RNG consequently needs no backward implementation.
   Range rng_call(const mir::Expr& e) {
     if (!in_write_array)
       bail(e.name + " is supported only in generated quantities");
@@ -1540,6 +1538,120 @@ struct ProgramCompiler {
     p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});
     Range out{r, out_len};
     out.kind = out_kind;
+    return out;
+  }
+
+  // Program-native instructions cover the hot elementary subset. Everything
+  // else in the shared regular-function registry reaches the exact same graph
+  // kernel through CALL, so adding an optable entry also makes it available in
+  // parameter-dependent control flow without another name table here.
+  static bool native_regular_opcode(uint16_t opcode) {
+    switch (opcode) {
+      case OP_ADD:
+      case OP_SUB:
+      case OP_MUL:
+      case OP_DIV:
+      case OP_POW:
+      case OP_FMAX:
+      case OP_FMIN:
+      case OP_LSE2:
+      case OP_LOG_DIFF_EXP:
+      case OP_NEG:
+      case OP_EXPV:
+      case OP_LOGV:
+      case OP_SQRT:
+      case OP_SQUARE:
+      case OP_INV:
+      case OP_ABS:
+      case OP_INV_LOGIT:
+      case OP_LOG1P_EXP:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  Range regular_kernel_call(const mir::Expr& e, const RegularSpec& spec) {
+    const size_t arity = spec.kind == RegularKind::Unary ? 1 : 2;
+    if (e.args.size() != arity) bail(e.name + ": wrong number of arguments");
+    std::vector<Range> args;
+    args.reserve(arity);
+    for (const mir::Expr& arg : e.args) args.push_back(expr(arg));
+
+    Range out = args[0];
+    if (spec.kind != RegularKind::Unary) {
+      const bool as = is_scalar(args[0]), bs = is_scalar(args[1]);
+      if (spec.kind == RegularKind::Binary) {
+        if (!as && !bs && !same_view(args[0], args[1]))
+          bail(e.name + ": incompatible logical views");
+        if (as && !bs) out = args[1];
+      } else {
+        const bool int_first = spec.kind == RegularKind::BinaryIntFirst;
+        const Range& re = args[int_first ? 1 : 0];
+        const Range& iv = args[int_first ? 0 : 1];
+        if (!is_scalar(re) && !is_scalar(iv) && re.len != iv.len)
+          bail(e.name + ": arguments must match in size");
+        out = is_scalar(re) ? iv : re;
+      }
+    }
+
+    const int result = alloc(out.len);
+    out.reg = result;
+    out = typed(out, e.type_);
+
+    Program::Call call;
+    call.opcode = spec.opcode;
+    call.n_in = (int8_t)args.size();
+    if (spec.kind == RegularKind::BinaryIntFirst)
+      call.input_adjoint_mask = 0x2;
+    else if (spec.kind == RegularKind::BinaryIntSecond)
+      call.input_adjoint_mask = 0x1;
+    for (size_t k = 0; k < args.size(); ++k) {
+      call.in[k] = args[k].reg;
+      call.in_len[k] = args[k].len;
+    }
+    call.out = result;
+    call.out_len = out.len;
+
+    if (spec.kind == RegularKind::BinaryIntFirst ||
+        spec.kind == RegularKind::BinaryIntSecond) {
+      const bool int_first = spec.kind == RegularKind::BinaryIntFirst;
+      const Range& re = args[int_first ? 1 : 0];
+      const Range& iv = args[int_first ? 0 : 1];
+      if (!is_scalar(iv)) {
+        if (re.kind == ViewKind::Matrix) {
+          call.idata = {(int)re.rows, (int)re.cols};
+        } else if (re.kind == ViewKind::Array && re.leaf == ViewKind::Matrix &&
+                   re.dims.size() >= 2) {
+          call.idata = {(int)re.dims[re.dims.size() - 2], (int)re.dims.back()};
+        }
+      }
+    }
+
+    const Kernel* kernel = find_kernel(call.opcode);
+    if (kernel == nullptr) bail(e.name + ": graph kernel is unavailable");
+    if (kernel->scratch_size != nullptr) {
+      Op op;
+      op.opcode = call.opcode;
+      op.n_in = call.n_in;
+      op.out = call.n_in;
+      op.idata = call.idata.data();
+      op.n_idata = (int64_t)call.idata.size();
+      std::vector<Slot> slots(args.size() + 1);
+      for (size_t k = 0; k < args.size(); ++k) {
+        op.in[k] = (int)k;
+        slots[k].len = args[k].len;
+      }
+      slots.back().len = out.len;
+      const int64_t scratch = kernel->scratch_size(op, slots.data());
+      if (scratch < 0 || scratch > kMaxRegs)
+        bail(e.name + ": kernel needs excessive scratch storage");
+      call.scratch_len = (int32_t)scratch;
+      call.scratch = scratch ? alloc((int)scratch) : 0;
+    }
+    if (!bind_call(call)) bail(e.name + ": graph kernel is unavailable");
+    p.calls.push_back(std::move(call));
+    p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});
     return out;
   }
 
@@ -1770,6 +1882,9 @@ struct ProgramCompiler {
     CallableTransformSpec transform;
     if (callable_transform(e.name, &transform))
       return transform_call(e, transform);
+    const auto regular = resolve_regular_builtin(e.name, e.args.size());
+    if (regular && !native_regular_opcode(regular->opcode))
+      return regular_kernel_call(e, *regular);
     if (e.name == "tcrossprod" && e.args.size() == 1)
       return matrix_gram(expr(e.args[0]), false);
     if (e.name == "crossprod" && e.args.size() == 1)

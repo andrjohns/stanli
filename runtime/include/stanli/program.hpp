@@ -170,9 +170,9 @@ struct Program {
     // union point with the graph executor -- one instruction gives the
     // register machine the graph's whole vocabulary, and its derivative
     // is the kernel's own backward rather than a transcribed rule. The
-    // kernels compute on doubles, so only run_program<double> can execute
-    // one; the carver keeps a CALL-bearing island only when the generated
-    // adjoint exists, so the var replay never meets it.
+    // kernels compute their values and partials on doubles. A generated
+    // adjoint invokes the backward directly; var replay uses a small adapter
+    // that exposes its output adjoints to the same backward implementation.
   };
   struct Instr {
     Code code = CONST;
@@ -189,6 +189,9 @@ struct Program {
   struct Call {
     uint16_t opcode = 0;
     uint8_t variant = 0;
+    // Inputs that receive derivatives when CALL is replayed over var. Integer
+    // lanes are values in the register file but are never autodiff operands.
+    uint8_t input_adjoint_mask = 0x3f;
     int8_t n_in = 0;
     // Resolved once when the call site is built. A registered kernel's
     // function identity is stable, so repeated table lookup during program
@@ -344,6 +347,11 @@ KernelCtx call_fwd_ctx(const Program::Call& call, double* reg);
 // have the Kernel in hand and bind its pointers directly. False leaves the
 // call unbound, so malformed or unavailable opcodes fail closed.
 bool bind_call(Program::Call& call);
+
+// Replay a graph-kernel call on a var register file. The kernel still owns its
+// value and pullback; this adapter only gathers/scatters the non-contiguous
+// vari pointers used by a runtime-control program.
+void run_call_var(const Program::Call& call, stan::math::var* reg);
 
 // Run one CALL forward through its pre-resolved function. `state` is the
 // caller's evaluation state, which is how a generated-quantities region
@@ -714,10 +722,7 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
           else
             run_call(p.calls[(size_t)I.a], reg, state);
         } else {
-          // Kernels are double machinery; a program that reaches here
-          // under var was carved wrong, and saying so beats corrupting
-          // a gradient.
-          throw std::logic_error("CALL instruction in a var replay");
+          run_call_var(p.calls[(size_t)I.a], reg);
         }
         break;
       case Program::TRANSFORM:

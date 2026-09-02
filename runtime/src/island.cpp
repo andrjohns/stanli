@@ -590,10 +590,9 @@ int carve_islands(Graph& g,
       compact_island_gated(cc.prog, false);
       priced_gen = gen_adjoint(cc.prog);
       cc.prog.native_adj = priced_gen && !std::getenv("STANLI_NO_NATIVE_ADJ");
-      // The var replay cannot execute a CALL (kernels are double
-      // machinery), so a CALL-bearing island exists only with its
-      // generated adjoint; otherwise the run stays as ops, which is the
-      // same work the CALLs would have done anyway.
+      // A failed generated adjoint would make this optimization replay each
+      // kernel through callback vars. Leave the run as graph ops instead;
+      // that is the same work without the gather/scatter adapter.
       if (!cc.prog.calls.empty() && !cc.prog.native_adj) compiled = false;
       // A refusal is not an error -- the replay still gives the right
       // gradient -- but it is worth being able to see, because it is the

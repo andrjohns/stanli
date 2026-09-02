@@ -1,4 +1,4 @@
-// Keep graph, MIR double/var, and ODE-fallback unary semantics aligned with
+// Keep graph, MIR double/var, and ODE-program unary semantics aligned with
 // Stan Math. Raw finite bits pin the shared pullback expression's ordering;
 // NaNs are compared by category because payload bits are not Stan semantics.
 #include <stanli/graph.hpp>
@@ -319,6 +319,8 @@ void expect_disconnected(const std::string& name, const Observation& got) {
 }
 
 void test_program_and_topology() {
+  check_program("sin", "sin", stanli::OP_SIN, 0.3,
+                [](const stan::math::var& x) { return stan::math::sin(x); });
   check_program("inv", "inv", stanli::OP_INV, 0.3,
                 [](const stan::math::var& x) { return stan::math::inv(x); });
   check_program("abs positive", "abs", stanli::OP_ABS, 0.3,
@@ -455,7 +457,7 @@ void test_vector_jacobian() {
   }
 }
 
-void test_ode_fallback() {
+void test_ode_program() {
   Expr rate = call("sin", {element(variable("theta", "UVector"), 1)}, "UReal");
   Expr value =
       call("Times__", {std::move(rate), element(variable("y", "UVector"), 1)},
@@ -480,10 +482,9 @@ void test_ode_fallback() {
   spec->prog = compile_rhs(f, defs, 1, 1, 1, x_i);
 
   const double want = 1.1 * std::exp(std::sin(0.2) * 0.4);
-  if (spec->prog.ok ||
-      spec->prog.why.find("function sin") == std::string::npos) {
+  if (!spec->prog.ok) {
     ++failures;
-    std::printf("FAIL ODE did not exercise unary fallback: %s\n",
+    std::printf("FAIL ODE did not inherit unary dispatch: %s\n",
                 spec->prog.why.c_str());
   }
 
@@ -503,8 +504,8 @@ void test_ode_fallback() {
     *executor.param_ptr(parameter) = 0.2;
     double gradient = 0;
     const double got = executor.gradient(&gradient);
-    expect_close(std::string("ODE fallback value ") + label, got, want, 2e-8);
-    expect_close(std::string("ODE fallback gradient ") + label, gradient,
+    expect_close(std::string("ODE program value ") + label, got, want, 2e-8);
+    expect_close(std::string("ODE program gradient ") + label, gradient,
                  want * 0.4 * std::cos(0.2), 2e-8);
   };
   run(0x0u, "legacy var/var");
@@ -519,7 +520,7 @@ int main() {
   test_program_and_topology();
   test_blocker_edges();
   test_vector_jacobian();
-  test_ode_fallback();
+  test_ode_program();
   if (failures == 0) std::printf("test_mir_unary_fallback: all cases passed\n");
   return failures == 0 ? 0 : 1;
 }

@@ -17,6 +17,7 @@
 #include <stanli/structured_loop.hpp>
 #include <stanli/partition.hpp>
 #include <stanli/reroll.hpp>
+#include <stanli/regular_builtin.hpp>
 #include <stanli/structured_check.hpp>
 #include <stanli/wa_interp.hpp>
 
@@ -638,13 +639,6 @@ struct Lowering {
     ShapeQuery,
   };
 
-  enum class RegularKind { Binary, BinaryIntFirst, BinaryIntSecond, Unary };
-
-  struct RegularSpec {
-    RegularKind kind;
-    uint16_t opcode;
-  };
-
   struct BuiltinDispatch {
     BuiltinFamily family = BuiltinFamily::Elementwise;
     std::optional<RegularSpec> regular;
@@ -657,10 +651,6 @@ struct Lowering {
         : family(selected), regular(regular_call), scalar_rng(rng) {}
   };
 
-  static BuiltinDispatch regular_dispatch(RegularKind kind, uint16_t opcode) {
-    return {BuiltinFamily::Elementwise, RegularSpec{kind, opcode}};
-  }
-
   static BuiltinDispatch rng_dispatch(ScalarRng family) {
     return {BuiltinFamily::ScalarRng, std::nullopt, family};
   }
@@ -672,16 +662,6 @@ struct Lowering {
 
   static BuiltinDispatch resolve_builtin(const mir::Expr& e) {
     if (mir::is_reduce_sum(e)) return {BuiltinFamily::ReduceSum};
-    // These two names are overloaded by arity. Their reduction forms remain
-    // bespoke; their binary forms share the regular broadcast emitter.
-    if (e.name == "log_sum_exp")
-      return e.args.size() == 2 ? regular_dispatch(RegularKind::Binary, OP_LSE2)
-                                : BuiltinDispatch{};
-    if (e.name == "log_diff_exp")
-      return e.args.size() == 2
-                 ? regular_dispatch(RegularKind::Binary, OP_LOG_DIFF_EXP)
-                 : BuiltinDispatch{};
-
     // Bespoke functions still own their semantic checks. This registry only
     // selects the handler, replacing the old sequence in which every family
     // was probed and declined in turn.
@@ -745,58 +725,11 @@ struct Lowering {
             {"size", BuiltinFamily::ShapeQuery},
             {"num_elements", BuiltinFamily::ShapeQuery},
 
-            // Regular elementwise families and their aliases share one emitter.
-            {"Plus__", regular_dispatch(RegularKind::Binary, OP_ADD)},
-            {"Minus__", regular_dispatch(RegularKind::Binary, OP_SUB)},
-            {"Divide__", regular_dispatch(RegularKind::Binary, OP_DIV)},
-            {"EltTimes__", regular_dispatch(RegularKind::Binary, OP_MUL)},
-            {"EltDivide__", regular_dispatch(RegularKind::Binary, OP_DIV)},
-            {"Pow__", regular_dispatch(RegularKind::Binary, OP_POW)},
-            {"EltPow__", regular_dispatch(RegularKind::Binary, OP_POW)},
-            {"pow", regular_dispatch(RegularKind::Binary, OP_POW)},
-            {"add", regular_dispatch(RegularKind::Binary, OP_ADD)},
-            {"subtract", regular_dispatch(RegularKind::Binary, OP_SUB)},
-            {"divide", regular_dispatch(RegularKind::Binary, OP_DIV)},
-            {"elt_multiply", regular_dispatch(RegularKind::Binary, OP_MUL)},
-            {"elt_divide", regular_dispatch(RegularKind::Binary, OP_DIV)},
-#define STANLI_DISPATCH_BINARY(code, name, fn) \
-  {#name, regular_dispatch(RegularKind::Binary, code)},
-            STANLI_SCALAR_BINARY_LIST(STANLI_DISPATCH_BINARY)
-#undef STANLI_DISPATCH_BINARY
-                {"multiply_log",
-                 regular_dispatch(RegularKind::Binary, OP_LMULTIPLY)},
-#define STANLI_DISPATCH_INT_FIRST(code, name, fn) \
-  {#name, regular_dispatch(RegularKind::BinaryIntFirst, code)},
-            STANLI_SCALAR_BINARY_INT_FIRST_LIST(STANLI_DISPATCH_INT_FIRST)
-#undef STANLI_DISPATCH_INT_FIRST
-#define STANLI_DISPATCH_INT_SECOND(code, name, fn) \
-  {#name, regular_dispatch(RegularKind::BinaryIntSecond, code)},
-                STANLI_SCALAR_BINARY_INT_SECOND_LIST(STANLI_DISPATCH_INT_SECOND)
-#undef STANLI_DISPATCH_INT_SECOND
-#define STANLI_DISPATCH_UNARY(code, name, value, delta, topology) \
-  {#name, regular_dispatch(RegularKind::Unary, code)},
-                    STANLI_SCALAR_UNARY_LIST(STANLI_DISPATCH_UNARY)
-#undef STANLI_DISPATCH_UNARY
-                        {"PMinus__",
-                         regular_dispatch(RegularKind::Unary, OP_NEG)},
-            {"minus", regular_dispatch(RegularKind::Unary, OP_NEG)},
-            {"std_normal_qf", regular_dispatch(RegularKind::Unary, OP_INV_PHI)},
-            {"trigamma", regular_dispatch(RegularKind::Unary, OP_TRIGAMMA)},
-            {"exp", regular_dispatch(RegularKind::Unary, OP_EXPV)},
-            {"log", regular_dispatch(RegularKind::Unary, OP_LOGV)},
-            {"inv_logit", regular_dispatch(RegularKind::Unary, OP_INV_LOGIT)},
-            {"logit", regular_dispatch(RegularKind::Unary, OP_LOGIT)},
-            {"sqrt", regular_dispatch(RegularKind::Unary, OP_SQRT)},
-            {"square", regular_dispatch(RegularKind::Unary, OP_SQUARE)},
-            {"log1m", regular_dispatch(RegularKind::Unary, OP_LOG1M)},
-            {"softmax", regular_dispatch(RegularKind::Unary, OP_SOFTMAX)},
-            {"tanh", regular_dispatch(RegularKind::Unary, OP_TANHV)},
-            {"cumulative_sum", regular_dispatch(RegularKind::Unary, OP_CUMSUM)},
-            {"log_softmax",
-             regular_dispatch(RegularKind::Unary, OP_LOG_SOFTMAX)},
         };
     const auto builtin = kBuiltins.find(e.name);
     if (builtin != kBuiltins.end()) return builtin->second;
+    if (const auto regular = resolve_regular_builtin(e.name, e.args.size()))
+      return {BuiltinFamily::Elementwise, *regular};
     // Keep the scalar-RNG vocabulary in the shared classifier used by the
     // graph, interpreter, and runtime-region compiler. The selected family is
     // still carried into the handler, so dispatch performs this lookup once.
