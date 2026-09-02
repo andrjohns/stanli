@@ -5318,6 +5318,29 @@ int main() {
     expect_eq("deep known-real UDF gradient", gradient[0], -0.25);
   }
 
+  // target() is a stateful read of the density accumulated at that source
+  // point. The first read lowers directly into the graph; the reads in the
+  // parameter-dependent branch (including one in an inlined _lp UDF) receive
+  // the graph prefix as an island live-in while publishing only their local
+  // delta back to the model target.
+  {
+    CompiledModel tm =
+        compile_model(slurp("tests/fixtures/target_read.tmir.sexp"), DataMap());
+    check(tm.n_unconstrained == 1, "target-read parameter width");
+    check(count_opcode(tm, OP_ISLAND) > 0, "target-read runtime island");
+    Executor tex(std::move(tm.graph));
+    tm.bind(tex);
+    double gradient[1] = {};
+
+    tex.params_data()[0] = -2.0;
+    expect_eq("target-read untaken lp", tex.gradient(gradient), -2.5);
+    expect_eq("target-read untaken gradient", gradient[0], 2.5);
+
+    tex.params_data()[0] = 2.0;
+    expect_eq("target-read taken lp", tex.gradient(gradient), 2.0);
+    expect_eq("target-read taken gradient", gradient[0], -5.0);
+  }
+
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations
   // themselves. An infinite bound is no bound -- the element is the
   // identity and adds no jacobian term -- and the kernels used to

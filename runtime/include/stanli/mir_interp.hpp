@@ -1297,6 +1297,8 @@ class MirInterp {
 
   Value eval_fun(const mir::Expr& e) {
     Value r;
+    if (mir::stateful_intrinsic_kind(e))
+      fail("target() is unavailable in this context", e.raw);
     if (const auto value = mir::nullary_constant(e)) {
       r.r = {T(*value)};
       return r;

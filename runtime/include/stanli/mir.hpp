@@ -118,6 +118,20 @@ inline std::optional<double> nullary_constant(const Expr& e) {
               : std::nullopt;
 }
 
+// Calls whose value comes from the evaluation context rather than solely
+// from their arguments. Keep their recognition beside the other shared MIR
+// call metadata so every backend, effect analysis, and optimizer agrees on
+// the spelling and arity. Backends still own the state itself.
+enum class StatefulIntrinsicKind : uint8_t { Target };
+
+inline std::optional<StatefulIntrinsicKind> stateful_intrinsic_kind(
+    const Expr& e) {
+  if (e.kind == Expr::FunApp && e.fn_lib == Expr::Lib::StanLib &&
+      e.name == "target" && e.args.empty())
+    return StatefulIntrinsicKind::Target;
+  return std::nullopt;
+}
+
 // A matrix row is a non-contiguous Eigen block.  Transposing it changes the
 // logical orientation but not the stride, so an outer elementwise expression
 // containing it has no packet access and Stan Math's product reduces in

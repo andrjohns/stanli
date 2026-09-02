@@ -153,9 +153,17 @@ struct ProgramCompiler {
   // a complete data-only UDF here also handles recursion without trying to
   // turn a dynamic call stack into finite inline instructions.
   std::function<bool(const mir::Expr&, double*)> extern_real;
-  // Where `target +=` accumulates, or -1 when the region may not have
-  // one. Set by the caller, which also seeds it to zero.
+  // Resolve the target accumulated before this program began. Lowering binds
+  // it lazily as a graph live-in; ODE and algebra callers leave it absent.
+  std::function<bool(Range*)> bind_target;
+  // Where this program's `target +=` delta accumulates, or -1 when the
+  // region may not modify target. The caller seeds it to zero and publishes
+  // only this delta, never the preceding target supplied by bind_target.
   int target_reg = -1;
+  // Cached register returned by bind_target. Keeping it separate from the
+  // delta prevents a region target contribution from double-counting the
+  // target that existed before the region.
+  int target_base_reg = -1;
   // Register runs allocated by the zero-length adoption in Assignment,
   // which is the one allocation site whose write can sit under a jump.
   // finish() fills them with NaN ahead of the program, restoring the
@@ -1835,6 +1843,22 @@ struct ProgramCompiler {
   }
 
   Range fun(const mir::Expr& e) {
+    if (const auto intrinsic = mir::stateful_intrinsic_kind(e)) {
+      switch (*intrinsic) {
+        case mir::StatefulIntrinsicKind::Target: {
+          if (target_base_reg < 0) {
+            Range base;
+            if (!bind_target || !bind_target(&base) || !is_scalar(base))
+              bail("target() is unavailable in this context");
+            target_base_reg = base.reg;
+          }
+          if (target_reg < 0) return {target_base_reg, 1};
+          const int current = alloc(1);
+          emit(Program::ADD, current, target_base_reg, target_reg);
+          return {current, 1};
+        }
+      }
+    }
     if (const auto value = mir::nullary_constant(e)) return {konst(*value), 1};
     // A shape query is a constant whatever surrounds it. Ahead of every
     // other case because `FnLength` is an internal function and the rest

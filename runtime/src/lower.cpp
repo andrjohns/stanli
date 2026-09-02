@@ -2856,6 +2856,16 @@ struct Lowering {
       *value = evaluated->r[0];
       return true;
     };
+    if (!in_write_array) {
+      c.bind_target = [&](Range* r) {
+        const int slot = current_target_slot();
+        r->reg = c.alloc(1);
+        r->len = 1;
+        prog->ins.push_back(IslandProg::LiveIn{r->reg, 1});
+        reg->in_slots.push_back(slot);
+        return true;
+      };
+    }
     std::set<std::string> outer_names;
     for (const auto& [name, value] : scope) outer_names.insert(name);
     for (const auto& [name, value] : decls) outer_names.insert(name);
@@ -3069,6 +3079,16 @@ struct Lowering {
     target_terms.push_back(slot);
   }
 
+  // Materialize the target visible at the current source position. The
+  // reduction consumes a copy, leaving the individual terms available for
+  // the final model target. This is shared by direct graph target() reads and
+  // the lazy live-in used by runtime-control programs.
+  int current_target_slot() {
+    std::vector<int> prefix = target_terms;
+    prefix.insert(prefix.end(), jac_slots.begin(), jac_slots.end());
+    return reduce_terms(std::move(prefix));
+  }
+
   // `if (<not known while building the graph>) ... else ...`
   void lower_runtime_ifelse(const mir::Stmt& s) {
     IslandRegion reg;
@@ -3225,6 +3245,7 @@ struct Lowering {
   // at model evaluation rather than move to construction. Propto densities
   // never fold because their value is instantiation-dependent.
   bool expr_effectful(const mir::Expr& e) {
+    if (mir::stateful_intrinsic_kind(e)) return true;
     if (e.kind == mir::Expr::FunApp && e.name.size() >= 4 &&
         e.name.compare(e.name.size() - 4, 4, "_rng") == 0)
       return true;
@@ -3296,7 +3317,8 @@ struct Lowering {
                             name == "algebra_solver" ||
                             name.compare(0, 13, "solve_newton") == 0 ||
                             name.compare(0, 13, "solve_powell") == 0;
-      if (rng || ode || callback || name == "target") return false;
+      if (rng || ode || callback || mir::stateful_intrinsic_kind(e))
+        return false;
     }
     for (const auto& a : e.args)
       if (!repeatable_target_expr(a, loopvar)) return false;
@@ -4747,6 +4769,17 @@ struct Lowering {
   }
 
   Val lower_funapp(const mir::Expr& e) {
+    if (const auto intrinsic = mir::stateful_intrinsic_kind(e)) {
+      switch (*intrinsic) {
+        case mir::StatefulIntrinsicKind::Target: {
+          if (in_write_array)
+            fail("target() is unavailable in write_array", e.raw);
+          SlotInfo si;
+          si.param_free = target_terms.empty() && jac_slots.empty();
+          return {current_target_slot(), scalar_autodiff(), si};
+        }
+      }
+    }
     if (const auto value = mir::nullary_constant(e)) return constant(*value);
     if (e.fn_lib == mir::Expr::Lib::UserDefined) {
       if (!region_current)
