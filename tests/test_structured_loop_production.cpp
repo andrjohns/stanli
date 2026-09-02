@@ -114,6 +114,16 @@ static bool set_forward(Node& node, int op, void (*forward)(KernelCtx&)) {
   return false;
 }
 
+static bool set_backward(Node& node, int op, void (*backward)(KernelCtx&)) {
+  if (node.kind == Node::KernelCall && node.op == op) {
+    node.backward = backward;
+    return true;
+  }
+  for (auto& child : node.children)
+    if (set_backward(child, op, backward)) return true;
+  return false;
+}
+
 static std::shared_ptr<StructuredLoop> recurrence(int trips) {
   auto plan = std::make_shared<StructuredLoop>();
   for (int i = 0; i < 7; ++i) plan->body.add_slot(1, false);
@@ -354,12 +364,12 @@ static std::shared_ptr<StructuredLoop> invariant_plan(int trips) {
   const int active_op = active_call.op;
   Node variant_call = call(*plan, OP_ADD, {iterator, two}, variant);
   const int variant_op = variant_call.op;
-  plan->root = sequence(
-      {alias(result, theta),
-       counted(lower, upper, iterator, std::max(0, trips),
-               sequence({std::move(first), std::move(second),
-                         std::move(active_call), alias(result, active),
-                         std::move(variant_call)}))});
+  plan->root =
+      sequence({alias(result, theta),
+                counted(lower, upper, iterator, std::max(0, trips),
+                        sequence({std::move(first), std::move(second),
+                                  std::move(active_call), alias(result, active),
+                                  std::move(variant_call)}))});
   plan->outputs = {result};
   plan->prepare(1 << 20);
   plan->dynamic_history = true;
@@ -393,8 +403,7 @@ static void loop_invariant_reuse_tests() {
         "inactive invariant chain executes once per loop invocation");
   check(invariant_active_calls == 3,
         "active loop work retains every reverse record");
-  check(invariant_variant_calls == 3,
-        "iterator-dependent work is not reused");
+  check(invariant_variant_calls == 3, "iterator-dependent work is not reused");
   const Evaluation second = evaluate_invariant(enabled, .25);
   check(invariant_first_calls == 2 && invariant_second_calls == 2,
         "invariant cache resets for a new forward evaluation");
@@ -433,8 +442,8 @@ static void loop_invariant_reuse_tests() {
   const int late_source = late->body.add_slot(1, false);
   const int late_result = late->body.add_slot(1, false);
   late->imports = {{late_theta, 0, 0}};
-  Node comparison = call(*late, OP_COMPARE, {late_iterator, late_one},
-                         late_condition);
+  Node comparison =
+      call(*late, OP_COMPARE, {late_iterator, late_one}, late_condition);
   late->body.ops[static_cast<size_t>(comparison.op)].variant = 2;
   Node late_definition = call(*late, OP_ADD, {late_one, late_one}, late_source);
   const int late_definition_op = late_definition.op;
@@ -442,9 +451,10 @@ static void loop_invariant_reuse_tests() {
   const int late_use_op = late_use.op;
   late->root = counted(
       late_lower, late_upper, late_iterator, 3,
-      sequence({std::move(comparison),
-                branch(late_condition, std::move(late_definition), sequence({})),
-                std::move(late_use)}));
+      sequence(
+          {std::move(comparison),
+           branch(late_condition, std::move(late_definition), sequence({})),
+           std::move(late_use)}));
   late->outputs = {late_result};
   late->prepare(1 << 20);
   late->dynamic_history = true;
@@ -478,15 +488,15 @@ static void loop_invariant_reuse_tests() {
   const int while_constant_op = while_constant.op;
   while_plan->root = while_loop(
       while_condition, 3, std::move(while_compare),
-      sequence({std::move(while_constant),
-                call(*while_plan, OP_ADD, {while_counter, while_one}, while_next),
-                alias(while_counter, while_next),
-                alias(while_result, while_invariant)}));
+      sequence(
+          {std::move(while_constant),
+           call(*while_plan, OP_ADD, {while_counter, while_one}, while_next),
+           alias(while_counter, while_next),
+           alias(while_result, while_invariant)}));
   while_plan->outputs = {while_result};
   while_plan->prepare(1 << 20);
   while_plan->dynamic_history = true;
-  check(set_forward(while_plan->root, while_constant_op,
-                    count_invariant_first),
+  check(set_forward(while_plan->root, while_constant_op, count_invariant_first),
         "find while invariant callback");
   invariant_first_calls = 0;
   Executor while_executor(outer(while_plan));
@@ -494,6 +504,317 @@ static void loop_invariant_reuse_tests() {
   close(while_result_value.value, 2, "while invariant result");
   check(invariant_first_calls == 1,
         "while body reuses its inactive invariant result");
+}
+
+static std::vector<double*> control_first_outputs;
+static std::vector<double*> control_second_outputs;
+static std::atomic<int> control_backward_calls{0};
+static std::atomic<bool> control_throw_once{false};
+
+static void record_control_add(KernelCtx& context) {
+  control_first_outputs.push_back(context.out.data);
+  find_kernel(OP_ADD)->forward(context);
+}
+static void record_control_compare(KernelCtx& context) {
+  control_second_outputs.push_back(context.out.data);
+  find_kernel(OP_COMPARE)->forward(context);
+}
+static void record_control_add_backward(KernelCtx& context) {
+  ++control_backward_calls;
+  find_kernel(OP_ADD)->backward(context);
+}
+static void throw_then_record_control_add(KernelCtx& context) {
+  if (control_throw_once.exchange(false))
+    throw std::runtime_error("injected inactive-control failure");
+  record_control_add(context);
+}
+
+static bool one_address(const std::vector<double*>& addresses) {
+  return !addresses.empty() &&
+         std::all_of(addresses.begin(), addresses.end(), [&](double* address) {
+           return address == addresses.front();
+         });
+}
+
+static bool distinct_addresses(const std::vector<double*>& addresses) {
+  for (size_t i = 0; i < addresses.size(); ++i)
+    for (size_t j = 0; j < i; ++j)
+      if (addresses[i] == addresses[j]) return false;
+  return true;
+}
+
+static std::shared_ptr<StructuredLoop> control_cone_plan(bool active_control) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int limit = scalar(*plan, 3);
+  const int first = plan->body.add_slot(1, false);
+  const int active_middle = plan->body.add_slot(1, false);
+  const int condition = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  const int updated = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+  Node first_call = call(*plan, OP_ADD, {iterator, zero}, first);
+  const int first_op = first_call.op;
+  std::vector<Node> control;
+  control.push_back(std::move(first_call));
+  int compare_input = first;
+  int active_middle_op = -1;
+  if (active_control) {
+    Node middle = call(*plan, OP_ADD, {first, theta}, active_middle);
+    active_middle_op = middle.op;
+    compare_input = active_middle;
+    control.push_back(std::move(middle));
+  }
+  Node compare = call(*plan, OP_COMPARE, {compare_input, limit}, condition);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 0;
+  const int compare_op = compare.op;
+  control.push_back(std::move(compare));
+  Node update = call(*plan, OP_ADD, {result, theta}, updated);
+  control.push_back(
+      branch(condition, sequence({std::move(update), alias(result, updated)}),
+             sequence({})));
+  plan->root =
+      sequence({alias(result, zero), counted(lower, upper, iterator, 3,
+                                             sequence(std::move(control)))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(set_forward(plan->root, first_op, record_control_add),
+        "find inactive-control first callback");
+  check(set_forward(plan->root, compare_op, record_control_compare),
+        "find inactive-control terminal callback");
+  if (active_control)
+    check(
+        set_backward(plan->root, active_middle_op, record_control_add_backward),
+        "find later active control-cone backward callback");
+  return plan;
+}
+
+static void inactive_control_tests() {
+  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
+  auto plan = control_cone_plan(false);
+  Executor enabled(outer(plan));
+  control_first_outputs.clear();
+  control_second_outputs.clear();
+  const Evaluation direct = evaluate_invariant(enabled, .25);
+  close(direct.value, .5, "inactive-control branch result");
+  close(direct.gradient[0], 2, "inactive-control branch gradient");
+  check(control_first_outputs.size() == 3 &&
+            control_second_outputs.size() == 3 &&
+            one_address(control_first_outputs) &&
+            one_address(control_second_outputs),
+        "inactive control cone uses body-sized canonical outputs");
+
+  test_setenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL", "1");
+  Executor disabled(outer(plan));
+  control_first_outputs.clear();
+  control_second_outputs.clear();
+  const Evaluation ordinary = evaluate_invariant(disabled, .25);
+  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
+  check(std::memcmp(&direct, &ordinary, sizeof(Evaluation)) == 0,
+        "inactive-control elision has bitwise same-binary parity");
+  check(control_first_outputs.size() == 3 &&
+            distinct_addresses(control_first_outputs),
+        "inactive-control ablation retains per-call outputs");
+
+  // An active external handle used only by a later site rejects the complete
+  // cone before its inactive first output is overwritten. Reverse must retain
+  // and invoke the active middle callback.
+  auto active_plan = control_cone_plan(true);
+  Executor active_executor(outer(active_plan));
+  control_first_outputs.clear();
+  control_second_outputs.clear();
+  control_backward_calls = 0;
+  const Evaluation active = evaluate_invariant(active_executor, .25);
+  close(active.value, .5, "later-active control-cone result");
+  close(active.gradient[0], 2, "later-active control-cone gradient");
+  check(control_first_outputs.size() == 3 &&
+            distinct_addresses(control_first_outputs),
+        "later active input makes the whole control cone ordinary");
+  check(control_backward_calls == 3,
+        "later active control site preserves zero-seed reverse callbacks");
+
+  // H6C can reuse an invariant first member while H6B continues direct
+  // execution for the iterator-dependent remainder of the same cone. The
+  // early H6C return must still finish its H6B site and avoid cone reentry.
+  auto interaction_plan = std::make_shared<StructuredLoop>();
+  const int interaction_theta = interaction_plan->body.add_slot(1, false);
+  const int interaction_lower = scalar(*interaction_plan, 1);
+  const int interaction_upper = scalar(*interaction_plan, 3);
+  const int interaction_iterator = interaction_plan->body.add_slot(1, false);
+  const int interaction_zero = scalar(*interaction_plan, 0);
+  const int interaction_two = scalar(*interaction_plan, 2);
+  const int interaction_three = scalar(*interaction_plan, 3);
+  const int interaction_limit = scalar(*interaction_plan, 8);
+  const int interaction_invariant = interaction_plan->body.add_slot(1, false);
+  const int interaction_variant = interaction_plan->body.add_slot(1, false);
+  const int interaction_condition = interaction_plan->body.add_slot(1, false);
+  const int interaction_result = interaction_plan->body.add_slot(1, false);
+  const int interaction_updated = interaction_plan->body.add_slot(1, false);
+  interaction_plan->imports = {{interaction_theta, 0, 0}};
+  Node interaction_first =
+      call(*interaction_plan, OP_ADD, {interaction_two, interaction_three},
+           interaction_invariant);
+  const int interaction_first_op = interaction_first.op;
+  Node interaction_later =
+      call(*interaction_plan, OP_ADD,
+           {interaction_iterator, interaction_invariant}, interaction_variant);
+  const int interaction_later_op = interaction_later.op;
+  Node interaction_compare =
+      call(*interaction_plan, OP_COMPARE,
+           {interaction_variant, interaction_limit}, interaction_condition);
+  interaction_plan->body.ops[static_cast<size_t>(interaction_compare.op)]
+      .variant = 0;
+  const int interaction_compare_op = interaction_compare.op;
+  Node interaction_update =
+      call(*interaction_plan, OP_ADD, {interaction_result, interaction_theta},
+           interaction_updated);
+  interaction_plan->root = sequence(
+      {alias(interaction_result, interaction_zero),
+       counted(
+           interaction_lower, interaction_upper, interaction_iterator, 3,
+           sequence({std::move(interaction_first), std::move(interaction_later),
+                     std::move(interaction_compare),
+                     branch(interaction_condition,
+                            sequence({std::move(interaction_update),
+                                      alias(interaction_result,
+                                            interaction_updated)}),
+                            sequence({}))}))});
+  interaction_plan->outputs = {interaction_result};
+  interaction_plan->prepare(1 << 20);
+  interaction_plan->dynamic_history = true;
+  check(set_forward(interaction_plan->root, interaction_first_op,
+                    count_invariant_first),
+        "find H6C member of inactive control cone");
+  check(set_forward(interaction_plan->root, interaction_later_op,
+                    record_control_add),
+        "find later H6B member after H6C reuse");
+  check(set_forward(interaction_plan->root, interaction_compare_op,
+                    record_control_compare),
+        "find terminal H6B member after H6C reuse");
+  invariant_first_calls = 0;
+  control_first_outputs.clear();
+  control_second_outputs.clear();
+  Executor interaction_executor(outer(interaction_plan));
+  const Evaluation interaction = evaluate_invariant(interaction_executor, .25);
+  close(interaction.value, .5, "H6C and H6B interaction result");
+  close(interaction.gradient[0], 2, "H6C and H6B interaction gradient");
+  check(invariant_first_calls == 1,
+        "H6C reuses the first inactive control-cone member");
+  check(control_first_outputs.size() == 3 &&
+            control_second_outputs.size() == 3 &&
+            one_address(control_first_outputs) &&
+            one_address(control_second_outputs),
+        "H6B continues direct execution after H6C reuse");
+
+  // While guards include the final false condition evaluation.
+  auto while_plan = std::make_shared<StructuredLoop>();
+  const int while_theta = while_plan->body.add_slot(1, false);
+  const int counter = scalar(*while_plan, 0);
+  const int zero = scalar(*while_plan, 0);
+  const int one = scalar(*while_plan, 1);
+  const int three = scalar(*while_plan, 3);
+  const int first = while_plan->body.add_slot(1, false);
+  const int condition = while_plan->body.add_slot(1, false);
+  const int next = while_plan->body.add_slot(1, false);
+  while_plan->imports = {{while_theta, 0, 0}};
+  Node first_call = call(*while_plan, OP_ADD, {counter, zero}, first);
+  const int first_op = first_call.op;
+  Node compare = call(*while_plan, OP_COMPARE, {three, first}, condition);
+  while_plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+  const int compare_op = compare.op;
+  while_plan->root = while_loop(
+      condition, 3, sequence({std::move(first_call), std::move(compare)}),
+      sequence({call(*while_plan, OP_ADD, {counter, one}, next),
+                alias(counter, next)}));
+  while_plan->outputs = {counter};
+  while_plan->prepare(1 << 20);
+  while_plan->dynamic_history = true;
+  check(set_forward(while_plan->root, first_op, record_control_add),
+        "find while control-cone first callback");
+  check(set_forward(while_plan->root, compare_op, record_control_compare),
+        "find while control-cone terminal callback");
+  control_first_outputs.clear();
+  control_second_outputs.clear();
+  Executor while_executor(outer(while_plan));
+  const Evaluation while_value = evaluate_invariant(while_executor, 0);
+  close(while_value.value, 3, "inactive-control while result");
+  check(control_first_outputs.size() == 4 &&
+            control_second_outputs.size() == 4 &&
+            one_address(control_first_outputs),
+        "inactive-control while includes its final false guard");
+
+  // A value that escapes the cone cannot use canonical storage because a
+  // later iteration could overwrite a published historical value.
+  auto escaped_plan = std::make_shared<StructuredLoop>();
+  const int escaped_theta = escaped_plan->body.add_slot(1, false);
+  const int escaped_lower = scalar(*escaped_plan, 1);
+  const int escaped_upper = scalar(*escaped_plan, 3);
+  const int escaped_iterator = escaped_plan->body.add_slot(1, false);
+  const int escaped_zero = scalar(*escaped_plan, 0);
+  const int escaped_limit = scalar(*escaped_plan, 3);
+  const int escaped_first = escaped_plan->body.add_slot(1, false);
+  const int escaped_condition = escaped_plan->body.add_slot(1, false);
+  const int escaped_output = escaped_plan->body.add_slot(1, false);
+  escaped_plan->imports = {{escaped_theta, 0, 0}};
+  Node escaped_add = call(*escaped_plan, OP_ADD,
+                          {escaped_iterator, escaped_zero}, escaped_first);
+  const int escaped_add_op = escaped_add.op;
+  Node escaped_compare =
+      call(*escaped_plan, OP_COMPARE, {escaped_first, escaped_limit},
+           escaped_condition);
+  escaped_plan->body.ops[static_cast<size_t>(escaped_compare.op)].variant = 0;
+  escaped_plan->root =
+      counted(escaped_lower, escaped_upper, escaped_iterator, 3,
+              sequence({std::move(escaped_add), std::move(escaped_compare),
+                        branch(escaped_condition, sequence({}), sequence({})),
+                        alias(escaped_output, escaped_first)}));
+  escaped_plan->outputs = {escaped_output};
+  escaped_plan->prepare(1 << 20);
+  escaped_plan->dynamic_history = true;
+  check(set_forward(escaped_plan->root, escaped_add_op, record_control_add),
+        "find escaping control value callback");
+  control_first_outputs.clear();
+  Executor escaped_executor(outer(escaped_plan));
+  const Evaluation escaped = evaluate_invariant(escaped_executor, 0);
+  close(escaped.value, 3, "escaping control value result");
+  check(control_first_outputs.size() == 3 &&
+            distinct_addresses(control_first_outputs),
+        "escaping control value retains ordinary history");
+
+  // If a cone callback throws after direct execution starts, a fresh forward
+  // must rebuild its handles and start the cone from a clean state.
+  auto retry_plan = control_cone_plan(false);
+  int retry_op = -1;
+  std::function<void(const Node&)> find_first = [&](const Node& node) {
+    if (retry_op >= 0) return;
+    if (node.kind == Node::KernelCall &&
+        retry_plan->body.ops[static_cast<size_t>(node.op)].opcode == OP_ADD) {
+      const Op& op = retry_plan->body.ops[static_cast<size_t>(node.op)];
+      if (op.in[0] == 3) retry_op = node.op;
+    }
+    for (const auto& child : node.children) find_first(child);
+  };
+  find_first(retry_plan->root);
+  check(retry_op >= 0 && set_forward(retry_plan->root, retry_op,
+                                     throw_then_record_control_add),
+        "find retry control-cone callback");
+  Executor retry_executor(outer(retry_plan));
+  control_throw_once = true;
+  bool threw = false;
+  try {
+    (void)evaluate_invariant(retry_executor, .25);
+  } catch (const std::runtime_error& error) {
+    threw = std::string(error.what()) == "injected inactive-control failure";
+  }
+  check(threw, "inactive-control callback preserves forward exception");
+  const Evaluation retry = evaluate_invariant(retry_executor, .25);
+  check(std::memcmp(&direct, &retry, sizeof(Evaluation)) == 0,
+        "inactive-control retry rebuilds clean execution state");
 }
 
 static Evaluation evaluate(Executor& executor, double theta, double beta) {
@@ -668,12 +989,14 @@ int main() {
   forced_control_tests();
   dynamic_history_tests();
   loop_invariant_reuse_tests();
+  inactive_control_tests();
   dynamic_history_concurrency_tests();
   dynamic_history_failure_tests();
   automatic_policy_tests();
   test_unsetenv("STANLI_STRUCTURED_LOOPS");
   test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
   test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
+  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
   if (failures == 0) std::printf("test_structured_loop_production OK\n");
   return failures != 0;
 }

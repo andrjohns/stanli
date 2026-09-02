@@ -492,8 +492,7 @@ struct LoopInvariantPlan {
         n.compact_update_cell >= 0)
       return false;
     const uint16_t opcode = p.body.ops[static_cast<size_t>(n.op)].opcode;
-    return !is_effectful_op(opcode) && opcode != OP_ISLAND &&
-           opcode != OP_LOOP;
+    return !is_effectful_op(opcode) && opcode != OP_ISLAND && opcode != OP_LOOP;
   }
 
   explicit LoopInvariantPlan(const StructuredLoop& p)
@@ -626,33 +625,30 @@ struct LoopInvariantPlan {
       }
 
       for (size_t op_id = 0; op_id < op_count; ++op_id) {
-        if (!contained[op_id] || !admissible[op_id] ||
-            site_by_op[op_id] >= 0)
+        if (!contained[op_id] || !admissible[op_id] || site_by_op[op_id] >= 0)
           continue;
         const Op& op = p.body.ops[op_id];
         if (writers[static_cast<size_t>(op.out)] != 1 ||
             !invariant[static_cast<size_t>(op.out)] ||
-            (op.out2 >= 0 &&
-             (writers[static_cast<size_t>(op.out2)] != 1 ||
-              !invariant[static_cast<size_t>(op.out2)])))
+            (op.out2 >= 0 && (writers[static_cast<size_t>(op.out2)] != 1 ||
+                              !invariant[static_cast<size_t>(op.out2)])))
           continue;
         bool inputs_invariant = true;
         for (int k = 0; k < op.n_in; ++k)
           inputs_invariant &= invariant[static_cast<size_t>(op.in[k])] != 0;
         if (!inputs_invariant) continue;
         site_by_op[op_id] = static_cast<int32_t>(sites.size());
-        sites.push_back(
-            {node_by_op[op_id], static_cast<int>(op_id), loop_id});
+        sites.push_back({node_by_op[op_id], static_cast<int>(op_id), loop_id});
       }
     }
   }
 
   int32_t find_loop(const Node& node) const noexcept {
-    const auto at = std::lower_bound(
-        loop_index.begin(), loop_index.end(), &node,
-        [](const LoopIndex& entry, const Node* wanted) {
-          return std::less<const Node*>{}(entry.node, wanted);
-        });
+    const auto at =
+        std::lower_bound(loop_index.begin(), loop_index.end(), &node,
+                         [](const LoopIndex& entry, const Node* wanted) {
+                           return std::less<const Node*>{}(entry.node, wanted);
+                         });
     return at != loop_index.end() && at->node == &node
                ? static_cast<int32_t>(at->loop)
                : int32_t{-1};
@@ -664,6 +660,267 @@ struct LoopInvariantPlan {
       site.cached_inputs.fill(0.0);
       site.cached_out = site.cached_out2 = -1;
       site.cached_generation = 0;
+    }
+  }
+};
+
+// Find contiguous pure kernel chains whose only observable result is an
+// immediately following if/while condition. At runtime the whole cone is
+// admitted atomically only when all external handles are inactive. Its
+// callbacks still run in source order, but their temporary values live in one
+// body-sized canonical buffer instead of per-iteration history.
+struct InactiveControlPlan {
+  struct Uses {
+    uint64_t producers = 0;
+    uint64_t aliases = 0;
+    uint64_t controls = 0;
+    uint64_t targets = 0;
+    uint64_t outputs = 0;
+    uint64_t imports = 0;
+    std::vector<int> kernel_consumers;
+  };
+  struct Site {
+    const Node* node = nullptr;
+    int op = -1;
+    uint32_t cone = 0;
+    bool first = false;
+    bool last = false;
+    uint64_t value_offset = 0;
+    double canonical_handle = -1;
+  };
+  struct Cone {
+    enum Decision : uint8_t { Direct, Ordinary } decision = Ordinary;
+    std::vector<int> external_slots;
+    uint32_t first_site = 0;
+    uint32_t site_count = 0;
+    uint64_t value_offset = 0;
+    uint64_t value_count = 0;
+    bool running = false;
+  };
+
+  std::vector<int32_t> site_by_op;
+  std::vector<Site> sites;
+  std::vector<Cone> cones;
+  uint64_t value_count = 0;
+
+  explicit InactiveControlPlan(const StructuredLoop& p)
+      : site_by_op(p.body.ops.size(), int32_t{-1}) {
+    const size_t op_count = p.body.ops.size();
+    std::vector<Uses> uses(p.body.slots.size());
+    std::vector<uint32_t> op_nodes(op_count, 0);
+    std::vector<const Node*> node_by_op(op_count, nullptr);
+    std::vector<uint8_t> inside_loop(op_count, 0);
+    std::function<void(const Node&, uint32_t)> inventory =
+        [&](const Node& n, uint32_t loop_depth) {
+          switch (n.kind) {
+            case Node::KernelCall: {
+              if (n.op < 0 || static_cast<size_t>(n.op) >= op_count)
+                throw std::logic_error(
+                    "inactive-control operation is out of range");
+              const Op& op = p.body.ops[static_cast<size_t>(n.op)];
+              ++op_nodes[static_cast<size_t>(n.op)];
+              node_by_op[static_cast<size_t>(n.op)] = &n;
+              ++uses.at(static_cast<size_t>(op.out)).producers;
+              if (op.out2 >= 0)
+                ++uses.at(static_cast<size_t>(op.out2)).producers;
+              for (int k = 0; k < op.n_in; ++k)
+                uses.at(static_cast<size_t>(op.in[k]))
+                    .kernel_consumers.push_back(n.op);
+              if (loop_depth) inside_loop[static_cast<size_t>(n.op)] = 1;
+              break;
+            }
+            case Node::Alias:
+              ++uses.at(static_cast<size_t>(n.src)).aliases;
+              ++uses.at(static_cast<size_t>(n.dst)).aliases;
+              break;
+            case Node::If:
+              ++uses.at(static_cast<size_t>(n.condition)).controls;
+              break;
+            case Node::For:
+              ++uses.at(static_cast<size_t>(n.lower)).controls;
+              ++uses.at(static_cast<size_t>(n.upper)).controls;
+              ++uses.at(static_cast<size_t>(n.iterator)).aliases;
+              break;
+            case Node::While:
+              ++uses.at(static_cast<size_t>(n.condition)).controls;
+              break;
+            case Node::Target:
+              ++uses.at(static_cast<size_t>(n.src)).targets;
+              break;
+            default:
+              break;
+          }
+          const uint32_t child_depth =
+              loop_depth + (n.kind == Node::For || n.kind == Node::While);
+          for (const auto& child : n.children) inventory(child, child_depth);
+        };
+    inventory(p.root, 0);
+    for (int output : p.outputs) ++uses.at(static_cast<size_t>(output)).outputs;
+    for (const auto& import : p.imports)
+      ++uses.at(static_cast<size_t>(import.slot)).imports;
+
+    std::vector<uint8_t> candidate(op_count, 0), admitted(op_count, 0);
+    for (size_t op_id = 0; op_id < op_count; ++op_id) {
+      if (!inside_loop[op_id] || op_nodes[op_id] != 1) continue;
+      const Node& node = *node_by_op[op_id];
+      const Op& op = p.body.ops[op_id];
+      if (!LoopInvariantPlan::pure_candidate(p, node) || op.out2 >= 0 ||
+          node.kernel_scratch != 0 || node.compact_update_cell >= 0)
+        continue;
+      candidate[op_id] = 1;
+    }
+
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (size_t op_id = 0; op_id < op_count; ++op_id) {
+        if (!candidate[op_id] || admitted[op_id]) continue;
+        const Op& op = p.body.ops[op_id];
+        const Uses& output = uses.at(static_cast<size_t>(op.out));
+        if (output.producers != 1 || output.aliases || output.targets ||
+            output.outputs || output.imports)
+          continue;
+        bool all_consumers_admitted = true;
+        bool reaches_control = output.controls != 0;
+        for (int consumer : output.kernel_consumers) {
+          if (consumer < 0 || static_cast<size_t>(consumer) >= op_count ||
+              !admitted[static_cast<size_t>(consumer)]) {
+            all_consumers_admitted = false;
+            break;
+          }
+          reaches_control = true;
+        }
+        if (!all_consumers_admitted || !reaches_control) continue;
+        admitted[op_id] = 1;
+        changed = true;
+      }
+    }
+
+    const auto add_cone = [&](const std::vector<const Node*>& run,
+                              int condition) {
+      if (run.empty() || run.back()->kind != Node::KernelCall) return;
+      const Op& terminal = p.body.ops.at(static_cast<size_t>(run.back()->op));
+      if (terminal.out != condition) return;
+      std::vector<uint8_t> needed(p.body.slots.size(), 0);
+      std::vector<uint8_t> selected(run.size(), 0);
+      needed.at(static_cast<size_t>(condition)) = 1;
+      for (size_t i = run.size(); i-- > 0;) {
+        const Node& node = *run[i];
+        const Op& op = p.body.ops.at(static_cast<size_t>(node.op));
+        if (!needed[static_cast<size_t>(op.out)]) continue;
+        if (!admitted[static_cast<size_t>(node.op)]) return;
+        selected[i] = 1;
+        needed[static_cast<size_t>(op.out)] = 0;
+        for (int k = 0; k < op.n_in; ++k)
+          needed[static_cast<size_t>(op.in[k])] = 1;
+      }
+      size_t first = 0;
+      while (first < selected.size() && !selected[first]) ++first;
+      if (first == selected.size()) return;
+      for (size_t i = first; i < selected.size(); ++i)
+        if (!selected[i]) return;
+      // A single comparison is already covered by DirectControlPlan. Keeping
+      // only multi-operation cones avoids redundant preflight and storage.
+      if (run.size() - first < 2) return;
+
+      std::vector<uint8_t> selected_op(op_count, 0);
+      for (size_t i = first; i < run.size(); ++i) {
+        const size_t op_id = static_cast<size_t>(run[i]->op);
+        if (site_by_op[op_id] >= 0) return;
+        selected_op[op_id] = 1;
+      }
+      for (size_t i = first; i < run.size(); ++i) {
+        const Op& op = p.body.ops[static_cast<size_t>(run[i]->op)];
+        const Uses& output = uses.at(static_cast<size_t>(op.out));
+        const uint64_t expected_controls = op.out == condition ? 1 : 0;
+        if (output.controls != expected_controls) return;
+        for (int consumer : output.kernel_consumers)
+          if (consumer < 0 || static_cast<size_t>(consumer) >= op_count ||
+              !selected_op[static_cast<size_t>(consumer)])
+            return;
+      }
+      if (cones.size() >= std::numeric_limits<uint32_t>::max() ||
+          sites.size() >=
+              static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+          run.size() - first > std::numeric_limits<uint32_t>::max())
+        throw std::length_error("inactive-control plan is too large");
+      const uint32_t cone_id = static_cast<uint32_t>(cones.size());
+      cones.emplace_back();
+      auto& cone = cones.back();
+      cone.first_site = static_cast<uint32_t>(sites.size());
+      cone.site_count = static_cast<uint32_t>(run.size() - first);
+      cone.value_offset = value_count;
+      std::vector<uint8_t> external(p.body.slots.size(), 0);
+      for (size_t i = first; i < run.size(); ++i) {
+        const Op& op = p.body.ops[static_cast<size_t>(run[i]->op)];
+        for (int k = 0; k < op.n_in; ++k) {
+          const int input = op.in[k];
+          bool produced_inside = false;
+          for (size_t j = first; j < i; ++j)
+            produced_inside |=
+                p.body.ops[static_cast<size_t>(run[j]->op)].out == input;
+          if (!produced_inside) external[static_cast<size_t>(input)] = 1;
+        }
+      }
+      for (size_t slot = 0; slot < external.size(); ++slot)
+        if (external[slot])
+          cone.external_slots.push_back(static_cast<int>(slot));
+      for (size_t i = first; i < run.size(); ++i) {
+        const int op_id = run[i]->op;
+        const int64_t len =
+            p.body.slots
+                .at(static_cast<size_t>(
+                    p.body.ops.at(static_cast<size_t>(op_id)).out))
+                .len;
+        if (len < 0 || value_count > static_cast<uint64_t>(exact_limit) -
+                                         static_cast<uint64_t>(len))
+          throw std::length_error("inactive-control value extent overflow");
+        site_by_op[static_cast<size_t>(op_id)] =
+            static_cast<int32_t>(sites.size());
+        sites.push_back({run[i], op_id, cone_id, i == first,
+                         i + 1 == run.size(), value_count});
+        value_count += static_cast<uint64_t>(len);
+      }
+      cone.value_count = value_count - cone.value_offset;
+    };
+    const auto suffix = [](const Node& node) {
+      std::vector<const Node*> run;
+      if (node.kind == Node::KernelCall) {
+        run.push_back(&node);
+      } else if (node.kind == Node::Sequence) {
+        size_t first = node.children.size();
+        while (first > 0 && node.children[first - 1].kind == Node::KernelCall)
+          --first;
+        for (size_t i = first; i < node.children.size(); ++i)
+          run.push_back(&node.children[i]);
+      }
+      return run;
+    };
+    const auto discover = [&](const auto& self, const Node& node) -> void {
+      if (node.kind == Node::Sequence) {
+        for (size_t i = 0; i < node.children.size(); ++i) {
+          const Node& control = node.children[i];
+          if (control.kind != Node::If || i == 0) continue;
+          size_t first = i;
+          while (first > 0 && node.children[first - 1].kind == Node::KernelCall)
+            --first;
+          std::vector<const Node*> run;
+          for (size_t j = first; j < i; ++j) run.push_back(&node.children[j]);
+          add_cone(run, control.condition);
+        }
+      }
+      if (node.kind == Node::While && node.children.size() == 2)
+        add_cone(suffix(node.children[0]), node.condition);
+      for (const auto& child : node.children) self(self, child);
+    };
+    discover(discover, p.root);
+  }
+
+  void reset_runtime() noexcept {
+    for (auto& site : sites) site.canonical_handle = -1;
+    for (auto& cone : cones) {
+      cone.decision = Cone::Ordinary;
+      cone.running = false;
     }
   }
 };
@@ -961,9 +1218,12 @@ struct DynamicLoopState final : KernelState {
   std::vector<KernelCtx> context_templates;
   std::unique_ptr<DirectControlPlan> direct_control_plan;
   std::unique_ptr<LoopInvariantPlan> loop_invariant_plan;
+  std::unique_ptr<InactiveControlPlan> inactive_control_plan;
+  std::vector<double> inactive_control_values;
   int64_t conceptual_adjoint_size = 0;
   int64_t adjoint_size = 0;
   bool loop_invariant_reuse = false;
+  bool inactive_control_reuse = false;
   bool cached_context_in_use = false;
   // A dynamic tape belongs to exactly one completed forward sweep.  Forward
   // invalidates the previous tape before doing any validation or allocation;
@@ -1046,6 +1306,23 @@ struct DynamicLoopState final : KernelState {
       // Invariant reuse is optional. A classifier allocation or proof failure
       // leaves the ordinary retained executor authoritative.
       loop_invariant_plan.reset();
+    }
+    try {
+      inactive_control_plan = std::make_unique<InactiveControlPlan>(p);
+      if (inactive_control_plan->cones.empty()) {
+        inactive_control_plan.reset();
+      } else {
+        if (inactive_control_plan->value_count >
+            std::numeric_limits<size_t>::max())
+          throw std::length_error("inactive-control value storage overflow");
+        inactive_control_values.resize(
+            static_cast<size_t>(inactive_control_plan->value_count));
+      }
+    } catch (...) {
+      // Control-history elision is optional. Setup failure preserves the
+      // ordinary per-call history path and model coverage.
+      inactive_control_plan.reset();
+      std::vector<double>{}.swap(inactive_control_values);
     }
   }
 
@@ -1191,8 +1468,7 @@ struct DynamicExecution {
     bool active = n.backward != nullptr;
     bool any_active_input = false;
     for (int k = 0; k < op.n_in; ++k)
-      any_active_input |=
-          state.bindings[static_cast<size_t>(op.in[k])] >= 0;
+      any_active_input |= state.bindings[static_cast<size_t>(op.in[k])] >= 0;
     active &= any_active_input;
     if (active || site->cached_generation != loop.generation) return false;
     for (int k = 0; k < op.n_in; ++k)
@@ -1225,6 +1501,133 @@ struct DynamicExecution {
     site->cached_out = out;
     site->cached_out2 = out2;
     site->cached_generation = loop.generation;
+  }
+
+  InactiveControlPlan::Site* inactive_control_site(const Node& n) noexcept {
+    auto* plan = state.inactive_control_plan.get();
+    if (!plan || n.op < 0 ||
+        static_cast<size_t>(n.op) >= plan->site_by_op.size())
+      return nullptr;
+    const int32_t id = plan->site_by_op[static_cast<size_t>(n.op)];
+    if (id < 0 || static_cast<size_t>(id) >= plan->sites.size()) return nullptr;
+    auto& site = plan->sites[static_cast<size_t>(id)];
+    if (site.node != &n) {
+      state.inactive_control_reuse = false;
+      return nullptr;
+    }
+    return &site;
+  }
+
+  void begin_inactive_control_cone(InactiveControlPlan::Site* site) {
+    if (!site || !site->first) return;
+    auto* plan = state.inactive_control_plan.get();
+    if (!plan || site->cone >= plan->cones.size()) {
+      state.inactive_control_reuse = false;
+      throw std::logic_error("inactive-control cone is out of range");
+    }
+    auto& cone = plan->cones[site->cone];
+    if (cone.running) {
+      state.inactive_control_reuse = false;
+      throw std::logic_error("inactive-control cone reentry is unsupported");
+    }
+    cone.running = true;
+    cone.decision = InactiveControlPlan::Cone::Ordinary;
+    if (!state.inactive_control_reuse) return;
+    for (int slot : cone.external_slots)
+      if (state.bindings.at(static_cast<size_t>(slot)) >= 0) return;
+    if (cone.value_offset > state.inactive_control_values.size() ||
+        cone.value_count >
+            state.inactive_control_values.size() - cone.value_offset) {
+      state.inactive_control_reuse = false;
+      throw std::logic_error("inactive-control cone value range is invalid");
+    }
+    const Desc output{state.inactive_control_values.data() + cone.value_offset,
+                      static_cast<int64_t>(cone.value_count)};
+    for (int slot : cone.external_slots) {
+      const auto& input = ref(state.bindings.at(static_cast<size_t>(slot)));
+      if (overlaps(output, {input.value, p.body.slots[slot].len})) return;
+    }
+    cone.decision = InactiveControlPlan::Cone::Direct;
+  }
+
+  void finish_inactive_control_site(InactiveControlPlan::Site* site) {
+    if (!site) return;
+    auto* plan = state.inactive_control_plan.get();
+    if (!plan || site->cone >= plan->cones.size() ||
+        !plan->cones[site->cone].running) {
+      state.inactive_control_reuse = false;
+      throw std::logic_error("inactive-control cone execution is incomplete");
+    }
+    if (site->last) plan->cones[site->cone].running = false;
+  }
+
+  void initialize_inactive_control_handles() noexcept {
+    auto* plan = state.inactive_control_plan.get();
+    if (!plan) return;
+    try {
+      for (auto& site : plan->sites) {
+        const Op& op = p.body.ops.at(static_cast<size_t>(site.op));
+        const Slot& output = p.body.slots.at(static_cast<size_t>(op.out));
+        if (site.value_offset > state.inactive_control_values.size() ||
+            output.len < 0 ||
+            static_cast<uint64_t>(output.len) >
+                state.inactive_control_values.size() - site.value_offset)
+          throw std::logic_error(
+              "inactive-control canonical result range is invalid");
+        const double canonical =
+            make_ref(state.inactive_control_values.data() + site.value_offset,
+                     output.len, false);
+        const auto& canonical_ref = ref(canonical);
+        if (canonical >= 0 ||
+            canonical_ref.value !=
+                state.inactive_control_values.data() + site.value_offset ||
+            canonical_ref.outer_input >= 0 ||
+            canonical_ref.adjoint_or_outer_offset >= 0)
+          throw std::logic_error(
+              "inactive-control canonical result handle is invalid");
+        site.canonical_handle = canonical;
+      }
+    } catch (...) {
+      // Canonical-handle setup is optional proof machinery. Any partial refs
+      // are harmless evaluation-local entries; disable the plan and use the
+      // ordinary path for this and later evaluations.
+      state.inactive_control_plan.reset();
+      state.inactive_control_reuse = false;
+    }
+  }
+
+  bool inactive_control(const Node& n, InactiveControlPlan::Site* site) {
+    if (!site) return false;
+    auto* plan = state.inactive_control_plan.get();
+    if (!plan || site->cone >= plan->cones.size() ||
+        !plan->cones[site->cone].running) {
+      state.inactive_control_reuse = false;
+      throw std::logic_error("inactive-control cone execution is incomplete");
+    }
+    auto& cone = plan->cones[site->cone];
+    if (cone.decision != InactiveControlPlan::Cone::Direct) {
+      finish_inactive_control_site(site);
+      return false;
+    }
+    const Op& op = p.body.ops.at(static_cast<size_t>(n.op));
+    double handles[6] = {};
+    for (int k = 0; k < op.n_in; ++k) {
+      handles[k] = state.bindings[static_cast<size_t>(op.in[k])];
+      if (handles[k] >= 0) {
+        state.inactive_control_reuse = false;
+        throw std::logic_error("inactive-control activity proof failed");
+      }
+    }
+    if (site->canonical_handle >= 0) {
+      state.inactive_control_reuse = false;
+      throw std::logic_error("inactive-control result handle became active");
+    }
+    auto& output = ref(site->canonical_handle);
+    ContextLease context(*this, n, handles, false, -1, -1, output.value);
+    n.forward(context.get());
+    state.bindings[static_cast<size_t>(op.out)] = site->canonical_handle;
+    finish_inactive_control_site(site);
+    return true;
   }
 
   DirectControlPlan::Site* direct_control_site(const Node& n) noexcept {
@@ -1539,7 +1942,16 @@ struct DynamicExecution {
         return Normal;
       case Node::KernelCall: {
         const Op& op = p.body.ops[n.op];
-        if (reuse_loop_invariant(n)) return Normal;
+        auto* inactive_site = inactive_control_site(n);
+        begin_inactive_control_cone(inactive_site);
+        if (reuse_loop_invariant(n)) {
+          finish_inactive_control_site(inactive_site);
+          return Normal;
+        }
+        if (inactive_control(n, inactive_site)) {
+          publish_loop_invariant(n);
+          return Normal;
+        }
         if (op.opcode == OP_COMPARE && direct_control(n)) {
           publish_loop_invariant(n);
           return Normal;
@@ -1713,6 +2125,10 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   s.loop_invariant_reuse =
       s.loop_invariant_plan &&
       std::getenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE") == nullptr;
+  if (s.inactive_control_plan) s.inactive_control_plan->reset_runtime();
+  s.inactive_control_reuse =
+      s.inactive_control_plan &&
+      std::getenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL") == nullptr;
   struct ReleaseOnFailure {
     DynamicLoopState& state;
     bool published = false;
@@ -1738,6 +2154,7 @@ void dynamic_loop_forward(KernelCtx& ctx) {
     s.bindings[slot] = e.make_ref(initial + p.body.slots[slot].offset,
                                   p.body.slots[slot].len, false);
   e.initialize_direct_control_handles();
+  e.initialize_inactive_control_handles();
   for (const auto& fill : p.fills)
     std::copy(fill.second.begin(), fill.second.end(),
               initial + p.body.slots[fill.first].offset);
