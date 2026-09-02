@@ -1632,6 +1632,8 @@ struct ProgramCompiler {
   }
 
   Range fun(const mir::Expr& e) {
+    if (const auto value = mir::nullary_constant(e))
+      return {konst(*value), 1};
     // A shape query is a constant whatever surrounds it. Ahead of every
     // other case because `FnLength` is an internal function and the rest
     // are library ones, and they are all answered the same way: from the
@@ -1917,12 +1919,8 @@ struct ProgramCompiler {
         }
         return out;
       }
-      if (e.name == "FnNegInf" && e.args.empty())
-        return {konst(-std::numeric_limits<double>::infinity()), 1};
       bail("internal function " + e.name);
     }
-    if (e.args.empty() && e.name == "negative_infinity")
-      return {konst(-std::numeric_limits<double>::infinity()), 1};
     if (e.args.size() == 2 && e.name == "append_array") {
       const Range a = expr(e.args[0]);
       const Range b = expr(e.args[1]);

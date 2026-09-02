@@ -4754,6 +4754,7 @@ struct Lowering {
   }
 
   Val lower_funapp(const mir::Expr& e) {
+    if (const auto value = mir::nullary_constant(e)) return constant(*value);
     if (e.fn_lib == mir::Expr::Lib::UserDefined) {
       if (!region_current)
         if (auto v = fold_const(e)) return *v;
@@ -4847,19 +4848,6 @@ struct Lowering {
     if (e.fn_lib != mir::Expr::Lib::StanLib) {
       if (auto v = fold_const(e)) return *v;
       fail("unsupported function kind for " + e.name, e.raw);
-    }
-    // Nullary math constants stanc's optimizer will not fold because their
-    // value is non-finite (or, for machine_precision, platform-specific).
-    // They are plain constant slots here, same as the interpreter returns.
-    if (e.args.empty()) {
-      if (e.name == "not_a_number")
-        return constant(std::numeric_limits<double>::quiet_NaN());
-      if (e.name == "positive_infinity")
-        return constant(std::numeric_limits<double>::infinity());
-      if (e.name == "negative_infinity")
-        return constant(-std::numeric_limits<double>::infinity());
-      if (e.name == "machine_precision")
-        return constant(std::numeric_limits<double>::epsilon());
     }
     // Construct the lazy argument state exactly once. Resolver and handlers
     // inspect source metadata freely; values are still acquired only when the

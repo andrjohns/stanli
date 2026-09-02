@@ -516,6 +516,30 @@ void test_uninitialized_real() {
            {std::move(entry)}, 1.0, {std::numeric_limits<double>::quiet_NaN()});
 }
 
+void test_nullary_constants() {
+  // All public nullary constants, plus stanc's internal negative-infinity
+  // spelling, share one resolver across ProgramCompiler and MirInterp.
+  const auto check = [&](const std::string& name, Expr value, double expected) {
+    FunDef entry = rhs_function(
+        "nullary_" + name + "_rhs",
+        {return_value(make_array({std::move(value)}))});
+    run_case("nullary " + name, "constant compiles identically",
+             {std::move(entry)}, 1.0, {expected});
+  };
+  check("e", fun("e", {}, "UReal"), stan::math::e());
+  check("pi", fun("pi", {}, "UReal"), stan::math::pi());
+  check("machine_precision", fun("machine_precision", {}, "UReal"),
+        std::numeric_limits<double>::epsilon());
+  check("negative_infinity", fun("negative_infinity", {}, "UReal"),
+        -std::numeric_limits<double>::infinity());
+  check("positive_infinity", fun("positive_infinity", {}, "UReal"),
+        std::numeric_limits<double>::infinity());
+  check("not_a_number", fun("not_a_number", {}, "UReal"),
+        std::numeric_limits<double>::quiet_NaN());
+  check("FnNegInf", fun("FnNegInf", {}, "UReal", Expr::Lib::Internal),
+        -std::numeric_limits<double>::infinity());
+}
+
 void test_full_span_ode_vector() {
   // ODE RHS compilation is one production caller of ProgramCompiler. The
   // destination is vector[1], and y supplies a vector view of exactly that
@@ -830,6 +854,7 @@ int main() {
   test_short_circuit_or_requires_rhs();
   test_short_circuit_and_requires_rhs();
   test_uninitialized_real();
+  test_nullary_constants();
   test_full_span_ode_vector();
   test_full_span_program_views();
   test_program_extrema();

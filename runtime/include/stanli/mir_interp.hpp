@@ -1314,6 +1314,10 @@ class MirInterp {
 
   Value eval_fun(const mir::Expr& e) {
     Value r;
+    if (const auto value = mir::nullary_constant(e)) {
+      r.r = {T(*value)};
+      return r;
+    }
     if (e.fn_lib == mir::Expr::Lib::UserDefined) return call_udf(e);
     if (mir::is_reduce_sum(e)) return call_reduce_sum(e);
     const auto is_scalar = [](const Value& v) {
@@ -2866,30 +2870,6 @@ class MirInterp {
         r.i.push_back((int)d);
         r.r.push_back(T((double)d));
       }
-      return r;
-    }
-    if (e.name == "pi" && e.args.empty()) {
-      r.r = {T(stan::math::pi())};
-      return r;
-    }
-    if (e.name == "e" && e.args.empty()) {
-      r.r = {T(stan::math::e())};
-      return r;
-    }
-    if (e.name == "machine_precision" && e.args.empty()) {
-      r.r = {T(std::numeric_limits<double>::epsilon())};
-      return r;
-    }
-    if (e.name == "negative_infinity") {
-      r.r = {T(-std::numeric_limits<double>::infinity())};
-      return r;
-    }
-    if (e.name == "positive_infinity") {
-      r.r = {T(std::numeric_limits<double>::infinity())};
-      return r;
-    }
-    if (e.name == "not_a_number") {
-      r.r = {T(std::numeric_limits<double>::quiet_NaN())};
       return r;
     }
     if (e.name == "student_t_lccdf" && e.args.size() == 4) {

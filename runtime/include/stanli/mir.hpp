@@ -9,6 +9,7 @@
 #include <stanli/sexp.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -59,6 +60,65 @@ struct Expr {
   bool promoted = false;   // explicit MIR Promotion to this adlevel/type
   std::string raw;         // Unsupported diagnostics
 };
+
+// stanc leaves these calls in MIR rather than folding them: four have
+// non-finite/platform values, while pi/e are still part of the same language
+// surface. Keep name recognition and values together so graph lowering, the
+// register compiler, and MirInterp cannot grow different subsets. FnNegInf is
+// the optimizer's internal spelling of the same negative-infinity constant.
+enum class NullaryConstantKind : uint8_t {
+  E,
+  Pi,
+  MachinePrecision,
+  NegativeInfinity,
+  PositiveInfinity,
+  NotANumber,
+};
+
+inline std::optional<NullaryConstantKind> nullary_constant_kind(
+    const Expr& e) {
+  if (e.kind != Expr::FunApp || !e.args.empty()) return std::nullopt;
+  if (e.fn_lib == Expr::Lib::Internal)
+    return e.name == "FnNegInf"
+               ? std::optional<NullaryConstantKind>(
+                     NullaryConstantKind::NegativeInfinity)
+               : std::nullopt;
+  if (e.fn_lib != Expr::Lib::StanLib) return std::nullopt;
+  if (e.name == "e") return NullaryConstantKind::E;
+  if (e.name == "pi") return NullaryConstantKind::Pi;
+  if (e.name == "machine_precision")
+    return NullaryConstantKind::MachinePrecision;
+  if (e.name == "negative_infinity")
+    return NullaryConstantKind::NegativeInfinity;
+  if (e.name == "positive_infinity")
+    return NullaryConstantKind::PositiveInfinity;
+  if (e.name == "not_a_number") return NullaryConstantKind::NotANumber;
+  return std::nullopt;
+}
+
+inline double nullary_constant_value(NullaryConstantKind kind) {
+  switch (kind) {
+    case NullaryConstantKind::E:
+      return 0x1.5bf0a8b145769p+1;
+    case NullaryConstantKind::Pi:
+      return 0x1.921fb54442d18p+1;
+    case NullaryConstantKind::MachinePrecision:
+      return std::numeric_limits<double>::epsilon();
+    case NullaryConstantKind::NegativeInfinity:
+      return -std::numeric_limits<double>::infinity();
+    case NullaryConstantKind::PositiveInfinity:
+      return std::numeric_limits<double>::infinity();
+    case NullaryConstantKind::NotANumber:
+      return std::numeric_limits<double>::quiet_NaN();
+  }
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
+inline std::optional<double> nullary_constant(const Expr& e) {
+  const auto kind = nullary_constant_kind(e);
+  return kind ? std::optional<double>(nullary_constant_value(*kind))
+              : std::nullopt;
+}
 
 // A matrix row is a non-contiguous Eigen block.  Transposing it changes the
 // logical orientation but not the stride, so an outer elementwise expression
