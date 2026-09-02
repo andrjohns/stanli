@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1205,6 +1206,123 @@ struct DynamicArena {
   }
 };
 
+struct DynamicAllocationProfile {
+  struct Bucket {
+    uint64_t ordinary_visits = 0;
+    uint64_t active_visits = 0;
+    uint64_t compact_visits = 0;
+    uint64_t invariant_reuses = 0;
+    uint64_t inactive_control_calls = 0;
+    uint64_t direct_control_calls = 0;
+    uint64_t inline_integer_calls = 0;
+    uint64_t elided_arena_values = 0;
+    uint64_t elided_refs = 0;
+    uint64_t arena_values = 0;
+    uint64_t input_handle_values = 0;
+    uint64_t output_values = 0;
+    uint64_t scratch_values = 0;
+    uint64_t padding_values = 0;
+    uint64_t refs = 0;
+    uint64_t active_refs = 0;
+    uint64_t referenced_values = 0;
+    uint64_t conceptual_adjoint_values = 0;
+    uint64_t physical_adjoint_values = 0;
+    uint64_t records = 0;
+  };
+
+  std::array<Bucket, OP_COUNT_> buckets{};
+  uint64_t initial_arena_values = 0;
+  uint64_t initial_slot_refs = 0;
+  uint64_t canonical_refs = 0;
+  uint64_t import_refs = 0;
+  bool overflow = false;
+
+  void add(uint64_t& total, uint64_t value) noexcept {
+    if (total > std::numeric_limits<uint64_t>::max() - value) {
+      total = std::numeric_limits<uint64_t>::max();
+      overflow = true;
+    } else {
+      total += value;
+    }
+  }
+
+  uint64_t count(int64_t value) noexcept {
+    if (value < 0) {
+      overflow = true;
+      return 0;
+    }
+    return static_cast<uint64_t>(value);
+  }
+
+  Bucket* bucket(const Op& op) noexcept {
+    if (op.opcode >= OP_COUNT_) {
+      overflow = true;
+      return nullptr;
+    }
+    return &buckets[op.opcode];
+  }
+
+  void note_reuse(const Op& op, uint64_t Bucket::* field) noexcept {
+    if (Bucket* b = bucket(op)) add(b->*field, 1);
+  }
+
+  void note_ordinary(const Op& op, const Node& node, int64_t retained,
+                     bool active) noexcept {
+    Bucket* b = bucket(op);
+    if (!b) return;
+    const uint64_t inputs = count(op.n_in);
+    const uint64_t outputs = count(node.frame_size - 6 - node.kernel_scratch);
+    const uint64_t scratch = count(node.kernel_scratch);
+    const uint64_t frame = count(retained);
+    uint64_t components = inputs;
+    add(components, outputs);
+    add(components, scratch);
+    const uint64_t padding = frame >= components ? frame - components : 0;
+    if (frame < components) overflow = true;
+    const uint64_t refs = op.out2 >= 0 ? 2 : 1;
+
+    add(b->ordinary_visits, 1);
+    add(b->active_visits, active ? 1 : 0);
+    add(b->arena_values, frame);
+    add(b->input_handle_values, inputs);
+    add(b->output_values, outputs);
+    add(b->scratch_values, scratch);
+    add(b->padding_values, padding);
+    add(b->refs, refs);
+    add(b->active_refs, active ? refs : 0);
+    add(b->referenced_values, outputs);
+    add(b->conceptual_adjoint_values, active ? outputs : 0);
+    add(b->physical_adjoint_values, active ? outputs : 0);
+    add(b->records, active ? 1 : 0);
+  }
+
+  void note_compact(const Op& op, int64_t retained, int64_t output_len,
+                    bool active, bool shared_adjoint) noexcept {
+    Bucket* b = bucket(op);
+    if (!b) return;
+    const uint64_t frame = count(retained);
+    const uint64_t extent = count(output_len);
+    add(b->compact_visits, 1);
+    add(b->active_visits, active ? 1 : 0);
+    add(b->arena_values, frame);
+    add(b->input_handle_values, count(op.n_in));
+    add(b->refs, 1);
+    add(b->active_refs, active ? 1 : 0);
+    add(b->referenced_values, extent);
+    add(b->conceptual_adjoint_values, active ? extent : 0);
+    add(b->physical_adjoint_values, active && !shared_adjoint ? extent : 0);
+    add(b->records, 1);
+  }
+
+  void note_inline_integer(const Op& op, int64_t retained) noexcept {
+    Bucket* b = bucket(op);
+    if (!b) return;
+    add(b->inline_integer_calls, 1);
+    add(b->elided_arena_values, count(retained));
+    add(b->elided_refs, 1);
+  }
+};
+
 struct DynamicLoopState final : KernelState {
   struct Ref {
     double* value = nullptr;
@@ -1250,6 +1368,7 @@ struct DynamicLoopState final : KernelState {
   std::unique_ptr<DirectControlPlan> direct_control_plan;
   std::unique_ptr<LoopInvariantPlan> loop_invariant_plan;
   std::unique_ptr<InactiveControlPlan> inactive_control_plan;
+  std::unique_ptr<DynamicAllocationProfile> allocation_profile;
   std::vector<double> inactive_control_values;
   int64_t conceptual_adjoint_size = 0;
   int64_t adjoint_size = 0;
@@ -1375,6 +1494,7 @@ struct DynamicLoopState final : KernelState {
     iterator_values = 0;
     cached_context_in_use = false;
     memory_profile = false;
+    allocation_profile.reset();
   }
 };
 static_assert(sizeof(DynamicLoopState::Ref) == 24,
@@ -1398,7 +1518,8 @@ uint64_t profile_add(uint64_t first, uint64_t second, bool& overflow) noexcept {
 }
 
 void report_memory_profile(const StructuredLoop& p,
-                           const DynamicLoopState& state) {
+                           const DynamicLoopState& state) noexcept {
+  const int saved_errno = errno;
   bool overflow = false;
   const uint64_t arena_used =
       profile_bytes(state.arena.used_values, sizeof(double), overflow);
@@ -1428,8 +1549,10 @@ void report_memory_profile(const StructuredLoop& p,
       stderr,
       "stanli_structured_memory phase=forward region=%p nodes=%zu "
       "body_kernels=%zu accounting_overflow=%d "
-      "iterator_values=%llu iterator_value_bytes=%llu "
-      "iterator_ref_bytes=%llu iterator_total_bytes=%llu "
+      "elided_iterator_instances=%llu "
+      "elided_iterator_value_bytes=%llu "
+      "elided_iterator_ref_bytes=%llu "
+      "elided_iterator_total_bytes=%llu "
       "arena_used_bytes=%llu arena_capacity_bytes=%llu "
       "ref_count=%zu ref_used_bytes=%llu ref_capacity_bytes=%llu "
       "record_count=%zu record_used_bytes=%llu record_capacity_bytes=%llu "
@@ -1449,6 +1572,148 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(undo_used),
       static_cast<unsigned long long>(undo_capacity),
       static_cast<unsigned long long>(planned_adjoint));
+
+  const auto* allocation = state.allocation_profile.get();
+  if (!allocation) {
+    errno = saved_errno;
+    return;
+  }
+  bool allocation_overflow = allocation->overflow;
+  uint64_t kernel_arena_values = 0;
+  uint64_t input_handle_values = 0;
+  uint64_t output_values = 0;
+  uint64_t scratch_values = 0;
+  uint64_t padding_values = 0;
+  uint64_t kernel_refs = 0;
+  uint64_t active_refs = 0;
+  uint64_t referenced_values = 0;
+  uint64_t conceptual_adjoint_values = 0;
+  uint64_t physical_adjoint_values = 0;
+  uint64_t profiled_records = 0;
+  uint64_t inline_integer_calls = 0;
+  uint64_t elided_arena_values = 0;
+  uint64_t elided_refs = 0;
+  for (const auto& bucket : allocation->buckets) {
+    kernel_arena_values = profile_add(kernel_arena_values, bucket.arena_values,
+                                      allocation_overflow);
+    input_handle_values = profile_add(
+        input_handle_values, bucket.input_handle_values, allocation_overflow);
+    output_values =
+        profile_add(output_values, bucket.output_values, allocation_overflow);
+    scratch_values =
+        profile_add(scratch_values, bucket.scratch_values, allocation_overflow);
+    padding_values =
+        profile_add(padding_values, bucket.padding_values, allocation_overflow);
+    kernel_refs = profile_add(kernel_refs, bucket.refs, allocation_overflow);
+    active_refs =
+        profile_add(active_refs, bucket.active_refs, allocation_overflow);
+    referenced_values = profile_add(referenced_values, bucket.referenced_values,
+                                    allocation_overflow);
+    conceptual_adjoint_values =
+        profile_add(conceptual_adjoint_values, bucket.conceptual_adjoint_values,
+                    allocation_overflow);
+    physical_adjoint_values =
+        profile_add(physical_adjoint_values, bucket.physical_adjoint_values,
+                    allocation_overflow);
+    profiled_records =
+        profile_add(profiled_records, bucket.records, allocation_overflow);
+    inline_integer_calls = profile_add(
+        inline_integer_calls, bucket.inline_integer_calls, allocation_overflow);
+    elided_arena_values = profile_add(
+        elided_arena_values, bucket.elided_arena_values, allocation_overflow);
+    elided_refs =
+        profile_add(elided_refs, bucket.elided_refs, allocation_overflow);
+  }
+  uint64_t profiled_arena_values =
+      profile_add(allocation->initial_arena_values, kernel_arena_values,
+                  allocation_overflow);
+  uint64_t setup_refs =
+      profile_add(allocation->initial_slot_refs, allocation->canonical_refs,
+                  allocation_overflow);
+  setup_refs =
+      profile_add(setup_refs, allocation->import_refs, allocation_overflow);
+  const uint64_t profiled_refs =
+      profile_add(setup_refs, kernel_refs, allocation_overflow);
+  std::fprintf(
+      stderr,
+      "stanli_structured_alloc_summary region=%p accounting_overflow=%d "
+      "initial_arena_values=%llu kernel_arena_values=%llu "
+      "profiled_arena_values=%llu actual_arena_values=%llu arena_match=%d "
+      "input_handle_values=%llu output_values=%llu scratch_values=%llu "
+      "padding_values=%llu initial_slot_refs=%llu canonical_refs=%llu "
+      "import_refs=%llu kernel_refs=%llu profiled_refs=%llu "
+      "actual_refs=%zu refs_match=%d active_refs=%llu "
+      "referenced_values=%llu conceptual_adjoint_values=%llu "
+      "physical_adjoint_values=%llu profiled_records=%llu "
+      "actual_records=%zu records_match=%d inline_integer_calls=%llu "
+      "elided_arena_values=%llu elided_refs=%llu\n",
+      static_cast<const void*>(&p), allocation_overflow ? 1 : 0,
+      static_cast<unsigned long long>(allocation->initial_arena_values),
+      static_cast<unsigned long long>(kernel_arena_values),
+      static_cast<unsigned long long>(profiled_arena_values),
+      static_cast<unsigned long long>(state.arena.used_values),
+      profiled_arena_values == state.arena.used_values ? 1 : 0,
+      static_cast<unsigned long long>(input_handle_values),
+      static_cast<unsigned long long>(output_values),
+      static_cast<unsigned long long>(scratch_values),
+      static_cast<unsigned long long>(padding_values),
+      static_cast<unsigned long long>(allocation->initial_slot_refs),
+      static_cast<unsigned long long>(allocation->canonical_refs),
+      static_cast<unsigned long long>(allocation->import_refs),
+      static_cast<unsigned long long>(kernel_refs),
+      static_cast<unsigned long long>(profiled_refs), state.refs.size(),
+      profiled_refs == state.refs.size() ? 1 : 0,
+      static_cast<unsigned long long>(active_refs),
+      static_cast<unsigned long long>(referenced_values),
+      static_cast<unsigned long long>(conceptual_adjoint_values),
+      static_cast<unsigned long long>(physical_adjoint_values),
+      static_cast<unsigned long long>(profiled_records), state.records.size(),
+      profiled_records == state.records.size() ? 1 : 0,
+      static_cast<unsigned long long>(inline_integer_calls),
+      static_cast<unsigned long long>(elided_arena_values),
+      static_cast<unsigned long long>(elided_refs));
+
+  for (uint16_t opcode = 0; opcode < OP_COUNT_; ++opcode) {
+    const auto& bucket = allocation->buckets[opcode];
+    if (bucket.ordinary_visits == 0 && bucket.compact_visits == 0 &&
+        bucket.invariant_reuses == 0 && bucket.inactive_control_calls == 0 &&
+        bucket.direct_control_calls == 0 && bucket.inline_integer_calls == 0)
+      continue;
+    std::fprintf(
+        stderr,
+        "stanli_structured_alloc_opcode region=%p opcode=%u name=%s "
+        "ordinary_visits=%llu active_visits=%llu compact_visits=%llu "
+        "invariant_reuses=%llu inactive_control_calls=%llu "
+        "direct_control_calls=%llu inline_integer_calls=%llu "
+        "elided_arena_values=%llu elided_refs=%llu arena_values=%llu "
+        "input_handle_values=%llu output_values=%llu scratch_values=%llu "
+        "padding_values=%llu refs=%llu active_refs=%llu "
+        "referenced_values=%llu conceptual_adjoint_values=%llu "
+        "physical_adjoint_values=%llu records=%llu\n",
+        static_cast<const void*>(&p), static_cast<unsigned>(opcode),
+        opcode_name(opcode),
+        static_cast<unsigned long long>(bucket.ordinary_visits),
+        static_cast<unsigned long long>(bucket.active_visits),
+        static_cast<unsigned long long>(bucket.compact_visits),
+        static_cast<unsigned long long>(bucket.invariant_reuses),
+        static_cast<unsigned long long>(bucket.inactive_control_calls),
+        static_cast<unsigned long long>(bucket.direct_control_calls),
+        static_cast<unsigned long long>(bucket.inline_integer_calls),
+        static_cast<unsigned long long>(bucket.elided_arena_values),
+        static_cast<unsigned long long>(bucket.elided_refs),
+        static_cast<unsigned long long>(bucket.arena_values),
+        static_cast<unsigned long long>(bucket.input_handle_values),
+        static_cast<unsigned long long>(bucket.output_values),
+        static_cast<unsigned long long>(bucket.scratch_values),
+        static_cast<unsigned long long>(bucket.padding_values),
+        static_cast<unsigned long long>(bucket.refs),
+        static_cast<unsigned long long>(bucket.active_refs),
+        static_cast<unsigned long long>(bucket.referenced_values),
+        static_cast<unsigned long long>(bucket.conceptual_adjoint_values),
+        static_cast<unsigned long long>(bucket.physical_adjoint_values),
+        static_cast<unsigned long long>(bucket.records));
+  }
+  errno = saved_errno;
 }
 
 int64_t compact_scalar_update_position(const DynamicIndexSpec& p,
@@ -1464,6 +1729,9 @@ DynamicLoopState& dynamic_state(KernelCtx& c) {
   if (!c.state) throw std::logic_error("dynamic structured loop has no state");
   return *static_cast<DynamicLoopState*>(c.state);
 }
+
+void compare_forward(KernelCtx& c);
+void int_forward(KernelCtx& c);
 
 struct DynamicExecution {
   const StructuredLoop& p;
@@ -2003,6 +2271,37 @@ struct DynamicExecution {
     KernelCtx& get() { return *call; }
   };
 
+  bool inline_integer_result(const Node& n) {
+    const Op& op = p.body.ops[static_cast<size_t>(n.op)];
+    if (op.opcode != OP_COMPARE && op.opcode != OP_INT_ARITH) return false;
+    const auto builtin =
+        op.opcode == OP_COMPARE ? compare_forward : int_forward;
+    // Only the built-in, synchronous, scalar, scratch-free callbacks have the
+    // exact-int32 result contract used by the compact handle encoding.  A
+    // custom callback, second output, reverse callback, or different layout
+    // keeps the ordinary retained-frame behavior.
+    if (n.forward != builtin || n.backward != nullptr ||
+        op.out2 >= 0 || p.body.slots[static_cast<size_t>(op.out)].len != 1 ||
+        n.kernel_scratch != 0)
+      return false;
+
+    double handles[6] = {};
+    for (int k = 0; k < op.n_in; ++k)
+      handles[k] = state.bindings[static_cast<size_t>(op.in[k])];
+    double output = 0.0;
+    ContextLease context(*this, n, handles, false, -1, -1, &output);
+    // Invoke the resolved callback before publishing anything, preserving its
+    // validation order and exact exception type/message.  OP_COMPARE returns
+    // 0/1 and OP_INT_ARITH validates its result is int32 before returning.
+    n.forward(context.get());
+    state.bindings[static_cast<size_t>(op.out)] =
+        inline_int_handle(static_cast<int32_t>(output));
+    if (state.allocation_profile)
+      state.allocation_profile->note_inline_integer(op,
+                                                    retained_frame_values(n));
+    return true;
+  }
+
   bool direct_control(const Node& n) {
     DirectControlPlan::Site* site = direct_control_site(n);
     if (!site) return false;
@@ -2089,6 +2388,10 @@ struct DynamicExecution {
           "compact structured adjoint exceeds preallocated work");
     c.out.data[position] = c.in[2].data[0];
     state.bindings[static_cast<size_t>(op.out)] = out;
+    if (state.allocation_profile)
+      state.allocation_profile->note_compact(op, std::max(1, retained_inputs),
+                                             c.out.len, active,
+                                             shared_adjoint >= 0);
     return true;
   }
 
@@ -2106,19 +2409,33 @@ struct DynamicExecution {
         auto* inactive_site = inactive_control_site(n);
         begin_inactive_control_cone(inactive_site);
         if (reuse_loop_invariant(n)) {
+          if (state.allocation_profile)
+            state.allocation_profile->note_reuse(
+                op, &DynamicAllocationProfile::Bucket::invariant_reuses);
           finish_inactive_control_site(inactive_site);
           return Normal;
         }
         if (inactive_control(n, inactive_site)) {
+          if (state.allocation_profile)
+            state.allocation_profile->note_reuse(
+                op, &DynamicAllocationProfile::Bucket::inactive_control_calls);
           publish_loop_invariant(n);
           return Normal;
         }
         if (op.opcode == OP_COMPARE && direct_control(n)) {
+          if (state.allocation_profile)
+            state.allocation_profile->note_reuse(
+                op, &DynamicAllocationProfile::Bucket::direct_control_calls);
+          publish_loop_invariant(n);
+          return Normal;
+        }
+        if (inline_integer_result(n)) {
           publish_loop_invariant(n);
           return Normal;
         }
         if (compact_update(n)) return Normal;
-        double* frame = state.arena.allocate(retained_frame_values(n));
+        const int64_t retained = retained_frame_values(n);
+        double* frame = state.arena.allocate(retained);
         for (int k = 0; k < op.n_in; ++k)
           frame[k] = state.bindings[static_cast<size_t>(op.in[k])];
         ContextLease context(*this, n, frame, false);
@@ -2142,6 +2459,8 @@ struct DynamicExecution {
               n.compact_update_cell)] = c.out.data;
         }
         publish_loop_invariant(n);
+        if (state.allocation_profile)
+          state.allocation_profile->note_ordinary(op, n, retained, active);
         return Normal;
       }
       case Node::Alias:
@@ -2282,6 +2601,15 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   // or a partially built replacement resident/available to reverse.
   s.release_tape();
   s.memory_profile = std::getenv("STANLI_STRUCTURED_MEMORY_PROFILE") != nullptr;
+  if (s.memory_profile) {
+    try {
+      s.allocation_profile = std::make_unique<DynamicAllocationProfile>();
+    } catch (...) {
+      // Profiling is observational. Failure to allocate its counters cannot
+      // reduce model coverage or change the exception seen by the caller.
+      s.allocation_profile.reset();
+    }
+  }
   if (s.loop_invariant_plan) s.loop_invariant_plan->reset_runtime();
   s.loop_invariant_reuse =
       s.loop_invariant_plan &&
@@ -2304,6 +2632,9 @@ void dynamic_loop_forward(KernelCtx& ctx) {
     throw std::logic_error("dynamic structured output size mismatch");
 
   double* initial = s.arena.allocate(p.initial_size);
+  if (s.allocation_profile)
+    s.allocation_profile->initial_arena_values =
+        static_cast<uint64_t>(p.initial_size);
   e.initial_values = initial;
   std::fill_n(initial, p.initial_size, 0.0);
   s.bindings.resize(p.body.slots.size());
@@ -2314,8 +2645,18 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   for (size_t slot = 0; slot < p.body.slots.size(); ++slot)
     s.bindings[slot] = e.make_ref(initial + p.body.slots[slot].offset,
                                   p.body.slots[slot].len, false);
+  if (s.allocation_profile)
+    s.allocation_profile->initial_slot_refs = s.refs.size();
   e.initialize_direct_control_handles();
   e.initialize_inactive_control_handles();
+  if (s.allocation_profile) {
+    if (s.refs.size() < s.allocation_profile->initial_slot_refs) {
+      s.allocation_profile->overflow = true;
+    } else {
+      s.allocation_profile->canonical_refs =
+          s.refs.size() - s.allocation_profile->initial_slot_refs;
+    }
+  }
   for (const auto& fill : p.fills)
     std::copy(fill.second.begin(), fill.second.end(),
               initial + p.body.slots[fill.first].offset);
@@ -2329,6 +2670,16 @@ void dynamic_loop_forward(KernelCtx& ctx) {
                    ctx.in_adj[in.input].data != nullptr, in.input, in.offset);
     std::copy_n(ctx.in[in.input].data + in.offset, slot.len,
                 initial + slot.offset);
+  }
+  if (s.allocation_profile) {
+    uint64_t before_imports = s.allocation_profile->initial_slot_refs;
+    s.allocation_profile->add(before_imports,
+                              s.allocation_profile->canonical_refs);
+    if (s.refs.size() < before_imports) {
+      s.allocation_profile->overflow = true;
+    } else {
+      s.allocation_profile->import_refs = s.refs.size() - before_imports;
+    }
   }
 
   e.forward(p.root);

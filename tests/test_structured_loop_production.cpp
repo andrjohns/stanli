@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -684,6 +685,230 @@ static void compact_iterator_history_tests() {
   close(updated.gradient[0], 6,
         "inline iterator compact-update theta gradient");
   close(updated.gradient[1], 0, "inline iterator compact-update beta gradient");
+}
+
+static std::shared_ptr<StructuredLoop> integer_history_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, -1);
+  const int upper = scalar(*plan, 1);
+  const int iterator = plan->body.add_slot(1, false);
+  const int two = scalar(*plan, 2);
+  const int integer_result = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int result = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+  Node arithmetic = call(*plan, OP_INT_ARITH, {iterator, two}, integer_result);
+  plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = 2;
+  Node multiply = call(*plan, OP_MUL, {theta, integer_result}, term);
+  const int multiply_op = multiply.op;
+  plan->root =
+      sequence({alias(result, zero),
+                counted(lower, upper, iterator, 3,
+                        sequence({std::move(arithmetic), std::move(multiply),
+                                  call(*plan, OP_ADD, {result, term}, next),
+                                  alias(result, next)}))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(set_forward(plan->root, multiply_op, trace_iterator_forward),
+        "find integer-result trace forward callback");
+  check(set_backward(plan->root, multiply_op, trace_iterator_backward),
+        "find integer-result trace backward callback");
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> comparison_target_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int lower = scalar(*plan, -1);
+  const int upper = scalar(*plan, 1);
+  const int iterator = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int compared = plan->body.add_slot(1, false);
+  Node comparison = call(*plan, OP_COMPARE, {iterator, zero}, compared);
+  plan->body.ops[static_cast<size_t>(comparison.op)].variant = 0;
+  Node target;
+  target.kind = Node::Target;
+  target.src = compared;
+  plan->root = counted(lower, upper, iterator, 3,
+                       sequence({std::move(comparison), std::move(target)}));
+  plan->has_target = true;
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> computed_nested_bound_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int one = scalar(*plan, 1);
+  const int two = scalar(*plan, 2);
+  const int outer_iterator = plan->body.add_slot(1, false);
+  const int inner_iterator = plan->body.add_slot(1, false);
+  const int inner_upper = plan->body.add_slot(1, false);
+  Node arithmetic =
+      call(*plan, OP_INT_ARITH, {outer_iterator, one}, inner_upper);
+  plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = 0;
+  Node target;
+  target.kind = Node::Target;
+  target.src = inner_iterator;
+  plan->root = counted(
+      one, two, outer_iterator, 2,
+      sequence({std::move(arithmetic), counted(one, inner_upper, inner_iterator,
+                                               3, std::move(target))}));
+  plan->has_target = true;
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> integer_output_plan(double a, double b) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int left = scalar(*plan, a);
+  const int right = scalar(*plan, b);
+  const int integer_result = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  Node arithmetic = call(*plan, OP_INT_ARITH, {left, right}, integer_result);
+  plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = 0;
+  plan->root = sequence({std::move(arithmetic), alias(result, integer_result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> imported_integer_output_plan(
+    int variant = 0) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int left = plan->body.add_slot(1, false);
+  const int right = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{left, 0, 0}, {right, 1, 0}};
+  Node arithmetic = call(*plan, OP_INT_ARITH, {left, right}, result);
+  plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = variant;
+  plan->root = std::move(arithmetic);
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static int custom_integer_calls = 0;
+static void custom_integer_forward(KernelCtx& context) {
+  ++custom_integer_calls;
+  find_kernel(OP_INT_ARITH)->forward(context);
+  context.out.data[0] += 0.5;
+}
+
+static void registered_custom_integer_forward(KernelCtx& context) {
+  ++custom_integer_calls;
+  context.out.data[0] = 5.5;
+}
+
+struct ScopedKernelOverride {
+  uint16_t opcode;
+  Kernel saved;
+
+  ScopedKernelOverride(uint16_t opcode, Kernel replacement)
+      : opcode(opcode), saved(*find_kernel(opcode)) {
+    register_kernel(opcode, replacement);
+  }
+  ~ScopedKernelOverride() { register_kernel(opcode, saved); }
+};
+
+static std::shared_ptr<StructuredLoop> custom_integer_plan() {
+  auto plan = integer_output_plan(2, 3);
+  check(set_forward(plan->root, 0, custom_integer_forward),
+        "find custom integer callback");
+  return plan;
+}
+
+static void compact_integer_result_tests() {
+  iterator_forward_values.clear();
+  iterator_reverse_values.clear();
+  Executor history(outer(integer_history_plan()));
+  const Evaluation traced = evaluate(history, .25, 0);
+  close(traced.value, 0, "inline integer history value");
+  close(traced.gradient[0], 0, "inline integer history theta gradient");
+  check(iterator_forward_values == std::vector<double>({-2, 0, 2}),
+        "inline integer forward values are exact");
+  check(iterator_reverse_values == std::vector<double>({2, 0, -2}),
+        "inline integer reverse values preserve history");
+
+  Executor comparison_target(outer(comparison_target_plan()));
+  const Evaluation compared = evaluate(comparison_target, 0, 0);
+  close(compared.value, 1, "inline comparison target keeps reached values");
+  close(compared.gradient[0], 0, "inline comparison target theta gradient");
+  close(compared.gradient[1], 0, "inline comparison target beta gradient");
+
+  Executor nested_bound(outer(computed_nested_bound_plan()));
+  const Evaluation nested = evaluate(nested_bound, 0, 0);
+  close(nested.value, 9, "inline integer supplies nested loop bound");
+  close(nested.gradient[0], 0, "inline integer bound theta gradient");
+  close(nested.gradient[1], 0, "inline integer bound beta gradient");
+
+  for (const auto& point : std::vector<std::pair<double, double>>{
+           {static_cast<double>(std::numeric_limits<int32_t>::min()), 0},
+           {static_cast<double>(std::numeric_limits<int32_t>::max()) - 1, 1}}) {
+    Executor boundary(outer(integer_output_plan(point.first, point.second)));
+    const Evaluation result = evaluate(boundary, 0, 0);
+    close(result.value, point.first + point.second,
+          "inline integer boundary escapes through output alias");
+    close(result.gradient[0], 0, "inline integer boundary theta gradient");
+    close(result.gradient[1], 0, "inline integer boundary beta gradient");
+  }
+
+  Executor retry(outer(imported_integer_output_plan()));
+  bool threw = false;
+  try {
+    (void)evaluate(retry,
+                   static_cast<double>(std::numeric_limits<int32_t>::max()), 1);
+  } catch (const std::domain_error& error) {
+    threw = std::string(error.what()) ==
+            "integer arithmetic exceeds Stan integer range";
+  }
+  check(threw, "inline integer preserves arithmetic exception");
+  const Evaluation retried = evaluate(retry, 2, 3);
+  close(retried.value, 5, "inline integer retry value");
+  close(retried.gradient[0], 0, "inline integer retry theta gradient");
+  close(retried.gradient[1], 0, "inline integer retry beta gradient");
+
+  Executor division_retry(outer(imported_integer_output_plan(3)));
+  threw = false;
+  try {
+    (void)evaluate(division_retry, 4, 0);
+  } catch (const std::domain_error& error) {
+    threw = std::string(error.what()) == "integer division by zero";
+  }
+  check(threw, "inline integer preserves division exception");
+  const Evaluation divided = evaluate(division_retry, 4, 2);
+  close(divided.value, 2, "inline integer division retry value");
+  close(divided.gradient[0], 0,
+        "inline integer division retry theta gradient");
+  close(divided.gradient[1], 0,
+        "inline integer division retry beta gradient");
+
+  custom_integer_calls = 0;
+  Executor custom(outer(custom_integer_plan()));
+  const Evaluation custom_result = evaluate(custom, 0, 0);
+  close(custom_result.value, 5.5,
+        "custom integer callback keeps ordinary result semantics");
+  check(custom_integer_calls == 1,
+        "custom integer callback uses ordinary retained path");
+
+  custom_integer_calls = 0;
+  {
+    Kernel replacement = *find_kernel(OP_INT_ARITH);
+    replacement.forward = registered_custom_integer_forward;
+    ScopedKernelOverride overridden(OP_INT_ARITH, replacement);
+    Executor registered_custom(outer(integer_output_plan(2, 3)));
+    const Evaluation registered_result = evaluate(registered_custom, 0, 0);
+    close(registered_result.value, 5.5,
+          "registered custom integer callback is not inlined");
+  }
+  check(custom_integer_calls == 1,
+        "pre-prepare custom integer callback keeps ordinary path");
 }
 
 static std::atomic<int> invariant_first_calls{0};
@@ -1427,6 +1652,7 @@ int main() {
   forced_control_tests();
   dynamic_history_tests();
   compact_iterator_history_tests();
+  compact_integer_result_tests();
   loop_invariant_reuse_tests();
   inactive_control_tests();
   dynamic_history_concurrency_tests();
