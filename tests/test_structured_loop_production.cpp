@@ -477,6 +477,7 @@ static Evaluation evaluate(Executor& executor, double theta, double beta);
 
 static std::vector<double> iterator_forward_values;
 static std::vector<double> iterator_reverse_values;
+static std::vector<std::array<double, 3>> update_reverse_values;
 static bool iterator_throw_once = false;
 
 static void trace_iterator_forward(KernelCtx& context) {
@@ -491,6 +492,12 @@ static void trace_iterator_forward(KernelCtx& context) {
 static void trace_iterator_backward(KernelCtx& context) {
   iterator_reverse_values.push_back(context.in[1].data[0]);
   find_kernel(OP_MUL)->backward(context);
+}
+
+static void trace_update_backward(KernelCtx& context) {
+  update_reverse_values.push_back(
+      {context.in[0].data[0], context.in[0].data[1], context.in[0].data[2]});
+  find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
 }
 
 static std::shared_ptr<StructuredLoop> iterator_history_plan() {
@@ -604,6 +611,7 @@ static std::shared_ptr<StructuredLoop> iterator_update_plan() {
   spec->selected_size = 1;
   Node update =
       call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, rhs}, updated);
+  const int update_op = update.op;
   plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
   plan->body.udata_pool.push_back(spec);
   plan->root =
@@ -617,6 +625,8 @@ static std::shared_ptr<StructuredLoop> iterator_update_plan() {
   plan->dynamic_history = true;
   check(plan->compact_update_sites == 1,
         "iterator update plan selects compact history");
+  check(set_backward(plan->root, update_op, trace_update_backward),
+        "find compact-update trace backward callback");
   return plan;
 }
 
@@ -679,12 +689,17 @@ static void compact_iterator_history_tests() {
   close(nested_result.gradient[0], 12, "nested inline iterator theta gradient");
   close(nested_result.gradient[1], 0, "nested inline iterator beta gradient");
 
+  update_reverse_values.clear();
   Executor update(outer(iterator_update_plan()));
   const Evaluation updated = evaluate(update, .25, 0);
   close(updated.value, 1.5, "inline iterator compact-update value");
   close(updated.gradient[0], 6,
         "inline iterator compact-update theta gradient");
   close(updated.gradient[1], 0, "inline iterator compact-update beta gradient");
+  check(update_reverse_values ==
+            std::vector<std::array<double, 3>>(
+                {{{.25, .5, .75}}, {{.25, .5, 30}}, {{10, 20, 30}}}),
+        "compact-update reverse restores overwritten values in LIFO order");
 }
 
 static std::shared_ptr<StructuredLoop> integer_history_plan() {

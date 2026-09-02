@@ -1382,12 +1382,12 @@ struct DynamicLoopState final : KernelState {
     const Node* node = nullptr;
     double* frame = nullptr;
     double out = -1;
+    // Ordinary calls store the optional second-output handle. Compact updates
+    // have no second output and store the overwritten value here instead.
     double out2 = -1;
+    // Compact updates store the overwritten position directly. Ordinary
+    // records use -1.
     int64_t undo = -1;
-  };
-  struct Undo {
-    int64_t position = -1;
-    double old_value = 0.0;
   };
   DynamicArena arena;
   std::vector<double> adjoints;
@@ -1400,7 +1400,6 @@ struct DynamicLoopState final : KernelState {
   std::vector<double> target_refs;
   std::vector<double> target_work;
   std::vector<Record> records;
-  std::vector<Undo> undos;
   // H2B may assign multiple conceptual compact-update Refs to one physical
   // internal-adjoint range. Reverse uses one fully overwritten temporary
   // output range to preserve the ordinary callback's distinct descriptors.
@@ -1555,7 +1554,6 @@ struct DynamicLoopState final : KernelState {
     std::vector<double>{}.swap(target_refs);
     std::vector<double>{}.swap(target_work);
     std::vector<Record>{}.swap(records);
-    std::vector<Undo>{}.swap(undos);
     conceptual_adjoint_size = 0;
     adjoint_size = 0;
     iterator_values = 0;
@@ -1600,10 +1598,6 @@ void report_memory_profile(const StructuredLoop& p,
       state.records.size(), sizeof(DynamicLoopState::Record), overflow);
   const uint64_t record_capacity = profile_bytes(
       state.records.capacity(), sizeof(DynamicLoopState::Record), overflow);
-  const uint64_t undo_used = profile_bytes(
-      state.undos.size(), sizeof(DynamicLoopState::Undo), overflow);
-  const uint64_t undo_capacity = profile_bytes(
-      state.undos.capacity(), sizeof(DynamicLoopState::Undo), overflow);
   const uint64_t planned_adjoint = profile_bytes(
       static_cast<uint64_t>(state.adjoint_size), sizeof(double), overflow);
   const uint64_t inactive_scratch =
@@ -1626,7 +1620,7 @@ void report_memory_profile(const StructuredLoop& p,
       "arena_used_bytes=%llu arena_capacity_bytes=%llu "
       "ref_count=%zu ref_used_bytes=%llu ref_capacity_bytes=%llu "
       "record_count=%zu record_used_bytes=%llu record_capacity_bytes=%llu "
-      "undo_count=%zu undo_used_bytes=%llu undo_capacity_bytes=%llu "
+      "undo_count=0 undo_used_bytes=0 undo_capacity_bytes=0 "
       "planned_adjoint_bytes=%llu inactive_scratch_bytes=%llu\n",
       static_cast<const void*>(&p), p.node_count, p.body.ops.size(),
       overflow ? 1 : 0, static_cast<unsigned long long>(state.iterator_values),
@@ -1638,9 +1632,7 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(ref_used),
       static_cast<unsigned long long>(ref_capacity), state.records.size(),
       static_cast<unsigned long long>(record_used),
-      static_cast<unsigned long long>(record_capacity), state.undos.size(),
-      static_cast<unsigned long long>(undo_used),
-      static_cast<unsigned long long>(undo_capacity),
+      static_cast<unsigned long long>(record_capacity),
       static_cast<unsigned long long>(planned_adjoint),
       static_cast<unsigned long long>(inactive_scratch));
 
@@ -2440,7 +2432,7 @@ struct DynamicExecution {
   bool compact_update(const Node& n) {
     if (n.compact_update_cell < 0) return false;
     const Op& op = p.body.ops[n.op];
-    if (op.n_in != 3)
+    if (op.n_in != 3 || op.out2 >= 0)
       throw std::logic_error("compact structured update arity is invalid");
     const int cell = n.compact_update_cell;
     const double base_handle = state.bindings[static_cast<size_t>(op.in[0])];
@@ -2472,16 +2464,12 @@ struct DynamicExecution {
     // Every allocation that can throw precedes the destructive write. A later
     // failure still drops the entire evaluation-local tape, but this ordering
     // also keeps the state internally coherent under allocation failure.
-    if (state.undos.size() >= static_cast<size_t>(exact_limit))
-      throw std::length_error("compact structured undo overflow");
     const int retained_inputs = op.n_in;
     double* frame = state.arena.allocate(std::max(1, retained_inputs));
     std::copy_n(handles, retained_inputs, frame);
-    const int64_t undo = static_cast<int64_t>(state.undos.size());
-    state.undos.push_back({position, c.out.data[position]});
     const double out =
         make_ref(c.out.data, c.out.len, active, -1, 0, shared_adjoint);
-    state.records.push_back({&n, frame, out, -1, undo});
+    state.records.push_back({&n, frame, out, c.out.data[position], position});
     if (shared_adjoint >= 0 && c.out.len > state.compact_adjoint_work_size)
       throw std::logic_error(
           "compact structured adjoint exceeds preallocated work");
@@ -2695,23 +2683,20 @@ struct DynamicExecution {
     for (size_t i = state.records.size(); i-- > 0;) {
       const auto& record = state.records[i];
       if (record.undo >= 0) {
-        if (static_cast<size_t>(record.undo) >= state.undos.size())
-          throw std::logic_error("compact structured undo out of range");
         auto& output = ref(record.out);
-        const auto& undo = state.undos[static_cast<size_t>(record.undo)];
         const int64_t output_len =
             p.body.slots[p.body.ops[record.node->op].out].len;
-        if (undo.position < 0 || undo.position >= output_len)
+        if (record.undo >= output_len)
           throw std::logic_error(
               "compact structured undo position out of range");
         if (record.out >= 0 && record.node->backward) {
           ContextLease context(*this, *record.node, record.frame, true,
-                               record.out, record.out2, output.value);
+                               record.out, -1, output.value);
           KernelCtx& c = context.get();
           prepare_shared_compact_adjoint(record, c);
           record.node->backward(c);
         }
-        output.value[undo.position] = undo.old_value;
+        output.value[record.undo] = record.out2;
       } else if (record.node->backward) {
         ContextLease context(*this, *record.node, record.frame, true,
                              record.out, record.out2);
@@ -2781,7 +2766,6 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   s.bindings.resize(p.body.slots.size());
   s.compact_primal_by_cell.assign(p.body.slots.size(), nullptr);
   s.records.clear();
-  s.undos.clear();
   s.target_refs.clear();
   for (size_t slot = 0; slot < p.body.slots.size(); ++slot)
     s.bindings[slot] = e.make_ref(initial + p.body.slots[slot].offset,
