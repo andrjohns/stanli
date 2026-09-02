@@ -181,6 +181,44 @@ static void runtime_trip_tests() {
   }
 }
 
+static void compact_import_reference_tests() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int left = plan->body.add_slot(1, false);
+  const int right = plan->body.add_slot(1, false);
+  const int repeated = plan->body.add_slot(1, false);
+  const int product = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  // Import ordinals deliberately differ from slot order. Two imports also
+  // name the same nonzero outer offset, so reverse must accumulate through
+  // distinct compact Ref entries into one graph adjoint cell.
+  plan->imports = {{repeated, 0, 1}, {left, 1, 2}, {right, 0, 1}};
+  plan->root = sequence({call(*plan, OP_MUL, {left, right}, product),
+                         call(*plan, OP_ADD, {product, repeated}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+
+  Graph graph;
+  graph.add_slot(3, true);
+  graph.add_slot(3, true);
+  const int output = graph.add_slot(1, false);
+  const int op = graph.add_op(OP_LOOP, {0, 1}, output);
+  graph.ops[op].udata = plan.get();
+  graph.udata_pool.push_back(std::move(plan));
+  graph.result_slot = output;
+
+  Executor executor(graph);
+  const double point[] = {1, 2, 3, 4, 5, 6};
+  std::copy(std::begin(point), std::end(point), executor.params_data());
+  double gradient[6] = {};
+  close(executor.gradient(gradient), 14,
+        "compact import ordinals preserve value");
+  const double expected[] = {0, 7, 0, 0, 0, 2};
+  for (size_t i = 0; i < std::size(expected); ++i)
+    close(gradient[i], expected[i],
+          "compact import ordinals preserve outer gradient");
+}
+
 static void direct_index_kernel_tests() {
   const Kernel* dynamic_index = find_kernel(OP_INDEX_DYNAMIC);
   check(dynamic_index && dynamic_index->forward && dynamic_index->backward,
@@ -1997,6 +2035,7 @@ static void direct_index_lowering_tests() {
 int main() {
   test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
   runtime_trip_tests();
+  compact_import_reference_tests();
   direct_index_kernel_tests();
   forced_control_tests();
   dynamic_history_tests();

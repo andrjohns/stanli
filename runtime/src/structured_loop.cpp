@@ -1444,12 +1444,11 @@ struct DynamicAllocationProfile {
 struct DynamicLoopState final : KernelState {
   struct Ref {
     double* value = nullptr;
-    // Internal references store their adjoint offset here. Outer references
-    // cannot have an internal adjoint, so the same field stores their offset
-    // into the outer input. The expected length comes from the graph slot at
-    // every use and need not be repeated for every reached value.
-    int64_t adjoint_or_outer_offset = -1;
-    int outer_input = -1;
+    // Nonnegative values are internal adjoint offsets, -1 marks an inactive
+    // internal value, and values <= -2 encode an ordinal in the immutable
+    // StructuredLoop::imports table. The expected length comes from the graph
+    // slot at every use and need not be repeated for every reached value.
+    int64_t adjoint_or_import = -1;
   };
   struct Record {
     const Node* node = nullptr;
@@ -1635,7 +1634,7 @@ struct DynamicLoopState final : KernelState {
     allocation_profile.reset();
   }
 };
-static_assert(sizeof(DynamicLoopState::Ref) == 24,
+static_assert(sizeof(DynamicLoopState::Ref) == 16,
               "dynamic structured references must stay compact");
 
 uint64_t profile_bytes(uint64_t count, uint64_t width,
@@ -1922,46 +1921,76 @@ struct DynamicExecution {
     return ordinary_ref(h);
   }
 
-  double make_ref(double* value, int64_t len, bool active, int outer_input = -1,
-                  int64_t outer_offset = 0,
+  static bool is_import_ref(const DynamicLoopState::Ref& ref) noexcept {
+    return ref.adjoint_or_import < -1;
+  }
+
+  const StructuredLoop::Import& import_ref(
+      const DynamicLoopState::Ref& ref) const {
+    if (!is_import_ref(ref))
+      throw std::logic_error(
+          "dynamic structured value is not an import reference");
+    const uint64_t ordinal =
+        static_cast<uint64_t>(-(ref.adjoint_or_import + 2));
+    if (ordinal >= p.imports.size())
+      throw std::logic_error(
+          "dynamic structured import reference out of range");
+    return p.imports[static_cast<size_t>(ordinal)];
+  }
+
+  double append_ref(DynamicLoopState::Ref ref, bool active) {
+    if (state.refs.size() >= static_cast<size_t>(ordinary_ref_limit))
+      throw std::length_error("dynamic structured reference overflow");
+    const int64_t id = static_cast<int64_t>(state.refs.size());
+    state.refs.push_back(ref);
+    return handle(id, active);
+  }
+
+  double make_ref(double* value, int64_t len, bool active,
                   int64_t shared_adjoint_offset = -1) {
     if (len < 0)
       throw std::logic_error(
           "dynamic structured reference has negative length");
-    if (state.refs.size() >= static_cast<size_t>(ordinary_ref_limit))
-      throw std::length_error("dynamic structured reference overflow");
     DynamicLoopState::Ref r;
     r.value = value;
-    r.outer_input = outer_input;
-    if (outer_input >= 0) {
-      if (shared_adjoint_offset >= 0)
-        throw std::logic_error(
-            "outer structured reference cannot share an internal adjoint");
-      if (outer_input >= outer.n_in || outer_offset < 0 ||
-          outer_offset > outer.in[outer_input].len ||
-          len > outer.in[outer_input].len - outer_offset)
-        throw std::logic_error(
-            "dynamic structured outer reference exceeds graph input");
-      r.adjoint_or_outer_offset = outer_offset;
-    } else if (active) {
+    if (active) {
       state.conceptual_adjoint_size = add(state.conceptual_adjoint_size, len);
       if (shared_adjoint_offset >= 0) {
         if (shared_adjoint_offset > state.adjoint_size ||
             len > state.adjoint_size - shared_adjoint_offset)
           throw std::logic_error(
               "shared structured adjoint range is out of bounds");
-        r.adjoint_or_outer_offset = shared_adjoint_offset;
+        r.adjoint_or_import = shared_adjoint_offset;
       } else {
-        r.adjoint_or_outer_offset = state.adjoint_size;
+        r.adjoint_or_import = state.adjoint_size;
         state.adjoint_size = add(state.adjoint_size, len);
       }
     } else if (shared_adjoint_offset >= 0) {
       throw std::logic_error(
           "inactive structured reference cannot share an adjoint");
     }
-    const int64_t id = static_cast<int64_t>(state.refs.size());
-    state.refs.push_back(r);
-    return handle(id, active);
+    return append_ref(r, active);
+  }
+
+  double make_import_ref(double* value, int64_t len, bool active,
+                         size_t import_ordinal) {
+    if (len < 0)
+      throw std::logic_error(
+          "dynamic structured import reference has negative length");
+    if (import_ordinal >= p.imports.size() ||
+        import_ordinal >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 2))
+      throw std::length_error("dynamic structured import reference overflow");
+    const auto& import = p.imports[import_ordinal];
+    if (import.input < 0 || import.input >= outer.n_in || import.offset < 0 ||
+        import.offset > outer.in[import.input].len ||
+        len > outer.in[import.input].len - import.offset)
+      throw std::logic_error(
+          "dynamic structured import reference exceeds graph input");
+    DynamicLoopState::Ref r;
+    r.value = value;
+    r.adjoint_or_import = -2 - static_cast<int64_t>(import_ordinal);
+    return append_ref(r, active);
   }
 
   double scalar_value(double h) {
@@ -2162,8 +2191,7 @@ struct DynamicExecution {
         if (canonical >= 0 ||
             canonical_ref.value !=
                 state.inactive_control_values.data() + site.value_offset ||
-            canonical_ref.outer_input >= 0 ||
-            canonical_ref.adjoint_or_outer_offset >= 0)
+            canonical_ref.adjoint_or_import != -1)
           throw std::logic_error(
               "inactive-control canonical result handle is invalid");
         site.canonical_handle = canonical;
@@ -2235,8 +2263,7 @@ struct DynamicExecution {
         if (!initial_values || canonical >= 0 || output.len != 1 ||
             output.offset < 0 || output.offset >= p.initial_size ||
             canonical_ref.value != initial_values + output.offset ||
-            canonical_ref.outer_input >= 0 ||
-            canonical_ref.adjoint_or_outer_offset >= 0)
+            canonical_ref.adjoint_or_import != -1)
           throw std::logic_error(
               "direct-control canonical result handle is invalid");
         site.canonical_handle = canonical;
@@ -2253,20 +2280,21 @@ struct DynamicExecution {
     if (expected_len < 0)
       throw std::logic_error("dynamic structured adjoint has negative length");
     const auto& r = ordinary_ref(h);
-    if (r.outer_input >= 0) {
-      if (r.outer_input >= outer.n_in || r.adjoint_or_outer_offset < 0)
+    if (is_import_ref(r)) {
+      const auto& import = import_ref(r);
+      if (import.input < 0 || import.input >= outer.n_in || import.offset < 0)
         throw std::logic_error(
             "dynamic structured outer adjoint handle out of range");
-      const int64_t at = r.adjoint_or_outer_offset;
-      const Desc& value_desc = outer.in[r.outer_input];
-      const Desc& adj_desc = outer.in_adj[r.outer_input];
+      const int64_t at = import.offset;
+      const Desc& value_desc = outer.in[import.input];
+      const Desc& adj_desc = outer.in_adj[import.input];
       if (at > value_desc.len || expected_len > value_desc.len - at ||
           at > adj_desc.len || expected_len > adj_desc.len - at)
         throw std::logic_error(
             "dynamic structured outer adjoint handle out of range");
       return adj_desc.data ? adj_desc.data + at : nullptr;
     }
-    const int64_t at = r.adjoint_or_outer_offset;
+    const int64_t at = r.adjoint_or_import;
     if (at < 0 || at > state.adjoint_size ||
         expected_len > state.adjoint_size - at ||
         static_cast<uint64_t>(state.adjoint_size) > state.adjoints.size())
@@ -2281,9 +2309,11 @@ struct DynamicExecution {
       throw std::logic_error("structured adjoint range has negative length");
     const auto& first = ref(first_handle);
     const auto& second = ref(second_handle);
-    if (first.outer_input < 0 && second.outer_input < 0) {
-      const int64_t first_at = first.adjoint_or_outer_offset;
-      const int64_t second_at = second.adjoint_or_outer_offset;
+    const bool first_import = is_import_ref(first);
+    const bool second_import = is_import_ref(second);
+    if (!first_import && !second_import) {
+      const int64_t first_at = first.adjoint_or_import;
+      const int64_t second_at = second.adjoint_or_import;
       if (first_at < 0 || second_at < 0 || first_at > state.adjoint_size ||
           second_at > state.adjoint_size ||
           first_len > state.adjoint_size - first_at ||
@@ -2293,15 +2323,15 @@ struct DynamicExecution {
       return first_at < second_at + second_len &&
              second_at < first_at + first_len;
     }
-    if ((first.outer_input < 0) != (second.outer_input < 0)) return false;
+    if (first_import != second_import) return false;
     const auto outer_desc = [&](const DynamicLoopState::Ref& r,
                                 int64_t len) -> Desc {
-      if (r.outer_input < 0 || r.outer_input >= outer.n_in ||
-          r.adjoint_or_outer_offset < 0)
+      const auto& import = import_ref(r);
+      if (import.input < 0 || import.input >= outer.n_in || import.offset < 0)
         throw std::logic_error(
             "structured outer adjoint range is out of bounds");
-      const Desc& desc = outer.in_adj[r.outer_input];
-      const int64_t at = r.adjoint_or_outer_offset;
+      const Desc& desc = outer.in_adj[import.input];
+      const int64_t at = import.offset;
       if (!desc.data || at > desc.len || len > desc.len - at)
         throw std::logic_error(
             "structured outer adjoint range is out of bounds");
@@ -2317,15 +2347,15 @@ struct DynamicExecution {
                                  int64_t rhs_len) {
     if (base_handle < 0) return -1;
     const auto& base = ref(base_handle);
-    if (base.outer_input >= 0 || base.adjoint_or_outer_offset < 0 ||
-        base_len <= 0 || base_len != output_len ||
+    if (is_import_ref(base) || base.adjoint_or_import < 0 || base_len <= 0 ||
+        base_len != output_len ||
         adjoint_ranges_overlap(base_handle, base_len, selector_handle,
                                selector_len) ||
         adjoint_ranges_overlap(base_handle, base_len, rhs_handle, rhs_len) ||
         adjoint_ranges_overlap(selector_handle, selector_len, rhs_handle,
                                rhs_len))
       return -1;
-    return base.adjoint_or_outer_offset;
+    return base.adjoint_or_import;
   }
 
   int64_t retained_frame_values(const Node& n) const {
@@ -2562,8 +2592,7 @@ struct DynamicExecution {
     const int retained_inputs = op.n_in;
     double* frame = state.arena.allocate(std::max(1, retained_inputs));
     std::copy_n(handles, retained_inputs, frame);
-    const double out =
-        make_ref(c.out.data, c.out.len, active, -1, 0, shared_adjoint);
+    const double out = make_ref(c.out.data, c.out.len, active, shared_adjoint);
     state.records.push_back({&n, frame, out, c.out.data[position], position});
     if (shared_adjoint >= 0 && c.out.len > state.compact_adjoint_work_size)
       throw std::logic_error(
@@ -2764,8 +2793,8 @@ struct DynamicExecution {
     if (base_handle < 0) return false;
     const auto& base = ref(base_handle);
     const auto& output = ref(record.out);
-    if (base.outer_input >= 0 || output.outer_input >= 0 ||
-        base.adjoint_or_outer_offset != output.adjoint_or_outer_offset)
+    if (is_import_ref(base) || is_import_ref(output) ||
+        base.adjoint_or_import != output.adjoint_or_import)
       return false;
     if (c.in_adj[0].len != c.out_adj_vec.len || c.in_adj[0].len <= 0 ||
         !c.in_adj[0].data || !c.out_adj_vec.data ||
@@ -2900,14 +2929,16 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   for (const auto& fill : p.fills)
     std::copy(fill.second.begin(), fill.second.end(),
               initial + p.body.slots[fill.first].offset);
-  for (const auto& in : p.imports) {
+  for (size_t import_ordinal = 0; import_ordinal < p.imports.size();
+       ++import_ordinal) {
+    const auto& in = p.imports[import_ordinal];
     const Slot& slot = p.body.slots[in.slot];
     if (in.input >= ctx.n_in || in.offset > ctx.in[in.input].len ||
         slot.len > ctx.in[in.input].len - in.offset)
       throw std::logic_error("dynamic structured import exceeds graph input");
     s.bindings[static_cast<size_t>(in.slot)] =
-        e.make_ref(initial + slot.offset, slot.len,
-                   ctx.in_adj[in.input].data != nullptr, in.input, in.offset);
+        e.make_import_ref(initial + slot.offset, slot.len,
+                          ctx.in_adj[in.input].data != nullptr, import_ordinal);
     std::copy_n(ctx.in[in.input].data + in.offset, slot.len,
                 initial + slot.offset);
   }
