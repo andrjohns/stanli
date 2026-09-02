@@ -30,6 +30,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -203,9 +204,15 @@ struct Program {
     int32_t in_len[6] = {0, 0, 0, 0, 0, 0};
     int32_t out = 0;
     int32_t out_len = 0;
+    // Logical container-ness cannot be recovered from width: vector[1] and a
+    // scalar both occupy one register but use different KernelCtx adjoints.
+    bool vector_output = false;
     int32_t scratch = 0;
     int32_t scratch_len = 0;
     std::vector<int> idata;
+    // Optional graph-kernel metadata. The shared owner lets a CALL retain the
+    // same solver/callback specification an ordinary graph Op points at.
+    std::shared_ptr<void> udata_owner;
     // Generated reverse binding. gen_adjoint normalizes CALL instructions to
     // one payload each, then caches their checkpointed value ranges and
     // compact adjoint ranges here. Forward-only Programs leave these zero.

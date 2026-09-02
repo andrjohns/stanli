@@ -661,29 +661,32 @@ struct Lowering {
   }
 
   static BuiltinDispatch resolve_builtin(const mir::Expr& e) {
-    if (mir::is_reduce_sum(e)) return {BuiltinFamily::ReduceSum};
+    if (const auto higher_order = mir::higher_order_call(e)) {
+      switch (higher_order->family) {
+        case mir::HigherOrderFamily::ReduceSum:
+          return {BuiltinFamily::ReduceSum};
+        case mir::HigherOrderFamily::MapRect:
+          return {BuiltinFamily::MapRect};
+        case mir::HigherOrderFamily::Algebra:
+          if (e.name == "algebra_solver" || e.name == "algebra_solver_newton")
+            return {BuiltinFamily::Algebra};
+          break;
+        case mir::HigherOrderFamily::Ode:
+          return {BuiltinFamily::Ode};
+        case mir::HigherOrderFamily::Integrate1D:
+        case mir::HigherOrderFamily::Dae:
+          break;
+      }
+    }
     // Bespoke functions still own their semantic checks. This registry only
     // selects the handler, replacing the old sequence in which every family
     // was probed and declined in turn.
     static const std::unordered_map<std::string_view, BuiltinDispatch>
         kBuiltins = {
-            {"map_rect", BuiltinFamily::MapRect},
             {"multi_normal_rng", BuiltinFamily::MultiNormalRng},
             {"dirichlet_rng", BuiltinFamily::DirichletRng},
             {"categorical_rng", BuiltinFamily::CategoricalRng},
             {"append_array", BuiltinFamily::AppendArray},
-            {"algebra_solver", BuiltinFamily::Algebra},
-            {"ode_bdf", BuiltinFamily::Ode},
-            {"ode_bdf_tol", BuiltinFamily::Ode},
-            {"ode_adams", BuiltinFamily::Ode},
-            {"ode_adams_tol", BuiltinFamily::Ode},
-            {"ode_rk45", BuiltinFamily::Ode},
-            {"ode_rk45_tol", BuiltinFamily::Ode},
-            {"ode_ckrk", BuiltinFamily::Ode},
-            {"ode_ckrk_tol", BuiltinFamily::Ode},
-            {"integrate_ode_rk45", BuiltinFamily::Ode},
-            {"integrate_ode_bdf", BuiltinFamily::Ode},
-            {"integrate_ode_adams", BuiltinFamily::Ode},
             {"Transpose__", BuiltinFamily::Matrix},
             {"transpose", BuiltinFamily::Matrix},
             {"tcrossprod", BuiltinFamily::Matrix},
@@ -2813,6 +2816,196 @@ struct Lowering {
     return false;
   }
 
+  // Retained higher-order algorithms use the graph kernel ABI even when
+  // their call site sits in a runtime-control Program. The Program owns the
+  // same specification object a graph Op would own, while kernel_call owns
+  // all register binding, scratch sizing, and reverse-mode wiring.
+  bool lower_program_variadic_algebra(ProgramCompiler& c, const mir::Expr& e,
+                                      Range* out_range) {
+    if (e.name != "solve_newton" && e.name != "solve_powell") return false;
+    if (e.args.size() < 2 || e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": expected a callback and an initial guess");
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Vector)
+      c.bail(e.name + ": result must be a vector");
+
+    std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Vector}};
+    for (size_t i = 2; i < e.args.size(); ++i)
+      views.push_back(e.args[i].unsized);
+    const mir::FunDef* system =
+        mir::resolve_callback(fun_defs, e.args[0].name, views);
+    if (system == nullptr)
+      c.bail(e.name + ": unknown algebraic system " + e.args[0].name);
+
+    auto spec = std::make_shared<AlgebraSpec>();
+    spec->adopt(fun_defs);
+    spec->system_name = system->name;
+    spec->solver =
+        e.name == "solve_newton" ? AlgebraSpec::Newton : AlgebraSpec::Powell;
+    spec->variadic = true;
+    if (spec->solver == AlgebraSpec::Newton) {
+      spec->relative_tolerance = 1e-3;
+      spec->max_num_steps = 200;
+    } else {
+      spec->max_num_steps = 200;
+    }
+
+    std::vector<Range> active;
+    int active_len = 0;
+    for (size_t i = 2; i < e.args.size(); ++i) {
+      const mir::Expr& arg = e.args[i];
+      RhsArg binding;
+      if (arg.unsized.leaf == mir::UnsizedLeaf::Int) {
+        auto value = try_eval_pure(arg);
+        if (!value || !value->is_int)
+          c.bail(e.name + ": integer callback arguments must be data-only");
+        binding.is_int = true;
+        binding.ints.assign(value->i.begin(), value->i.end());
+      } else if (arg.data_only) {
+        auto value = try_eval_pure(arg);
+        if (!value || value->is_int)
+          c.bail(e.name + ": data callback argument is not compile-known");
+        const bool matrix = arg.type_ == "UMatrix";
+        const bool nested_matrix = arg.unsized.depth != 0 &&
+                                   arg.unsized.leaf == mir::UnsizedLeaf::Matrix;
+        std::vector<double> values = graph_order(*value, matrix, nested_matrix);
+        if (values.size() > (size_t)std::numeric_limits<int>::max())
+          c.bail(e.name + ": callback argument is too large");
+        binding.len = (int)values.size();
+        spec->x_r.insert(spec->x_r.end(), values.begin(), values.end());
+      } else {
+        Range value = c.expr(arg);
+        if (value.len > std::numeric_limits<int>::max() - active_len)
+          c.bail(e.name + ": active callback arguments are too large");
+        binding.is_param = true;
+        binding.len = value.len;
+        active_len += value.len;
+        active.push_back(value);
+      }
+      spec->args.push_back(std::move(binding));
+    }
+
+    const Range x = c.expr(e.args[1]);
+    if (x.kind != ViewKind::Vector)
+      c.bail(e.name + ": initial guess must be a vector");
+    Range theta{c.alloc(active_len), active_len};
+    theta.kind = ViewKind::Vector;
+    int at = 0;
+    for (const Range& value : active)
+      for (int k = 0; k < value.len; ++k)
+        c.emit(Program::MOV, theta.reg + at++, value.reg + k);
+
+    mir::FunDef adapted = *spec->system();
+    adapted.arg_names.insert(adapted.arg_names.begin(),
+                             "__stanli_algebra_unused_time");
+    adapted.arg_types.insert(adapted.arg_types.begin(), "UReal");
+    adapted.arg_views.insert(adapted.arg_views.begin(),
+                             mir::UnsizedView{0, mir::UnsizedLeaf::Real});
+    adapted.arg_data_only.insert(adapted.arg_data_only.begin(), true);
+    spec->prog = compile_rhs_args(adapted, *spec->funs(), x.len, spec->args);
+
+    Range result{0, x.len};
+    result.kind = ViewKind::Vector;
+    const uint8_t active_variant = active_len == 0 ? 0u : 0x1u;
+    *out_range = c.kernel_call(OP_ALGEBRA_SOLVER, {x, theta}, result,
+                               active_variant, 0x2u, {}, spec, e.name);
+    return true;
+  }
+
+  bool lower_program_higher_order(ProgramCompiler& c, const mir::Expr& e,
+                                  Range* out_range) {
+    const auto higher_order = mir::higher_order_call(e);
+    if (!higher_order ||
+        higher_order->family != mir::HigherOrderFamily::Algebra)
+      return false;
+    if (lower_program_variadic_algebra(c, e, out_range)) return true;
+    if ((e.name != "algebra_solver" && e.name != "algebra_solver_newton"))
+      return false;
+    if (e.args.size() != 5 && e.args.size() != 8)
+      c.bail("algebra_solver: expected 5 or 8 arguments");
+    if (e.args[0].kind != mir::Expr::Var)
+      c.bail("algebra_solver: system is not a function name");
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Vector)
+      c.bail("algebra_solver: result must be a vector");
+
+    const std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Vector},
+                                              {0, mir::UnsizedLeaf::Vector},
+                                              {1, mir::UnsizedLeaf::Real},
+                                              {1, mir::UnsizedLeaf::Int}};
+    const mir::FunDef* system =
+        mir::resolve_callback(fun_defs, e.args[0].name, views);
+    if (system == nullptr)
+      c.bail("algebra_solver: unknown algebraic system " + e.args[0].name);
+    if (system->arg_names.size() != views.size())
+      c.bail("algebra_solver: system argument metadata is incomplete");
+
+    const auto constant = [&](const mir::Expr& arg,
+                              const std::string& name) -> DataMap::Entry {
+      auto value = try_eval_pure(arg);
+      if (!value) c.bail(name + " must be data-only and known at compile time");
+      return std::move(*value);
+    };
+    DataMap::Entry xr = constant(e.args[3], "algebra_solver x_r");
+    DataMap::Entry xi = constant(e.args[4], "algebra_solver x_i");
+    if (xr.is_int || !xi.is_int || xi.i.size() != xi.r.size())
+      c.bail("algebra_solver: malformed real or integer data argument");
+
+    auto spec = std::make_shared<AlgebraSpec>();
+    spec->adopt(fun_defs);
+    spec->system_name = system->name;
+    spec->solver = e.name == "algebra_solver_newton" ? AlgebraSpec::Newton
+                                                     : AlgebraSpec::Powell;
+    if (spec->solver == AlgebraSpec::Newton) {
+      spec->relative_tolerance = 1e-3;
+      spec->max_num_steps = 200;
+    }
+    spec->x_r = std::move(xr.r);
+    spec->x_i.assign(xi.i.begin(), xi.i.end());
+    if (e.args.size() == 8) {
+      const DataMap::Entry rtol =
+          constant(e.args[5], "algebra_solver relative tolerance");
+      const DataMap::Entry ftol =
+          constant(e.args[6], "algebra_solver function tolerance");
+      const DataMap::Entry steps =
+          constant(e.args[7], "algebra_solver maximum steps");
+      if (rtol.r.size() != 1 || ftol.r.size() != 1 || !steps.is_int ||
+          steps.i.size() != 1)
+        c.bail("algebra_solver: malformed tolerance arguments");
+      spec->relative_tolerance = rtol.r[0];
+      spec->function_tolerance = ftol.r[0];
+      spec->max_num_steps = steps.i[0];
+    }
+
+    const Range x = c.expr(e.args[1]);
+    const Range y = c.expr(e.args[2]);
+    if (x.kind != ViewKind::Vector || y.kind != ViewKind::Vector)
+      c.bail("algebra_solver: initial guess and parameters must be vectors");
+    if (x.len < 0 || y.len < 0 ||
+        spec->x_r.size() > (size_t)std::numeric_limits<int>::max())
+      c.bail("algebra_solver: argument is too large");
+
+    mir::FunDef adapted = *spec->system();
+    adapted.arg_names.insert(adapted.arg_names.begin(),
+                             "__stanli_algebra_unused_time");
+    adapted.arg_types.insert(adapted.arg_types.begin(), "UReal");
+    adapted.arg_views.insert(adapted.arg_views.begin(),
+                             mir::UnsizedView{0, mir::UnsizedLeaf::Real});
+    adapted.arg_data_only.insert(adapted.arg_data_only.begin(), true);
+    std::vector<RhsArg> args(3);
+    args[0].is_param = true;
+    args[0].len = y.len;
+    args[1].len = (int)spec->x_r.size();
+    args[2].is_int = true;
+    args[2].ints = spec->x_i;
+    spec->prog = compile_rhs_args(adapted, *spec->funs(), x.len, args);
+
+    Range result{0, x.len};
+    result.kind = ViewKind::Vector;
+    const uint8_t active = e.args[2].data_only ? 0u : 0x1u;
+    *out_range = c.kernel_call(OP_ALGEBRA_SOLVER, {x, y}, result, active, 0x2u,
+                               {}, spec, e.name);
+    return true;
+  }
+
   // Compile `s` (a statement region) or `e` (a ternary) into a program.
   void lower_island(const mir::Stmt* s, const mir::Expr* e, IslandRegion* reg,
                     Range* expr_out, std::shared_ptr<IslandProg>* prog_out) {
@@ -2855,6 +3048,9 @@ struct Lowering {
         return false;
       *value = evaluated->r[0];
       return true;
+    };
+    c.lower_higher_order = [&](const mir::Expr& x, Range* result) {
+      return lower_program_higher_order(c, x, result);
     };
     if (!in_write_array) {
       c.bind_target = [&](Range* r) {
@@ -3263,7 +3459,7 @@ struct Lowering {
   bool reduce_sum_effectful(const mir::Expr& e) {
     if (e.args.empty() || e.args[0].kind != mir::Expr::Var) return true;
     bool propto = false;
-    const mir::FunDef* f = mir::resolve_reduce_sum_partial(
+    const mir::FunDef* f = mir::resolve_callback(
         fun_defs, mir::reduce_sum_partial_name(e.args[0].name, &propto),
         mir::reduce_sum_partial_views(e));
     // A functor this cannot resolve is refused at lowering. Until it gets
@@ -3309,15 +3505,7 @@ struct Lowering {
       const std::string& name = e.name;
       const bool rng =
           name.size() >= 4 && name.compare(name.size() - 4, 4, "_rng") == 0;
-      const bool ode = name.compare(0, 4, "ode_") == 0 ||
-                       name.compare(0, 14, "integrate_ode_") == 0 ||
-                       name.compare(0, 13, "integrate_dae") == 0;
-      const bool callback = name == "map_rect" || name == "reduce_sum" ||
-                            name == "integrate_1d" ||
-                            name == "algebra_solver" ||
-                            name.compare(0, 13, "solve_newton") == 0 ||
-                            name.compare(0, 13, "solve_powell") == 0;
-      if (rng || ode || callback || mir::stateful_intrinsic_kind(e))
+      if (rng || mir::higher_order_call(e) || mir::stateful_intrinsic_kind(e))
         return false;
     }
     for (const auto& a : e.args)
@@ -4626,8 +4814,7 @@ struct Lowering {
         mir::reduce_sum_partial_name(partial_expr.name, &propto);
     const std::vector<mir::UnsizedView> views =
         mir::reduce_sum_partial_views(e);
-    const mir::FunDef* f =
-        mir::resolve_reduce_sum_partial(fun_defs, base, views);
+    const mir::FunDef* f = mir::resolve_callback(fun_defs, base, views);
     if (f == nullptr)
       fail("reduce_sum: unknown partial-sum function " + base, e.raw);
     if (f->arg_views.size() != views.size())
@@ -6468,7 +6655,7 @@ struct Lowering {
     return std::nullopt;
   }
 
-  // The deprecated Powell algebra_solver interface:
+  // The deprecated algebra_solver interfaces (Powell and Newton):
   //
   //   algebra_solver(f, x, y, x_r, x_i[, rel_tol, f_tol, max_steps])
   //
@@ -6478,18 +6665,23 @@ struct Lowering {
   // activity and result scalar type from y alone.
   Val lower_algebra_fn(const mir::Expr& e, CallArguments& actuals) {
     if (actuals.size() != 5 && actuals.size() != 8)
-      fail("algebra_solver: expected 5 or 8 arguments", e.raw);
+      fail(e.name + ": expected 5 or 8 arguments", e.raw);
     if (e.unsized.leaf != mir::UnsizedLeaf::Vector || e.unsized.depth != 0)
       fail("algebra_solver: result must be a vector", e.raw);
 
     // Argument zero is a callback name, not a value acquisition. It must stay
     // source-level so the callback can be retained in AlgebraSpec.
     const mir::Expr& system_expr = actuals.at(0).expr();
-    auto fit = fun_defs.find(system_expr.name);
-    if (fit == fun_defs.end())
+    const std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Vector},
+                                              {0, mir::UnsizedLeaf::Vector},
+                                              {1, mir::UnsizedLeaf::Real},
+                                              {1, mir::UnsizedLeaf::Int}};
+    const mir::FunDef* resolved =
+        mir::resolve_callback(fun_defs, system_expr.name, views);
+    if (resolved == nullptr)
       fail("algebra_solver: unknown algebraic system " + system_expr.name,
            e.raw);
-    const mir::FunDef& f = *fit->second;
+    const mir::FunDef& f = *resolved;
     if (f.arg_views.size() != 4 || f.arg_names.size() != 4 ||
         f.arg_types.size() != 4 || f.arg_views[0].depth != 0 ||
         f.arg_views[0].leaf != mir::UnsizedLeaf::Vector ||
@@ -6506,7 +6698,13 @@ struct Lowering {
 
     auto spec = std::make_shared<AlgebraSpec>();
     spec->adopt(fun_defs);
-    spec->system_name = system_expr.name;
+    spec->system_name = f.name;
+    spec->solver = e.name == "algebra_solver_newton" ? AlgebraSpec::Newton
+                                                     : AlgebraSpec::Powell;
+    if (spec->solver == AlgebraSpec::Newton) {
+      spec->relative_tolerance = 1e-3;
+      spec->max_num_steps = 200;
+    }
     spec->x_r = actuals.at(3).require_constant_reals("algebra_solver x_r");
     spec->x_i = actuals.at(4).require_constant_ints("algebra_solver x_i");
     if (actuals.size() == 8) {

@@ -8,6 +8,7 @@
     "add",
     "add_diag",
     "algebra_solver",
+    "algebra_solver_newton",
     "append_array",
     "append_col",
     "append_row",
@@ -532,6 +533,7 @@
     "higher_order": {
       "names": [
         "algebra_solver",
+        "algebra_solver_newton",
         "integrate_ode_adams",
         "integrate_ode_bdf",
         "integrate_ode_rk45",
@@ -1136,7 +1138,7 @@
       ]
     }
   },
-  "name_count": 415,
+  "name_count": 416,
   "recognized_but_unsupported": {
     "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout.",
     "integrate_1d": "Mentioned only in effect analysis; no runtime implementation exists."

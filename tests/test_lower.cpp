@@ -5341,6 +5341,53 @@ int main() {
     expect_eq("target-read taken gradient", gradient[0], -5.0);
   }
 
+  // A higher-order callback inside parameter-dependent control flow uses the
+  // same argument binder and UDF inliner as an ordinary call. Serial
+  // reduce_sum supplies the complete slice and synthesized bounds while its
+  // shared real argument remains differentiable.
+  {
+    CompiledModel rm = compile_model(
+        slurp("tests/fixtures/reduce_sum_region.tmir.sexp"), DataMap());
+    check(rm.n_unconstrained == 1, "reduce_sum region parameter width");
+    check(count_opcode(rm, OP_ISLAND) > 0, "reduce_sum runtime island");
+    Executor rex(std::move(rm.graph));
+    rm.bind(rex);
+    double gradient[1] = {};
+
+    rex.params_data()[0] = -2.0;
+    expect_eq("reduce_sum untaken lp", rex.gradient(gradient), -2.0);
+    expect_eq("reduce_sum untaken gradient", gradient[0], 2.0);
+
+    rex.params_data()[0] = 2.0;
+    expect_eq("reduce_sum taken lp", rex.gradient(gradient), 10.0);
+    expect_eq("reduce_sum taken gradient", gradient[0], 10.0);
+  }
+
+  // Retained higher-order algorithms use the same graph-kernel CALL adapter
+  // as regular functions. Its owned callback specification remains attached
+  // to the runtime region and its input activity mask preserves the solver's
+  // contract that only theta, not the initial guess, is differentiated.
+  {
+    CompiledModel am = compile_model(
+        slurp("tests/fixtures/algebra_region.tmir.sexp"), DataMap());
+    check(am.n_unconstrained == 2, "algebra region parameter width");
+    check(count_opcode(am, OP_ISLAND) > 0, "algebra runtime island");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    double gradient[2] = {};
+
+    aex.params_data()[0] = -1.0;
+    aex.params_data()[1] = 2.0;
+    expect_eq("algebra untaken lp", aex.gradient(gradient), -2.5);
+    expect_eq("algebra untaken gate gradient", gradient[0], 1.0);
+    expect_eq("algebra untaken theta gradient", gradient[1], -2.0);
+
+    aex.params_data()[0] = 1.0;
+    expect_eq("algebra taken lp", aex.gradient(gradient), 5.5);
+    expect_eq("algebra taken gate gradient", gradient[0], -1.0);
+    expect_eq("algebra taken theta gradient", gradient[1], 2.0);
+  }
+
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations
   // themselves. An infinite bound is no bound -- the element is the
   // identity and adds no jacobian term -- and the kernels used to

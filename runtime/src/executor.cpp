@@ -87,6 +87,7 @@ static void bind_call_fwd_ctx(const Program::Call& call, double* reg,
   ctx.scratch = reg + call.scratch;
   ctx.idata = call.idata.data();
   ctx.n_idata = (int64_t)call.idata.size();
+  ctx.udata = call.udata_owner.get();
   // Not a call-site fact: the draw stream belongs to the evaluation, so it
   // is rebound with the pointer fields rather than resolved once.
   ctx.eval_state = state;
@@ -148,6 +149,7 @@ void run_call_var(const Program::Call& call, stan::math::var* reg) {
   ctx.scratch = value_base ? value_base + scratch_offset : nullptr;
   ctx.idata = call.idata.data();
   ctx.n_idata = (int64_t)call.idata.size();
+  ctx.udata = call.udata_owner.get();
   call.forward(ctx);
 
   ArenaVaris output_varis((size_t)call.out_len);
@@ -183,7 +185,8 @@ void run_call_var(const Program::Call& call, stan::math::var* reg) {
     reverse.scratch = value_base ? value_base + scratch_offset : nullptr;
     reverse.idata = site->idata.data();
     reverse.n_idata = (int64_t)site->idata.size();
-    if (site->out_len == 1) {
+    reverse.udata = site->udata_owner.get();
+    if (!site->vector_output) {
       reverse.out_adj = output_varis[0]->adj_;
     } else {
       for (int i = 0; i < site->out_len; ++i)

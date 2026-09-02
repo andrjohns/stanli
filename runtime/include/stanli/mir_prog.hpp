@@ -153,6 +153,10 @@ struct ProgramCompiler {
   // a complete data-only UDF here also handles recursion without trying to
   // turn a dynamic call stack into finite inline instructions.
   std::function<bool(const mir::Expr&, double*)> extern_real;
+  // Families whose algorithm repeatedly invokes its callback are constructed
+  // by the owning backend and emitted through Program::CALL. Nested UDFs use
+  // this same hook, so they do not need another higher-order dispatch path.
+  std::function<bool(const mir::Expr&, Range*)> lower_higher_order;
   // Resolve the target accumulated before this program began. Lowering binds
   // it lazily as a graph live-in; ODE and algebra callers leave it absent.
   std::function<bool(Range*)> bind_target;
@@ -1478,6 +1482,169 @@ struct ProgramCompiler {
     return out;
   }
 
+  // The ordinary UDF path and higher-order families must bind callback
+  // arguments identically.  In particular, data integers retain their
+  // compile-time values and data reals retain both their register and known
+  // value, so nested calls automatically inherit every improvement made to
+  // UDF argument handling here.
+  InlineArg inline_argument(const mir::Expr& e) {
+    InlineArg arg;
+    long v;
+    if (e.type_ == "UInt" && try_cint(e, &v)) {
+      arg.is_const_int = true;
+      arg.ints = {v};
+    } else if (e.unsized.depth != 0 &&
+               e.unsized.leaf == mir::UnsizedLeaf::Int &&
+               try_cints(e, &arg.ints)) {
+      arg.is_const_int = true;
+      Range view;
+      if (!static_view(e, &view) || view.kind != ViewKind::Array)
+        bail("integer function argument has no static array view");
+      arg.int_dims =
+          view.dims.empty() ? std::vector<int64_t>{view.len} : view.dims;
+    } else {
+      if (e.type_ == "UReal") arg.is_const_real = try_creal(e, &arg.const_real);
+      arg.real = expr(e);
+    }
+    return arg;
+  }
+
+  std::vector<InlineArg> inline_arguments(const std::vector<mir::Expr>& exprs,
+                                          size_t begin = 0) {
+    std::vector<InlineArg> args;
+    args.reserve(exprs.size() - begin);
+    for (size_t i = begin; i < exprs.size(); ++i)
+      args.push_back(inline_argument(exprs[i]));
+    return args;
+  }
+
+  void require_positive(const Range& value, const std::string& name) {
+    if (!is_scalar(value)) bail(name + " is not a scalar");
+    const int ok = alloc(1);
+    emit(Program::GE, ok, value.reg, konst(1.0));
+    const int reject = emit(Program::JZ, 0, ok);
+    const int done = emit(Program::JMP, 0);
+    p.code[(size_t)reject].dst = (int)p.code.size();
+    Program::Message message;
+    message.spec.chunks = {name + " must be positive"};
+    p.messages.push_back(std::move(message));
+    emit(Program::REJECT, 0, (int)p.messages.size() - 1);
+    p.code[(size_t)done].dst = (int)p.code.size();
+  }
+
+  // Serial reduce_sum is exactly one call over the complete slice, matching
+  // Stan Math without STAN_THREADS.  Only family-specific argument synthesis
+  // lives here; callback lookup and UDF binding are shared with every other
+  // backend and ordinary inline calls respectively.
+  Range reduce_sum_call(const mir::Expr& e) {
+    if (e.args.size() < 3)
+      bail(
+          "reduce_sum: expected a partial-sum function, a sliced argument, "
+          "and a grainsize");
+    if (e.args[0].kind != mir::Expr::Var)
+      bail("reduce_sum: the partial-sum argument is not a function name");
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Real)
+      bail("reduce_sum: result is not a real");
+
+    const Range slice = expr(e.args[1]);
+    if (slice.kind != ViewKind::Array || slice.dims.empty())
+      bail("reduce_sum: the sliced argument is not an array");
+    const Range grainsize = expr(e.args[2]);
+    if (e.args[2].unsized.depth != 0 ||
+        e.args[2].unsized.leaf != mir::UnsizedLeaf::Int ||
+        !is_scalar(grainsize))
+      bail("reduce_sum: grainsize is not an integer scalar");
+
+    // Evaluate shared arguments before the empty-slice return, as C++ does.
+    std::vector<InlineArg> shared = inline_arguments(e.args, 3);
+    require_positive(grainsize, "reduce_sum grainsize");
+    const int64_t n = slice.dims.front();
+    if (n == 0) return {konst(0.0), 1};
+    if (n > std::numeric_limits<int32_t>::max())
+      bail("reduce_sum: slice bound exceeds the Stan integer range");
+
+    bool propto = false;
+    const std::string base =
+        mir::reduce_sum_partial_name(e.args[0].name, &propto);
+    const std::vector<mir::UnsizedView> views =
+        mir::reduce_sum_partial_views(e);
+    const mir::FunDef* f = mir::resolve_callback(funs, base, views);
+    if (f == nullptr) bail("reduce_sum: unknown partial-sum function " + base);
+    if (f->arg_names.size() != views.size())
+      bail("reduce_sum: partial-sum arity does not match the call");
+
+    std::vector<InlineArg> args;
+    args.reserve(views.size());
+    InlineArg sliced;
+    sliced.real = slice;
+    args.push_back(std::move(sliced));
+    InlineArg start;
+    start.is_const_int = true;
+    start.ints = {1};
+    args.push_back(std::move(start));
+    InlineArg end;
+    end.is_const_int = true;
+    end.ints = {(long)n};
+    args.push_back(std::move(end));
+    for (InlineArg& arg : shared) args.push_back(std::move(arg));
+    (void)propto;
+    return inline_call(*f, args);
+  }
+
+  // One adapter from register ranges to the graph kernel ABI. Regular
+  // builtins, RNGs, and retained higher-order algorithms all use the same
+  // binding, scratch sizing, ownership, and reverse-mode contract.
+  Range kernel_call(uint16_t opcode, const std::vector<Range>& args, Range out,
+                    uint8_t variant = 0, uint8_t input_adjoint_mask = 0x3f,
+                    std::vector<int> idata = {},
+                    std::shared_ptr<void> udata = {},
+                    const std::string& name = "function") {
+    if (args.size() > 6) bail(name + ": too many kernel arguments");
+    out.reg = alloc(out.len);
+    Program::Call call;
+    call.opcode = opcode;
+    call.variant = variant;
+    call.input_adjoint_mask = input_adjoint_mask;
+    call.n_in = (int8_t)args.size();
+    for (size_t k = 0; k < args.size(); ++k) {
+      call.in[k] = args[k].reg;
+      call.in_len[k] = args[k].len;
+    }
+    call.out = out.reg;
+    call.out_len = out.len;
+    call.vector_output = !is_scalar(out);
+    call.idata = std::move(idata);
+    call.udata_owner = std::move(udata);
+
+    const Kernel* kernel = find_kernel(opcode);
+    if (kernel == nullptr) bail(name + ": graph kernel is unavailable");
+    if (kernel->scratch_size != nullptr) {
+      Op op;
+      op.opcode = opcode;
+      op.variant = variant;
+      op.n_in = call.n_in;
+      op.out = call.n_in;
+      op.idata = call.idata.data();
+      op.n_idata = (int64_t)call.idata.size();
+      op.udata = call.udata_owner.get();
+      std::vector<Slot> slots(args.size() + 1);
+      for (size_t k = 0; k < args.size(); ++k) {
+        op.in[k] = (int)k;
+        slots[k].len = args[k].len;
+      }
+      slots.back().len = out.len;
+      const int64_t scratch = kernel->scratch_size(op, slots.data());
+      if (scratch < 0 || scratch > kMaxRegs)
+        bail(name + ": kernel needs excessive scratch storage");
+      call.scratch_len = (int32_t)scratch;
+      call.scratch = scratch ? alloc((int)scratch) : 0;
+    }
+    if (!bind_call(call)) bail(name + ": graph kernel is unavailable");
+    p.calls.push_back(std::move(call));
+    p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});
+    return out;
+  }
+
   // Every RNG spelling the region can carry, which is exactly the set the
   // graph's OP_RNG kernel speaks.
   static bool rng_call_name(const std::string& name) {
@@ -1538,26 +1705,10 @@ struct ProgramCompiler {
       idata.push_back(out_len);
     }
 
-    // Fresh registers, so the result cannot alias an argument -- which the
-    // kernel would otherwise have to be written to tolerate.
-    const int r = alloc(out_len);
-    Program::Call call;
-    call.opcode = OP_RNG;
-    call.variant = variant;
-    call.n_in = (int8_t)args.size();
-    for (size_t k = 0; k < args.size(); ++k) {
-      call.in[k] = args[k].reg;
-      call.in_len[k] = args[k].len;
-    }
-    call.out = r;
-    call.out_len = out_len;
-    call.idata = std::move(idata);
-    if (!bind_call(call)) bail("the RNG kernel is unavailable");
-    p.calls.push_back(std::move(call));
-    p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});
-    Range out{r, out_len};
+    Range out{0, out_len};
     out.kind = out_kind;
-    return out;
+    return kernel_call(OP_RNG, args, out, variant, 0, std::move(idata), {},
+                       e.name);
   }
 
   // Program-native instructions cover the hot elementary subset. Everything
@@ -1614,24 +1765,14 @@ struct ProgramCompiler {
       }
     }
 
-    const int result = alloc(out.len);
-    out.reg = result;
     out = typed(out, e.type_);
-
-    Program::Call call;
-    call.opcode = spec.opcode;
-    call.n_in = (int8_t)args.size();
+    uint8_t input_adjoint_mask = 0x3f;
     if (spec.kind == RegularKind::BinaryIntFirst)
-      call.input_adjoint_mask = 0x2;
+      input_adjoint_mask = 0x2;
     else if (spec.kind == RegularKind::BinaryIntSecond)
-      call.input_adjoint_mask = 0x1;
-    for (size_t k = 0; k < args.size(); ++k) {
-      call.in[k] = args[k].reg;
-      call.in_len[k] = args[k].len;
-    }
-    call.out = result;
-    call.out_len = out.len;
+      input_adjoint_mask = 0x1;
 
+    std::vector<int> idata;
     if (spec.kind == RegularKind::BinaryIntFirst ||
         spec.kind == RegularKind::BinaryIntSecond) {
       const bool int_first = spec.kind == RegularKind::BinaryIntFirst;
@@ -1639,39 +1780,15 @@ struct ProgramCompiler {
       const Range& iv = args[int_first ? 0 : 1];
       if (!is_scalar(iv)) {
         if (re.kind == ViewKind::Matrix) {
-          call.idata = {(int)re.rows, (int)re.cols};
+          idata = {(int)re.rows, (int)re.cols};
         } else if (re.kind == ViewKind::Array && re.leaf == ViewKind::Matrix &&
                    re.dims.size() >= 2) {
-          call.idata = {(int)re.dims[re.dims.size() - 2], (int)re.dims.back()};
+          idata = {(int)re.dims[re.dims.size() - 2], (int)re.dims.back()};
         }
       }
     }
-
-    const Kernel* kernel = find_kernel(call.opcode);
-    if (kernel == nullptr) bail(e.name + ": graph kernel is unavailable");
-    if (kernel->scratch_size != nullptr) {
-      Op op;
-      op.opcode = call.opcode;
-      op.n_in = call.n_in;
-      op.out = call.n_in;
-      op.idata = call.idata.data();
-      op.n_idata = (int64_t)call.idata.size();
-      std::vector<Slot> slots(args.size() + 1);
-      for (size_t k = 0; k < args.size(); ++k) {
-        op.in[k] = (int)k;
-        slots[k].len = args[k].len;
-      }
-      slots.back().len = out.len;
-      const int64_t scratch = kernel->scratch_size(op, slots.data());
-      if (scratch < 0 || scratch > kMaxRegs)
-        bail(e.name + ": kernel needs excessive scratch storage");
-      call.scratch_len = (int32_t)scratch;
-      call.scratch = scratch ? alloc((int)scratch) : 0;
-    }
-    if (!bind_call(call)) bail(e.name + ": graph kernel is unavailable");
-    p.calls.push_back(std::move(call));
-    p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});
-    return out;
+    return kernel_call(spec.opcode, args, out, 0, input_adjoint_mask,
+                       std::move(idata), {}, e.name);
   }
 
   Range matrix_gram(const Range& m, bool transpose_first) {
@@ -1860,6 +1977,17 @@ struct ProgramCompiler {
       }
     }
     if (const auto value = mir::nullary_constant(e)) return {konst(*value), 1};
+    if (const auto higher_order = mir::higher_order_call(e)) {
+      switch (higher_order->family) {
+        case mir::HigherOrderFamily::ReduceSum:
+          return reduce_sum_call(e);
+        default:
+          Range result;
+          if (lower_higher_order && lower_higher_order(e, &result))
+            return result;
+          break;
+      }
+    }
     // A shape query is a constant whatever surrounds it. Ahead of every
     // other case because `FnLength` is an internal function and the rest
     // are library ones, and they are all answered the same way: from the
@@ -2052,35 +2180,7 @@ struct ProgramCompiler {
     if (e.fn_lib == mir::Expr::Lib::UserDefined) {
       auto it = funs.find(e.name);
       if (it == funs.end()) bail("unknown function " + e.name);
-      std::vector<InlineArg> args;
-      args.reserve(e.args.size());
-      for (const auto& a : e.args) {
-        InlineArg arg;
-        long v;
-        if (a.type_ == "UInt" && try_cint(a, &v)) {
-          arg.is_const_int = true;
-          arg.ints = {v};
-        } else if (a.unsized.depth != 0 &&
-                   a.unsized.leaf == mir::UnsizedLeaf::Int &&
-                   try_cints(a, &arg.ints)) {
-          // Function arguments are rebound in a fresh compiler scope. Carry
-          // a data-only selector as values, not merely as its register Range,
-          // so the callee (and a nested inline call) can still use it in
-          // IndexMulti or a compile-time scalar indexed read.
-          arg.is_const_int = true;
-          Range view;
-          if (!static_view(a, &view) || view.kind != ViewKind::Array)
-            bail("integer function argument has no static array view");
-          arg.int_dims =
-              view.dims.empty() ? std::vector<int64_t>{view.len} : view.dims;
-        } else {
-          if (a.type_ == "UReal")
-            arg.is_const_real = try_creal(a, &arg.const_real);
-          arg.real = expr(a);
-        }
-        args.push_back(std::move(arg));
-      }
-      return inline_call(*it->second, args);
+      return inline_call(*it->second, inline_arguments(e.args));
     }
     if (e.fn_lib == mir::Expr::Lib::Internal) {
       if (e.name == "FnMakeArray" || e.name == "FnMakeRowVec") {

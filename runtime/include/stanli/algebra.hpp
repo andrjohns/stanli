@@ -16,6 +16,8 @@
 namespace stanli {
 
 struct AlgebraSpec {
+  enum Solver { Powell, Newton };
+
   std::map<std::string, mir::FunDef> owned;
   std::map<std::string, const mir::FunDef*> funs_map;
   std::string system_name;
@@ -34,9 +36,15 @@ struct AlgebraSpec {
 
   std::vector<double> x_r;
   std::vector<int> x_i;
+  // Variadic solve_* calls pack all active real callback arguments into the
+  // kernel's second input and all data reals into x_r. `args` reconstructs
+  // the original positional signature for the compiled/interpreted callback.
+  bool variadic = false;
+  std::vector<RhsArg> args;
   double relative_tolerance = 1e-10;
   double function_tolerance = 1e-6;
   int64_t max_num_steps = 1000;
+  Solver solver = Powell;
 
   // Algebra systems have (unknown, parameters, real data, integer data),
   // while RhsProgram's seed convention has an extra leading scalar time.

@@ -13,6 +13,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace stanli {
@@ -535,14 +536,46 @@ struct Program {
   std::vector<std::string> output_vars;
 };
 
-// reduce_sum(f, sliced, grainsize, shared...) reaches its partial-sum
-// function through a bare Var rather than a call, so both engines need the
-// same three answers about that reference: whether this is a reduce_sum at
-// all, which definition the name means, and what propto it asks for.
+// Higher-order Stan functions carry their callback as a bare Var rather than
+// a user-function call.  Keep family recognition here so graph lowering, the
+// register compiler, the interpreter, and effect analysis cannot acquire
+// different lists as support grows.
+
+enum class HigherOrderFamily : uint8_t {
+  ReduceSum,
+  MapRect,
+  Algebra,
+  Integrate1D,
+  Ode,
+  Dae,
+};
+
+struct HigherOrderCall {
+  HigherOrderFamily family;
+  size_t callback_arg = 0;
+};
+
+inline std::optional<HigherOrderCall> higher_order_call(const Expr& e) {
+  if (e.kind != Expr::FunApp || e.fn_lib != Expr::Lib::StanLib) return {};
+  const std::string_view name = e.name;
+  if (name == "reduce_sum" || name == "reduce_sum_static")
+    return HigherOrderCall{HigherOrderFamily::ReduceSum};
+  if (name == "map_rect") return HigherOrderCall{HigherOrderFamily::MapRect};
+  if (name == "algebra_solver" || name == "algebra_solver_newton" ||
+      name.rfind("solve_newton", 0) == 0 || name.rfind("solve_powell", 0) == 0)
+    return HigherOrderCall{HigherOrderFamily::Algebra};
+  if (name == "integrate_1d")
+    return HigherOrderCall{HigherOrderFamily::Integrate1D};
+  if (name.rfind("ode_", 0) == 0 || name.rfind("integrate_ode_", 0) == 0)
+    return HigherOrderCall{HigherOrderFamily::Ode};
+  if (name == "dae" || name.rfind("integrate_dae", 0) == 0)
+    return HigherOrderCall{HigherOrderFamily::Dae};
+  return {};
+}
 
 inline bool is_reduce_sum(const Expr& e) {
-  return e.kind == Expr::FunApp && e.fn_lib == Expr::Lib::StanLib &&
-         (e.name == "reduce_sum" || e.name == "reduce_sum_static");
+  const auto call = higher_order_call(e);
+  return call && call->family == HigherOrderFamily::ReduceSum;
 }
 
 // The `_lupdf` / `_lupmf` spelling at the functor reference is stanc3's
@@ -581,12 +614,13 @@ inline std::vector<UnsizedView> reduce_sum_partial_views(const Expr& e) {
   return views;
 }
 
-// The reader mangles an overloaded definition's name and rewrites its call
-// sites, but a functor reference is a Var and is never rewritten. Take the
-// unmangled name when it is the only one, and otherwise select the overload
-// whose formals match the call reduce_sum will make. Returns null when the
-// name resolves to nothing or, impossibly, to more than one.
-inline const FunDef* resolve_reduce_sum_partial(
+// The reader mangles an overloaded definition's name and rewrites ordinary
+// call sites, but a higher-order callback reference is a Var and is never
+// rewritten. Take the unmangled name when it is the only one, and otherwise
+// select the overload whose formals match the call the family will make.
+// Returns null when the name resolves to nothing or, impossibly, to more than
+// one.  Family-specific helpers only have to construct `views`.
+inline const FunDef* resolve_callback(
     const std::map<std::string, const FunDef*>& funs, const std::string& base,
     const std::vector<UnsizedView>& views) {
   const auto exact = funs.find(base);

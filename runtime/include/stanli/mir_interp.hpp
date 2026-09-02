@@ -973,7 +973,7 @@ class MirInterp {
         mir::reduce_sum_partial_name(e.args[0].name, &propto);
     const std::vector<mir::UnsizedView> views =
         mir::reduce_sum_partial_views(e);
-    const mir::FunDef* f = mir::resolve_reduce_sum_partial(funs_, base, views);
+    const mir::FunDef* f = mir::resolve_callback(funs_, base, views);
     if (f == nullptr)
       fail("reduce_sum: unknown partial-sum function " + base, e.raw);
     if (f->arg_names.size() != views.size())

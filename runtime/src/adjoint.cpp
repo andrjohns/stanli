@@ -440,16 +440,21 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
       for (int k = 0; k < call.n_in; ++k) {
         ctx.in[k] = Desc{const_cast<double*>(val) + call.bwd_value_in[k],
                          call.in_len[k]};
-        ctx.in_adj[k] = Desc{adj + call.bwd_adj_in[k], call.in_len[k]};
+        ctx.in_adj[k] = (call.input_adjoint_mask & (uint8_t)(1u << k))
+                            ? Desc{adj + call.bwd_adj_in[k], call.in_len[k]}
+                            : Desc{nullptr, call.in_len[k]};
       }
       ctx.out =
           Desc{const_cast<double*>(val) + call.bwd_value_out, call.out_len};
-      ctx.out_adj_vec = Desc{adj + call.bwd_adj_out, call.out_len};
-      ctx.out_adj = call.out_len == 1 ? adj[call.bwd_adj_out] : 0.0;
+      ctx.out_adj_vec = call.vector_output
+                            ? Desc{adj + call.bwd_adj_out, call.out_len}
+                            : Desc{nullptr, 0};
+      ctx.out_adj = call.vector_output ? 0.0 : adj[call.bwd_adj_out];
       ctx.variant = call.variant;
       ctx.scratch = const_cast<double*>(val) + call.scratch;
       ctx.idata = call.idata.data();
       ctx.n_idata = (int64_t)call.idata.size();
+      ctx.udata = call.udata_owner.get();
       call.backward(ctx);
       for (int j = 0; j < call.out_len; ++j) adj[call.bwd_adj_out + j] = 0.0;
       continue;
