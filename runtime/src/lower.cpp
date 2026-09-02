@@ -16,6 +16,7 @@
 #include <stanli/island.hpp>
 #include <stanli/structured_loop.hpp>
 #include <stanli/partition.hpp>
+#include <stanli/quadrature.hpp>
 #include <stanli/reroll.hpp>
 #include <stanli/regular_builtin.hpp>
 #include <stanli/structured_check.hpp>
@@ -635,6 +636,7 @@ struct Lowering {
     AppendArray,
     Matrix,
     Algebra,
+    Quadrature,
     Ode,
     ShapeQuery,
   };
@@ -674,6 +676,7 @@ struct Lowering {
         case mir::HigherOrderFamily::Ode:
           return {BuiltinFamily::Ode};
         case mir::HigherOrderFamily::Integrate1D:
+          return {BuiltinFamily::Quadrature};
         case mir::HigherOrderFamily::Dae:
           break;
       }
@@ -2911,12 +2914,134 @@ struct Lowering {
     return true;
   }
 
+  bool lower_program_quadrature(ProgramCompiler& c, const mir::Expr& e,
+                                Range* out_range) {
+    const auto call = mir::quadrature_call(e.name);
+    if (!call) return false;
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Real)
+      c.bail(e.name + ": result must be a real");
+
+    size_t callback_end = e.args.size();
+    if (call->legacy) {
+      if (e.args.size() != 6 && e.args.size() != 7)
+        c.bail(e.name + ": expected 6 or 7 arguments");
+      callback_end = 6;
+    } else if (call->with_tolerance) {
+      if (e.args.size() < 6)
+        c.bail(e.name +
+               ": expected controls followed by callback arguments");
+    } else if (e.args.size() < 3) {
+      c.bail(e.name + ": expected callback and integration bounds");
+    }
+    if (e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": integrand is not a function name");
+
+    std::vector<mir::UnsizedView> views{
+        {0, mir::UnsizedLeaf::Real}, {0, mir::UnsizedLeaf::Real}};
+    for (size_t i = call->callback_args_begin; i < callback_end; ++i)
+      views.push_back(e.args[i].unsized);
+    const mir::FunDef* integrand =
+        mir::resolve_callback(fun_defs, e.args[0].name, views);
+    if (!integrand)
+      c.bail(e.name + ": unknown integrand " + e.args[0].name);
+
+    const auto constant = [&](size_t i, const std::string& role) {
+      auto value = try_eval_pure(e.args[i]);
+      if (!value) c.bail(role + " must be data-only and known at compile time");
+      return *value;
+    };
+    const auto scalar_real = [&](size_t i, const std::string& role) {
+      const DataMap::Entry value = constant(i, role);
+      if (value.is_int || value.r.size() != 1)
+        c.bail(role + " must be one real");
+      return value.r[0];
+    };
+    const auto scalar_int = [&](size_t i, const std::string& role) {
+      const DataMap::Entry value = constant(i, role);
+      if (!value.is_int || value.i.size() != 1)
+        c.bail(role + " must be one integer");
+      return value.i[0];
+    };
+
+    auto spec = std::make_shared<QuadratureSpec>();
+    spec->adopt(fun_defs);
+    spec->callback_name = integrand->name;
+    spec->method = call->method;
+    if (call->legacy && e.args.size() == 7) {
+      spec->relative_tolerance = scalar_real(6, "quadrature tolerance");
+    } else if (call->with_tolerance) {
+      spec->relative_tolerance =
+          scalar_real(3, "quadrature relative tolerance");
+      spec->absolute_tolerance =
+          scalar_real(4, "quadrature absolute tolerance");
+      spec->max_steps = static_cast<int>(
+          scalar_int(5, "quadrature maximum steps"));
+    }
+
+    std::vector<Range> active = pack_callback_arguments<Range>(
+        *spec, e.args, call->callback_args_begin, callback_end,
+        [&](size_t i) {
+          Range value = c.expr(e.args[i]);
+          return std::make_pair(value, value.len);
+        },
+        [&](size_t i) {
+          DataMap::Entry value = constant(i, "quadrature data argument");
+          if (value.is_int)
+            c.bail("quadrature real data argument is integer-valued");
+          const bool matrix = e.args[i].type_ == "UMatrix";
+          const bool nested_matrix = e.args[i].unsized.depth != 0 &&
+                                     e.args[i].unsized.leaf ==
+                                         mir::UnsizedLeaf::Matrix;
+          return graph_order(value, matrix, nested_matrix);
+        },
+        [&](size_t i) {
+          DataMap::Entry value = constant(i, "quadrature integer argument");
+          if (!value.is_int)
+            c.bail("quadrature integer argument is real-valued");
+          return value.i;
+        },
+        [&](const std::string& message) { c.bail(e.name + ": " + message); });
+
+    Range theta{c.konst(0.0), 1};
+    theta.kind = ViewKind::Vector;
+    spec->parameter_count = 0;
+    for (const Range& value : active) {
+      if (value.len > std::numeric_limits<int>::max() - spec->parameter_count)
+        c.bail(e.name + ": active callback arguments are too large");
+      spec->parameter_count += value.len;
+    }
+    if (spec->parameter_count != 0) {
+      theta = Range{c.alloc(spec->parameter_count), spec->parameter_count};
+      theta.kind = ViewKind::Vector;
+      int at = 0;
+      for (const Range& value : active)
+        for (int i = 0; i < value.len; ++i)
+          c.emit(Program::MOV, theta.reg + at++, value.reg + i);
+    }
+    spec->prog =
+        compile_rhs_args(*spec->callback(), *spec->funs(), 1, spec->args);
+
+    const Range a = c.expr(e.args[1]);
+    const Range b = c.expr(e.args[2]);
+    if (!c.is_scalar(a) || !c.is_scalar(b))
+      c.bail(e.name + ": integration bounds must be scalar");
+    const uint8_t variant = static_cast<uint8_t>(
+        (!e.args[1].data_only ? 0x1u : 0u) |
+        (!e.args[2].data_only ? 0x2u : 0u) |
+        (spec->parameter_count != 0 ? 0x4u : 0u));
+    Range result{0, 1};
+    *out_range = c.kernel_call(OP_QUADRATURE, {a, b, theta}, result, variant,
+                               variant, {}, spec, e.name);
+    return true;
+  }
+
   bool lower_program_higher_order(ProgramCompiler& c, const mir::Expr& e,
                                   Range* out_range) {
     const auto higher_order = mir::higher_order_call(e);
-    if (!higher_order ||
-        higher_order->family != mir::HigherOrderFamily::Algebra)
-      return false;
+    if (!higher_order) return false;
+    if (higher_order->family == mir::HigherOrderFamily::Integrate1D)
+      return lower_program_quadrature(c, e, out_range);
+    if (higher_order->family != mir::HigherOrderFamily::Algebra) return false;
     if (lower_program_variadic_algebra(c, e, out_range)) return true;
     if ((e.name != "algebra_solver" && e.name != "algebra_solver_newton"))
       return false;
@@ -5104,6 +5229,8 @@ struct Lowering {
         break;
       case BuiltinFamily::Algebra:
         return lower_algebra_fn(e, actuals);
+      case BuiltinFamily::Quadrature:
+        return lower_quadrature_fn(e, actuals);
       case BuiltinFamily::Ode:
         if (auto v = lower_ode_fn(e, actuals)) return *v;
         break;
@@ -6663,6 +6790,108 @@ struct Lowering {
   // Stan Math intentionally returns value_type_t<y>, so only y participates
   // in autodiff.  Keep x as a graph input for values while stamping the op's
   // activity and result scalar type from y alone.
+  Val lower_quadrature_fn(const mir::Expr& e, CallArguments& actuals) {
+    const auto call = mir::quadrature_call(e.name);
+    if (!call) fail(e.name + ": missing quadrature metadata", e.raw);
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Real)
+      fail(e.name + ": result must be a real", e.raw);
+
+    size_t callback_end = actuals.size();
+    if (call->legacy) {
+      if (actuals.size() != 6 && actuals.size() != 7)
+        fail(e.name + ": expected 6 or 7 arguments", e.raw);
+      callback_end = 6;
+    } else if (call->with_tolerance) {
+      if (actuals.size() < 6)
+        fail(e.name + ": expected controls followed by callback arguments",
+             e.raw);
+    } else if (actuals.size() < 3) {
+      fail(e.name + ": expected callback and integration bounds", e.raw);
+    }
+    if (e.args[0].kind != mir::Expr::Var)
+      fail(e.name + ": integrand is not a function name", e.raw);
+
+    std::vector<mir::UnsizedView> views{
+        {0, mir::UnsizedLeaf::Real}, {0, mir::UnsizedLeaf::Real}};
+    for (size_t i = call->callback_args_begin; i < callback_end; ++i)
+      views.push_back(e.args[i].unsized);
+    const mir::FunDef* integrand =
+        mir::resolve_callback(fun_defs, e.args[0].name, views);
+    if (!integrand)
+      fail(e.name + ": unknown integrand " + e.args[0].name, e.raw);
+
+    auto spec = std::make_shared<QuadratureSpec>();
+    spec->adopt(fun_defs);
+    spec->callback_name = integrand->name;
+    spec->method = call->method;
+    if (call->legacy && actuals.size() == 7) {
+      spec->relative_tolerance =
+          actuals.at(6).require_constant_reals("quadrature tolerance").at(0);
+    } else if (call->with_tolerance) {
+      spec->relative_tolerance =
+          actuals.at(3).require_constant_reals("quadrature relative tolerance")
+              .at(0);
+      spec->absolute_tolerance =
+          actuals.at(4).require_constant_reals("quadrature absolute tolerance")
+              .at(0);
+      spec->max_steps = static_cast<int>(
+          actuals.at(5).require_constant_int("quadrature maximum steps"));
+    }
+
+    std::vector<Val> active = pack_callback_arguments<Val>(
+        *spec, e.args, call->callback_args_begin, callback_end,
+        [&](size_t i) {
+          Val value = actuals.at(i).value();
+          if (g.slots[value.slot].len > std::numeric_limits<int>::max())
+            fail(e.name + ": callback argument is too large", e.raw);
+          return std::make_pair(value, static_cast<int>(g.slots[value.slot].len));
+        },
+        [&](size_t i) {
+          const auto& values = actuals.at(i).require_constant_reals(
+              "quadrature data argument");
+          return std::vector<double>(values.begin(), values.end());
+        },
+        [&](size_t i) {
+          const auto& values = actuals.at(i).require_constant_ints(
+              "quadrature integer argument");
+          return std::vector<int>(values.begin(), values.end());
+        },
+        [&](const std::string& message) { fail(e.name + ": " + message, e.raw); });
+
+    Val theta = constant(0.0);  // unread placeholder when there are no params
+    spec->parameter_count = 0;
+    if (!active.empty()) {
+      theta = active.front();
+      spec->parameter_count = static_cast<int>(g.slots[theta.slot].len);
+      for (size_t i = 1; i < active.size(); ++i) {
+        const int64_t add = g.slots[active[i].slot].len;
+        if (add > std::numeric_limits<int>::max() - spec->parameter_count)
+          fail(e.name + ": active callback arguments are too large", e.raw);
+        theta = emit_value(OP_CONCAT2, {theta, active[i]},
+                           spec->parameter_count + add);
+        spec->parameter_count += static_cast<int>(add);
+      }
+    }
+    spec->prog =
+        compile_rhs_args(*spec->callback(), *spec->funs(), 1, spec->args);
+
+    Val a = actuals.at(1).value();
+    Val b = actuals.at(2).value();
+    if (!is_scalar(a) || !is_scalar(b))
+      fail(e.name + ": integration bounds must be scalar", e.raw);
+    const uint8_t variant = static_cast<uint8_t>(
+        (a.autodiff ? 0x1u : 0u) | (b.autodiff ? 0x2u : 0u) |
+        (spec->parameter_count != 0 ? 0x4u : 0u));
+    SlotInfo si = view_of(e.type_);
+    si.param_free = variant == 0;
+    Val result = emit_raw(OP_QUADRATURE, {a.slot, b.slot, theta.slot}, 1, si,
+                          {}, -1, variant != 0);
+    g.ops.back().variant = variant;
+    g.ops.back().udata = spec.get();
+    g.udata_pool.push_back(std::move(spec));
+    return result;
+  }
+
   Val lower_algebra_fn(const mir::Expr& e, CallArguments& actuals) {
     if (actuals.size() != 5 && actuals.size() != 8)
       fail(e.name + ": expected 5 or 8 arguments", e.raw);

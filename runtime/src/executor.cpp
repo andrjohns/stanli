@@ -225,6 +225,7 @@ void register_density_kernels();
 void register_legacy_kernels();
 void register_matrix_kernels();
 void register_algebra_kernels();
+void register_quadrature_kernels();
 void register_ode_kernels();
 void register_constrain_kernels();
 void register_eltwise_kernels();
@@ -243,6 +244,7 @@ static void ensure_registered() {
     register_legacy_kernels();
     register_matrix_kernels();
     register_algebra_kernels();
+    register_quadrature_kernels();
     register_ode_kernels();
     register_constrain_kernels();
     register_message_kernels();

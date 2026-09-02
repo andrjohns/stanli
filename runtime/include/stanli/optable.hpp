@@ -80,6 +80,7 @@ namespace stanli {
   X(OP_NORMAL_ID_GLM_LPDF)          \
   X(OP_TRANSPOSE)                   \
   X(OP_ALGEBRA_SOLVER)              \
+  X(OP_QUADRATURE)                  \
   X(OP_ODE)                         \
   X(OP_RNG)                         \
   X(OP_ISLAND)                      \

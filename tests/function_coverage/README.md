@@ -9,8 +9,9 @@ multivariate densities/GLMs, RNGs, and higher-order calls.
 This is **function-name coverage, not complete overload or input coverage**.
 `manifest.json` records each case and the supported boundaries. In particular,
 GP coordinates are data, GLMs use supported design/outcome shapes, and
-`map_rect` covers only the implemented empty-job case. `integrate_1d` and
-`gaussian_dlm_obs_lpdf` are explicitly unsupported, not silently skipped.
+`map_rect` covers only the implemented empty-job case. The quadrature family
+has focused graph/runtime-control coverage in `quadrature_region.stan`;
+`gaussian_dlm_obs_lpdf` is explicitly unsupported, not silently skipped.
 Parameter declaration transforms remain in their dedicated tests; a transform
 being supported in a declaration does not imply its named function is callable.
 

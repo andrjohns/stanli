@@ -555,6 +555,34 @@ struct HigherOrderCall {
   size_t callback_arg = 0;
 };
 
+enum class QuadratureMethod : uint8_t {
+  Integrate1D,
+  DoubleExponential,
+  GaussKronrod,
+};
+
+struct QuadratureCall {
+  QuadratureMethod method;
+  bool legacy = false;
+  bool with_tolerance = false;
+  size_t callback_args_begin = 3;
+};
+
+inline std::optional<QuadratureCall> quadrature_call(std::string_view name) {
+  if (name == "integrate_1d")
+    return QuadratureCall{QuadratureMethod::Integrate1D, true, false, 3};
+  if (name == "integrate_1d_double_exponential")
+    return QuadratureCall{QuadratureMethod::DoubleExponential, false, false,
+                          3};
+  if (name == "integrate_1d_double_exponential_tol")
+    return QuadratureCall{QuadratureMethod::DoubleExponential, false, true, 6};
+  if (name == "integrate_1d_gauss_kronrod")
+    return QuadratureCall{QuadratureMethod::GaussKronrod, false, false, 3};
+  if (name == "integrate_1d_gauss_kronrod_tol")
+    return QuadratureCall{QuadratureMethod::GaussKronrod, false, true, 6};
+  return {};
+}
+
 inline std::optional<HigherOrderCall> higher_order_call(const Expr& e) {
   if (e.kind != Expr::FunApp || e.fn_lib != Expr::Lib::StanLib) return {};
   const std::string_view name = e.name;
@@ -564,7 +592,7 @@ inline std::optional<HigherOrderCall> higher_order_call(const Expr& e) {
   if (name == "algebra_solver" || name == "algebra_solver_newton" ||
       name.rfind("solve_newton", 0) == 0 || name.rfind("solve_powell", 0) == 0)
     return HigherOrderCall{HigherOrderFamily::Algebra};
-  if (name == "integrate_1d")
+  if (quadrature_call(name))
     return HigherOrderCall{HigherOrderFamily::Integrate1D};
   if (name.rfind("ode_", 0) == 0 || name.rfind("integrate_ode_", 0) == 0)
     return HigherOrderCall{HigherOrderFamily::Ode};

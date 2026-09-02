@@ -417,6 +417,13 @@
     "zeros_row_vector",
     "zeros_vector"
   ],
+  "focused_coverage": {
+    "integrate_1d": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_1d_double_exponential": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_1d_double_exponential_tol": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_1d_gauss_kronrod": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_1d_gauss_kronrod_tol": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering"
+  },
   "models": {
     "containers": {
       "names": [
@@ -1140,8 +1147,7 @@
   },
   "name_count": 416,
   "recognized_but_unsupported": {
-    "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout.",
-    "integrate_1d": "Mentioned only in effect analysis; no runtime implementation exists."
+    "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout."
   },
   "schema": 1,
   "scope": {

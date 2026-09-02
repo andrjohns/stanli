@@ -5,42 +5,25 @@
 #ifndef STANLI_ALGEBRA_HPP
 #define STANLI_ALGEBRA_HPP
 
-#include <stanli/mir.hpp>
-#include <stanli/ode_prog.hpp>
+#include <stanli/callback.hpp>
 
 #include <cstdint>
-#include <map>
-#include <string>
 #include <vector>
 
 namespace stanli {
 
-struct AlgebraSpec {
+struct AlgebraSpec : RetainedCallback {
   enum Solver { Powell, Newton };
 
-  std::map<std::string, mir::FunDef> owned;
-  std::map<std::string, const mir::FunDef*> funs_map;
+  // Compatibility name retained for tooling/tests; storage and lookup live
+  // in the shared RetainedCallback base.
   std::string system_name;
+  const mir::FunDef* system() const { return callback(system_name); }
 
-  void adopt(const std::map<std::string, const mir::FunDef*>& src) {
-    for (const auto& [name, def] : src) owned[name] = *def;
-    for (const auto& [name, def] : owned) funs_map[name] = &def;
-  }
-  const mir::FunDef* system() const {
-    auto it = owned.find(system_name);
-    return it == owned.end() ? nullptr : &it->second;
-  }
-  const std::map<std::string, const mir::FunDef*>* funs() const {
-    return &funs_map;
-  }
-
-  std::vector<double> x_r;
-  std::vector<int> x_i;
   // Variadic solve_* calls pack all active real callback arguments into the
   // kernel's second input and all data reals into x_r. `args` reconstructs
   // the original positional signature for the compiled/interpreted callback.
   bool variadic = false;
-  std::vector<RhsArg> args;
   double relative_tolerance = 1e-10;
   double function_tolerance = 1e-6;
   int64_t max_num_steps = 1000;
@@ -50,7 +33,6 @@ struct AlgebraSpec {
   // while RhsProgram's seed convention has an extra leading scalar time.
   // Lowering compiles a synthetic, unused time formal so the mature ODE
   // register machine can be shared without changing either Stan signature.
-  RhsProgram prog;
 };
 
 }  // namespace stanli

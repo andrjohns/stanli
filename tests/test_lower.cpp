@@ -5388,6 +5388,48 @@ int main() {
     expect_eq("algebra taken theta gradient", gradient[1], 2.0);
   }
 
+  // Every one-dimensional integration frontend shares one retained callback
+  // ABI and one quadrature kernel. The legacy call exercises ordinary graph
+  // lowering; the four modern method/tolerance forms exercise Program CALL
+  // lowering inside runtime control. Bounds and packed callback reals remain
+  // independently differentiable in both backends.
+  {
+    CompiledModel qm = compile_model(
+        slurp("tests/fixtures/quadrature_region.tmir.sexp"), DataMap());
+    check(qm.n_unconstrained == 3, "quadrature region parameter width");
+    check(count_opcode(qm, OP_QUADRATURE) > 0, "quadrature graph kernel");
+    check(count_opcode(qm, OP_ISLAND) > 0, "quadrature runtime island");
+    Executor qex(std::move(qm.graph));
+    qm.bind(qex);
+    double gradient[3] = {};
+
+    qex.params_data()[0] = -1.0;
+    qex.params_data()[1] = 2.0;
+    qex.params_data()[2] = 3.0;
+    double quadrature_lp = qex.gradient(gradient);
+    check(std::fabs(quadrature_lp - 6.0) < 1e-10,
+          "quadrature untaken lp " + std::to_string(quadrature_lp));
+    check(std::fabs(gradient[0]) < 1e-12,
+          "quadrature untaken gate gradient");
+    check(std::fabs(gradient[1] - 6.0) < 1e-10,
+          "quadrature untaken bound gradient");
+    check(std::fabs(gradient[2] - 2.0) < 1e-10,
+          "quadrature untaken callback gradient");
+
+    qex.params_data()[0] = 1.0;
+    qex.params_data()[1] = 2.0;
+    qex.params_data()[2] = 3.0;
+    quadrature_lp = qex.gradient(gradient);
+    check(std::fabs(quadrature_lp - 30.0) < 1e-9,
+          "quadrature taken lp " + std::to_string(quadrature_lp));
+    check(std::fabs(gradient[0]) < 1e-12,
+          "quadrature taken gate gradient");
+    check(std::fabs(gradient[1] - 30.0) < 1e-8,
+          "quadrature taken bound gradient");
+    check(std::fabs(gradient[2] - 10.0) < 1e-8,
+          "quadrature taken callback gradient");
+  }
+
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations
   // themselves. An infinite bound is no bound -- the element is the
   // identity and adds no jacobian term -- and the kernels used to
