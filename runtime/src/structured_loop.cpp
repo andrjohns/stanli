@@ -32,6 +32,20 @@ int64_t mul(int64_t a, int64_t b) {
   return a * b;
 }
 using Node = StructuredLoop::Node;
+void set_index_forward(KernelCtx& c);
+void set_index_backward(KernelCtx& c);
+bool index_selection_is_ordered_unique(const DynamicIndexSpec& p) {
+  return std::all_of(p.axes.begin(), p.axes.end(), [](const auto& axis) {
+    return axis.kind != DynamicIndexSpec::Axis::Multi || axis.count <= 1;
+  });
+}
+bool scalar_compact_update_spec(const DynamicIndexSpec& p) {
+  return p.selected_size == 1 &&
+         std::all_of(p.axes.begin(), p.axes.end(), [](const auto& axis) {
+           return axis.kind == DynamicIndexSpec::Axis::Single &&
+                  axis.count == 1 && axis.count_input_offset < 0;
+         });
+}
 void slot(const StructuredLoop& p, int s) {
   if (s < 0 || static_cast<size_t>(s) >= p.body.slots.size())
     throw std::invalid_argument("structured loop invalid slot");
@@ -202,26 +216,25 @@ void classify_compact_updates(StructuredLoop& p) {
         if (call.kind != Node::KernelCall || install.kind != Node::Alias)
           continue;
         const Op& op = p.body.ops[static_cast<size_t>(call.op)];
-        if (op.opcode != OP_SET_INDEX_DYNAMIC || op.n_in != 3 || op.out2 >= 0 ||
-            install.src != op.out || install.dst != op.in[0] ||
-            op.out == op.in[0] || op.in[1] == op.in[0] ||
+        if (op.opcode != OP_SET_INDEX_DYNAMIC) continue;
+        if (install.src != op.out || install.dst != op.in[0]) continue;
+        if (op.n_in != 3 || op.out2 >= 0 || call.forward != set_index_forward ||
+            call.backward != set_index_backward)
+          continue;
+        if (op.out == op.in[0] || op.in[1] == op.in[0] ||
             op.in[2] == op.in[0] || op.in[1] == op.out || op.in[2] == op.out ||
             op.in[1] == op.in[2] || call.kernel_scratch != 0)
           continue;
         const int cell = install.dst;
         const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
-        if (!spec || spec->axes.empty() || spec->selected_size != 1 ||
-            !std::all_of(spec->axes.begin(), spec->axes.end(),
-                         [](const DynamicIndexSpec::Axis& axis) {
-                           return axis.kind == DynamicIndexSpec::Axis::Single &&
-                                  axis.count == 1 &&
-                                  axis.count_input_offset < 0;
-                         }))
+        if (!spec || spec->axes.empty() || spec->selected_size < 0 ||
+            spec->input_count != 0 || !index_selection_is_ordered_unique(*spec))
           continue;
         if (p.body.slots[static_cast<size_t>(op.out)].len == 0 ||
             p.body.slots[static_cast<size_t>(op.out)].len !=
                 p.body.slots[static_cast<size_t>(cell)].len ||
-            p.body.slots[static_cast<size_t>(op.in[2])].len != 1)
+            p.body.slots[static_cast<size_t>(op.in[2])].len !=
+                spec->selected_size)
           continue;
         const auto& output = uses[static_cast<size_t>(op.out)];
         const auto& binding = uses[static_cast<size_t>(cell)];
@@ -1291,6 +1304,9 @@ struct DynamicAllocationProfile {
     uint64_t arena_values = 0;
     uint64_t input_handle_values = 0;
     uint64_t record_handle_values = 0;
+    uint64_t compact_position_values = 0;
+    uint64_t compact_old_value_values = 0;
+    uint64_t compact_rhs_handle_values = 0;
     uint64_t output_values = 0;
     uint64_t scratch_values = 0;
     uint64_t padding_values = 0;
@@ -1438,6 +1454,29 @@ struct DynamicAllocationProfile {
     add(b->records, 1);
   }
 
+  void note_delta_compact(const Op& op, int64_t selected, int64_t output_len,
+                          bool active) noexcept {
+    Bucket* b = bucket(op);
+    if (!b) return;
+    const uint64_t count = this->count(selected);
+    const uint64_t extent = this->count(output_len);
+    uint64_t retained = count;
+    add(retained, count);
+    add(retained, active ? 1 : 0);
+    add(b->compact_visits, 1);
+    add(b->frame_free_compact_visits, 1);
+    add(b->active_visits, active ? 1 : 0);
+    add(b->arena_values, retained);
+    add(b->compact_position_values, count);
+    add(b->compact_old_value_values, count);
+    add(b->compact_rhs_handle_values, active ? 1 : 0);
+    add(b->refs, 1);
+    add(b->active_refs, active ? 1 : 0);
+    add(b->referenced_values, extent);
+    add(b->conceptual_adjoint_values, active ? extent : 0);
+    add(b->records, 1);
+  }
+
   void note_inline_integer(const Op& op, int64_t retained) noexcept {
     Bucket* b = bucket(op);
     if (!b) return;
@@ -1466,11 +1505,13 @@ struct DynamicLoopState final : KernelState {
       double rhs_handle;
     };
     double out = -1;
-    // Ordinary calls store the optional second-output handle. Compact updates
-    // have no second output and store the overwritten value here instead.
+    // Ordinary calls store the optional second-output handle. Scalar compact
+    // updates store the overwritten value. Delta compact updates store their
+    // exact reached selection count.
     double out2 = -1;
     // Retained compact updates store a nonnegative position. Ordinary records
-    // use -1. Frame-free compact updates encode position as -2 - position.
+    // use -1. Frame-free scalar updates encode position as -2 - position.
+    // INT64_MIN identifies a variable-width ordered-unique delta payload.
     int64_t undo = -1;
   };
   DynamicArena arena;
@@ -1565,7 +1606,10 @@ struct DynamicLoopState final : KernelState {
           if (len <= 0)
             throw std::invalid_argument(
                 "compact dynamic structured output extent is invalid");
-          compact_adjoint_work_size = std::max(compact_adjoint_work_size, len);
+          const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+          if (spec && scalar_compact_update_spec(*spec))
+            compact_adjoint_work_size =
+                std::max(compact_adjoint_work_size, len);
         }
       }
       for (const auto& child : n.children) self(self, child);
@@ -1733,6 +1777,9 @@ void report_memory_profile(const StructuredLoop& p,
   uint64_t kernel_arena_values = 0;
   uint64_t input_handle_values = 0;
   uint64_t record_handle_values = 0;
+  uint64_t compact_position_values = 0;
+  uint64_t compact_old_value_values = 0;
+  uint64_t compact_rhs_handle_values = 0;
   uint64_t output_values = 0;
   uint64_t scratch_values = 0;
   uint64_t padding_values = 0;
@@ -1757,6 +1804,15 @@ void report_memory_profile(const StructuredLoop& p,
         input_handle_values, bucket.input_handle_values, allocation_overflow);
     record_handle_values = profile_add(
         record_handle_values, bucket.record_handle_values, allocation_overflow);
+    compact_position_values =
+        profile_add(compact_position_values, bucket.compact_position_values,
+                    allocation_overflow);
+    compact_old_value_values =
+        profile_add(compact_old_value_values, bucket.compact_old_value_values,
+                    allocation_overflow);
+    compact_rhs_handle_values =
+        profile_add(compact_rhs_handle_values, bucket.compact_rhs_handle_values,
+                    allocation_overflow);
     output_values =
         profile_add(output_values, bucket.output_values, allocation_overflow);
     scratch_values =
@@ -1813,6 +1869,8 @@ void report_memory_profile(const StructuredLoop& p,
       "initial_arena_values=%llu kernel_arena_values=%llu "
       "profiled_arena_values=%llu actual_arena_values=%llu arena_match=%d "
       "input_handle_values=%llu record_handle_values=%llu "
+      "compact_position_values=%llu compact_old_value_values=%llu "
+      "compact_rhs_handle_values=%llu "
       "output_values=%llu scratch_values=%llu "
       "padding_values=%llu initial_slot_refs=%llu canonical_refs=%llu "
       "import_refs=%llu kernel_refs=%llu profiled_refs=%llu "
@@ -1832,6 +1890,9 @@ void report_memory_profile(const StructuredLoop& p,
       profiled_arena_values == state.arena.used_values ? 1 : 0,
       static_cast<unsigned long long>(input_handle_values),
       static_cast<unsigned long long>(record_handle_values),
+      static_cast<unsigned long long>(compact_position_values),
+      static_cast<unsigned long long>(compact_old_value_values),
+      static_cast<unsigned long long>(compact_rhs_handle_values),
       static_cast<unsigned long long>(output_values),
       static_cast<unsigned long long>(scratch_values),
       static_cast<unsigned long long>(padding_values),
@@ -1874,6 +1935,8 @@ void report_memory_profile(const StructuredLoop& p,
         "inactive_output_refs=%llu "
         "arena_location_refs=%llu "
         "input_handle_values=%llu record_handle_values=%llu "
+        "compact_position_values=%llu compact_old_value_values=%llu "
+        "compact_rhs_handle_values=%llu "
         "output_values=%llu scratch_values=%llu "
         "padding_values=%llu refs=%llu active_refs=%llu "
         "referenced_values=%llu conceptual_adjoint_values=%llu "
@@ -1897,6 +1960,9 @@ void report_memory_profile(const StructuredLoop& p,
         static_cast<unsigned long long>(bucket.arena_location_refs),
         static_cast<unsigned long long>(bucket.input_handle_values),
         static_cast<unsigned long long>(bucket.record_handle_values),
+        static_cast<unsigned long long>(bucket.compact_position_values),
+        static_cast<unsigned long long>(bucket.compact_old_value_values),
+        static_cast<unsigned long long>(bucket.compact_rhs_handle_values),
         static_cast<unsigned long long>(bucket.output_values),
         static_cast<unsigned long long>(bucket.scratch_values),
         static_cast<unsigned long long>(bucket.padding_values),
@@ -1912,6 +1978,8 @@ void report_memory_profile(const StructuredLoop& p,
 
 int64_t compact_scalar_update_position(const DynamicIndexSpec& p,
                                        const KernelCtx& c);
+int64_t compact_ordered_update_positions(const DynamicIndexSpec& p,
+                                         const KernelCtx& c, double* positions);
 
 bool overlaps(Desc a, Desc b) {
   if (!a.data || !b.data || a.len <= 0 || b.len <= 0) return false;
@@ -1926,7 +1994,6 @@ DynamicLoopState& dynamic_state(KernelCtx& c) {
 
 void compare_forward(KernelCtx& c);
 void int_forward(KernelCtx& c);
-void set_index_backward(KernelCtx& c);
 
 struct DynamicExecution {
   const StructuredLoop& p;
@@ -2597,6 +2664,8 @@ struct DynamicExecution {
       base = ordinary_ref(base_handle).value;
     if (state.compact_primal_by_cell[static_cast<size_t>(cell)] != base)
       return false;
+    if (n.forward != set_index_forward || n.backward != set_index_backward)
+      return false;
 
     double handles[6] = {};
     for (int k = 0; k < op.n_in; ++k)
@@ -2605,10 +2674,7 @@ struct DynamicExecution {
     KernelCtx& c = context.get();
     if (overlaps(c.out, c.in[1]) || overlaps(c.out, c.in[2])) return false;
     const auto& spec = *static_cast<const DynamicIndexSpec*>(op.udata);
-    const int64_t position = compact_scalar_update_position(spec, c);
-    if (position < 0 || position >= c.out.len)
-      throw std::logic_error("compact structured update position out of range");
-
+    const bool scalar_site = scalar_compact_update_spec(spec);
     bool active = false;
     for (int k = 0; k < c.n_in; ++k) active |= handles[k] >= 0;
     active &= n.backward != nullptr;
@@ -2617,6 +2683,52 @@ struct DynamicExecution {
                                         handles[1], c.in[1].len, handles[2],
                                         c.in[2].len)
                : -1;
+
+    if (!scalar_site) {
+      if (active && shared_adjoint < 0) return false;
+      const int64_t selected =
+          compact_ordered_update_positions(spec, c, nullptr);
+      int64_t retained = mul(2, selected);
+      if (active) retained = add(retained, 1);
+      if (active) {
+        if (retained >= retained_frame_values(n)) return false;
+      } else if (add(retained, 7) >= c.out.len) {
+        // Inactive ordinary calls retain only the output buffer. A compact
+        // delta also adds one 16-byte Ref and one 40-byte Record, so demand a
+        // strict total-byte win rather than comparing arena values alone.
+        return false;
+      }
+      double* const delta = state.arena.allocate(retained);
+      const int64_t reached = compact_ordered_update_positions(spec, c, delta);
+      if (reached != selected)
+        throw std::logic_error(
+            "compact structured selection changed during forward");
+      for (int64_t i = 0; i < selected; ++i) {
+        const int64_t position = static_cast<int64_t>(delta[i]);
+        delta[selected + i] = c.out.data[position];
+      }
+      if (active) delta[2 * selected] = handles[2];
+      const double out =
+          make_ref(c.out.data, c.out.len, active, shared_adjoint);
+      DynamicLoopState::Record record;
+      record.node = &n;
+      record.frame = delta;
+      record.out = out;
+      record.out2 = static_cast<double>(selected);
+      record.undo = std::numeric_limits<int64_t>::min();
+      state.records.push_back(record);
+      for (int64_t i = 0; i < selected; ++i)
+        c.out.data[static_cast<int64_t>(delta[i])] = c.in[2].data[i];
+      state.bindings[static_cast<size_t>(op.out)] = out;
+      if (state.allocation_profile)
+        state.allocation_profile->note_delta_compact(op, selected, c.out.len,
+                                                     active);
+      return true;
+    }
+
+    const int64_t position = compact_scalar_update_position(spec, c);
+    if (position < 0 || position >= c.out.len)
+      throw std::logic_error("compact structured update position out of range");
 
     bool frame_free =
         !active || (shared_adjoint >= 0 && n.backward == set_index_backward);
@@ -2878,6 +2990,74 @@ struct DynamicExecution {
     return true;
   }
 
+  void backward_delta_compact(const DynamicLoopState::Record& record) {
+    if (!record.node || record.node->op < 0 ||
+        static_cast<size_t>(record.node->op) >= p.body.ops.size() ||
+        !std::isfinite(record.out2) || std::trunc(record.out2) != record.out2 ||
+        record.out2 < 0 || record.out2 > static_cast<double>(exact_limit))
+      throw std::logic_error("delta compact structured record is invalid");
+    const Op& op = p.body.ops[static_cast<size_t>(record.node->op)];
+    const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+    const int64_t selected = static_cast<int64_t>(record.out2);
+    const int64_t output_len = p.body.slots[static_cast<size_t>(op.out)].len;
+    const int64_t rhs_len = p.body.slots[static_cast<size_t>(op.in[2])].len;
+    if (!spec || record.node->forward != set_index_forward ||
+        record.node->backward != set_index_backward ||
+        op.opcode != OP_SET_INDEX_DYNAMIC || op.n_in != 3 || op.out2 >= 0 ||
+        selected > spec->selected_size || rhs_len != spec->selected_size ||
+        output_len <= 0 || (selected > 0 && !record.frame))
+      throw std::logic_error("delta compact structured record is invalid");
+
+    double* const delta = record.frame;
+    int64_t previous = -1;
+    for (int64_t i = 0; i < selected; ++i) {
+      const double raw = delta[i];
+      if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 0 ||
+          raw >= static_cast<double>(output_len) ||
+          static_cast<int64_t>(raw) <= previous)
+        throw std::logic_error(
+            "delta compact structured positions are invalid");
+      previous = static_cast<int64_t>(raw);
+    }
+
+    auto& output = ref(record.out);
+    if (!output.value)
+      throw std::logic_error("delta compact structured output is unavailable");
+    if (record.out >= 0) {
+      if (is_import_ref(output) || output.adjoint_or_import < 0 || !delta)
+        throw std::logic_error(
+            "delta compact structured adjoint layout is invalid");
+      const double rhs_handle = delta[2 * selected];
+      double* const shared_adjoint = adj(record.out, output_len);
+      double* const rhs_adjoint = adj(rhs_handle, rhs_len);
+      if (!shared_adjoint ||
+          adjoint_ranges_overlap(record.out, output_len, rhs_handle, rhs_len))
+        throw std::logic_error(
+            "delta compact structured adjoints are not disjoint");
+
+      int64_t ordinal = 0;
+      int64_t position = selected > 0 ? static_cast<int64_t>(delta[0]) : -1;
+      for (int64_t i = 0; i < output_len; ++i) {
+        const double contribution = shared_adjoint[i];
+        shared_adjoint[i] = 0.0;
+        if (ordinal < selected && i == position) {
+          if (rhs_adjoint) rhs_adjoint[ordinal] += contribution;
+          ++ordinal;
+          if (ordinal < selected)
+            position = static_cast<int64_t>(delta[ordinal]);
+        } else {
+          shared_adjoint[i] += contribution;
+        }
+      }
+      if (ordinal != selected)
+        throw std::logic_error(
+            "delta compact structured selection is unordered");
+    }
+
+    for (int64_t i = selected; i-- > 0;)
+      output.value[static_cast<int64_t>(delta[i])] = delta[selected + i];
+  }
+
   void backward_frame_free_compact(const DynamicLoopState::Record& record,
                                    int64_t position) {
     const Op& op = p.body.ops[static_cast<size_t>(record.node->op)];
@@ -2927,7 +3107,9 @@ struct DynamicExecution {
   void backward() {
     for (size_t i = state.records.size(); i-- > 0;) {
       const auto& record = state.records[i];
-      if (record.undo != -1) {
+      if (record.undo == std::numeric_limits<int64_t>::min()) {
+        backward_delta_compact(record);
+      } else if (record.undo != -1) {
         const bool frame_free = record.undo < -1;
         const int64_t position = frame_free ? -(record.undo + 2) : record.undo;
         auto& output = ref(record.out);
@@ -3532,6 +3714,23 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
     throw std::logic_error("invalid structured index storage");
   return runtime;
 }
+int64_t compact_ordered_update_positions(const DynamicIndexSpec& p,
+                                         const KernelCtx& c,
+                                         double* positions) {
+  if (!index_selection_is_ordered_unique(p))
+    throw std::logic_error("compact structured update selection is unordered");
+  const IndexRuntime runtime = validate_index(p, c, true);
+  int64_t previous = -1;
+  for (int64_t i = 0; i < runtime.selected; ++i) {
+    const int64_t position = selected_position(p, c, runtime, i);
+    if (position <= previous || position > exact_limit)
+      throw std::logic_error(
+          "compact structured update positions are not ordered and unique");
+    if (positions) positions[i] = static_cast<double>(position);
+    previous = position;
+  }
+  return runtime.selected;
+}
 int64_t compact_scalar_update_position(const DynamicIndexSpec& p,
                                        const KernelCtx& c) {
   const IndexRuntime runtime = validate_index(p, c, true);
@@ -3553,11 +3752,6 @@ void index_backward(KernelCtx& c) {
   for (int64_t i = 0; i < runtime.selected; ++i)
     c.in_adj[0].data[selected_position(p, c, runtime, i)] +=
         c.out_adj_vec.data[i];
-}
-bool index_selection_is_ordered_unique(const DynamicIndexSpec& p) {
-  return std::all_of(p.axes.begin(), p.axes.end(), [](const auto& axis) {
-    return axis.kind != DynamicIndexSpec::Axis::Multi || axis.count <= 1;
-  });
 }
 void set_index_forward(KernelCtx& c) {
   const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);

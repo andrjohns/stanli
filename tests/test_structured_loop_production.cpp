@@ -516,7 +516,11 @@ static Evaluation evaluate(Executor& executor, double theta, double beta);
 static std::vector<double> iterator_forward_values;
 static std::vector<double> iterator_reverse_values;
 static std::vector<std::array<double, 3>> update_reverse_values;
+static std::vector<std::array<double, 6>> range_update_reverse_values;
+static std::vector<const double*> range_update_forward_addresses;
 static bool iterator_throw_once = false;
+static int ordinary_update_forward_calls = 0;
+static int ordinary_update_backward_calls = 0;
 
 static void trace_iterator_forward(KernelCtx& context) {
   iterator_forward_values.push_back(context.in[1].data[0]);
@@ -540,6 +544,28 @@ static void trace_update_backward(KernelCtx& context) {
 
 static void retained_update_backward(KernelCtx& context) {
   find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
+}
+
+static void ordinary_update_forward(KernelCtx& context) {
+  ++ordinary_update_forward_calls;
+  find_kernel(OP_SET_INDEX_DYNAMIC)->forward(context);
+}
+
+static void ordinary_update_backward(KernelCtx& context) {
+  ++ordinary_update_backward_calls;
+  find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
+}
+
+static void trace_range_sum_backward(KernelCtx& context) {
+  std::array<double, 6> values{};
+  std::copy_n(context.in[0].data, values.size(), values.data());
+  range_update_reverse_values.push_back(values);
+  find_kernel(OP_SUM_VEC)->backward(context);
+}
+
+static void trace_range_sum_forward(KernelCtx& context) {
+  range_update_forward_addresses.push_back(context.in[0].data);
+  find_kernel(OP_SUM_VEC)->forward(context);
 }
 
 static std::shared_ptr<StructuredLoop> iterator_history_plan() {
@@ -635,7 +661,8 @@ static std::shared_ptr<StructuredLoop> nested_iterator_plan() {
 }
 
 static std::shared_ptr<StructuredLoop> iterator_update_plan(
-    void (*backward)(KernelCtx&) = trace_update_backward) {
+    void (*backward)(KernelCtx&) = trace_update_backward,
+    void (*forward)(KernelCtx&) = nullptr) {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int lower = scalar(*plan, 1);
@@ -671,6 +698,143 @@ static std::shared_ptr<StructuredLoop> iterator_update_plan(
   if (backward)
     check(set_backward(plan->root, update_op, backward),
           "find compact-update replacement backward callback");
+  if (forward)
+    check(set_forward(plan->root, update_op, forward),
+          "find compact-update replacement forward callback");
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> range_update_plan(bool force_ordinary) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int base = plan->body.add_slot(6, false);
+  const int theta = plan->body.add_slot(1, false);
+  const int beta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int selector = scalar(*plan, 1);
+  const int weights = plan->body.add_slot(6, false);
+  plan->fills.push_back({weights, {1, 2, 4, 8, 16, 32}});
+  const int current = plan->body.add_slot(6, false);
+  const int theta_term = plan->body.add_slot(1, false);
+  const int beta_term = plan->body.add_slot(1, false);
+  const int rhs = plan->body.add_slot(2, false);
+  const int updated = plan->body.add_slot(6, false);
+  const int zero_selector = plan->body.add_slot(2, false);
+  plan->fills.push_back({zero_selector, {1, 0}});
+  const int zero_updated = plan->body.add_slot(6, false);
+  const int observed = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{base, 0, 0}, {theta, 1, 0}, {beta, 2, 0}};
+
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Range, 6, 1, 2, 0}};
+  spec->selected_size = 2;
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, selector, rhs}, updated);
+  const int update_op = update.op;
+  plan->body.ops[static_cast<size_t>(update_op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  auto zero_spec = std::make_shared<DynamicIndexSpec>();
+  zero_spec->axes = {{DynamicIndexSpec::Axis::Range, 6, 1, 2, 0}};
+  zero_spec->axes[0].count_input_offset = 1;
+  zero_spec->selected_size = 2;
+  Node zero_update = call(*plan, OP_SET_INDEX_DYNAMIC,
+                          {current, zero_selector, rhs}, zero_updated);
+  const int zero_update_op = zero_update.op;
+  plan->body.ops[static_cast<size_t>(zero_update_op)].udata = zero_spec.get();
+  plan->body.udata_pool.push_back(zero_spec);
+  Node observe = call(*plan, OP_SUM_VEC, {current}, observed);
+  const int observe_op = observe.op;
+  plan->root = sequence(
+      {alias(current, base),
+       counted(lower, upper, iterator, 3,
+               sequence({call(*plan, OP_MUL, {theta, iterator}, theta_term),
+                         call(*plan, OP_MUL, {beta, iterator}, beta_term),
+                         call(*plan, OP_CONCAT2, {theta_term, beta_term}, rhs),
+                         std::move(update), alias(current, updated),
+                         std::move(observe)})),
+       std::move(zero_update), alias(current, zero_updated),
+       call(*plan, OP_DOT, {current, weights}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->compact_update_sites == 2,
+        "ordered range update selects compact history");
+  check(set_backward(plan->root, observe_op, trace_range_sum_backward),
+        "find ordered range observer");
+  check(set_forward(plan->root, observe_op, trace_range_sum_forward),
+        "find ordered range forward observer");
+  if (force_ordinary) {
+    check(set_forward(plan->root, update_op, ordinary_update_forward),
+          "find ordered range update forward callback");
+    check(set_backward(plan->root, update_op, ordinary_update_backward),
+          "find ordered range update backward callback");
+    check(set_forward(plan->root, zero_update_op, ordinary_update_forward),
+          "find zero range update forward callback");
+    check(set_backward(plan->root, zero_update_op, ordinary_update_backward),
+          "find zero range update backward callback");
+  }
+  return plan;
+}
+
+static Graph range_update_outer(std::shared_ptr<StructuredLoop> plan) {
+  Graph graph;
+  graph.add_slot(6, true);
+  graph.add_slot(1, true);
+  graph.add_slot(1, true);
+  const int output = graph.add_slot(1, false);
+  const int op = graph.add_op(OP_LOOP, {0, 1, 2}, output);
+  graph.ops[op].udata = plan.get();
+  graph.udata_pool.push_back(std::move(plan));
+  graph.result_slot = output;
+  return graph;
+}
+
+static std::shared_ptr<StructuredLoop> inactive_range_update_plan(
+    bool force_ordinary) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int base = plan->body.add_slot(16, false);
+  plan->fills.push_back(
+      {base, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}});
+  const int current = plan->body.add_slot(16, false);
+  const int selector = scalar(*plan, 1);
+  const int rhs = plan->body.add_slot(2, false);
+  plan->fills.push_back({rhs, {10, 20}});
+  const int updated = plan->body.add_slot(16, false);
+  const int total = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Range, 16, 1, 2, 0}};
+  spec->selected_size = 2;
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, selector, rhs}, updated);
+  const int update_op = update.op;
+  plan->body.ops[static_cast<size_t>(update_op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  plan->root =
+      sequence({alias(current, base),
+                counted(lower, upper, iterator, 3,
+                        sequence({std::move(update), alias(current, updated)})),
+                call(*plan, OP_SUM_VEC, {current}, total),
+                call(*plan, OP_MUL, {theta, total}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->compact_update_sites == 1,
+        "inactive ordered range selects compact history");
+  if (force_ordinary) {
+    check(set_forward(plan->root, update_op, ordinary_update_forward),
+          "find inactive range update forward callback");
+    check(set_backward(plan->root, update_op, ordinary_update_backward),
+          "find inactive range update backward callback");
+  }
   return plan;
 }
 
@@ -742,18 +906,90 @@ static void compact_iterator_history_tests() {
   close(updated.gradient[1], 0, "inline iterator compact-update beta gradient");
   check(update_reverse_values ==
             std::vector<std::array<double, 3>>(
-                {{{.25, .5, .75}}, {{.25, .5, 30}}, {{10, 20, 30}}}),
-        "compact-update reverse restores overwritten values in LIFO order");
+                {{{.25, .5, 30}}, {{.25, 20, 30}}, {{10, 20, 30}}}),
+        "custom update reverse sees ordinary historical inputs");
 
   Executor frame_free(outer(iterator_update_plan(nullptr)));
   Executor retained(outer(iterator_update_plan(retained_update_backward)));
   const Evaluation compact = evaluate(frame_free, .25, 0);
   const Evaluation reference = evaluate(retained, .25, 0);
   check(std::memcmp(&compact, &reference, sizeof(Evaluation)) == 0,
-        "frame-free compact reverse has bitwise retained-frame parity");
+        "frame-free compact reverse has bitwise ordinary-path parity");
   const Evaluation repeated = evaluate(frame_free, .25, 0);
   check(std::memcmp(&compact, &repeated, sizeof(Evaluation)) == 0,
         "frame-free compact reverse resets between evaluations");
+  ordinary_update_forward_calls = 0;
+  Executor custom_forward(
+      outer(iterator_update_plan(nullptr, ordinary_update_forward)));
+  const Evaluation custom_forward_result = evaluate(custom_forward, .25, 0);
+  check(ordinary_update_forward_calls == 3 &&
+            std::memcmp(&compact, &custom_forward_result, sizeof(Evaluation)) ==
+                0,
+        "custom update forward callback forces the ordinary path");
+
+  struct RangeEvaluation {
+    double value = 0;
+    double gradient[8] = {};
+    std::vector<std::array<double, 6>> reverse_values;
+    std::vector<const double*> forward_addresses;
+  };
+  const auto run_range = [](bool ordinary) {
+    range_update_reverse_values.clear();
+    range_update_forward_addresses.clear();
+    Executor executor(range_update_outer(range_update_plan(ordinary)));
+    const double point[] = {10, 20, 30, 40, 50, 60, .25, -.5};
+    std::copy(std::begin(point), std::end(point), executor.params_data());
+    RangeEvaluation result;
+    result.value = executor.gradient(result.gradient);
+    result.reverse_values = range_update_reverse_values;
+    result.forward_addresses = range_update_forward_addresses;
+    return result;
+  };
+  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
+  const RangeEvaluation delta = run_range(false);
+  const RangeEvaluation ordinary = run_range(true);
+  check(std::memcmp(&delta.value, &ordinary.value, sizeof(double)) == 0 &&
+            std::memcmp(delta.gradient, ordinary.gradient,
+                        sizeof(delta.gradient)) == 0,
+        "ordered range delta has bitwise ordinary-path parity");
+  check(
+      ordinary_update_forward_calls == 4 && ordinary_update_backward_calls == 4,
+      "custom ordered range callbacks force the ordinary path");
+  close(delta.value, 3157.75, "ordered range delta result");
+  const double expected_gradient[] = {0, 0, 4, 8, 16, 32, 3, 6};
+  for (size_t i = 0; i < std::size(expected_gradient); ++i)
+    close(delta.gradient[i], expected_gradient[i],
+          "ordered range delta gradient");
+  const std::vector<std::array<double, 6>> expected_reverse = {
+      {{.75, -1.5, 30, 40, 50, 60}},
+      {{.5, -1, 30, 40, 50, 60}},
+      {{.25, -.5, 30, 40, 50, 60}},
+  };
+  check(delta.reverse_values == expected_reverse &&
+            ordinary.reverse_values == expected_reverse,
+        "ordered range delta restores historical primals in LIFO order");
+  check(delta.forward_addresses.size() == 3 &&
+            delta.forward_addresses[0] == delta.forward_addresses[1] &&
+            delta.forward_addresses[1] == delta.forward_addresses[2],
+        "ordered range delta reuses one anchored primal buffer");
+  check(ordinary.forward_addresses.size() == 3 &&
+            ordinary.forward_addresses[0] != ordinary.forward_addresses[1] &&
+            ordinary.forward_addresses[1] != ordinary.forward_addresses[2],
+        "ordinary range fallback keeps distinct output buffers");
+
+  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
+  Executor inactive_delta(outer(inactive_range_update_plan(false)));
+  Executor inactive_ordinary(outer(inactive_range_update_plan(true)));
+  const Evaluation inactive_compact = evaluate(inactive_delta, .25, 0);
+  const Evaluation inactive_reference = evaluate(inactive_ordinary, .25, 0);
+  check(std::memcmp(&inactive_compact, &inactive_reference,
+                    sizeof(Evaluation)) == 0 &&
+            ordinary_update_forward_calls == 3 &&
+            ordinary_update_backward_calls == 0,
+        "inactive range delta has bitwise ordinary-path parity");
+  close(inactive_compact.value, 40.75, "inactive range delta result");
+  close(inactive_compact.gradient[0], 163,
+        "inactive range delta outer gradient");
 }
 
 static std::shared_ptr<StructuredLoop> integer_history_plan() {
