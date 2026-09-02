@@ -8,7 +8,9 @@
 
 #include <stan/math/prim.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace stanli {
 namespace {
@@ -499,6 +501,27 @@ void repv_bwd(KernelCtx& ctx) {
     ctx.in_adj[0].data[0] += ctx.out_adj_vec.data[i];
 }
 
+int64_t repv_extent(const KernelCtx& ctx) {
+  if (ctx.n_in != 2 || ctx.in[1].len != 1)
+    throw std::logic_error("dynamic rep_vector extent is not scalar");
+  const double raw = ctx.in[1].data[0];
+  if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 0 ||
+      raw > static_cast<double>(ctx.out.len))
+    throw std::domain_error("dynamic rep_vector extent exceeds capacity");
+  return static_cast<int64_t>(raw);
+}
+void repv_dynamic_fwd(KernelCtx& ctx) {
+  const int64_t n = repv_extent(ctx);
+  for (int64_t i = 0; i < n; ++i) ctx.out.data[i] = ctx.in[0].data[0];
+  std::fill(ctx.out.data + n, ctx.out.data + ctx.out.len, 0.0);
+}
+void repv_dynamic_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  const int64_t n = repv_extent(ctx);
+  for (int64_t i = 0; i < n; ++i)
+    ctx.in_adj[0].data[0] += ctx.out_adj_vec.data[i];
+}
+
 // Generated from STANLI_SCALAR_UNARY_LIST (optable.hpp): the value in the
 // forward, the ordered delta and its pullback topology in the backward.
 // Shape-preserving and elementwise, so a re-rolled vector arrives here as one
@@ -555,6 +578,8 @@ void register_eltwise_kernels() {
   register_kernel(OP_VARIANCE, Kernel{dispersion_fwd<false>, dispersion_bwd,
                                       dispersion_scratch});
   register_kernel(OP_REP_VEC, Kernel{repv_fwd, repv_bwd, nullptr});
+  register_kernel(OP_REP_VEC_DYNAMIC,
+                  Kernel{repv_dynamic_fwd, repv_dynamic_bwd, nullptr});
 }
 
 }  // namespace stanli

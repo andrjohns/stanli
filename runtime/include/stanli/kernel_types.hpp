@@ -10,6 +10,13 @@ namespace stanli {
 
 class WaRng;
 
+// Mutable state owned by one bound Executor and one operation. Most kernels
+// need none; retained control uses it when reached history must grow at run
+// time instead of occupying a rectangular worst-case scratch arena.
+struct KernelState {
+  virtual ~KernelState() = default;
+};
+
 // Per-evaluation resources that are neither graph structure nor arena state.
 // The caller owns every pointed-to resource. In particular, an RNG stream
 // belongs to one chain/drawing thread, never to a compiled model or executor.
@@ -60,6 +67,7 @@ struct KernelCtx {
   int64_t n_idata = 0;
   const void* udata = nullptr;
   EvalState* eval_state = nullptr;
+  KernelState* state = nullptr;
   Desc out2{nullptr, 0};  // second output value (scalar), if any
   // Backward only. Data inputs get {nullptr, len}: kernels skip them.
   Desc in_adj[6];

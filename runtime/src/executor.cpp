@@ -134,6 +134,7 @@ void register_mixture_kernels();
 void register_message_kernels();
 void register_rng_kernel();
 void register_island_kernel();
+void register_structured_loop_kernel();
 
 static void ensure_registered() {
   static const bool once = [] {
@@ -151,6 +152,7 @@ static void ensure_registered() {
     register_scalar_unary_ad_kernels();
     register_mixture_kernels();
     register_island_kernel();
+    register_structured_loop_kernel();
     return true;
   }();
   (void)once;
@@ -251,20 +253,27 @@ Executor::Executor(const Executor& src) : graph_(src.graph_) {
 }
 
 void Executor::bind_() {
+  const auto checked_size = [](int64_t a, int64_t b) {
+    const auto max = static_cast<uint64_t>(std::vector<double>{}.max_size());
+    if (a < 0 || b < 0 || static_cast<uint64_t>(a) > max ||
+        static_cast<uint64_t>(b) > max - static_cast<uint64_t>(a))
+      throw std::length_error("executor arena size overflow");
+    return a + b;
+  };
   // Parameters first so the gradient vector is contiguous in declaration
   // order; then everything else.
   int64_t off = 0;
   for (auto& s : graph_.slots) {
     if (s.is_param) {
       s.offset = off;
-      off += s.len;
+      off = checked_size(off, s.len);
     }
   }
   n_params_ = off;
   for (auto& s : graph_.slots) {
     if (!s.is_param) {
       s.offset = off;
-      off += s.len;
+      off = checked_size(off, s.len);
     }
   }
   values_.assign(off, 0.0);
@@ -289,7 +298,7 @@ void Executor::bind_() {
     const Slot& s = graph_.slots[i];
     if (s.is_param) {
       adjoint_offsets[i] = adj_off;
-      adj_off += s.len;
+      adj_off = checked_size(adj_off, s.len);
     }
   }
   assert(adj_off == n_params_);
@@ -297,7 +306,7 @@ void Executor::bind_() {
     const Slot& s = graph_.slots[i];
     if (!s.is_param && (written[i] || (int)i == graph_.result_slot)) {
       adjoint_offsets[i] = adj_off;
-      adj_off += s.len;
+      adj_off = checked_size(adj_off, s.len);
     }
   }
   adjoints_.assign(adj_off, 0.0);
@@ -321,7 +330,8 @@ void Executor::bind_() {
       throw std::runtime_error(std::string("opcode not registered: ") +
                                opcode_name(op.opcode));
     scratch_offsets.push_back(scratch);
-    scratch += k.scratch_size ? k.scratch_size(op, graph_.slots.data()) : 0;
+    scratch = checked_size(
+        scratch, k.scratch_size ? k.scratch_size(op, graph_.slots.data()) : 0);
   }
   scratch_.assign(scratch, 0.0);
 
@@ -331,10 +341,17 @@ void Executor::bind_() {
   // gradient, which on the serial models (one op per observation, nothing to
   // vectorize) was a third of the time.
   ctx_.resize(graph_.ops.size());
+  kernel_states_.clear();
   out2_adj_ptr_.assign(graph_.ops.size(), nullptr);
   for (size_t i = 0; i < graph_.ops.size(); ++i) {
     ctx_[i] =
         make_ctx_(graph_.ops[i], scratch_offsets[i], written, adjoint_offsets);
+    const Kernel& k = kernel(graph_.ops[i].opcode);
+    if (k.make_state) {
+      kernel_states_.emplace_back(
+          k.make_state(graph_.ops[i], graph_.slots.data()));
+      ctx_[i].state = kernel_states_.back().get();
+    }
     const int o2 = graph_.ops[i].out2;
     if (o2 >= 0) {
       assert(adjoint_offsets[o2] >= 0);

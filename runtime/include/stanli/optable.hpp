@@ -83,6 +83,15 @@ namespace stanli {
   X(OP_ODE)                         \
   X(OP_RNG)                         \
   X(OP_ISLAND)                      \
+  X(OP_LOOP)                        \
+  X(OP_TARGET_REDUCE)               \
+  X(OP_COMPARE)                     \
+  X(OP_INT_ARITH)                   \
+  X(OP_REP_VEC_DYNAMIC)             \
+  X(OP_SUM_VEC_DYNAMIC)             \
+  X(OP_INDEX_DYNAMIC)               \
+  X(OP_SET_INDEX_DYNAMIC)           \
+  X(OP_MATRIX_EXP_DYNAMIC)          \
   X(OP_EIGENVALUES_SYM)             \
   X(OP_EIGENVECTORS_SYM)            \
   X(OP_LOG_SUM_EXP)                 \
@@ -811,6 +820,8 @@ constexpr bool is_effectful_op(uint16_t opcode) {
     case OP_RNG:
     case OP_PRINT:
     case OP_REJECT:
+    case OP_LOOP:
+    case OP_TARGET_REDUCE:
       return true;
     default:
       return false;
@@ -829,6 +840,9 @@ struct Kernel {
   void (*backward)(KernelCtx&) = nullptr;
   // Scratch doubles needed, given bound slot shapes. Null means zero.
   int64_t (*scratch_size)(const Op&, const Slot* slots) = nullptr;
+  // Optional mutable state, created once per bound Executor/op. Graph udata
+  // remains immutable and safely shared by executor copies.
+  KernelState* (*make_state)(const Op&, const Slot* slots) = nullptr;
 };
 
 // The most common Kernel::scratch_size shape: one scratch double per

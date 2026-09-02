@@ -248,6 +248,10 @@ class Executor {
   std::vector<double> adjoints_;
   int64_t result_adjoint_offset_ = -1;
   std::vector<double> scratch_;
+  // Only stateful kernels are represented here; ordinary graph operations do
+  // not pay for a parallel null unique_ptr. KernelCtx retains stable raw views
+  // into these heap-owned objects.
+  std::vector<std::unique_ptr<KernelState>> kernel_states_;
   // One context per op, assembled once at bind. Every field in it is a
   // pointer into an arena that never moves after binding, or an immediate
   // copied from the op, so the only per-evaluation work is refreshing the

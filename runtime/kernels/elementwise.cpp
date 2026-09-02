@@ -152,6 +152,28 @@ void sum_vec_bwd(KernelCtx& ctx) {
       ctx.in_adj[0].data[i] += ctx.out_adj;
 }
 
+int64_t dynamic_extent(const KernelCtx& ctx, int input, int64_t capacity) {
+  if (input >= ctx.n_in || ctx.in[input].len != 1)
+    throw std::logic_error("dynamic extent input is not scalar");
+  const double raw = ctx.in[input].data[0];
+  if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 0 ||
+      raw > static_cast<double>(capacity))
+    throw std::domain_error("logical extent exceeds graph capacity");
+  return static_cast<int64_t>(raw);
+}
+
+void sum_vec_dynamic_fwd(KernelCtx& ctx) {
+  const int64_t n = dynamic_extent(ctx, 1, ctx.in[0].len);
+  double acc = 0;
+  for (int64_t i = 0; i < n; ++i) acc += ctx.in[0].data[i];
+  ctx.out.data[0] = acc;
+}
+void sum_vec_dynamic_bwd(KernelCtx& ctx) {
+  if (!ctx.in_adj[0].data) return;
+  const int64_t n = dynamic_extent(ctx, 1, ctx.in[0].len);
+  for (int64_t i = 0; i < n; ++i) ctx.in_adj[0].data[i] += ctx.out_adj;
+}
+
 // OP_PROD_VEC: product of a vector/row-vector.
 // Bit 0 preserves the ascending scalar reduction selected by Eigen when the
 // source expression contains a strided matrix row. Bit 1 marks an active
@@ -513,6 +535,8 @@ void register_elementwise_kernels() {
   register_kernel(OP_BCAST_FMA, Kernel{fma_fwd, fma_bwd, nullptr});
   register_kernel(OP_MATVEC, Kernel{matvec_fwd, matvec_bwd, nullptr});
   register_kernel(OP_SUM_VEC, Kernel{sum_vec_fwd, sum_vec_bwd, nullptr});
+  register_kernel(OP_SUM_VEC_DYNAMIC,
+                  Kernel{sum_vec_dynamic_fwd, sum_vec_dynamic_bwd, nullptr});
   register_kernel(OP_PROD_VEC, Kernel{prod_vec_fwd, prod_vec_bwd, nullptr});
   register_kernel(OP_EXTREMA_VEC,
                   Kernel{extrema_vec_fwd, extrema_vec_bwd, extrema_scratch});
