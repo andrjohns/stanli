@@ -876,13 +876,13 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
     si = array_view(output_dims, leaf_kind(result_view.leaf));
   }
   Val result;
-  // Keep the packed ABI for variable-width selectors, active selectors, and
-  // indexed updates. Direct scalar data operands avoid recording CONCAT2
-  // intermediates without changing their adjoint or aliasing semantics.
+  // Keep the packed ABI for active selectors and indexed updates. Direct
+  // fixed-capacity data operands avoid recording CONCAT2 intermediates;
+  // runtime logical counts remain separate direct operands in the same order.
   const bool direct_inputs =
       !rhs && indices.size() >= 2 && indices.size() <= 5 &&
       std::all_of(indices.begin(), indices.end(), [&](const Val& input) {
-        return g.slots[input.slot].len == 1 && !input.autodiff &&
+        return g.slots[input.slot].len > 0 && !input.autodiff &&
                input.si.param_free;
       }) &&
       std::getenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS") == nullptr;

@@ -2782,6 +2782,7 @@ static void direct_index_lowering_tests() {
         "direct-index ablation keeps structured execution");
   size_t direct_reads = 0, direct_concats = 0, packed_reads = 0,
          packed_concats = 0;
+  bool direct_multi_selector = false;
   if (direct_plan)
     for (const auto& op : direct_plan->body.ops) {
       direct_concats += op.opcode == OP_CONCAT2;
@@ -2794,7 +2795,10 @@ static void direct_index_lowering_tests() {
         if (spec && spec->input_count > 0) {
           ++direct_reads;
           check(op.n_in == spec->input_count && op.n_in == 3,
-                "two-axis read binds direct scalar selector inputs");
+                "two-axis read binds direct selector inputs");
+          direct_multi_selector |=
+              direct_plan->body.slots[static_cast<size_t>(op.in[1])].len > 1 ||
+              direct_plan->body.slots[static_cast<size_t>(op.in[2])].len > 1;
         }
       }
     }
@@ -2809,8 +2813,10 @@ static void direct_index_lowering_tests() {
     }
   check(direct_reads > 0 && packed_reads >= direct_reads,
         "structured model exposes direct-index read sites");
+  check(direct_multi_selector,
+        "fixed-capacity multi-index binds a direct data operand");
   check(direct_concats < packed_concats,
-        "direct scalar selectors remove packing operations");
+        "direct selectors remove packing operations");
   compare_gradients(direct, packed, {{.1, .7}, {-.2, .3}, {0, .5}},
                     "direct-index value parity",
                     "direct-index gradient parity");
