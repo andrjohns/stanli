@@ -6,6 +6,7 @@
 #include <stanli/cse.hpp>
 #include <stanli/expression_layout.hpp>
 #include <stanli/inplace.hpp>
+#include <stanli/mir_message.hpp>
 #include <stanli/mir_prog.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/mir_decode.hpp>
@@ -3319,9 +3320,7 @@ struct Lowering {
   }
 
   bool stmt_effectful(const mir::Stmt& s) {
-    if (s.kind == mir::Stmt::NRFunApp &&
-        (s.fn_name == "FnPrint" || s.fn_name == "FnReject"))
-      return true;
+    if (s.kind == mir::Stmt::NRFunApp && message_action(s.fn_name)) return true;
     for (const auto& e : s.fn_args)
       if (expr_effectful(e)) return true;
     if (s.has_init && expr_effectful(s.init)) return true;
@@ -7720,30 +7719,22 @@ struct Lowering {
         // std::domain_error at forward time, which is the same exception
         // from the same place CmdStan's generated code throws it, so the
         // sampler counts it as a rejected proposal rather than a failure.
-        if (s.fn_name == "FnReject" || s.fn_name == "FnPrint") {
+        if (const auto action = message_action(s.fn_name)) {
           auto spec = std::make_shared<MessageSpec>();
           std::vector<int> ins;
-          std::string pending;
-          for (const auto& a : s.fn_args) {
-            if (a.kind == mir::Expr::LitStr) {
-              pending += a.lit_s;
-              continue;
-            }
-            // Each value input closes the chunk that precedes it. Op::in
-            // holds six, and a message longer than that is a diagnostic
-            // nobody will miss the tail of -- but say so rather than
-            // corrupting the op.
-            if (ins.size() >= 6)
-              fail(std::string(s.fn_name == "FnReject" ? "reject" : "print") +
-                       " with more than 6 printed values",
-                   s.raw);
-            spec->chunks.push_back(pending);
-            pending.clear();
-            ins.push_back(lower_expr(a).slot);
-          }
-          spec->chunks.push_back(pending);  // trailing literal, if any
+          *spec = lower_message_arguments(
+              s.fn_args, [&](const mir::Expr& argument) {
+                // Op::in holds six. Keep that backend capacity check here;
+                // parsing and semantic dispatch remain shared.
+                if (ins.size() >= 6)
+                  fail(std::string(*action == MessageAction::Reject ? "reject"
+                                                                    : "print") +
+                           " with more than 6 printed values",
+                       s.raw);
+                ins.push_back(lower_expr(argument).slot);
+              });
           Op op;
-          op.opcode = s.fn_name == "FnReject" ? OP_REJECT : OP_PRINT;
+          op.opcode = *action == MessageAction::Reject ? OP_REJECT : OP_PRINT;
           op.n_in = (int)ins.size();
           for (size_t k = 0; k < ins.size(); ++k) op.in[k] = ins[k];
           // The output is a dead scalar: every op writes somewhere, and

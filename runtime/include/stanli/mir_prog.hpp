@@ -20,6 +20,7 @@
 #ifndef STANLI_MIR_PROG_HPP
 #define STANLI_MIR_PROG_HPP
 
+#include <stanli/mir_message.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/program.hpp>
@@ -3166,41 +3167,18 @@ struct ProgramCompiler {
       }
       case mir::Stmt::NRFunApp:
         if (s.fn_name == "FnValidateSize") return;
-        if (s.fn_name == "FnPrint") {
-          Program::Print print;
-          std::string pending;
-          for (const auto& a : s.fn_args) {
-            if (a.kind == mir::Expr::LitStr) {
-              pending += a.lit_s;
-              continue;
-            }
-            print.chunks.push_back(std::move(pending));
-            pending.clear();
-            const Range value = expr(a);
-            print.value_reg.push_back(value.reg);
-            print.value_len.push_back(value.len);
-          }
-          print.chunks.push_back(std::move(pending));
-          p.prints.push_back(std::move(print));
-          emit(Program::PRINT, 0, (int)p.prints.size() - 1);
-          return;
-        }
-        if (s.fn_name == "FnReject") {
-          // Only a literal message: interleaving a runtime value would need
-          // to format it into the thrown string at forward time, which this
-          // machine has no instruction for. `reject("some literal")` is the
-          // common case (a guard on a parameter's domain) and needs none.
-          std::string msg;
-          for (const auto& a : s.fn_args) {
-            if (a.kind != mir::Expr::LitStr)
-              bail(
-                  "statement function FnReject with a runtime-valued "
-                  "message argument (a literal-only message is supported "
-                  "here)");
-            msg += a.lit_s;
-          }
-          p.messages.push_back(std::move(msg));
-          emit(Program::REJECT, 0, (int)p.messages.size() - 1);
+        if (const auto action = message_action(s.fn_name)) {
+          Program::Message message;
+          message.spec = lower_message_arguments(
+              s.fn_args, [&](const mir::Expr& argument) {
+                const Range value = expr(argument);
+                message.value_reg.push_back(value.reg);
+                message.value_len.push_back(value.len);
+              });
+          p.messages.push_back(std::move(message));
+          emit(*action == MessageAction::Reject ? Program::REJECT
+                                                : Program::PRINT,
+               0, (int)p.messages.size() - 1);
           return;
         }
         bail("statement function " + s.fn_name +

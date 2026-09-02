@@ -238,25 +238,32 @@ int main() {
            lines.size() == 1 && lines[0] == "print-only x=0.2");
   }
 
-  // A runtime-valued reject message remains unsupported. Unlike print, its
-  // text must be preserved in the exception, so keep refusing it until the
-  // register program has a rendered-reject payload too.
+  // A runtime-valued reject uses the same literal/value message template as
+  // print. The untaken arm is silent and the taken arm preserves the rendered
+  // value in the domain error.
   {
-    bool threw = false;
-    std::string msg;
+    DataMap d;
+    d.set_int("mode", 2);
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/necessity_effects.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    std::vector<double> g((size_t)ex.n_params());
+
+    ex.params_data()[0] = 0.1;
+    const double accepted_lp = ex.gradient(g.data());
+    expect("necessity untaken reject lp", accepted_lp == 0.1);
+    expect("necessity untaken reject gradient", g[0] == 1.0);
+
+    ex.params_data()[0] = -0.1;
+    std::string message;
     try {
-      DataMap d;
-      d.set_int("mode", 2);
-      (void)compile_model(slurp("tests/fixtures/necessity_effects.tmir.sexp"),
-                          d);
-    } catch (const CompileError& e) {
-      threw = true;
-      msg = e.what();
+      (void)ex.gradient(g.data());
+    } catch (const std::domain_error& e) {
+      message = e.what();
     }
-    expect("necessity runtime-valued reject refuses compilation", threw);
-    expect("necessity reject error names the unsupported effect: " + msg,
-           msg.find("runtime-control region") != std::string::npos &&
-               msg.find("FnReject") != std::string::npos);
+    expect("necessity dynamic reject message: " + message,
+           message == "negative x=-0.1");
   }
 
   if (failures == 0) std::printf("test_rejectprint: all checks passed\n");

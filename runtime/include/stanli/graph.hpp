@@ -5,6 +5,7 @@
 #define STANLI_GRAPH_HPP
 
 #include <stanli/kernel_types.hpp>
+#include <stanli/message.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -133,13 +134,6 @@ struct Graph {
 
  private:
   std::shared_ptr<const std::vector<int>> compact_idata_;
-};
-
-// Payload for OP_REJECT and OP_PRINT: the literal chunks of the message,
-// interleaved with the op's inputs at forward time. Chunk k precedes
-// input k; a trailing chunk with no input after it is just appended.
-struct MessageSpec {
-  std::vector<std::string> chunks;
 };
 
 // Payload for generated runtime bound and dimension checks.

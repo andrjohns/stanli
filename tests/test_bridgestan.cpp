@@ -824,19 +824,23 @@ void test_necessity_effects() {
   g_printed.clear();
   err = nullptr;
   m = bs_model_construct(root.dump().c_str(), 1, &err);
-  if (m != nullptr) {
-    fail("BridgeStan accepted runtime-valued necessity reject");
-    bs_model_destruct(m);
-  } else if (err == nullptr ||
-             std::string(err).find("runtime-control region") ==
-                 std::string::npos ||
-             std::string(err).find("FnReject") == std::string::npos) {
-    fail("BridgeStan necessity FnReject error: " +
+  if (m == nullptr) {
+    fail("BridgeStan refused dynamic necessity reject: " +
          std::string(err != nullptr ? err : "(no message)"));
+    bs_free_error_msg(err);
+  } else {
+    double lp = 0.0;
+    const double accepted = 0.1;
+    expect_eq_int("BridgeStan untaken dynamic reject",
+                  bs_log_density(m, true, true, &accepted, &lp, &err), 0);
+    const double rejected = -0.1;
+    expect_refused("BridgeStan taken dynamic reject",
+                   bs_log_density(m, true, true, &rejected, &lp, &err), &err,
+                   "negative x=-0.1");
+    bs_model_destruct(m);
   }
-  bs_free_error_msg(err);
   if (!g_printed.empty())
-    fail("BridgeStan executed FnReject while refusing: [" + g_printed + "]");
+    fail("BridgeStan dynamic reject unexpectedly printed: [" + g_printed + "]");
 
   err = nullptr;
   expect_eq_int("necessity callback clear",
