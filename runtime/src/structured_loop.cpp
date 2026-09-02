@@ -32,6 +32,9 @@ int64_t mul(int64_t a, int64_t b) {
   return a * b;
 }
 using Node = StructuredLoop::Node;
+void index_forward(KernelCtx& c);
+void index_backward(KernelCtx& c);
+int64_t scalar_index_forward(KernelCtx& c);
 void set_index_forward(KernelCtx& c);
 void set_index_backward(KernelCtx& c);
 bool index_selection_is_ordered_unique(const DynamicIndexSpec& p) {
@@ -1482,6 +1485,23 @@ struct DynamicAllocationProfile {
     add(b->records, 1);
   }
 
+  void note_compact_index(const Op& op) noexcept {
+    Bucket* b = bucket(op);
+    if (!b) return;
+    add(b->compact_visits, 1);
+    add(b->frame_free_compact_visits, 1);
+    add(b->active_visits, 1);
+    add(b->arena_values, 1);
+    add(b->record_handle_values, 1);
+    add(b->output_values, 1);
+    add(b->refs, 1);
+    add(b->active_refs, 1);
+    add(b->referenced_values, 1);
+    add(b->conceptual_adjoint_values, 1);
+    add(b->physical_adjoint_values, 1);
+    add(b->records, 1);
+  }
+
   void note_inline_integer(const Op& op, int64_t retained) noexcept {
     Bucket* b = bucket(op);
     if (!b) return;
@@ -1496,7 +1516,8 @@ struct DynamicLoopState final : KernelState {
       std::numeric_limits<uint32_t>::max();
   static constexpr uint32_t retained_scalar_record = ordinary_record - 1;
   static constexpr uint32_t delta_record = ordinary_record - 2;
-  static constexpr uint32_t max_frame_free_position = ordinary_record - 3;
+  static constexpr uint32_t scalar_index_record = ordinary_record - 3;
+  static constexpr uint32_t max_frame_free_position = ordinary_record - 4;
 
   struct Ref {
     double* value = nullptr;
@@ -1513,15 +1534,18 @@ struct DynamicLoopState final : KernelState {
     union {
       double* frame = nullptr;
       double rhs_handle;
+      double base_handle;
     };
     double out = -1;
     // Ordinary calls store the optional second-output handle. Scalar compact
-    // updates store the overwritten value. Delta compact updates store their
-    // exact reached selection count.
+    // updates store the overwritten value; compact scalar reads store their
+    // exact reached position, or -1 for an empty selection. Delta compact
+    // updates store their exact reached selection count.
     double out2 = -1;
     uint32_t site = ~uint32_t{0};
-    // Reserved tags identify ordinary, retained scalar, and ordered-delta
-    // records. Every lower code is an exact frame-free scalar position.
+    // Reserved tags identify ordinary, retained scalar update, ordered-delta,
+    // and scalar-read records. Every lower code is an exact frame-free scalar
+    // update position.
     uint32_t code = ordinary_record;
   };
   DynamicArena arena;
@@ -2675,6 +2699,46 @@ struct DynamicExecution {
     return true;
   }
 
+  bool compact_scalar_index(const Node& n) {
+    const Op& op = p.body.ops[static_cast<size_t>(n.op)];
+    if (op.opcode != OP_INDEX_DYNAMIC || op.n_in < 2 || op.out2 >= 0 ||
+        n.forward != index_forward || n.backward != index_backward ||
+        n.kernel_scratch != 0 ||
+        p.body.slots[static_cast<size_t>(op.out)].len != 1)
+      return false;
+    const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+    if (!spec || spec->selected_size != 1) return false;
+
+    double handles[6] = {};
+    bool active = false;
+    for (int k = 0; k < op.n_in; ++k) {
+      handles[k] = state.bindings[static_cast<size_t>(op.in[k])];
+      active |= handles[k] >= 0;
+    }
+    if (!active) return false;
+
+    // Keep the selected value immutable, but move the historical base handle
+    // into the fixed-size reverse record and save the validated position
+    // instead of retaining every selector handle. The shared helper is also
+    // the built-in callback's scalar path, so validation and exception order
+    // remain identical and every allocation precedes publication.
+    double* const output = state.arena.allocate(1);
+    ContextLease context(*this, n, handles, false, -1, -1, output);
+    const int64_t position = scalar_index_forward(context.get());
+    const double out = make_ref(output, 1, true);
+    DynamicLoopState::Record record;
+    record.base_handle = handles[0];
+    record.out = out;
+    record.out2 = static_cast<double>(position);
+    record.site = n.record_site;
+    record.code = DynamicLoopState::scalar_index_record;
+    state.records.push_back(record);
+    state.bindings[static_cast<size_t>(op.out)] = out;
+    if (state.allocation_profile)
+      state.allocation_profile->note_compact_index(op);
+    return true;
+  }
+
   bool compact_update(const Node& n) {
     if (n.compact_update_cell < 0) return false;
     const Op& op = p.body.ops[n.op];
@@ -2899,6 +2963,10 @@ struct DynamicExecution {
           publish_loop_invariant(n);
           return Normal;
         }
+        if (compact_scalar_index(n)) {
+          publish_loop_invariant(n);
+          return Normal;
+        }
         if (compact_update(n)) return Normal;
         double handles[6] = {};
         bool active = false;
@@ -3028,6 +3096,39 @@ struct DynamicExecution {
     return true;
   }
 
+  void backward_compact_scalar_index(
+      const DynamicLoopState::Record& record) {
+    const Node& node = record_node(record);
+    if (node.op < 0 || static_cast<size_t>(node.op) >= p.body.ops.size())
+      throw std::logic_error("compact scalar index node is invalid");
+    const Op& op = p.body.ops[static_cast<size_t>(node.op)];
+    const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+    if (!spec || op.n_in < 2 || op.n_in > 6 ||
+        op.n_in != (spec->input_count > 0 ? spec->input_count : 2))
+      throw std::logic_error("compact scalar index record is invalid");
+    const int64_t base_len = p.body.slots[static_cast<size_t>(op.in[0])].len;
+    if (node.forward != index_forward || node.backward != index_backward ||
+        op.opcode != OP_INDEX_DYNAMIC ||
+        op.out2 >= 0 || spec->selected_size != 1 ||
+        p.body.slots[static_cast<size_t>(op.out)].len != 1 ||
+        node.kernel_scratch != 0 || record.out < 0 || base_len < 0 ||
+        !std::isfinite(record.out2) || std::trunc(record.out2) != record.out2 ||
+        record.out2 < -1 || record.out2 >= static_cast<double>(base_len))
+      throw std::logic_error("compact scalar index record is invalid");
+
+    const auto& output = ref(record.out);
+    if (is_import_ref(output) || output.adjoint_or_import < 0 ||
+        !output.value)
+      throw std::logic_error("compact scalar index output is invalid");
+    double* const base_adjoint = adj(record.base_handle, base_len);
+    if (!base_adjoint || record.out2 < 0) return;
+    double* const output_adjoint = adj(record.out, 1);
+    if (!output_adjoint || overlaps({base_adjoint, base_len},
+                                    {output_adjoint, 1}))
+      throw std::logic_error("compact scalar index adjoints overlap");
+    base_adjoint[static_cast<int64_t>(record.out2)] += output_adjoint[0];
+  }
+
   void backward_delta_compact(const DynamicLoopState::Record& record) {
     const Node& node = record_node(record);
     if (node.op < 0 || static_cast<size_t>(node.op) >= p.body.ops.size() ||
@@ -3151,6 +3252,8 @@ struct DynamicExecution {
         throw std::logic_error("dynamic structured record node is invalid");
       if (record.code == DynamicLoopState::delta_record) {
         backward_delta_compact(record);
+      } else if (record.code == DynamicLoopState::scalar_index_record) {
+        backward_compact_scalar_index(record);
       } else if (record.code != DynamicLoopState::ordinary_record) {
         const bool frame_free =
             record.code != DynamicLoopState::retained_scalar_record;
@@ -3788,8 +3891,23 @@ int64_t compact_scalar_update_position(const DynamicIndexSpec& p,
     throw std::logic_error("compact structured update is not scalar");
   return selected_position(p, c, runtime, 0);
 }
+int64_t scalar_index_forward(KernelCtx& c) {
+  const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);
+  const IndexRuntime runtime = validate_index(p, c, false);
+  if (p.selected_size != 1 || c.out.len != 1 || runtime.selected > 1)
+    throw std::logic_error("invalid compact scalar index shape");
+  c.out.data[0] = 0.0;
+  if (runtime.selected == 0) return -1;
+  const int64_t position = selected_position(p, c, runtime, 0);
+  c.out.data[0] = c.in[0].data[position];
+  return position;
+}
 void index_forward(KernelCtx& c) {
   const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);
+  if (p.selected_size == 1 && c.out.len == 1) {
+    (void)scalar_index_forward(c);
+    return;
+  }
   const IndexRuntime runtime = validate_index(p, c, false);
   std::fill(c.out.data, c.out.data + c.out.len, 0.0);
   for (int64_t i = 0; i < runtime.selected; ++i)
