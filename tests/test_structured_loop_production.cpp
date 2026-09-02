@@ -521,6 +521,7 @@ static std::vector<const double*> range_update_forward_addresses;
 static bool iterator_throw_once = false;
 static int ordinary_update_forward_calls = 0;
 static int ordinary_update_backward_calls = 0;
+static int duplicate_site_backward_calls = 0;
 
 static void trace_iterator_forward(KernelCtx& context) {
   iterator_forward_values.push_back(context.in[1].data[0]);
@@ -554,6 +555,11 @@ static void ordinary_update_forward(KernelCtx& context) {
 static void ordinary_update_backward(KernelCtx& context) {
   ++ordinary_update_backward_calls;
   find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
+}
+
+static void duplicate_site_backward(KernelCtx& context) {
+  ++duplicate_site_backward_calls;
+  find_kernel(OP_MUL)->backward(context);
 }
 
 static void trace_range_sum_backward(KernelCtx& context) {
@@ -973,6 +979,81 @@ static std::shared_ptr<StructuredLoop> loop_aliased_update_plan(
   return plan;
 }
 
+static std::shared_ptr<StructuredLoop> retained_scalar_update_plan(
+    bool force_ordinary) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int two = scalar(*plan, 2);
+  const int inactive_rhs = scalar(*plan, 7);
+  const int base = plan->body.add_slot(3, false);
+  plan->fills.push_back({base, {10, 20, 30}});
+  const int current = plan->body.add_slot(3, false);
+  const int updated1_slot = plan->body.add_slot(3, false);
+  const int updated2_slot = plan->body.add_slot(3, false);
+  const int observed1 = plan->body.add_slot(1, false);
+  const int observed2 = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
+  spec->selected_size = 1;
+  Node update1 = call(*plan, OP_SET_INDEX_DYNAMIC,
+                      {current, one, inactive_rhs}, updated1_slot);
+  Node update2 =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, two, theta}, updated2_slot);
+  const int update_ops[] = {update1.op, update2.op};
+  for (int op : update_ops)
+    plan->body.ops[static_cast<size_t>(op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  Node observe1 = call(*plan, OP_SUM_VEC, {current}, observed1);
+  Node observe2 = call(*plan, OP_SUM_VEC, {current}, observed2);
+  const int observer_ops[] = {observe1.op, observe2.op};
+  plan->root = sequence(
+      {alias(current, base), std::move(update1),
+       alias(current, updated1_slot), std::move(observe1), std::move(update2),
+       alias(current, updated2_slot), std::move(observe2),
+       call(*plan, OP_SUM_VEC, {current}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->compact_update_sites == 2,
+        "retained scalar plan selects compact update sites");
+  for (int op : observer_ops)
+    check(set_forward(plan->root, op, trace_range_sum_forward),
+          "find retained scalar address observer");
+  if (force_ordinary) {
+    for (int op : update_ops) {
+      check(set_forward(plan->root, op, ordinary_update_forward),
+            "find retained scalar forward callback");
+      check(set_backward(plan->root, op, ordinary_update_backward),
+            "find retained scalar backward callback");
+    }
+  }
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> duplicate_record_site_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int beta = plan->body.add_slot(1, false);
+  const int product = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}, {beta, 1, 0}};
+  Node first = call(*plan, OP_MUL, {theta, beta}, product);
+  Node second = first;
+  plan->root = sequence({std::move(first), std::move(second)});
+  plan->outputs = {product};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->record_node_count == 2 &&
+            plan->root.children[0].record_site !=
+                plan->root.children[1].record_site,
+        "duplicate operation nodes receive distinct record sites");
+  plan->root.children[1].backward = duplicate_site_backward;
+  return plan;
+}
+
 static void compact_iterator_history_tests() {
   iterator_forward_values.clear();
   iterator_reverse_values.clear();
@@ -1181,6 +1262,40 @@ static void compact_iterator_history_tests() {
         "loop-backedge alias preserves snapshot value");
   close(loop_aliased.gradient[0], 7,
         "loop-backedge alias preserves snapshot gradient");
+
+  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
+  Executor retained_compact(outer(retained_scalar_update_plan(false)));
+  Executor retained_ordinary(outer(retained_scalar_update_plan(true)));
+  range_update_forward_addresses.clear();
+  const Evaluation retained_result = evaluate(retained_compact, .25, 0);
+  const auto retained_compact_addresses = range_update_forward_addresses;
+  range_update_forward_addresses.clear();
+  const Evaluation retained_reference = evaluate(retained_ordinary, .25, 0);
+  const auto retained_ordinary_addresses = range_update_forward_addresses;
+  check(std::memcmp(&retained_result, &retained_reference,
+                    sizeof(Evaluation)) == 0 &&
+            ordinary_update_forward_calls == 2 &&
+            ordinary_update_backward_calls == 1,
+        "retained scalar record has bitwise ordinary-path parity");
+  check(retained_compact_addresses.size() == 2 &&
+            retained_compact_addresses[0] == retained_compact_addresses[1] &&
+            retained_ordinary_addresses.size() == 2 &&
+            retained_ordinary_addresses[0] != retained_ordinary_addresses[1],
+        "unshared active scalar update uses retained compact history");
+  close(retained_result.value, 37.25, "retained scalar record value");
+  close(retained_result.gradient[0], 1,
+        "retained scalar record gradient");
+
+  duplicate_site_backward_calls = 0;
+  Executor duplicate_sites(outer(duplicate_record_site_plan()));
+  const Evaluation duplicate = evaluate(duplicate_sites, 2, 3);
+  close(duplicate.value, 6, "duplicate operation record-site value");
+  close(duplicate.gradient[0], 3,
+        "duplicate operation record-site theta gradient");
+  close(duplicate.gradient[1], 2,
+        "duplicate operation record-site beta gradient");
+  check(duplicate_site_backward_calls == 1,
+        "reverse resolves the exact duplicate operation node");
 }
 
 static std::shared_ptr<StructuredLoop> integer_history_plan() {

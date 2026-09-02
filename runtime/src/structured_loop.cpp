@@ -59,6 +59,7 @@ void prepare_node(StructuredLoop& p, Node& n, unsigned depth,
                   unsigned loop_depth) {
   if (depth > 256) throw std::length_error("structured loop nesting limit");
   ++p.node_count;
+  n.record_site = ~uint32_t{0};
   n.compact_update_cell = -1;
   n.frame_size = n.target_capacity = 0;
   const bool loop = n.kind == Node::For || n.kind == Node::While;
@@ -72,6 +73,9 @@ void prepare_node(StructuredLoop& p, Node& n, unsigned depth,
       }
       break;
     case Node::KernelCall: {
+      if (p.record_node_count >= std::numeric_limits<uint32_t>::max())
+        throw std::length_error("too many structured kernel call sites");
+      n.record_site = static_cast<uint32_t>(p.record_node_count++);
       if (n.op < 0 || static_cast<size_t>(n.op) >= p.body.ops.size())
         throw std::invalid_argument("structured loop invalid operation");
       const Op& op = p.body.ops[n.op];
@@ -1488,6 +1492,12 @@ struct DynamicAllocationProfile {
 };
 
 struct DynamicLoopState final : KernelState {
+  static constexpr uint32_t ordinary_record =
+      std::numeric_limits<uint32_t>::max();
+  static constexpr uint32_t retained_scalar_record = ordinary_record - 1;
+  static constexpr uint32_t delta_record = ordinary_record - 2;
+  static constexpr uint32_t max_frame_free_position = ordinary_record - 3;
+
   struct Ref {
     double* value = nullptr;
     // Nonnegative values are internal adjoint offsets, -1 marks an inactive
@@ -1497,7 +1507,6 @@ struct DynamicLoopState final : KernelState {
     int64_t adjoint_or_import = -1;
   };
   struct Record {
-    const Node* node = nullptr;
     // Ordinary and retained compact records store their input frame. A
     // frame-free active compact record stores only its RHS handle; an inactive
     // frame-free compact record leaves the pointer null.
@@ -1510,10 +1519,10 @@ struct DynamicLoopState final : KernelState {
     // updates store the overwritten value. Delta compact updates store their
     // exact reached selection count.
     double out2 = -1;
-    // Retained compact updates store a nonnegative position. Ordinary records
-    // use -1. Frame-free scalar updates encode position as -2 - position.
-    // INT64_MIN identifies a variable-width ordered-unique delta payload.
-    int64_t undo = -1;
+    uint32_t site = ~uint32_t{0};
+    // Reserved tags identify ordinary, retained scalar, and ordered-delta
+    // records. Every lower code is an exact frame-free scalar position.
+    uint32_t code = ordinary_record;
   };
   DynamicArena arena;
   std::vector<double> adjoints;
@@ -1540,6 +1549,7 @@ struct DynamicLoopState final : KernelState {
   // structure between calls; context() refreshes every evaluation-local
   // pointer and adjoint before each reached forward or reverse callback.
   std::vector<KernelCtx> context_templates;
+  std::vector<const Node*> record_nodes;
   std::unique_ptr<DirectControlPlan> direct_control_plan;
   std::unique_ptr<LoopInvariantPlan> loop_invariant_plan;
   std::unique_ptr<InactiveControlPlan> inactive_control_plan;
@@ -1595,10 +1605,16 @@ struct DynamicLoopState final : KernelState {
       if (op.out2 >= 0) c.out2 = {nullptr, p.body.slots[op.out2].len};
       context_templates.push_back(c);
     }
+    record_nodes.assign(p.record_node_count, nullptr);
     const auto visit_workspace = [&](const auto& self, const Node& n) -> void {
       if (n.kind == Node::KernelCall) {
         if (n.op < 0 || static_cast<size_t>(n.op) >= p.body.ops.size())
           throw std::invalid_argument("dynamic structured body op is invalid");
+        if (n.record_site >= record_nodes.size() ||
+            record_nodes[n.record_site] != nullptr)
+          throw std::invalid_argument(
+              "dynamic structured record site is invalid");
+        record_nodes[n.record_site] = &n;
         inactive_scratch_size =
             std::max(inactive_scratch_size, n.kernel_scratch);
         if (n.compact_update_cell >= 0) {
@@ -1616,6 +1632,9 @@ struct DynamicLoopState final : KernelState {
       for (const auto& child : n.children) self(self, child);
     };
     visit_workspace(visit_workspace, p.root);
+    if (std::any_of(record_nodes.begin(), record_nodes.end(),
+                    [](const Node* node) { return node == nullptr; }))
+      throw std::invalid_argument("dynamic structured record site is missing");
     if (compact_adjoint_work_size < 0 ||
         static_cast<uint64_t>(compact_adjoint_work_size) >
             std::numeric_limits<size_t>::max())
@@ -1693,7 +1712,7 @@ struct DynamicLoopState final : KernelState {
 };
 static_assert(sizeof(DynamicLoopState::Ref) == 16,
               "dynamic structured references must stay compact");
-static_assert(sizeof(DynamicLoopState::Record) == 40,
+static_assert(sizeof(DynamicLoopState::Record) == 32,
               "dynamic structured reverse records must stay compact");
 static_assert(std::is_trivially_copyable_v<DynamicLoopState::Record>,
               "dynamic structured reverse records must copy by value");
@@ -2006,6 +2025,13 @@ struct DynamicExecution {
       : p(*static_cast<const StructuredLoop*>(c.udata)),
         outer(c),
         state(dynamic_state(c)) {}
+
+  const Node& record_node(const DynamicLoopState::Record& record) const {
+    if (record.site >= state.record_nodes.size() ||
+        !state.record_nodes[record.site])
+      throw std::logic_error("dynamic structured record site is invalid");
+    return *state.record_nodes[record.site];
+  }
 
   DynamicLoopState::Ref& ordinary_ref(double h) {
     const int64_t id = offset(h);
@@ -2693,9 +2719,9 @@ struct DynamicExecution {
       if (active) retained = add(retained, 1);
       if (active) {
         if (retained >= retained_frame_values(n)) return false;
-      } else if (add(retained, 7) >= c.out.len) {
+      } else if (add(retained, 6) >= c.out.len) {
         // Inactive ordinary calls retain only the output buffer. A compact
-        // delta also adds one 16-byte Ref and one 40-byte Record, so demand a
+        // delta also adds one 16-byte Ref and one 32-byte Record, so demand a
         // strict total-byte win rather than comparing arena values alone.
         return false;
       }
@@ -2712,11 +2738,11 @@ struct DynamicExecution {
       const double out =
           make_ref(c.out.data, c.out.len, active, shared_adjoint);
       DynamicLoopState::Record record;
-      record.node = &n;
       record.frame = delta;
       record.out = out;
       record.out2 = static_cast<double>(selected);
-      record.undo = std::numeric_limits<int64_t>::min();
+      record.site = n.record_site;
+      record.code = DynamicLoopState::delta_record;
       state.records.push_back(record);
       for (int64_t i = 0; i < selected; ++i)
         c.out.data[static_cast<int64_t>(delta[i])] = c.in[2].data[i];
@@ -2733,14 +2759,10 @@ struct DynamicExecution {
 
     bool frame_free =
         !active || (shared_adjoint >= 0 && n.backward == set_index_backward);
-    int64_t undo = position;
-    if (frame_free) {
-      if (position > std::numeric_limits<int64_t>::max() - 2) {
-        frame_free = false;
-      } else {
-        undo = -2 - position;
-      }
-    }
+    if (frame_free &&
+        static_cast<uint64_t>(position) >
+            DynamicLoopState::max_frame_free_position)
+      frame_free = false;
 
     // Every allocation that can throw precedes the destructive write. A later
     // failure still drops the entire evaluation-local tape, but this ordering
@@ -2748,29 +2770,31 @@ struct DynamicExecution {
     const int retained_inputs = op.n_in;
     double* frame = nullptr;
     if (!frame_free) {
-      frame = state.arena.allocate(std::max(1, retained_inputs));
+      frame = state.arena.allocate(std::max(1, retained_inputs + 1));
       std::copy_n(handles, retained_inputs, frame);
+      frame[retained_inputs] = static_cast<double>(position);
     }
     const double out = make_ref(c.out.data, c.out.len, active, shared_adjoint);
     if (shared_adjoint >= 0 && c.out.len > state.compact_adjoint_work_size)
       throw std::logic_error(
           "compact structured adjoint exceeds preallocated work");
     DynamicLoopState::Record record;
-    record.node = &n;
     if (frame_free && active)
       record.rhs_handle = handles[2];
     else
       record.frame = frame;
     record.out = out;
     record.out2 = c.out.data[position];
-    record.undo = undo;
+    record.site = n.record_site;
+    record.code = frame_free ? static_cast<uint32_t>(position)
+                             : DynamicLoopState::retained_scalar_record;
     state.records.push_back(record);
     c.out.data[position] = c.in[2].data[0];
     state.bindings[static_cast<size_t>(op.out)] = out;
     if (state.allocation_profile)
       state.allocation_profile->note_compact(
-          op, frame_free ? 0 : std::max(1, retained_inputs), c.out.len, active,
-          shared_adjoint >= 0, frame_free);
+          op, frame_free ? 0 : std::max(1, retained_inputs + 1), c.out.len,
+          active, shared_adjoint >= 0, frame_free);
     return true;
   }
 
@@ -2894,7 +2918,14 @@ struct DynamicExecution {
         if (op.out2 >= 0)
           state.bindings[static_cast<size_t>(op.out2)] = out2 =
               make_ref(c.out2.data, c.out2.len, active);
-        if (active) state.records.push_back({&n, frame, out, out2, -1});
+        if (active) {
+          DynamicLoopState::Record record;
+          record.frame = frame;
+          record.out = out;
+          record.out2 = out2;
+          record.site = n.record_site;
+          state.records.push_back(record);
+        }
         if (n.compact_update_cell >= 0) {
           state.compact_primal_by_cell[static_cast<size_t>(
               n.compact_update_cell)] = c.out.data;
@@ -2960,7 +2991,9 @@ struct DynamicExecution {
 
   bool prepare_shared_compact_adjoint(const DynamicLoopState::Record& record,
                                       KernelCtx& c) {
-    if (record.undo < 0 || record.out < 0 || c.n_in != 3) return false;
+    if (record.code != DynamicLoopState::retained_scalar_record ||
+        record.out < 0 || c.n_in != 3)
+      return false;
     const double base_handle = record.frame[0];
     if (base_handle < 0) return false;
     const auto& base = ref(base_handle);
@@ -2996,18 +3029,18 @@ struct DynamicExecution {
   }
 
   void backward_delta_compact(const DynamicLoopState::Record& record) {
-    if (!record.node || record.node->op < 0 ||
-        static_cast<size_t>(record.node->op) >= p.body.ops.size() ||
+    const Node& node = record_node(record);
+    if (node.op < 0 || static_cast<size_t>(node.op) >= p.body.ops.size() ||
         !std::isfinite(record.out2) || std::trunc(record.out2) != record.out2 ||
         record.out2 < 0 || record.out2 > static_cast<double>(exact_limit))
       throw std::logic_error("delta compact structured record is invalid");
-    const Op& op = p.body.ops[static_cast<size_t>(record.node->op)];
+    const Op& op = p.body.ops[static_cast<size_t>(node.op)];
     const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
     const int64_t selected = static_cast<int64_t>(record.out2);
     const int64_t output_len = p.body.slots[static_cast<size_t>(op.out)].len;
     const int64_t rhs_len = p.body.slots[static_cast<size_t>(op.in[2])].len;
-    if (!spec || record.node->forward != set_index_forward ||
-        record.node->backward != set_index_backward ||
+    if (!spec || node.forward != set_index_forward ||
+        node.backward != set_index_backward ||
         op.opcode != OP_SET_INDEX_DYNAMIC || op.n_in != 3 || op.out2 >= 0 ||
         selected > spec->selected_size || rhs_len != spec->selected_size ||
         output_len <= 0 || (selected > 0 && !record.frame))
@@ -3065,9 +3098,10 @@ struct DynamicExecution {
 
   void backward_frame_free_compact(const DynamicLoopState::Record& record,
                                    int64_t position) {
-    const Op& op = p.body.ops[static_cast<size_t>(record.node->op)];
+    const Node& node = record_node(record);
+    const Op& op = p.body.ops[static_cast<size_t>(node.op)];
     const int64_t output_len = p.body.slots[static_cast<size_t>(op.out)].len;
-    if (record.out < 0 || record.node->backward != set_index_backward ||
+    if (record.out < 0 || node.backward != set_index_backward ||
         op.opcode != OP_SET_INDEX_DYNAMIC || op.n_in != 3 || op.out2 >= 0 ||
         p.body.slots[static_cast<size_t>(op.in[2])].len != 1 || position < 0 ||
         position >= output_len || output_len <= 0 ||
@@ -3112,34 +3146,45 @@ struct DynamicExecution {
   void backward() {
     for (size_t i = state.records.size(); i-- > 0;) {
       const auto& record = state.records[i];
-      if (record.undo == std::numeric_limits<int64_t>::min()) {
+      const Node& node = record_node(record);
+      if (node.op < 0 || static_cast<size_t>(node.op) >= p.body.ops.size())
+        throw std::logic_error("dynamic structured record node is invalid");
+      if (record.code == DynamicLoopState::delta_record) {
         backward_delta_compact(record);
-      } else if (record.undo != -1) {
-        const bool frame_free = record.undo < -1;
-        const int64_t position = frame_free ? -(record.undo + 2) : record.undo;
+      } else if (record.code != DynamicLoopState::ordinary_record) {
+        const bool frame_free =
+            record.code != DynamicLoopState::retained_scalar_record;
+        double raw_position = frame_free
+                                  ? static_cast<double>(record.code)
+                                  : record.frame[p.body.ops[node.op].n_in];
+        if (!std::isfinite(raw_position) ||
+            std::trunc(raw_position) != raw_position || raw_position < 0 ||
+            raw_position > static_cast<double>(exact_limit))
+          throw std::logic_error(
+              "compact structured undo position is invalid");
+        const int64_t position = static_cast<int64_t>(raw_position);
         auto& output = ref(record.out);
-        const int64_t output_len =
-            p.body.slots[p.body.ops[record.node->op].out].len;
+        const int64_t output_len = p.body.slots[p.body.ops[node.op].out].len;
         if (position < 0 || position >= output_len)
           throw std::logic_error(
               "compact structured undo position out of range");
-        if (record.out >= 0 && record.node->backward) {
+        if (record.out >= 0 && node.backward) {
           if (frame_free) {
             backward_frame_free_compact(record, position);
           } else {
-            ContextLease context(*this, *record.node, record.frame, true,
-                                 record.out, -1, output.value);
+            ContextLease context(*this, node, record.frame, true, record.out,
+                                 -1, output.value);
             KernelCtx& c = context.get();
             prepare_shared_compact_adjoint(record, c);
-            record.node->backward(c);
+            node.backward(c);
           }
         }
         output.value[position] = record.out2;
-      } else if (record.node->backward) {
-        ContextLease context(*this, *record.node, record.frame, true,
-                             record.out, record.out2);
+      } else if (node.backward) {
+        ContextLease context(*this, node, record.frame, true, record.out,
+                             record.out2);
         KernelCtx& c = context.get();
-        record.node->backward(c);
+        node.backward(c);
       }
     }
   }
@@ -3828,7 +3873,7 @@ void StructuredLoop::prepare(int64_t max_bytes) {
       throw std::invalid_argument("invalid structured import");
   }
   for (int s : outputs) slot(*this, s);
-  node_count = compact_update_sites = 0;
+  node_count = record_node_count = compact_update_sites = 0;
   prepare_node(*this, root, 0, 0);
   classify_compact_updates(*this);
   bindings_offset = initial_size;

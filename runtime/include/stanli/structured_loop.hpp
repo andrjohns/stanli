@@ -65,6 +65,9 @@ struct StructuredLoop {
       Continue,
       Target
     } kind = Sequence;
+    // Dense immutable call-site identity for compact dynamic reverse records.
+    // This occupies the padding before children on supported 64-bit targets.
+    uint32_t record_site = ~uint32_t{0};
     std::vector<Node> children;
     int op = -1;
     int dst = -1, src = -1;
@@ -96,7 +99,7 @@ struct StructuredLoop {
   int64_t initial_size = 0, bindings_offset = 0, history_offset = 0;
   int64_t primal_size = 0, target_refs_offset = 0, target_work_offset = 0;
   int64_t adjoint_offset = 0, scratch_size = 0;
-  size_t node_count = 0, compact_update_sites = 0;
+  size_t node_count = 0, record_node_count = 0, compact_update_sites = 0;
 
   // Validate and size without enumerating execution. Throws on malformed
   // graphs or checked resource limits; builders publish only after success.
