@@ -2397,11 +2397,18 @@ void int_forward(KernelCtx& c) {
   c.out.data[0] = static_cast<double>(integer(static_cast<double>(v)));
 }
 
-int64_t packed_integer(const KernelCtx& c, int64_t offset, int64_t upper,
-                       const char* what) {
-  if (offset < 0 || offset >= c.in[1].len)
+const Desc& index_input(const KernelCtx& c, int input, const char* what) {
+  if (input < 0 || input >= c.n_in)
+    throw std::logic_error(std::string("invalid ") + what + " input");
+  return c.in[input];
+}
+
+int64_t index_integer(const KernelCtx& c, int input, int64_t offset,
+                      int64_t upper, const char* what) {
+  const Desc& values = index_input(c, input, what);
+  if (offset < 0 || offset >= values.len)
     throw std::logic_error(std::string("invalid ") + what + " offset");
-  const double raw = c.in[1].data[offset];
+  const double raw = values.data[offset];
   if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 0 ||
       raw > static_cast<double>(upper))
     throw std::out_of_range(std::string(what) + " exceeds capacity");
@@ -2412,8 +2419,8 @@ int64_t logical_axis_extent(const DynamicIndexSpec::Axis& axis,
                             const KernelCtx& c) {
   return axis.extent_input_offset < 0
              ? axis.extent
-             : packed_integer(c, axis.extent_input_offset, axis.extent,
-                              "dynamic index logical extent");
+             : index_integer(c, axis.extent_input, axis.extent_input_offset,
+                             axis.extent, "dynamic index logical extent");
 }
 
 int64_t dynamic_axis_count(const DynamicIndexSpec::Axis& axis,
@@ -2422,10 +2429,14 @@ int64_t dynamic_axis_count(const DynamicIndexSpec::Axis& axis,
   const int64_t upper = axis.kind == DynamicIndexSpec::Axis::Range
                             ? std::numeric_limits<int32_t>::max()
                             : axis.count;
-  int64_t count =
-      packed_integer(c, axis.count_input_offset, upper, "dynamic index count");
+  int64_t count = index_integer(c, axis.count_input, axis.count_input_offset,
+                                upper, "dynamic index count");
   if (axis.kind == DynamicIndexSpec::Axis::Range) {
-    const double first = c.in[1].data[axis.input_offset];
+    const Desc& selector =
+        index_input(c, axis.selector_input, "dynamic range start");
+    if (axis.input_offset < 0 || axis.input_offset >= selector.len)
+      throw std::logic_error("invalid dynamic range start offset");
+    const double first = selector.data[axis.input_offset];
     if (!std::isfinite(first) || std::trunc(first) != first || first < 1 ||
         first > std::numeric_limits<int32_t>::max())
       throw std::domain_error("dynamic range start is not an integer");
@@ -2499,13 +2510,17 @@ int64_t selected_position(const DynamicIndexSpec& p, const KernelCtx& c,
         raw = static_cast<double>(ordinal + 1);
         break;
       case DynamicIndexSpec::Axis::Single:
-        raw = c.in[1].data[axis.input_offset];
+        raw = index_input(c, axis.selector_input, "structured selector")
+                  .data[axis.input_offset];
         break;
       case DynamicIndexSpec::Axis::Multi:
-        raw = c.in[1].data[axis.input_offset + ordinal];
+        raw = index_input(c, axis.selector_input, "structured selector")
+                  .data[axis.input_offset + ordinal];
         break;
       case DynamicIndexSpec::Axis::Range:
-        raw = c.in[1].data[axis.input_offset] + static_cast<double>(ordinal);
+        raw = index_input(c, axis.selector_input, "structured selector")
+                  .data[axis.input_offset] +
+              static_cast<double>(ordinal);
         break;
       default:
         throw std::logic_error("invalid index selector");
@@ -2525,12 +2540,29 @@ int64_t selected_position(const DynamicIndexSpec& p, const KernelCtx& c,
 }
 IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
                             bool update) {
-  if (c.n_in != (update ? 3 : 2) || (p.matrix_leaf && p.axes.size() < 2))
+  if (p.input_count < 0 || p.input_count > 6)
+    throw std::logic_error("invalid structured index input count");
+  const int expected_inputs =
+      !update && p.input_count > 0 ? p.input_count : (update ? 3 : 2);
+  if (c.n_in != expected_inputs || (update && p.input_count > 0) ||
+      (p.matrix_leaf && p.axes.size() < 2))
     throw std::logic_error("invalid structured index descriptor");
+  const int selector_end = p.input_count > 0 ? p.input_count : 2;
+  const auto validate_selector_input = [&](int input, const char* what) {
+    if (input < 1 || input >= selector_end)
+      throw std::logic_error(std::string("invalid ") + what + " input");
+  };
   IndexRuntime runtime(p.axes.size());
   int64_t capacity = 1, logical_size = 1;
   for (size_t dim = 0; dim < p.axes.size(); ++dim) {
     const auto& axis = p.axes[dim];
+    if (axis.kind != DynamicIndexSpec::Axis::All)
+      validate_selector_input(axis.selector_input, "structured selector");
+    if (axis.count_input_offset >= 0)
+      validate_selector_input(axis.count_input, "dynamic index count");
+    if (axis.extent_input_offset >= 0)
+      validate_selector_input(axis.extent_input,
+                              "dynamic index logical extent");
     const int64_t logical_extent = logical_axis_extent(axis, c);
     runtime.extent(dim) = logical_extent;
     const int64_t count = dynamic_axis_count(axis, c);
@@ -2538,19 +2570,31 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
     runtime.selected = mul(runtime.selected, count);
     capacity = mul(capacity, axis.extent);
     logical_size = mul(logical_size, logical_extent);
-    if (axis.stride < 0 || axis.input_offset < 0)
+    if (axis.stride < 0 ||
+        (axis.kind != DynamicIndexSpec::Axis::All && axis.input_offset < 0))
       throw std::logic_error("invalid structured index offset");
-    const int64_t width = axis.kind == DynamicIndexSpec::Axis::All ? 0
-                          : axis.kind == DynamicIndexSpec::Axis::Multi
-                              ? axis.count
-                          : axis.count_input_offset >= 0 ? 2
-                                                         : 1;
-    if (axis.input_offset > c.in[1].len ||
-        width > c.in[1].len - axis.input_offset ||
+    const int64_t width =
+        axis.kind == DynamicIndexSpec::Axis::All     ? 0
+        : axis.kind == DynamicIndexSpec::Axis::Multi ? axis.count
+        : axis.kind == DynamicIndexSpec::Axis::Range &&
+                axis.count_input_offset >= 0 &&
+                axis.count_input == axis.selector_input &&
+                axis.count_input_offset == axis.input_offset + 1
+            ? 2
+            : 1;
+    const Desc* selector =
+        axis.kind == DynamicIndexSpec::Axis::All
+            ? nullptr
+            : &index_input(c, axis.selector_input, "structured selector");
+    if ((selector && (axis.input_offset > selector->len ||
+                      width > selector->len - axis.input_offset)) ||
         (axis.count_input_offset >= 0 &&
-         axis.count_input_offset >= c.in[1].len) ||
+         axis.count_input_offset >=
+             index_input(c, axis.count_input, "dynamic index count").len) ||
         (axis.extent_input_offset >= 0 &&
-         axis.extent_input_offset >= c.in[1].len) ||
+         axis.extent_input_offset >=
+             index_input(c, axis.extent_input, "dynamic index logical extent")
+                 .len) ||
         (axis.kind == DynamicIndexSpec::Axis::Single && axis.count != 1) ||
         (axis.kind == DynamicIndexSpec::Axis::All && axis.count != axis.extent))
       throw std::logic_error("invalid structured index shape");
@@ -2561,7 +2605,7 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
     const int64_t selector_width =
         axis.kind == DynamicIndexSpec::Axis::Multi ? count : 1;
     for (int64_t j = 0; j < selector_width; ++j) {
-      const double raw = c.in[1].data[axis.input_offset + j];
+      const double raw = selector->data[axis.input_offset + j];
       const double last = axis.kind == DynamicIndexSpec::Axis::Range
                               ? raw + static_cast<double>(count - 1)
                               : raw;

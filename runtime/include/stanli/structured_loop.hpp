@@ -21,10 +21,21 @@ struct DynamicIndexSpec {
     // -1 keeps count fixed. Multi reads an explicit logical count; Range
     // reads its inclusive runtime endpoint and derives max(0, hi-lo+1).
     int64_t count_input_offset = -1;
+    // KernelCtx input descriptor containing each runtime field. Existing
+    // hand-built and packed descriptors use input 1 for every field. Native
+    // structured lowering may instead bind common-rank selector values
+    // directly and keep each offset local to that descriptor.
+    int selector_input = 1;
+    int extent_input = 1;
+    int count_input = 1;
   };
   std::vector<Axis> axes;
   bool matrix_leaf = false;
   int64_t selected_size = 0;
+  // Zero preserves the original two-input read / three-input update ABI.
+  // A positive value is the exact direct-input arity for a read. Updates keep
+  // the packed ABI until their compact-update alias contract is generalized.
+  int input_count = 0;
 };
 
 // One ordered stream: scalar leaves and counted fragments from retained

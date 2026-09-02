@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -177,6 +178,132 @@ static void runtime_trip_tests() {
       close(gradient[1], beta.adj(), "zero/one/many beta gradient");
     }
   }
+}
+
+static void direct_index_kernel_tests() {
+  const Kernel* dynamic_index = find_kernel(OP_INDEX_DYNAMIC);
+  check(dynamic_index && dynamic_index->forward && dynamic_index->backward,
+        "dynamic index kernel registered");
+  if (!dynamic_index || !dynamic_index->forward || !dynamic_index->backward)
+    return;
+
+  DynamicIndexSpec packed_spec;
+  packed_spec.matrix_leaf = true;
+  packed_spec.axes = {
+      {DynamicIndexSpec::Axis::Single, 2, 1, 1, 0},
+      {DynamicIndexSpec::Axis::Range, 3, 2, 3, 1},
+  };
+  packed_spec.axes[1].count_input_offset = 2;
+  packed_spec.selected_size = 3;
+  double base[] = {1, 2, 3, 4, 5, 6};
+  double selectors[] = {2, 1, 3};
+  double packed_output[3] = {};
+  double packed_base_adj[6] = {};
+  double seed[] = {1, 2, 3};
+  KernelCtx packed{};
+  packed.n_in = 2;
+  packed.in[0] = {base, 6};
+  packed.in[1] = {selectors, 3};
+  packed.in_adj[0] = {packed_base_adj, 6};
+  packed.in_adj[1] = {nullptr, 3};
+  packed.out = {packed_output, 3};
+  packed.out_adj_vec = {seed, 3};
+  packed.udata = &packed_spec;
+  dynamic_index->forward(packed);
+  dynamic_index->backward(packed);
+
+  DynamicIndexSpec direct_spec = packed_spec;
+  direct_spec.input_count = 4;
+  direct_spec.axes[0].selector_input = 1;
+  direct_spec.axes[0].input_offset = 0;
+  direct_spec.axes[1].selector_input = 2;
+  direct_spec.axes[1].input_offset = 0;
+  direct_spec.axes[1].count_input = 3;
+  direct_spec.axes[1].count_input_offset = 0;
+  double row = 2, lower = 1, upper = 3;
+  double direct_output[3] = {};
+  double direct_base_adj[6] = {};
+  KernelCtx direct{};
+  direct.n_in = 4;
+  direct.in[0] = {base, 6};
+  direct.in[1] = {&row, 1};
+  direct.in[2] = {&lower, 1};
+  direct.in[3] = {&upper, 1};
+  direct.in_adj[0] = {direct_base_adj, 6};
+  direct.in_adj[1] = {nullptr, 1};
+  direct.in_adj[2] = {nullptr, 1};
+  direct.in_adj[3] = {nullptr, 1};
+  direct.out = {direct_output, 3};
+  direct.out_adj_vec = {seed, 3};
+  direct.udata = &direct_spec;
+  dynamic_index->forward(direct);
+  dynamic_index->backward(direct);
+  check(std::memcmp(packed_output, direct_output, sizeof(packed_output)) == 0,
+        "direct index matches packed values bitwise");
+  check(std::memcmp(packed_base_adj, direct_base_adj,
+                    sizeof(packed_base_adj)) == 0,
+        "direct index matches packed adjoints bitwise");
+
+  upper = 0;
+  dynamic_index->forward(direct);
+  check(direct_output[0] == 0 && direct_output[1] == 0 && direct_output[2] == 0,
+        "direct dynamic range supports zero selected values");
+  upper = 4;
+  lower = 4;
+  try {
+    dynamic_index->forward(direct);
+    check(false, "direct index validates selectors");
+  } catch (const std::out_of_range&) {
+  }
+  lower = 1;
+  direct.n_in = 3;
+  try {
+    dynamic_index->forward(direct);
+    check(false, "direct index validates input arity");
+  } catch (const std::logic_error&) {
+  }
+  direct.n_in = 4;
+  lower = 1;
+  upper = 3;
+
+  DynamicIndexSpec invalid_route = direct_spec;
+  invalid_route.axes[0].selector_input = 0;
+  direct.udata = &invalid_route;
+  try {
+    dynamic_index->forward(direct);
+    check(false, "direct index rejects the base as a selector descriptor");
+  } catch (const std::logic_error&) {
+  }
+  invalid_route = direct_spec;
+  invalid_route.axes[1].count_input = 4;
+  direct.udata = &invalid_route;
+  try {
+    dynamic_index->forward(direct);
+    check(false, "direct index rejects an out-of-range count descriptor");
+  } catch (const std::logic_error&) {
+  }
+  direct.udata = &direct_spec;
+
+  DynamicIndexSpec extent_spec;
+  extent_spec.input_count = 2;
+  extent_spec.axes = {{DynamicIndexSpec::Axis::All, 4, 1, 4, 0}};
+  extent_spec.axes[0].extent_input = 1;
+  extent_spec.axes[0].extent_input_offset = 0;
+  extent_spec.axes[0].count_input = 1;
+  extent_spec.axes[0].count_input_offset = 0;
+  extent_spec.selected_size = 4;
+  double logical_extent = 2;
+  double extent_output[4] = {-1, -1, -1, -1};
+  KernelCtx extent{};
+  extent.n_in = 2;
+  extent.in[0] = {base, 4};
+  extent.in[1] = {&logical_extent, 1};
+  extent.out = {extent_output, 4};
+  extent.udata = &extent_spec;
+  dynamic_index->forward(extent);
+  check(extent_output[0] == 1 && extent_output[1] == 2 &&
+            extent_output[2] == 0 && extent_output[3] == 0,
+        "direct logical extent preserves output capacity and zero fill");
 }
 
 static std::string fixture_mir(const std::string& name) {
@@ -983,9 +1110,77 @@ static void automatic_policy_tests() {
                     "refusal target parity", "refusal gradient parity");
 }
 
+static void direct_index_lowering_tests() {
+  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+  const auto direct =
+      compile_fixture("structured_direct_index", 4, Mode::Force);
+  test_setenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS", "1");
+  const auto packed =
+      compile_fixture("structured_direct_index", 4, Mode::Force);
+  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+  const StructuredLoop* direct_plan = retained(direct);
+  const StructuredLoop* packed_plan = retained(packed);
+  check(direct_plan && packed_plan,
+        "direct-index ablation keeps structured execution");
+  size_t direct_reads = 0, direct_concats = 0, packed_reads = 0,
+         packed_concats = 0;
+  if (direct_plan)
+    for (const auto& op : direct_plan->body.ops) {
+      direct_concats += op.opcode == OP_CONCAT2;
+      if (op.opcode == OP_SET_INDEX_DYNAMIC) {
+        const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+        check(spec && spec->input_count == 0 && op.n_in == 3,
+              "indexed updates preserve the packed ABI");
+      } else if (op.opcode == OP_INDEX_DYNAMIC) {
+        const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+        if (spec && spec->input_count > 0) {
+          ++direct_reads;
+          check(op.n_in == spec->input_count && op.n_in == 3,
+                "two-axis read binds direct scalar selector inputs");
+        }
+      }
+    }
+  if (packed_plan)
+    for (const auto& op : packed_plan->body.ops) {
+      packed_concats += op.opcode == OP_CONCAT2;
+      if (op.opcode != OP_INDEX_DYNAMIC) continue;
+      ++packed_reads;
+      const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+      check(spec && spec->input_count == 0 && op.n_in == 2,
+            "direct-index ablation preserves packed read ABI");
+    }
+  check(direct_reads > 0 && packed_reads >= direct_reads,
+        "structured model exposes direct-index read sites");
+  check(direct_concats < packed_concats,
+        "direct scalar selectors remove packing operations");
+  compare_gradients(direct, packed, {{.1, .7}, {-.2, .3}, {0, .5}},
+                    "direct-index value parity",
+                    "direct-index gradient parity");
+  const auto legacy = compile_fixture("structured_direct_index", 4, Mode::Off);
+  compare_gradients(direct, legacy, {{.1, .7}, {-.2, .3}},
+                    "direct-index legacy value parity",
+                    "direct-index legacy gradient parity");
+
+  test_setenv("STANLI_STRUCTURED_HISTORY_BYTES", "1");
+  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+  const auto dynamic_direct =
+      compile_fixture("structured_direct_index", 4, Mode::Force);
+  test_setenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS", "1");
+  const auto dynamic_packed =
+      compile_fixture("structured_direct_index", 4, Mode::Force);
+  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+  test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
+  check(retained(dynamic_direct) && retained(dynamic_direct)->dynamic_history,
+        "direct-index test exercises dynamic history");
+  compare_gradients(dynamic_direct, dynamic_packed, {{.1, .7}, {-.2, .3}},
+                    "dynamic direct-index value parity",
+                    "dynamic direct-index gradient parity");
+}
+
 int main() {
   test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
   runtime_trip_tests();
+  direct_index_kernel_tests();
   forced_control_tests();
   dynamic_history_tests();
   loop_invariant_reuse_tests();
@@ -993,10 +1188,12 @@ int main() {
   dynamic_history_concurrency_tests();
   dynamic_history_failure_tests();
   automatic_policy_tests();
+  direct_index_lowering_tests();
   test_unsetenv("STANLI_STRUCTURED_LOOPS");
   test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
   test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
   test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
+  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
   if (failures == 0) std::printf("test_structured_loop_production OK\n");
   return failures != 0;
 }
