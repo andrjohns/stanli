@@ -1241,7 +1241,17 @@ struct DynamicArena {
       const size_t capacity = std::max(n, next_capacity);
       if (capacity > std::numeric_limits<uint64_t>::max() - capacity_values)
         throw std::length_error("dynamic structured history overflow");
-      blocks.push_back({std::make_unique<double[]>(capacity), capacity, 0});
+      // Every allocated range is initialized by its owner before publication.
+      // Avoid value-initializing unused capacity in production: touching a
+      // geometrically grown block here makes its entire reserved tail
+      // resident. Debug builds poison blocks so the focused structured-loop
+      // suite exposes any accidental dependence on fresh zeroes.
+      std::unique_ptr<double[]> data(new double[capacity]);
+#ifndef NDEBUG
+      std::fill_n(data.get(), capacity,
+                  std::numeric_limits<double>::quiet_NaN());
+#endif
+      blocks.push_back({std::move(data), capacity, 0});
       capacity_values += capacity;
       if (next_capacity < arena_location_block_values)
         next_capacity =
