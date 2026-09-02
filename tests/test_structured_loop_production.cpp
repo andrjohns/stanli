@@ -838,6 +838,141 @@ static std::shared_ptr<StructuredLoop> inactive_range_update_plan(
   return plan;
 }
 
+static std::shared_ptr<StructuredLoop> aliased_update_plan(
+    bool force_ordinary) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int two = scalar(*plan, 2);
+  const int three = scalar(*plan, 3);
+  const int base = plan->body.add_slot(3, false);
+  plan->fills.push_back({base, {10, 20, 30}});
+  const int current = plan->body.add_slot(3, false);
+  const int snapshot1 = plan->body.add_slot(3, false);
+  const int snapshot2 = plan->body.add_slot(3, false);
+  const int rhs1 = plan->body.add_slot(1, false);
+  const int rhs2 = plan->body.add_slot(1, false);
+  const int rhs3 = plan->body.add_slot(1, false);
+  const int updated1_slot = plan->body.add_slot(3, false);
+  const int updated2_slot = plan->body.add_slot(3, false);
+  const int updated3_slot = plan->body.add_slot(3, false);
+  const int observed1 = plan->body.add_slot(1, false);
+  const int observed2 = plan->body.add_slot(1, false);
+  const int observed3 = plan->body.add_slot(1, false);
+  const int snapshot_sum1 = plan->body.add_slot(1, false);
+  const int snapshot_sum2 = plan->body.add_slot(1, false);
+  const int current_sum = plan->body.add_slot(1, false);
+  const int snapshot_total = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
+  spec->selected_size = 1;
+  Node update1 =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, rhs1}, updated1_slot);
+  Node update2 =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, two, rhs2}, updated2_slot);
+  Node update3 =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, three, rhs3}, updated3_slot);
+  const int update_ops[] = {update1.op, update2.op, update3.op};
+  for (int op : update_ops)
+    plan->body.ops[static_cast<size_t>(op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  Node observe1 = call(*plan, OP_SUM_VEC, {current}, observed1);
+  Node observe2 = call(*plan, OP_SUM_VEC, {current}, observed2);
+  Node observe3 = call(*plan, OP_SUM_VEC, {current}, observed3);
+  const int observer_ops[] = {observe1.op, observe2.op, observe3.op};
+  plan->root = sequence(
+      {alias(current, base), call(*plan, OP_MUL, {theta, one}, rhs1),
+       std::move(update1), alias(current, updated1_slot), std::move(observe1),
+       alias(snapshot1, current), alias(snapshot2, current),
+       call(*plan, OP_MUL, {theta, two}, rhs2), std::move(update2),
+       alias(current, updated2_slot), std::move(observe2),
+       call(*plan, OP_MUL, {theta, three}, rhs3), std::move(update3),
+       alias(current, updated3_slot), std::move(observe3),
+       call(*plan, OP_SUM_VEC, {snapshot1}, snapshot_sum1),
+       call(*plan, OP_SUM_VEC, {snapshot2}, snapshot_sum2),
+       call(*plan, OP_SUM_VEC, {current}, current_sum),
+       call(*plan, OP_ADD, {snapshot_sum1, snapshot_sum2}, snapshot_total),
+       call(*plan, OP_ADD, {snapshot_total, current_sum}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->compact_update_sites == 3,
+        "outgoing alias keeps compact update sites eligible");
+  for (int op : observer_ops)
+    check(set_forward(plan->root, op, trace_range_sum_forward),
+          "find aliased update address observer");
+  if (force_ordinary) {
+    for (int op : update_ops) {
+      check(set_forward(plan->root, op, ordinary_update_forward),
+            "find aliased update forward callback");
+      check(set_backward(plan->root, op, ordinary_update_backward),
+            "find aliased update backward callback");
+    }
+  }
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> loop_aliased_update_plan(
+    bool force_ordinary) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int base = plan->body.add_slot(3, false);
+  plan->fills.push_back({base, {10, 20, 30}});
+  const int current = plan->body.add_slot(3, false);
+  const int snapshot = plan->body.add_slot(3, false);
+  const int rhs = plan->body.add_slot(1, false);
+  const int updated = plan->body.add_slot(3, false);
+  const int observed = plan->body.add_slot(1, false);
+  const int first = plan->body.add_slot(1, false);
+  const int snapshot_sum = plan->body.add_slot(1, false);
+  const int current_sum = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
+  spec->selected_size = 1;
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, rhs}, updated);
+  const int update_op = update.op;
+  plan->body.ops[static_cast<size_t>(update_op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  Node observe = call(*plan, OP_SUM_VEC, {current}, observed);
+  const int observe_op = observe.op;
+  Node is_first = call(*plan, OP_COMPARE, {iterator, lower}, first);
+  plan->body.ops[static_cast<size_t>(is_first.op)].variant = 4;
+  plan->root = sequence(
+      {alias(current, base),
+       counted(lower, upper, iterator, 3,
+               sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                         std::move(update), alias(current, updated),
+                         std::move(observe), std::move(is_first),
+                         branch(first, alias(snapshot, current), sequence({}))})),
+       call(*plan, OP_SUM_VEC, {snapshot}, snapshot_sum),
+       call(*plan, OP_SUM_VEC, {current}, current_sum),
+       call(*plan, OP_ADD, {snapshot_sum, current_sum}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->compact_update_sites == 1,
+        "loop-backedge alias keeps compact update site eligible");
+  check(set_forward(plan->root, observe_op, trace_range_sum_forward),
+        "find loop-backedge update address observer");
+  if (force_ordinary) {
+    check(set_forward(plan->root, update_op, ordinary_update_forward),
+          "find loop-backedge update forward callback");
+    check(set_backward(plan->root, update_op, ordinary_update_backward),
+          "find loop-backedge update backward callback");
+  }
+  return plan;
+}
+
 static void compact_iterator_history_tests() {
   iterator_forward_values.clear();
   iterator_reverse_values.clear();
@@ -946,6 +1081,7 @@ static void compact_iterator_history_tests() {
     return result;
   };
   ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
+  range_update_forward_addresses.clear();
   const RangeEvaluation delta = run_range(false);
   const RangeEvaluation ordinary = run_range(true);
   check(std::memcmp(&delta.value, &ordinary.value, sizeof(double)) == 0 &&
@@ -990,6 +1126,61 @@ static void compact_iterator_history_tests() {
   close(inactive_compact.value, 40.75, "inactive range delta result");
   close(inactive_compact.gradient[0], 163,
         "inactive range delta outer gradient");
+
+  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
+  Executor aliased_compact(outer(aliased_update_plan(false)));
+  Executor aliased_ordinary(outer(aliased_update_plan(true)));
+  range_update_forward_addresses.clear();
+  const Evaluation aliased = evaluate(aliased_compact, .25, 0);
+  const auto aliased_compact_addresses = range_update_forward_addresses;
+  range_update_forward_addresses.clear();
+  const Evaluation aliased_reference = evaluate(aliased_ordinary, .25, 0);
+  const auto aliased_ordinary_addresses = range_update_forward_addresses;
+  check(std::memcmp(&aliased, &aliased_reference, sizeof(Evaluation)) == 0 &&
+            ordinary_update_forward_calls == 3 &&
+            ordinary_update_backward_calls == 3,
+        "outgoing alias invalidation has bitwise ordinary-path parity");
+  check(aliased_compact_addresses.size() == 3 &&
+            aliased_compact_addresses[0] != aliased_compact_addresses[1] &&
+            aliased_compact_addresses[1] == aliased_compact_addresses[2] &&
+            aliased_ordinary_addresses.size() == 3 &&
+            aliased_ordinary_addresses[0] != aliased_ordinary_addresses[1] &&
+            aliased_ordinary_addresses[1] != aliased_ordinary_addresses[2],
+        "compact mutation resumes after one copy-on-write update");
+  close(aliased.value, 102, "outgoing aliases preserve snapshot values");
+  close(aliased.gradient[0], 8,
+        "outgoing aliases preserve snapshot gradients");
+
+  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
+  Executor loop_aliased_compact(outer(loop_aliased_update_plan(false)));
+  Executor loop_aliased_ordinary(outer(loop_aliased_update_plan(true)));
+  range_update_forward_addresses.clear();
+  const Evaluation loop_aliased = evaluate(loop_aliased_compact, .25, 0);
+  const auto loop_aliased_compact_addresses = range_update_forward_addresses;
+  range_update_forward_addresses.clear();
+  const Evaluation loop_aliased_reference =
+      evaluate(loop_aliased_ordinary, .25, 0);
+  const auto loop_aliased_ordinary_addresses = range_update_forward_addresses;
+  check(std::memcmp(&loop_aliased, &loop_aliased_reference,
+                    sizeof(Evaluation)) == 0 &&
+            ordinary_update_forward_calls == 3 &&
+            ordinary_update_backward_calls == 3,
+        "loop-backedge alias invalidation has bitwise ordinary-path parity");
+  check(loop_aliased_compact_addresses.size() == 3 &&
+            loop_aliased_compact_addresses[0] !=
+                loop_aliased_compact_addresses[1] &&
+            loop_aliased_compact_addresses[1] ==
+                loop_aliased_compact_addresses[2] &&
+            loop_aliased_ordinary_addresses.size() == 3 &&
+            loop_aliased_ordinary_addresses[0] !=
+                loop_aliased_ordinary_addresses[1] &&
+            loop_aliased_ordinary_addresses[1] !=
+                loop_aliased_ordinary_addresses[2],
+        "compact mutation resumes across an aliasing loop backedge");
+  close(loop_aliased.value, 51.75,
+        "loop-backedge alias preserves snapshot value");
+  close(loop_aliased.gradient[0], 7,
+        "loop-backedge alias preserves snapshot gradient");
 }
 
 static std::shared_ptr<StructuredLoop> integer_history_plan() {

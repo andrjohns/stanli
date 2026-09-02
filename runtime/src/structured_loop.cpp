@@ -159,11 +159,12 @@ struct StructuredSlotUses {
 };
 
 // H2A is deliberately narrower than ordinary indexed assignment support. It
-// recognizes a scalar functional update whose result is immediately installed
-// in one stable binding cell and whose historical handles cannot escape through
-// another binding or delayed target publication. Ordinary kernel/control reads
-// of the cell are synchronous; reverse sees their historical values after LIFO
-// undo. Anything less explicit keeps the immutable copying kernel.
+// recognizes a functional update whose result is immediately installed in one
+// stable binding cell. Ordinary kernel/control reads of the cell are
+// synchronous; reverse sees their historical values after LIFO undo. A reached
+// alias from the binding invalidates its mutable anchor, so the next update
+// takes the ordinary copying path before compact mutation can resume. Anything
+// less explicit keeps the immutable copying kernel.
 void classify_compact_updates(StructuredLoop& p) {
   p.compact_update_sites = 0;
   std::vector<StructuredSlotUses> uses(p.body.slots.size());
@@ -243,7 +244,7 @@ void classify_compact_updates(StructuredLoop& p) {
             output.alias_sources != 1 || output.alias_destinations != 0 ||
             output.control != 0 || output.targets != 0 || output.outputs != 0 ||
             output.imports != 0 || binding.producers != 0 ||
-            binding.alias_sources != 0 || binding.targets != 0)
+            binding.targets != 0)
           continue;
         call.compact_update_cell = cell;
         ++p.compact_update_sites;
@@ -2906,6 +2907,10 @@ struct DynamicExecution {
       case Node::Alias:
         state.bindings[static_cast<size_t>(n.dst)] =
             state.bindings[static_cast<size_t>(n.src)];
+        // The destination now preserves the source's current value. Prevent a
+        // later compact update from mutating that shared storage: its ordinary
+        // fallback creates a fresh output and reanchors the updated binding.
+        state.compact_primal_by_cell[static_cast<size_t>(n.src)] = nullptr;
         return Normal;
       case Node::If:
         return forward(n.children[scalar_value(n.condition) != 0.0 ? 0 : 1]);
