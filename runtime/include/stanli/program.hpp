@@ -21,6 +21,7 @@
 #define STANLI_PROGRAM_HPP
 
 #include <stanli/callable_transform.hpp>
+#include <stanli/extrema_grouping.hpp>
 #include <stanli/kernel_types.hpp>
 #include <stanli/program_density.hpp>
 
@@ -59,6 +60,16 @@ enum ProgramOpFlag : uint16_t {
   kProgramReadC = 1u << 11,
 };
 
+// EXTREMA_RANGE's `c` immediate. The register file has already materialized
+// every input contiguously, but the source expression's Eigen traversal is
+// still observable for NaNs, signed zero, ties, and adjoint selection. Keep
+// that grouping beside the integer-surface marker instead of guessing from
+// the materialized address at execution time.
+inline constexpr int32_t kProgramExtremaInteger = 1 << 0;
+inline constexpr int32_t kProgramExtremaScalar = 1 << 1;
+inline constexpr int32_t kProgramExtremaPhased = 1 << 2;
+inline constexpr int32_t kProgramExtremaPhaseShift = 3;
+
 // `a` is an operand wherever kProgramNoInputs is absent; b and c are not,
 // and the ones that are not hold register zero rather than nothing, so
 // which registers a program actually reads needs saying. DENSITY's arity
@@ -94,7 +105,7 @@ enum ProgramOpFlag : uint16_t {
   X(EQ, kProgramReadB)                                                       \
   X(NE, kProgramReadB)                                                       \
   X(DYN_INDEX, kProgramReadB | kProgramNoAdjoint)                            \
-  /* b selects max (1) or min (0); c marks the integer-container surface. */ \
+  /* b selects max (1) or min (0); c stores kProgramExtrema* metadata. */    \
   X(EXTREMA_RANGE, kProgramRangeA | kProgramNoAdjoint)                       \
   X(JZ, kProgramNoAdjoint | kProgramNoOutput)                                \
   X(JMP, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)            \
@@ -474,20 +485,70 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
         break;
       }
       case Program::EXTREMA_RANGE: {
-        if (I.c != 0 && I.len == 0) {
+        const bool maximum = I.b != 0;
+        const bool integer = (I.c & kProgramExtremaInteger) != 0;
+        const bool scalar = (I.c & kProgramExtremaScalar) != 0;
+        const bool phased = (I.c & kProgramExtremaPhased) != 0;
+        if (integer && I.len == 0) {
           // The register file stores integers as doubles, so call the actual
           // integer overload solely to preserve Stan Math's empty-container
           // exception instead of returning a floating-point infinity.
           const std::vector<int> empty;
-          if (I.b != 0)
+          if (maximum)
             (void)stan::math::max(empty);
           else
             (void)stan::math::min(empty);
         }
-        std::vector<T> owning;
-        if (I.len > 0)
-          owning.assign(&reg[(size_t)I.a], &reg[(size_t)(I.a + I.len)]);
-        d() = I.b != 0 ? stan::math::max(owning) : stan::math::min(owning);
+        if (I.len == 0) {
+          d() = T(maximum ? -std::numeric_limits<double>::infinity()
+                          : std::numeric_limits<double>::infinity());
+          break;
+        }
+        if (scalar) {
+          T selected = reg[(size_t)I.a];
+          for (int32_t i = 1; i < I.len; ++i) {
+            const T& candidate = reg[(size_t)(I.a + i)];
+            if (maximum ? stan::math::value_of(selected) <
+                              stan::math::value_of(candidate)
+                        : stan::math::value_of(candidate) <
+                              stan::math::value_of(selected))
+              selected = candidate;
+          }
+          d() = selected;
+          break;
+        }
+        const int64_t phase =
+            static_cast<int64_t>(I.c) >> kProgramExtremaPhaseShift;
+        if constexpr (std::is_same_v<T, double>) {
+          if (phased) {
+            d() = extrema_phased(&reg[(size_t)I.a], I.len, phase, maximum);
+          } else {
+            const Eigen::Map<const Eigen::VectorXd> input(&reg[(size_t)I.a],
+                                                          I.len);
+            const auto owning_grouping = input.unaryExpr(
+                Eigen::internal::core_cast_op<double, double>());
+            d() = maximum ? stan::math::max(owning_grouping)
+                          : stan::math::min(owning_grouping);
+          }
+        } else {
+          // Packet/phased instructions are parameter-free: an active source
+          // is classified scalar by ProgramCompiler. Recreate the double
+          // value grouping during replay and keep the result constant, just
+          // as generated Stan computes the extrema before promoting it into
+          // any downstream var expression.
+          std::vector<double> values((size_t)I.len);
+          for (int32_t i = 0; i < I.len; ++i)
+            values[(size_t)i] = stan::math::value_of(reg[(size_t)(I.a + i)]);
+          if (phased) {
+            d() = T(extrema_phased(values.data(), I.len, phase, maximum));
+          } else {
+            const Eigen::Map<const Eigen::VectorXd> input(values.data(), I.len);
+            const auto owning_grouping = input.unaryExpr(
+                Eigen::internal::core_cast_op<double, double>());
+            d() = T(maximum ? stan::math::max(owning_grouping)
+                            : stan::math::min(owning_grouping));
+          }
+        }
         break;
       }
       case Program::JZ:

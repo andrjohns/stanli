@@ -660,6 +660,7 @@ void test_program_extrema() {
     compiler.reals[name] = range;
     Expr input = var(name, type);
     input.unsized = {depth, leaf};
+    input.data_only = leaf != UnsizedLeaf::Int;
     return input;
   };
   auto reduce = [&](const char* name, Expr input, const char* result_type,
@@ -701,14 +702,24 @@ void test_program_extrema() {
   int extrema_count = 0;
   int min_count = 0;
   int max_count = 0;
+  int packet_count = 0;
+  int scalar_count = 0;
   for (const auto& instruction : program.code) {
     if (instruction.code != stanli::Program::EXTREMA_RANGE) continue;
     ++extrema_count;
     instruction.b == 0 ? ++min_count : ++max_count;
+    if (instruction.c & stanli::kProgramExtremaScalar)
+      ++scalar_count;
+    else
+      ++packet_count;
   }
-  if (extrema_count != 6 || min_count != 3 || max_count != 3) {
+  if (extrema_count != 6 || min_count != 3 || max_count != 3 ||
+      packet_count != 4 || scalar_count != 2) {
     ++failures;
-    std::printf("FAIL Program extrema did not share the unified opcode\n");
+    std::printf(
+        "FAIL Program extrema opcode/grouping: total=%d min=%d max=%d "
+        "packet=%d scalar=%d\n",
+        extrema_count, min_count, max_count, packet_count, scalar_count);
   }
 
   std::vector<double> registers(static_cast<size_t>(program.n_regs));

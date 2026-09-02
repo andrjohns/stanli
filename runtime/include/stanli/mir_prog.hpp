@@ -2094,8 +2094,26 @@ struct ProgramCompiler {
       const bool maximum = extrema.kind == mir::ExtremaKind::Max;
       const bool integer = extrema.surface == mir::ExtremaSurface::IntArray ||
                            extrema.surface == mir::ExtremaSurface::IntPair;
+      // Matrix<var>, vector<var>, and std::vector<var> all reduce in ascending
+      // scalar order. Otherwise retain the source expression's double
+      // evaluator grouping even though `expr` materialized it into a flat
+      // register run above. This mirrors Lowering::reduction_grouping.
+      const bool active = !in_write_array && !e.args[0].data_only;
+      const ExpressionLayout layout =
+          integer || active ? ExpressionLayout::scalar()
+                            : mir::source_expression_layout(e.args[0]);
+      if (!layout.known()) bail("min/max expression grouping is not native");
+      int32_t flags = integer ? kProgramExtremaInteger : 0;
+      if (layout.kind == ExpressionLayout::Kind::Scalar) {
+        flags |= kProgramExtremaScalar;
+      } else if (layout.kind == ExpressionLayout::Kind::Direct &&
+                 layout.element_offset != 0) {
+        flags |= kProgramExtremaPhased;
+        const int64_t phase = layout.element_offset % extrema_phase_modulus();
+        flags |= static_cast<int32_t>(phase << kProgramExtremaPhaseShift);
+      }
       p.code.push_back(Program::Instr{Program::EXTREMA_RANGE, r, a.reg,
-                                      maximum ? 1 : 0, integer ? 1 : 0, a.len});
+                                      maximum ? 1 : 0, flags, a.len});
       return typed(Range{r, 1}, e.type_);
     }
     // Ahead of the arity-keyed blocks below: those end in a bail on an
