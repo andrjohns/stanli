@@ -531,17 +531,24 @@ void expect_necessity_effects() {
 
   std::fill(std::begin(err), std::end(err), '\0');
   model = stanli_model_new(mir.c_str(), "{\"mode\":2}", err, sizeof err);
-  if (model != nullptr) {
+  if (model == nullptr) {
     ++failures;
-    std::printf("FAIL C API accepted runtime-valued necessity reject\n");
-    stanli_model_free(model);
+    std::printf("FAIL C API refused dynamic necessity reject: %s\n", err);
   } else {
-    const std::string msg = err;
-    if (msg.find("runtime-control region") == std::string::npos ||
-        msg.find("FnReject") == std::string::npos) {
+    double lp = 0.0, grad = 0.0;
+    const double accepted = 0.1;
+    if (stanli_grad(model, &accepted, &lp, &grad) != 0 || lp != 0.1 ||
+        grad != 1.0) {
       ++failures;
-      std::printf("FAIL C API necessity FnReject error: %s\n", err);
+      std::printf("FAIL C API untaken dynamic reject\n");
     }
+    const double rejected = -0.1;
+    if (stanli_grad(model, &rejected, &lp, &grad) != 1 || !std::isinf(lp) ||
+        lp > 0.0) {
+      ++failures;
+      std::printf("FAIL C API taken dynamic reject: lp %.17g\n", lp);
+    }
+    stanli_model_free(model);
   }
 }
 

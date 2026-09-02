@@ -4964,6 +4964,69 @@ int main() {
     }
   }
 
+  // Regular scalar-function metadata is shared with the runtime-control
+  // compiler. The branch forces ordinary unary/binary calls and all nine
+  // int/real binary families through Program::CALL, including array results
+  // and both int argument positions.
+  {
+    CompiledModel rm = compile_model(
+        slurp("tests/fixtures/paramcond_regular_calls.tmir.sexp"), DataMap());
+    check(rm.n_unconstrained == 7, "regular-call island parameter width");
+    check(count_opcode(rm, OP_ISLAND) > 0, "regular-call runtime island");
+    Executor rex(std::move(rm.graph));
+    rm.bind(rex);
+
+    const double xv[3] = {3.2, 3.6, 4.1};
+    const double pv[3] = {0.2, 0.4, 0.7};
+    rex.params_data()[0] = -0.5;
+    for (int i = 0; i < 3; ++i) {
+      rex.params_data()[1 + i] = xv[i];
+      rex.params_data()[4 + i] = pv[i];
+    }
+    double gradient[7] = {};
+    expect_eq("regular-call untaken lp", rex.gradient(gradient), 0.0);
+    for (double g : gradient)
+      expect_eq("regular-call untaken gradient", g, 0.0);
+
+    rex.params_data()[0] = 0.5;
+    const double lp = rex.gradient(gradient);
+    using stan::math::var;
+    std::vector<var> x = {xv[0], xv[1], xv[2]};
+    std::vector<var> probability = {pv[0], pv[1], pv[2]};
+    const int order[3] = {0, 1, 2};
+    const int label[3] = {0, 1, 0};
+    const int count[3] = {0, 1, 2};
+    var acc = 0, term = 0;
+#define REGULAR_TERM(expr)                  \
+  term = 0;                                 \
+  for (int i = 0; i < 3; ++i) term += expr; \
+  acc += term;
+    REGULAR_TERM(stan::math::atan2(x[i], probability[i]))
+    REGULAR_TERM(stan::math::tgamma(x[i]))
+    REGULAR_TERM(stan::math::bessel_first_kind(order[i], x[i]))
+    REGULAR_TERM(stan::math::bessel_second_kind(order[i], x[i]))
+    REGULAR_TERM(stan::math::binary_log_loss(label[i], probability[i]))
+    REGULAR_TERM(stan::math::falling_factorial(x[i], count[i]))
+    REGULAR_TERM(stan::math::ldexp(x[i], count[i]))
+    REGULAR_TERM(stan::math::lmgamma(2, x[i]))
+    REGULAR_TERM(stan::math::modified_bessel_first_kind(order[i], x[i]))
+    REGULAR_TERM(stan::math::modified_bessel_second_kind(order[i], x[i]))
+    REGULAR_TERM(stan::math::rising_factorial(x[i], count[i]))
+#undef REGULAR_TERM
+    acc.grad();
+
+    check(std::abs(lp - acc.val()) <=
+              16 * 2.220446049250313e-16 * std::abs(acc.val()),
+          "regular-call island lp matches stan-math");
+    expect_eq("regular-call branch gradient", gradient[0], 0.0);
+    for (int i = 0; i < 3; ++i) {
+      expect_ulp("regular-call real gradient", gradient[1 + i], x[i].adj());
+      expect_ulp("regular-call probability gradient", gradient[4 + i],
+                 probability[i].adj());
+    }
+    stan::math::recover_memory();
+  }
+
   // The one-argument scalar math library over containers. See
   // tests/fixtures/unaryfns.stan: transformed data runs the MIR interpreter
   // on doubles and the model block runs the graph kernels, so a name wired
@@ -5216,6 +5279,43 @@ int main() {
             "callable jacobians finite gradient");
     }
     check(lp[0] != lp[1], "callable jacobians runtime branch changes target");
+  }
+
+  // A transformed-data real passed to a recursive UDF inside parameter-
+  // dependent control flow remains known. A complete pure call is evaluated
+  // once by the data interpreter instead of requiring a finite expansion of
+  // its recursive call tree, while the surrounding branch remains an island.
+  {
+    CompiledModel km = compile_model(
+        slurp("tests/fixtures/known_real_udf.tmir.sexp"), DataMap());
+    check(km.n_unconstrained == 1, "known-real UDF parameter width");
+    check(count_opcode(km, OP_ISLAND) > 0, "known-real UDF runtime island");
+    Executor kex(std::move(km.graph));
+    km.bind(kex);
+    kex.params_data()[0] = 0.25;
+    double gradient[1];
+    const double lp = kex.gradient(gradient);
+    expect_eq("known-real UDF lp", lp, -0.5 * 0.25 * 0.25);
+    expect_eq("known-real UDF gradient", gradient[0], -0.25);
+  }
+
+  // Forty recursive steps exceed ProgramCompiler's inlining budget but stay
+  // within the MIR interpreter's supported call depth. This is the regression
+  // boundary: concrete pure recursion must use the latter rather than fail
+  // while trying to manufacture a finite register call stack.
+  {
+    CompiledModel km = compile_model(
+        slurp("tests/fixtures/known_real_udf_deep.tmir.sexp"), DataMap());
+    check(km.n_unconstrained == 1, "deep known-real UDF parameter width");
+    check(count_opcode(km, OP_ISLAND) > 0,
+          "deep known-real UDF runtime island");
+    Executor kex(std::move(km.graph));
+    km.bind(kex);
+    kex.params_data()[0] = 0.25;
+    double gradient[1];
+    const double lp = kex.gradient(gradient);
+    expect_eq("deep known-real UDF lp", lp, -0.5 * 0.25 * 0.25);
+    expect_eq("deep known-real UDF gradient", gradient[0], -0.25);
   }
 
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations

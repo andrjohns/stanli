@@ -23,6 +23,7 @@
 #include <stanli/callable_transform.hpp>
 #include <stanli/extrema_grouping.hpp>
 #include <stanli/kernel_types.hpp>
+#include <stanli/message.hpp>
 #include <stanli/program_density.hpp>
 
 #include <stan/math.hpp>
@@ -169,9 +170,9 @@ struct Program {
     // union point with the graph executor -- one instruction gives the
     // register machine the graph's whole vocabulary, and its derivative
     // is the kernel's own backward rather than a transcribed rule. The
-    // kernels compute on doubles, so only run_program<double> can execute
-    // one; the carver keeps a CALL-bearing island only when the generated
-    // adjoint exists, so the var replay never meets it.
+    // kernels compute their values and partials on doubles. A generated
+    // adjoint invokes the backward directly; var replay uses a small adapter
+    // that exposes its output adjoints to the same backward implementation.
   };
   struct Instr {
     Code code = CONST;
@@ -188,6 +189,9 @@ struct Program {
   struct Call {
     uint16_t opcode = 0;
     uint8_t variant = 0;
+    // Inputs that receive derivatives when CALL is replayed over var. Integer
+    // lanes are values in the register file but are never autodiff operands.
+    uint8_t input_adjoint_mask = 0x3f;
     int8_t n_in = 0;
     // Resolved once when the call site is built. A registered kernel's
     // function identity is stable, so repeated table lookup during program
@@ -211,12 +215,12 @@ struct Program {
     int32_t bwd_adj_out = 0;
   };
 
-  // A PRINT's payload: literal chunks interleaved with register ranges.
-  // The double forward renders it once; a var replay deliberately skips it,
-  // because replay exists only to recover derivatives and must not repeat an
-  // observable Stan statement.
-  struct Print {
-    std::vector<std::string> chunks;
+  // A PRINT or REJECT payload: the shared literal template plus the Program-
+  // specific register ranges supplying its runtime values. A var replay skips
+  // PRINT because it must not repeat an observable effect; REJECT never gets
+  // a replay because its double forward already threw.
+  struct Message {
+    MessageSpec spec;
     std::vector<int32_t> value_reg;
     std::vector<int32_t> value_len;
   };
@@ -260,22 +264,24 @@ struct Program {
   std::vector<Instr> code;
   std::vector<Call> calls;            // CALL payloads, indexed by Instr::a
   std::vector<Transform> transforms;  // TRANSFORM payloads, indexed by Instr::a
-  std::vector<Print> prints;          // PRINT payloads, indexed by Instr::a
+  std::vector<Message> messages;      // PRINT/REJECT payloads, by Instr::a
   std::vector<double> pool;           // CONSTR data
-  // REJECT's literal message text, indexed by Instr::a. Never touched as a
-  // register (REJECT is kProgramNoInputs), so it rides beside the register
-  // file rather than in it.
-  std::vector<std::string> messages;
   // DENSITY_VEC payloads, indexed by Instr::a.
   std::vector<VecDensity> vec_densities;
   int n_regs = 0;
   std::vector<int> out_regs;  // the values the caller reads back
 };
 
-// Render one register-program print through the same sink and formatting as
-// graph OP_PRINT. Kept out of the evaluator template so only the double path
-// needs to know how messages are assembled.
-void emit_program_print(const Program::Print& print, const double* reg);
+template <typename T>
+std::string render_program_message(const Program::Message& message,
+                                   const T* reg) {
+  return render_message(
+      message.spec, message.value_reg.size(),
+      [&](std::size_t k) { return static_cast<int64_t>(message.value_len[k]); },
+      [&](std::size_t k, int64_t i) {
+        return stan::math::value_of(reg[message.value_reg[k] + i]);
+      });
+}
 
 struct ProgramOpSpec {
   const char* name;
@@ -341,6 +347,11 @@ KernelCtx call_fwd_ctx(const Program::Call& call, double* reg);
 // have the Kernel in hand and bind its pointers directly. False leaves the
 // call unbound, so malformed or unavailable opcodes fail closed.
 bool bind_call(Program::Call& call);
+
+// Replay a graph-kernel call on a var register file. The kernel still owns its
+// value and pullback; this adapter only gathers/scatters the non-contiguous
+// vari pointers used by a runtime-control program.
+void run_call_var(const Program::Call& call, stan::math::var* reg);
 
 // Run one CALL forward through its pre-resolved function. `state` is the
 // caller's evaluation state, which is how a generated-quantities region
@@ -711,10 +722,7 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
           else
             run_call(p.calls[(size_t)I.a], reg, state);
         } else {
-          // Kernels are double machinery; a program that reaches here
-          // under var was carved wrong, and saying so beats corrupting
-          // a gradient.
-          throw std::logic_error("CALL instruction in a var replay");
+          run_call_var(p.calls[(size_t)I.a], reg);
         }
         break;
       case Program::TRANSFORM:
@@ -722,14 +730,17 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
         break;
       case Program::PRINT:
         if constexpr (std::is_same_v<T, double>)
-          emit_program_print(p.prints[(size_t)I.a], reg);
+          execute_message(MessageAction::Print,
+                          render_program_message(p.messages[(size_t)I.a], reg));
         break;
       // reject(): the same exception CmdStan's generated code throws from
       // the same place, so the sampler counts it as a rejected proposal
       // rather than a failure. No adjoint reaches this -- the forward
       // already threw -- so there is nothing to do under var either.
       case Program::REJECT:
-        throw std::domain_error(p.messages[(size_t)I.a]);
+        execute_message(MessageAction::Reject,
+                        render_program_message(p.messages[(size_t)I.a], reg));
+        break;
       case Program::DENSITY: {
         const int ar = program_density_arity(I.len);
         if (ar > 3) {

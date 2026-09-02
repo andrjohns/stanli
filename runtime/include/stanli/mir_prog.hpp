@@ -20,9 +20,11 @@
 #ifndef STANLI_MIR_PROG_HPP
 #define STANLI_MIR_PROG_HPP
 
+#include <stanli/mir_message.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/program.hpp>
+#include <stanli/regular_builtin.hpp>
 #include <stanli/rng_family.hpp>
 
 #include <algorithm>
@@ -64,6 +66,8 @@ struct InlineArg {
   std::vector<long> ints;
   std::vector<int64_t> int_dims;
   bool is_const_int = false;
+  bool is_const_real = false;
+  double const_real = 0.0;
 };
 
 struct Bail {
@@ -75,6 +79,10 @@ struct ProgramCompiler {
   const std::map<std::string, const mir::FunDef*>& funs;
   std::map<std::string, Range> reals;
   std::map<std::string, std::vector<long>> ints;
+  // Known scalar real formals are retained beside their register binding.
+  // The register still supplies ordinary execution; this map is only what
+  // lets compile-time control decisions and nested calls retain the value.
+  std::map<std::string, double> known_reals;
   // Integer containers still occupy registers when a real-valued expression
   // consumes them, but their values are data and therefore available while
   // the program is being compiled.  Keep that provenance beside the register
@@ -100,8 +108,7 @@ struct ProgramCompiler {
   // being in `reals` only says the region has read one as a value.
   std::set<std::string> extern_bound;
   // Whether this region belongs to generated quantities. Only there is an
-  // RNG draw legal, and only there is a program guaranteed never to be
-  // replayed under var -- which is what lets it hold a CALL at all.
+  // RNG draw legal.
   bool in_write_array = false;
   int branch_depth = 0;  // inside a branch on a runtime value
   // A while is a genuinely runtime loop: its condition and state must be
@@ -140,6 +147,12 @@ struct ProgramCompiler {
   std::function<bool(const mir::Expr&, std::vector<long>*,
                      std::vector<int64_t>*)>
       extern_ints;
+  // A scalar real expression whose value the surrounding lowerer can prove
+  // at model-construction time. This is a value callback, not an activity
+  // test: generated-quantity draws are inactive but still unknown. Evaluating
+  // a complete data-only UDF here also handles recursion without trying to
+  // turn a dynamic call stack into finite inline instructions.
+  std::function<bool(const mir::Expr&, double*)> extern_real;
   // Where `target +=` accumulates, or -1 when the region may not have
   // one. Set by the caller, which also seeds it to zero.
   int target_reg = -1;
@@ -475,6 +488,64 @@ struct ProgramCompiler {
     return e.type_ == "UInt" || e.unsized.leaf == mir::UnsizedLeaf::Int;
   }
 
+  double creal(const mir::Expr& e) {
+    if (e.data_only && extern_real && e.type_ == "UReal") {
+      double value = 0.0;
+      if (extern_real(e, &value)) return value;
+    }
+    switch (e.kind) {
+      case mir::Expr::LitInt:
+        return static_cast<double>(e.lit_i);
+      case mir::Expr::LitReal:
+        return e.lit;
+      case mir::Expr::Var: {
+        auto real = known_reals.find(e.name);
+        if (real != known_reals.end()) return real->second;
+        auto integer = ints.find(e.name);
+        if (integer != ints.end() && integer->second.size() == 1)
+          return static_cast<double>(integer->second[0]);
+        bail("real " + e.name + " is not known at compile time");
+      }
+      case mir::Expr::Promotion:
+        if (e.args.size() != 1) bail("real promotion form");
+        return creal(e.args[0]);
+      case mir::Expr::TernaryIf:
+        if (e.args.size() != 3) bail("real conditional form");
+        return creal(e.args[cint(e.args[0]) != 0 ? 1 : 2]);
+      case mir::Expr::FunApp:
+        if (const auto value = mir::nullary_constant(e)) return *value;
+        if (e.args.size() == 1) {
+          if (e.name == "PMinus__" || e.name == "minus")
+            return -creal(e.args[0]);
+          if (e.name == "PPlus__" || e.name == "plus") return creal(e.args[0]);
+        }
+        if (e.args.size() == 2) {
+          const double lhs = creal(e.args[0]);
+          const double rhs = creal(e.args[1]);
+          if (e.name == "Plus__" || e.name == "add") return lhs + rhs;
+          if (e.name == "Minus__" || e.name == "subtract") return lhs - rhs;
+          if (e.name == "Times__" || e.name == "multiply" ||
+              e.name == "elt_multiply")
+            return lhs * rhs;
+          if (e.name == "Divide__" || e.name == "divide" ||
+              e.name == "elt_divide")
+            return lhs / rhs;
+        }
+        bail("real function " + e.name + " is not known at compile time");
+      default:
+        bail("real expression is not known at compile time");
+    }
+  }
+
+  bool try_creal(const mir::Expr& e, double* out) {
+    try {
+      *out = creal(e);
+      return true;
+    } catch (Bail&) {
+      return false;
+    }
+  }
+
   long cint(const mir::Expr& e) {
     switch (e.kind) {
       case mir::Expr::LitInt:
@@ -603,6 +674,15 @@ struct ProgramCompiler {
             if (e.name == "Leq__") return cint(e.args[0]) <= cint(e.args[1]);
             if (e.name == "Greater__") return cint(e.args[0]) > cint(e.args[1]);
             if (e.name == "Geq__") return cint(e.args[0]) >= cint(e.args[1]);
+          }
+          double lhs = 0.0, rhs = 0.0;
+          if (try_creal(e.args[0], &lhs) && try_creal(e.args[1], &rhs)) {
+            if (e.name == "Equals__") return lhs == rhs;
+            if (e.name == "NEquals__") return lhs != rhs;
+            if (e.name == "Less__") return lhs < rhs;
+            if (e.name == "Leq__") return lhs <= rhs;
+            if (e.name == "Greater__") return lhs > rhs;
+            if (e.name == "Geq__") return lhs >= rhs;
           }
         }
         if (e.args.size() == 1 && e.name == "PMinus__") return -cint(e.args[0]);
@@ -959,8 +1039,8 @@ struct ProgramCompiler {
       r.rows = r.cols = 0;
     } else if (type == "UMatrix" && r.kind != ViewKind::Matrix) {
       bail("matrix expression has unknown logical extents");
-    } else if (type == "UArray") {
-      bail("array expressions are unsupported by the register program");
+    } else if (type == "UArray" && r.kind != ViewKind::Array) {
+      bail("array expression has an unknown logical view");
     }
     return r;
   }
@@ -1033,6 +1113,17 @@ struct ProgramCompiler {
 
   // ---- expressions ---------------------------------------------------------
   Range expr(const mir::Expr& e) {
+    // A complete, concretely evaluable pure UDF is already executable by the
+    // surrounding MIR interpreter. Materialize its result once instead of
+    // expanding its call tree into a finite register program. The successful
+    // callback is the proof of concreteness: stanc can label the recursive
+    // remainder AutoDiffable even after all its actuals became data literals.
+    if (e.kind == mir::Expr::FunApp &&
+        e.fn_lib == mir::Expr::Lib::UserDefined && e.type_ == "UReal" &&
+        extern_real) {
+      double value = 0.0;
+      if (extern_real(e, &value)) return {konst(value), 1};
+    }
     switch (e.kind) {
       case mir::Expr::LitInt:
         return {konst((double)e.lit_i), 1};
@@ -1390,10 +1481,8 @@ struct ProgramCompiler {
   // the graph's own OP_RNG kernel rather than transcribed family by family.
   // The stream, the stan-math call and the argument contract are then the
   // kernel's, so the region and the graph cannot disagree about what a draw
-  // is or where in the stream it lands. CALL is double-only, which is the
-  // right constraint here rather than a limitation: generated quantities
-  // never runs a gradient, and OP_RNG has no backward for the carver to
-  // generate one from, so the island keeps the replay it will never use.
+  // is or where in the stream it lands. Generated quantities never runs a
+  // gradient, and OP_RNG consequently needs no backward implementation.
   Range rng_call(const mir::Expr& e) {
     if (!in_write_array)
       bail(e.name + " is supported only in generated quantities");
@@ -1460,6 +1549,120 @@ struct ProgramCompiler {
     p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});
     Range out{r, out_len};
     out.kind = out_kind;
+    return out;
+  }
+
+  // Program-native instructions cover the hot elementary subset. Everything
+  // else in the shared regular-function registry reaches the exact same graph
+  // kernel through CALL, so adding an optable entry also makes it available in
+  // parameter-dependent control flow without another name table here.
+  static bool native_regular_opcode(uint16_t opcode) {
+    switch (opcode) {
+      case OP_ADD:
+      case OP_SUB:
+      case OP_MUL:
+      case OP_DIV:
+      case OP_POW:
+      case OP_FMAX:
+      case OP_FMIN:
+      case OP_LSE2:
+      case OP_LOG_DIFF_EXP:
+      case OP_NEG:
+      case OP_EXPV:
+      case OP_LOGV:
+      case OP_SQRT:
+      case OP_SQUARE:
+      case OP_INV:
+      case OP_ABS:
+      case OP_INV_LOGIT:
+      case OP_LOG1P_EXP:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  Range regular_kernel_call(const mir::Expr& e, const RegularSpec& spec) {
+    const size_t arity = spec.kind == RegularKind::Unary ? 1 : 2;
+    if (e.args.size() != arity) bail(e.name + ": wrong number of arguments");
+    std::vector<Range> args;
+    args.reserve(arity);
+    for (const mir::Expr& arg : e.args) args.push_back(expr(arg));
+
+    Range out = args[0];
+    if (spec.kind != RegularKind::Unary) {
+      const bool as = is_scalar(args[0]), bs = is_scalar(args[1]);
+      if (spec.kind == RegularKind::Binary) {
+        if (!as && !bs && !same_view(args[0], args[1]))
+          bail(e.name + ": incompatible logical views");
+        if (as && !bs) out = args[1];
+      } else {
+        const bool int_first = spec.kind == RegularKind::BinaryIntFirst;
+        const Range& re = args[int_first ? 1 : 0];
+        const Range& iv = args[int_first ? 0 : 1];
+        if (!is_scalar(re) && !is_scalar(iv) && re.len != iv.len)
+          bail(e.name + ": arguments must match in size");
+        out = is_scalar(re) ? iv : re;
+      }
+    }
+
+    const int result = alloc(out.len);
+    out.reg = result;
+    out = typed(out, e.type_);
+
+    Program::Call call;
+    call.opcode = spec.opcode;
+    call.n_in = (int8_t)args.size();
+    if (spec.kind == RegularKind::BinaryIntFirst)
+      call.input_adjoint_mask = 0x2;
+    else if (spec.kind == RegularKind::BinaryIntSecond)
+      call.input_adjoint_mask = 0x1;
+    for (size_t k = 0; k < args.size(); ++k) {
+      call.in[k] = args[k].reg;
+      call.in_len[k] = args[k].len;
+    }
+    call.out = result;
+    call.out_len = out.len;
+
+    if (spec.kind == RegularKind::BinaryIntFirst ||
+        spec.kind == RegularKind::BinaryIntSecond) {
+      const bool int_first = spec.kind == RegularKind::BinaryIntFirst;
+      const Range& re = args[int_first ? 1 : 0];
+      const Range& iv = args[int_first ? 0 : 1];
+      if (!is_scalar(iv)) {
+        if (re.kind == ViewKind::Matrix) {
+          call.idata = {(int)re.rows, (int)re.cols};
+        } else if (re.kind == ViewKind::Array && re.leaf == ViewKind::Matrix &&
+                   re.dims.size() >= 2) {
+          call.idata = {(int)re.dims[re.dims.size() - 2], (int)re.dims.back()};
+        }
+      }
+    }
+
+    const Kernel* kernel = find_kernel(call.opcode);
+    if (kernel == nullptr) bail(e.name + ": graph kernel is unavailable");
+    if (kernel->scratch_size != nullptr) {
+      Op op;
+      op.opcode = call.opcode;
+      op.n_in = call.n_in;
+      op.out = call.n_in;
+      op.idata = call.idata.data();
+      op.n_idata = (int64_t)call.idata.size();
+      std::vector<Slot> slots(args.size() + 1);
+      for (size_t k = 0; k < args.size(); ++k) {
+        op.in[k] = (int)k;
+        slots[k].len = args[k].len;
+      }
+      slots.back().len = out.len;
+      const int64_t scratch = kernel->scratch_size(op, slots.data());
+      if (scratch < 0 || scratch > kMaxRegs)
+        bail(e.name + ": kernel needs excessive scratch storage");
+      call.scratch_len = (int32_t)scratch;
+      call.scratch = scratch ? alloc((int)scratch) : 0;
+    }
+    if (!bind_call(call)) bail(e.name + ": graph kernel is unavailable");
+    p.calls.push_back(std::move(call));
+    p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});
     return out;
   }
 
@@ -1690,6 +1893,9 @@ struct ProgramCompiler {
     CallableTransformSpec transform;
     if (callable_transform(e.name, &transform))
       return transform_call(e, transform);
+    const auto regular = resolve_regular_builtin(e.name, e.args.size());
+    if (regular && !native_regular_opcode(regular->opcode))
+      return regular_kernel_call(e, *regular);
     if (e.name == "tcrossprod" && e.args.size() == 1)
       return matrix_gram(expr(e.args[0]), false);
     if (e.name == "crossprod" && e.args.size() == 1)
@@ -1844,6 +2050,8 @@ struct ProgramCompiler {
           arg.int_dims =
               view.dims.empty() ? std::vector<int64_t>{view.len} : view.dims;
         } else {
+          if (a.type_ == "UReal")
+            arg.is_const_real = try_creal(a, &arg.const_real);
           arg.real = expr(a);
         }
         args.push_back(std::move(arg));
@@ -3085,41 +3293,18 @@ struct ProgramCompiler {
       }
       case mir::Stmt::NRFunApp:
         if (s.fn_name == "FnValidateSize") return;
-        if (s.fn_name == "FnPrint") {
-          Program::Print print;
-          std::string pending;
-          for (const auto& a : s.fn_args) {
-            if (a.kind == mir::Expr::LitStr) {
-              pending += a.lit_s;
-              continue;
-            }
-            print.chunks.push_back(std::move(pending));
-            pending.clear();
-            const Range value = expr(a);
-            print.value_reg.push_back(value.reg);
-            print.value_len.push_back(value.len);
-          }
-          print.chunks.push_back(std::move(pending));
-          p.prints.push_back(std::move(print));
-          emit(Program::PRINT, 0, (int)p.prints.size() - 1);
-          return;
-        }
-        if (s.fn_name == "FnReject") {
-          // Only a literal message: interleaving a runtime value would need
-          // to format it into the thrown string at forward time, which this
-          // machine has no instruction for. `reject("some literal")` is the
-          // common case (a guard on a parameter's domain) and needs none.
-          std::string msg;
-          for (const auto& a : s.fn_args) {
-            if (a.kind != mir::Expr::LitStr)
-              bail(
-                  "statement function FnReject with a runtime-valued "
-                  "message argument (a literal-only message is supported "
-                  "here)");
-            msg += a.lit_s;
-          }
-          p.messages.push_back(std::move(msg));
-          emit(Program::REJECT, 0, (int)p.messages.size() - 1);
+        if (const auto action = message_action(s.fn_name)) {
+          Program::Message message;
+          message.spec = lower_message_arguments(
+              s.fn_args, [&](const mir::Expr& argument) {
+                const Range value = expr(argument);
+                message.value_reg.push_back(value.reg);
+                message.value_len.push_back(value.len);
+              });
+          p.messages.push_back(std::move(message));
+          emit(*action == MessageAction::Reject ? Program::REJECT
+                                                : Program::PRINT,
+               0, (int)p.messages.size() - 1);
           return;
         }
         bail("statement function " + s.fn_name +
@@ -3141,6 +3326,7 @@ struct ProgramCompiler {
     // restore afterwards. Registers are never reused, so nothing aliases.
     auto saved_reals = reals;
     auto saved_ints = ints;
+    auto saved_known_reals = known_reals;
     auto saved_known_int_arrays = known_int_arrays;
     auto saved_known_int_array_dims = known_int_array_dims;
     auto saved_int_array_names = int_array_names;
@@ -3150,6 +3336,7 @@ struct ProgramCompiler {
     const int saved_branch_depth = branch_depth;
     reals.clear();
     ints.clear();
+    known_reals.clear();
     known_int_arrays.clear();
     known_int_array_dims.clear();
     int_array_names.clear();
@@ -3158,6 +3345,8 @@ struct ProgramCompiler {
     extern_bound.clear();
     branch_depth = 0;
     inline_stack.push_back(f.name);
+    std::set<std::string> assigned;
+    for (const auto& statement : f.body) assigned_names(statement, &assigned);
     for (size_t k = 0; k < f.arg_names.size(); ++k) {
       if (args[k].is_const_int) {
         if (args[k].int_dims.empty()) {
@@ -3171,6 +3360,8 @@ struct ProgramCompiler {
         int_decl_at[f.arg_names[k]] = {0, loops.size()};
       } else {
         reals[f.arg_names[k]] = args[k].real;
+        if (args[k].is_const_real && !assigned.count(f.arg_names[k]))
+          known_reals[f.arg_names[k]] = args[k].const_real;
       }
     }
     Range out{0, 0};
@@ -3183,6 +3374,7 @@ struct ProgramCompiler {
       inline_stack.pop_back();
       reals = std::move(saved_reals);
       ints = std::move(saved_ints);
+      known_reals = std::move(saved_known_reals);
       known_int_arrays = std::move(saved_known_int_arrays);
       known_int_array_dims = std::move(saved_known_int_array_dims);
       int_array_names = std::move(saved_int_array_names);
@@ -3196,6 +3388,7 @@ struct ProgramCompiler {
     inline_stack.pop_back();
     reals = std::move(saved_reals);
     ints = std::move(saved_ints);
+    known_reals = std::move(saved_known_reals);
     known_int_arrays = std::move(saved_known_int_arrays);
     known_int_array_dims = std::move(saved_known_int_array_dims);
     int_array_names = std::move(saved_int_array_names);

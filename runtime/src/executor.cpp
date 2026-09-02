@@ -4,6 +4,7 @@
 #include <stanli/packet.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
@@ -105,6 +106,102 @@ bool bind_call(Program::Call& call) {
   call.forward = k->forward;
   call.backward = k->backward;
   return true;
+}
+
+void run_call_var(const Program::Call& call, stan::math::var* reg) {
+  using ArenaDoubles = stan::arena_t<std::vector<double>>;
+  using ArenaVaris = stan::arena_t<std::vector<stan::math::vari*>>;
+  if (call.forward == nullptr || call.backward == nullptr)
+    throw std::logic_error("unbound Program::CALL var replay");
+
+  std::array<int32_t, 6> in_offset{};
+  int32_t total = 0;
+  for (int k = 0; k < call.n_in; ++k) {
+    in_offset[(size_t)k] = total;
+    total += call.in_len[k];
+  }
+  const int32_t out_offset = total;
+  total += call.out_len;
+  const int32_t scratch_offset = total;
+  total += call.scratch_len;
+
+  ArenaDoubles values((size_t)total, 0.0);
+  ArenaDoubles adjoints((size_t)total, 0.0);
+  ArenaVaris input_varis;
+  input_varis.reserve((size_t)out_offset);
+  for (int k = 0; k < call.n_in; ++k) {
+    for (int i = 0; i < call.in_len[k]; ++i) {
+      const stan::math::var& x = reg[(size_t)(call.in[k] + i)];
+      values[(size_t)(in_offset[(size_t)k] + i)] = x.val();
+      input_varis.push_back(x.vi_);
+    }
+  }
+
+  KernelCtx ctx;
+  double* const value_base = values.empty() ? nullptr : values.data();
+  ctx.n_in = call.n_in;
+  for (int k = 0; k < call.n_in; ++k)
+    ctx.in[k] = Desc{value_base ? value_base + in_offset[(size_t)k] : nullptr,
+                     call.in_len[k]};
+  ctx.out = Desc{value_base ? value_base + out_offset : nullptr, call.out_len};
+  ctx.variant = call.variant;
+  ctx.scratch = value_base ? value_base + scratch_offset : nullptr;
+  ctx.idata = call.idata.data();
+  ctx.n_idata = (int64_t)call.idata.size();
+  call.forward(ctx);
+
+  ArenaVaris output_varis((size_t)call.out_len);
+  for (int i = 0; i < call.out_len; ++i) {
+    reg[(size_t)(call.out + i)] =
+        stan::math::var(values[(size_t)(out_offset + i)]);
+    output_varis[(size_t)i] = reg[(size_t)(call.out + i)].vi_;
+  }
+
+  const Program::Call* site = &call;
+  stan::math::reverse_pass_callback([site, values, adjoints, input_varis,
+                                     output_varis, in_offset, out_offset,
+                                     scratch_offset]() mutable {
+    std::fill(adjoints.begin(), adjoints.end(), 0.0);
+    KernelCtx reverse;
+    double* const value_base = values.empty() ? nullptr : values.data();
+    double* const adjoint_base = adjoints.empty() ? nullptr : adjoints.data();
+    reverse.n_in = site->n_in;
+    for (int k = 0; k < site->n_in; ++k) {
+      reverse.in[k] =
+          Desc{value_base ? value_base + in_offset[(size_t)k] : nullptr,
+               site->in_len[k]};
+      reverse.in_adj[k] =
+          (site->input_adjoint_mask & (uint8_t)(1u << k))
+              ? Desc{adjoint_base ? adjoint_base + in_offset[(size_t)k]
+                                  : nullptr,
+                     site->in_len[k]}
+              : Desc{nullptr, site->in_len[k]};
+    }
+    reverse.out =
+        Desc{value_base ? value_base + out_offset : nullptr, site->out_len};
+    reverse.variant = site->variant;
+    reverse.scratch = value_base ? value_base + scratch_offset : nullptr;
+    reverse.idata = site->idata.data();
+    reverse.n_idata = (int64_t)site->idata.size();
+    if (site->out_len == 1) {
+      reverse.out_adj = output_varis[0]->adj_;
+    } else {
+      for (int i = 0; i < site->out_len; ++i)
+        adjoints[(size_t)(out_offset + i)] = output_varis[(size_t)i]->adj_;
+      reverse.out_adj_vec = Desc{
+          adjoint_base ? adjoint_base + out_offset : nullptr, site->out_len};
+    }
+    site->backward(reverse);
+
+    size_t vari_at = input_varis.size();
+    for (int k = site->n_in; k-- > 0;) {
+      vari_at -= (size_t)site->in_len[k];
+      if (!(site->input_adjoint_mask & (uint8_t)(1u << k))) continue;
+      for (int i = site->in_len[k]; i-- > 0;)
+        input_varis[vari_at + (size_t)i]->adj_ +=
+            adjoints[(size_t)(in_offset[(size_t)k] + i)];
+    }
+  });
 }
 
 void run_call(const Program::Call& call, double* reg, KernelCtx& ctx,

@@ -810,8 +810,7 @@ void test_print_then_reject_effects() {
   run_domain_error_case(
       "print then reject effects",
       "print occurs first; reject throws domain_error with its full message",
-      {std::move(entry)}, 1.0, "bad rhs t=1", "before reject t=1\n",
-      "FnReject");
+      {std::move(entry)}, 1.0, "bad rhs t=1", "before reject t=1\n", nullptr);
 }
 
 FunDef runtime_effect_rhs() {
@@ -838,11 +837,11 @@ void test_runtime_guarded_effects() {
   const FunDef entry = runtime_effect_rhs();
   run_case("untaken runtime effects",
            "a false branch emits nothing and evaluation continues", {entry},
-           1.0, {1.0}, {}, "FnReject");
+           1.0, {1.0});
   run_domain_error_case(
       "taken runtime effects",
       "a true branch prints once, then reject terminates evaluation", {entry},
-      -1.0, "negative t rejected: -1", "negative branch t=-1\n", "FnReject");
+      -1.0, "negative t rejected: -1", "negative branch t=-1\n");
 }
 
 void test_unknown_nrfunapp_fails_loud() {

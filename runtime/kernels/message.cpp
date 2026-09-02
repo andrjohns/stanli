@@ -16,6 +16,7 @@
 // because that is the only time the values exist. CmdStan formats a
 // vector as `[1,2,3]` and a scalar bare, and so does this.
 #include <stanli/graph.hpp>
+#include <stanli/message.hpp>
 #include <stanli/message_sink.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/packet.hpp>
@@ -39,32 +40,15 @@
 
 #include <cmath>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace stanli {
 
-void emit_program_print(const Program::Print& print, const double* reg) {
-  std::ostringstream out;
-  for (size_t k = 0; k < print.chunks.size(); ++k) {
-    out << print.chunks[k];
-    if (k >= print.value_reg.size()) continue;
-    const int32_t first = print.value_reg[k];
-    const int32_t len = print.value_len[k];
-    if (len == 1) {
-      out << reg[first];
-    } else {
-      out << '[';
-      for (int32_t i = 0; i < len; ++i) {
-        if (i) out << ',';
-        out << reg[first + i];
-      }
-      out << ']';
-    }
-  }
-  emit_message(out.str());
+void execute_message(MessageAction action, const std::string& message) {
+  if (action == MessageAction::Reject) throw std::domain_error(message);
+  emit_message(message);
 }
 
 namespace {
@@ -200,24 +184,11 @@ namespace {
 // what a call ending in a string literal produces.
 std::string render(const KernelCtx& ctx) {
   const auto* msg = static_cast<const MessageSpec*>(ctx.udata);
-  std::ostringstream out;
-  for (size_t k = 0; k < msg->chunks.size(); ++k) {
-    out << msg->chunks[k];
-    if ((int)k >= ctx.n_in) continue;
-    const auto& in = ctx.in[k];
-    // CmdStan prints a container in brackets and a scalar bare.
-    if (in.len == 1) {
-      out << in.data[0];
-    } else {
-      out << '[';
-      for (int64_t i = 0; i < in.len; ++i) {
-        if (i) out << ',';
-        out << in.data[i];
-      }
-      out << ']';
-    }
-  }
-  return out.str();
+  if (msg == nullptr) throw std::logic_error("message op has no template");
+  return render_message(
+      *msg, static_cast<size_t>(ctx.n_in),
+      [&](size_t k) { return ctx.in[k].len; },
+      [&](size_t k, int64_t i) { return ctx.in[k].data[i]; });
 }
 
 void reject_fwd(KernelCtx& ctx) {
@@ -225,10 +196,12 @@ void reject_fwd(KernelCtx& ctx) {
   // stan-math's own reject throws, and it is what the executor's callers
   // and the sampler already treat as "this draw is not valid" rather than
   // as a failure of the run.
-  throw std::domain_error(render(ctx));
+  execute_message(MessageAction::Reject, render(ctx));
 }
 
-void print_fwd(KernelCtx& ctx) { emit_message(render(ctx)); }
+void print_fwd(KernelCtx& ctx) {
+  execute_message(MessageAction::Print, render(ctx));
+}
 
 void check_structured_fwd(KernelCtx& ctx) {
   if (ctx.n_in != 1 || ctx.out.len != 1 || ctx.udata == nullptr)

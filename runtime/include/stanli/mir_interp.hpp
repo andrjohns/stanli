@@ -24,7 +24,7 @@
 #include <stanli/container_shape.hpp>
 #include <stanli/data.hpp>
 #include <stanli/extrema_grouping.hpp>
-#include <stanli/message_sink.hpp>
+#include <stanli/mir_message.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/optable.hpp>  // STANLI_SCALAR_UNARY_LIST
 #include <stanli/program.hpp>
@@ -38,7 +38,6 @@
 #include <functional>
 #include <limits>
 #include <map>
-#include <sstream>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -682,27 +681,21 @@ class MirInterp {
         // there rather than sampling from a model whose data is wrong.
         // Skipping it would mean stanli happily sampled a model CmdStan
         // refuses to build.
-        if (st.fn_name == "FnReject" || st.fn_name == "FnPrint") {
-          std::string msg;
-          for (const auto& a : st.fn_args) {
-            if (a.kind == mir::Expr::LitStr) {
-              msg += a.lit_s;
-              continue;
-            }
-            const Value v = eval(a);
-            if (v.r.size() == 1) {
-              msg += fmt_num(val(v.r[0]));
-            } else {
-              msg += '[';
-              for (size_t i = 0; i < v.r.size(); ++i) {
-                if (i) msg += ',';
-                msg += fmt_num(val(v.r[i]));
-              }
-              msg += ']';
-            }
-          }
-          if (st.fn_name == "FnReject") throw std::domain_error(msg);
-          emit_message(msg);
+        if (const auto action = message_action(st.fn_name)) {
+          std::vector<Value> values;
+          const MessageSpec spec = lower_message_arguments(
+              st.fn_args, [&](const mir::Expr& argument) {
+                values.push_back(eval(argument));
+              });
+          execute_message(*action,
+                          render_message(
+                              spec, values.size(),
+                              [&](size_t k) {
+                                return static_cast<int64_t>(values[k].r.size());
+                              },
+                              [&](size_t k, int64_t i) {
+                                return val(values[k].r[static_cast<size_t>(i)]);
+                              }));
           return;
         }
         if (st.fn_name == "FnCheck") {
@@ -740,16 +733,6 @@ class MirInterp {
   }
 
  private:
-  // How reject()/print() render a number. ostream's default formatting is
-  // what the OP_REJECT kernel uses on the graph side, so the two paths
-  // spell the same value the same way -- and it is also what stan-math's
-  // own reject produces.
-  static std::string fmt_num(double v) {
-    std::ostringstream os;
-    os << v;
-    return os.str();
-  }
-
   // Thrown by a Return statement inside an interpreted function body.
   struct ReturnV {
     Value v;

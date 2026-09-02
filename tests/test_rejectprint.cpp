@@ -238,25 +238,72 @@ int main() {
            lines.size() == 1 && lines[0] == "print-only x=0.2");
   }
 
-  // A runtime-valued reject message remains unsupported. Unlike print, its
-  // text must be preserved in the exception, so keep refusing it until the
-  // register program has a rendered-reject payload too.
+  // A runtime-valued reject uses the same literal/value message template as
+  // print. The untaken arm is silent and the taken arm preserves the rendered
+  // value in the domain error.
   {
-    bool threw = false;
-    std::string msg;
+    DataMap d;
+    d.set_int("mode", 2);
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/necessity_effects.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    std::vector<double> g((size_t)ex.n_params());
+
+    ex.params_data()[0] = 0.1;
+    const double accepted_lp = ex.gradient(g.data());
+    expect("necessity untaken reject lp", accepted_lp == 0.1);
+    expect("necessity untaken reject gradient", g[0] == 1.0);
+
+    ex.params_data()[0] = -0.1;
+    std::string message;
     try {
-      DataMap d;
-      d.set_int("mode", 2);
-      (void)compile_model(slurp("tests/fixtures/necessity_effects.tmir.sexp"),
-                          d);
-    } catch (const CompileError& e) {
-      threw = true;
-      msg = e.what();
+      (void)ex.gradient(g.data());
+    } catch (const std::domain_error& e) {
+      message = e.what();
     }
-    expect("necessity runtime-valued reject refuses compilation", threw);
-    expect("necessity reject error names the unsupported effect: " + msg,
-           msg.find("runtime-control region") != std::string::npos &&
-               msg.find("FnReject") != std::string::npos);
+    expect("necessity dynamic reject message: " + message,
+           message == "negative x=-0.1");
+  }
+
+  // A recursive cycle is not itself an effect, but an effect reachable in
+  // that cycle still prevents compile-time evaluation. The untaken runtime
+  // arm must therefore be silent, and the taken arm emits each print once.
+  {
+    std::vector<std::string> lines;
+    set_message_sink([&lines](const char* text, size_t len) {
+      lines.emplace_back(text, len);
+    });
+    DataMap d;
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/known_real_udf_effect.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    std::vector<double> g((size_t)ex.n_params());
+
+    ex.params_data()[0] = 0.25;
+    const double untaken_lp = ex.gradient(g.data());
+    expect("effectful recursive UDF untaken lp",
+           untaken_lp == -0.5 * 0.25 * 0.25);
+    expect("effectful recursive UDF untaken gradient", g[0] == -0.25);
+    expect("effectful recursive UDF is not evaluated during compilation",
+           lines.empty());
+
+    ex.params_data()[0] = 101.0;
+    const double taken_lp = ex.gradient(g.data());
+    set_message_sink(nullptr);
+    expect("effectful recursive UDF taken lp",
+           taken_lp == -0.5 * 101.0 * 101.0);
+    expect("effectful recursive UDF taken gradient", g[0] == -101.0);
+    expect("effectful recursive UDF emits exactly twice, got " +
+               std::to_string(lines.size()),
+           lines.size() == 2);
+    if (lines.size() == 2) {
+      expect("recursive effect remains ordered: " + lines[0],
+             lines[0] == "recursive base");
+      expect("outer recursive print remains ordered: " + lines[1],
+             lines[1] == "known effectful recursive real: -0.5");
+    }
   }
 
   if (failures == 0) std::printf("test_rejectprint: all checks passed\n");

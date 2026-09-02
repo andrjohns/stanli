@@ -6,6 +6,7 @@
 #include <stanli/cse.hpp>
 #include <stanli/expression_layout.hpp>
 #include <stanli/inplace.hpp>
+#include <stanli/mir_message.hpp>
 #include <stanli/mir_prog.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/mir_decode.hpp>
@@ -16,6 +17,7 @@
 #include <stanli/structured_loop.hpp>
 #include <stanli/partition.hpp>
 #include <stanli/reroll.hpp>
+#include <stanli/regular_builtin.hpp>
 #include <stanli/structured_check.hpp>
 #include <stanli/wa_interp.hpp>
 
@@ -637,13 +639,6 @@ struct Lowering {
     ShapeQuery,
   };
 
-  enum class RegularKind { Binary, BinaryIntFirst, BinaryIntSecond, Unary };
-
-  struct RegularSpec {
-    RegularKind kind;
-    uint16_t opcode;
-  };
-
   struct BuiltinDispatch {
     BuiltinFamily family = BuiltinFamily::Elementwise;
     std::optional<RegularSpec> regular;
@@ -656,10 +651,6 @@ struct Lowering {
         : family(selected), regular(regular_call), scalar_rng(rng) {}
   };
 
-  static BuiltinDispatch regular_dispatch(RegularKind kind, uint16_t opcode) {
-    return {BuiltinFamily::Elementwise, RegularSpec{kind, opcode}};
-  }
-
   static BuiltinDispatch rng_dispatch(ScalarRng family) {
     return {BuiltinFamily::ScalarRng, std::nullopt, family};
   }
@@ -671,16 +662,6 @@ struct Lowering {
 
   static BuiltinDispatch resolve_builtin(const mir::Expr& e) {
     if (mir::is_reduce_sum(e)) return {BuiltinFamily::ReduceSum};
-    // These two names are overloaded by arity. Their reduction forms remain
-    // bespoke; their binary forms share the regular broadcast emitter.
-    if (e.name == "log_sum_exp")
-      return e.args.size() == 2 ? regular_dispatch(RegularKind::Binary, OP_LSE2)
-                                : BuiltinDispatch{};
-    if (e.name == "log_diff_exp")
-      return e.args.size() == 2
-                 ? regular_dispatch(RegularKind::Binary, OP_LOG_DIFF_EXP)
-                 : BuiltinDispatch{};
-
     // Bespoke functions still own their semantic checks. This registry only
     // selects the handler, replacing the old sequence in which every family
     // was probed and declined in turn.
@@ -744,58 +725,11 @@ struct Lowering {
             {"size", BuiltinFamily::ShapeQuery},
             {"num_elements", BuiltinFamily::ShapeQuery},
 
-            // Regular elementwise families and their aliases share one emitter.
-            {"Plus__", regular_dispatch(RegularKind::Binary, OP_ADD)},
-            {"Minus__", regular_dispatch(RegularKind::Binary, OP_SUB)},
-            {"Divide__", regular_dispatch(RegularKind::Binary, OP_DIV)},
-            {"EltTimes__", regular_dispatch(RegularKind::Binary, OP_MUL)},
-            {"EltDivide__", regular_dispatch(RegularKind::Binary, OP_DIV)},
-            {"Pow__", regular_dispatch(RegularKind::Binary, OP_POW)},
-            {"EltPow__", regular_dispatch(RegularKind::Binary, OP_POW)},
-            {"pow", regular_dispatch(RegularKind::Binary, OP_POW)},
-            {"add", regular_dispatch(RegularKind::Binary, OP_ADD)},
-            {"subtract", regular_dispatch(RegularKind::Binary, OP_SUB)},
-            {"divide", regular_dispatch(RegularKind::Binary, OP_DIV)},
-            {"elt_multiply", regular_dispatch(RegularKind::Binary, OP_MUL)},
-            {"elt_divide", regular_dispatch(RegularKind::Binary, OP_DIV)},
-#define STANLI_DISPATCH_BINARY(code, name, fn) \
-  {#name, regular_dispatch(RegularKind::Binary, code)},
-            STANLI_SCALAR_BINARY_LIST(STANLI_DISPATCH_BINARY)
-#undef STANLI_DISPATCH_BINARY
-                {"multiply_log",
-                 regular_dispatch(RegularKind::Binary, OP_LMULTIPLY)},
-#define STANLI_DISPATCH_INT_FIRST(code, name, fn) \
-  {#name, regular_dispatch(RegularKind::BinaryIntFirst, code)},
-            STANLI_SCALAR_BINARY_INT_FIRST_LIST(STANLI_DISPATCH_INT_FIRST)
-#undef STANLI_DISPATCH_INT_FIRST
-#define STANLI_DISPATCH_INT_SECOND(code, name, fn) \
-  {#name, regular_dispatch(RegularKind::BinaryIntSecond, code)},
-                STANLI_SCALAR_BINARY_INT_SECOND_LIST(STANLI_DISPATCH_INT_SECOND)
-#undef STANLI_DISPATCH_INT_SECOND
-#define STANLI_DISPATCH_UNARY(code, name, value, delta, topology) \
-  {#name, regular_dispatch(RegularKind::Unary, code)},
-                    STANLI_SCALAR_UNARY_LIST(STANLI_DISPATCH_UNARY)
-#undef STANLI_DISPATCH_UNARY
-                        {"PMinus__",
-                         regular_dispatch(RegularKind::Unary, OP_NEG)},
-            {"minus", regular_dispatch(RegularKind::Unary, OP_NEG)},
-            {"std_normal_qf", regular_dispatch(RegularKind::Unary, OP_INV_PHI)},
-            {"trigamma", regular_dispatch(RegularKind::Unary, OP_TRIGAMMA)},
-            {"exp", regular_dispatch(RegularKind::Unary, OP_EXPV)},
-            {"log", regular_dispatch(RegularKind::Unary, OP_LOGV)},
-            {"inv_logit", regular_dispatch(RegularKind::Unary, OP_INV_LOGIT)},
-            {"logit", regular_dispatch(RegularKind::Unary, OP_LOGIT)},
-            {"sqrt", regular_dispatch(RegularKind::Unary, OP_SQRT)},
-            {"square", regular_dispatch(RegularKind::Unary, OP_SQUARE)},
-            {"log1m", regular_dispatch(RegularKind::Unary, OP_LOG1M)},
-            {"softmax", regular_dispatch(RegularKind::Unary, OP_SOFTMAX)},
-            {"tanh", regular_dispatch(RegularKind::Unary, OP_TANHV)},
-            {"cumulative_sum", regular_dispatch(RegularKind::Unary, OP_CUMSUM)},
-            {"log_softmax",
-             regular_dispatch(RegularKind::Unary, OP_LOG_SOFTMAX)},
         };
     const auto builtin = kBuiltins.find(e.name);
     if (builtin != kBuiltins.end()) return builtin->second;
+    if (const auto regular = resolve_regular_builtin(e.name, e.args.size()))
+      return {BuiltinFamily::Elementwise, *regular};
     // Keep the scalar-RNG vocabulary in the shared classifier used by the
     // graph, interpreter, and runtime-region compiler. The selected family is
     // still carried into the handler, so dispatch performs this lookup once.
@@ -870,7 +804,6 @@ struct Lowering {
   // return use the promoted type, but a direct formal reference keeps its own.
   std::map<std::string, bool> udf_formal_autodiff;
   std::map<std::string, bool> effectful_cache;
-  std::set<std::string> effectful_visiting;
   std::set<std::string> int_locals;  // SInt locals in log_prob (data-only)
   int udf_depth = 0;
   // Names the reduce_sum rewrite binds its lowered slice under, kept
@@ -2915,6 +2848,14 @@ struct Lowering {
       *dims = evaluated->dims;
       return true;
     };
+    c.extern_real = [&](const mir::Expr& x, double* value) {
+      if (x.type_ != "UReal") return false;
+      auto evaluated = try_eval_pure(x);
+      if (!evaluated || evaluated->is_int || evaluated->r.size() != 1)
+        return false;
+      *value = evaluated->r[0];
+      return true;
+    };
     std::set<std::string> outer_names;
     for (const auto& [name, value] : scope) outer_names.insert(name);
     for (const auto& [name, value] : decls) outer_names.insert(name);
@@ -3311,9 +3252,7 @@ struct Lowering {
   }
 
   bool stmt_effectful(const mir::Stmt& s) {
-    if (s.kind == mir::Stmt::NRFunApp &&
-        (s.fn_name == "FnPrint" || s.fn_name == "FnReject"))
-      return true;
+    if (s.kind == mir::Stmt::NRFunApp && message_action(s.fn_name)) return true;
     for (const auto& e : s.fn_args)
       if (expr_effectful(e)) return true;
     if (s.has_init && expr_effectful(s.init)) return true;
@@ -3435,16 +3374,70 @@ struct Lowering {
   bool fun_effectful(const std::string& name) {
     auto memo = effectful_cache.find(name);
     if (memo != effectful_cache.end()) return memo->second;
-    if (!effectful_visiting.insert(name).second) return true;
-    bool effect = false;
-    auto f = fun_defs.find(name);
-    if (f != fun_defs.end())
-      for (const auto& s : f->second->body)
-        if (stmt_effectful(s)) {
-          effect = true;
-          break;
-        }
-    effectful_visiting.erase(name);
+
+    // Recursion is not itself an observable effect.  Walk the complete
+    // reachable call graph for this query, treating an edge back into the
+    // active component as already being examined.  Do not memoize an
+    // intermediate node: in an effectful recursive component its answer can
+    // depend on statements that the outer frame has not visited yet.
+    std::set<std::string> visiting;
+    std::function<bool(const std::string&)> visit_fun;
+    std::function<bool(const mir::Expr&)> visit_expr;
+    std::function<bool(const mir::Stmt&)> visit_stmt;
+
+    visit_fun = [&](const std::string& called) {
+      auto known = effectful_cache.find(called);
+      if (known != effectful_cache.end()) return known->second;
+      if (!visiting.insert(called).second) return false;
+      bool found = false;
+      auto f = fun_defs.find(called);
+      if (f != fun_defs.end())
+        for (const auto& s : f->second->body)
+          if (visit_stmt(s)) {
+            found = true;
+            break;
+          }
+      visiting.erase(called);
+      return found;
+    };
+
+    visit_expr = [&](const mir::Expr& e) {
+      if (e.kind == mir::Expr::FunApp && e.name.size() >= 4 &&
+          e.name.compare(e.name.size() - 4, 4, "_rng") == 0)
+        return true;
+      if (e.kind == mir::Expr::FunApp &&
+          e.fn_lib == mir::Expr::Lib::UserDefined && visit_fun(e.name))
+        return true;
+      if (mir::is_reduce_sum(e)) {
+        if (e.args.empty() || e.args[0].kind != mir::Expr::Var) return true;
+        bool propto = false;
+        const mir::FunDef* partial = mir::resolve_reduce_sum_partial(
+            fun_defs, mir::reduce_sum_partial_name(e.args[0].name, &propto),
+            mir::reduce_sum_partial_views(e));
+        if (partial == nullptr || visit_fun(partial->name)) return true;
+      }
+      for (const auto& a : e.args)
+        if (visit_expr(a)) return true;
+      return false;
+    };
+
+    visit_stmt = [&](const mir::Stmt& s) {
+      if (s.kind == mir::Stmt::NRFunApp && message_action(s.fn_name))
+        return true;
+      for (const auto& e : s.fn_args)
+        if (visit_expr(e)) return true;
+      if (s.has_init && visit_expr(s.init)) return true;
+      if (visit_expr(s.rhs) || visit_expr(s.target) || visit_expr(s.lower) ||
+          visit_expr(s.upper) || visit_expr(s.cond))
+        return true;
+      for (const auto& e : s.lhs_idx)
+        if (visit_expr(e)) return true;
+      for (const auto& child : s.body)
+        if (visit_stmt(child)) return true;
+      return false;
+    };
+
+    const bool effect = visit_fun(name);
     effectful_cache[name] = effect;
     return effect;
   }
@@ -7712,30 +7705,22 @@ struct Lowering {
         // std::domain_error at forward time, which is the same exception
         // from the same place CmdStan's generated code throws it, so the
         // sampler counts it as a rejected proposal rather than a failure.
-        if (s.fn_name == "FnReject" || s.fn_name == "FnPrint") {
+        if (const auto action = message_action(s.fn_name)) {
           auto spec = std::make_shared<MessageSpec>();
           std::vector<int> ins;
-          std::string pending;
-          for (const auto& a : s.fn_args) {
-            if (a.kind == mir::Expr::LitStr) {
-              pending += a.lit_s;
-              continue;
-            }
-            // Each value input closes the chunk that precedes it. Op::in
-            // holds six, and a message longer than that is a diagnostic
-            // nobody will miss the tail of -- but say so rather than
-            // corrupting the op.
-            if (ins.size() >= 6)
-              fail(std::string(s.fn_name == "FnReject" ? "reject" : "print") +
-                       " with more than 6 printed values",
-                   s.raw);
-            spec->chunks.push_back(pending);
-            pending.clear();
-            ins.push_back(lower_expr(a).slot);
-          }
-          spec->chunks.push_back(pending);  // trailing literal, if any
+          *spec = lower_message_arguments(
+              s.fn_args, [&](const mir::Expr& argument) {
+                // Op::in holds six. Keep that backend capacity check here;
+                // parsing and semantic dispatch remain shared.
+                if (ins.size() >= 6)
+                  fail(std::string(*action == MessageAction::Reject ? "reject"
+                                                                    : "print") +
+                           " with more than 6 printed values",
+                       s.raw);
+                ins.push_back(lower_expr(argument).slot);
+              });
           Op op;
-          op.opcode = s.fn_name == "FnReject" ? OP_REJECT : OP_PRINT;
+          op.opcode = *action == MessageAction::Reject ? OP_REJECT : OP_PRINT;
           op.n_in = (int)ins.size();
           for (size_t k = 0; k < ins.size(); ++k) op.in[k] = ins[k];
           // The output is a dead scalar: every op writes somewhere, and
