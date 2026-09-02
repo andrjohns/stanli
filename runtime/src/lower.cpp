@@ -2915,6 +2915,14 @@ struct Lowering {
       *dims = evaluated->dims;
       return true;
     };
+    c.extern_real = [&](const mir::Expr& x, double* value) {
+      if (x.type_ != "UReal") return false;
+      auto evaluated = try_eval_pure(x);
+      if (!evaluated || evaluated->is_int || evaluated->r.size() != 1)
+        return false;
+      *value = evaluated->r[0];
+      return true;
+    };
     std::set<std::string> outer_names;
     for (const auto& [name, value] : scope) outer_names.insert(name);
     for (const auto& [name, value] : decls) outer_names.insert(name);

@@ -5218,6 +5218,24 @@ int main() {
     check(lp[0] != lp[1], "callable jacobians runtime branch changes target");
   }
 
+  // A transformed-data real passed to a recursive UDF inside parameter-
+  // dependent control flow remains known while ProgramCompiler inlines the
+  // call. Each recursive condition therefore folds, while the surrounding
+  // branch itself remains a runtime island.
+  {
+    CompiledModel km = compile_model(
+        slurp("tests/fixtures/known_real_udf.tmir.sexp"), DataMap());
+    check(km.n_unconstrained == 1, "known-real UDF parameter width");
+    check(count_opcode(km, OP_ISLAND) > 0, "known-real UDF runtime island");
+    Executor kex(std::move(km.graph));
+    km.bind(kex);
+    kex.params_data()[0] = 0.25;
+    double gradient[1];
+    const double lp = kex.gradient(gradient);
+    expect_eq("known-real UDF lp", lp, -0.5 * 0.25 * 0.25);
+    expect_eq("known-real UDF gradient", gradient[0], -0.25);
+  }
+
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations
   // themselves. An infinite bound is no bound -- the element is the
   // identity and adds no jacobian term -- and the kernels used to

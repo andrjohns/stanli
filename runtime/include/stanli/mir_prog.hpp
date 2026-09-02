@@ -64,6 +64,8 @@ struct InlineArg {
   std::vector<long> ints;
   std::vector<int64_t> int_dims;
   bool is_const_int = false;
+  bool is_const_real = false;
+  double const_real = 0.0;
 };
 
 struct Bail {
@@ -75,6 +77,10 @@ struct ProgramCompiler {
   const std::map<std::string, const mir::FunDef*>& funs;
   std::map<std::string, Range> reals;
   std::map<std::string, std::vector<long>> ints;
+  // Known scalar real formals are retained beside their register binding.
+  // The register still supplies ordinary execution; this map is only what
+  // lets compile-time control decisions and nested calls retain the value.
+  std::map<std::string, double> known_reals;
   // Integer containers still occupy registers when a real-valued expression
   // consumes them, but their values are data and therefore available while
   // the program is being compiled.  Keep that provenance beside the register
@@ -140,6 +146,12 @@ struct ProgramCompiler {
   std::function<bool(const mir::Expr&, std::vector<long>*,
                      std::vector<int64_t>*)>
       extern_ints;
+  // A scalar real expression whose value the surrounding lowerer can prove
+  // at model-construction time. This is a value callback, not an activity
+  // test: generated-quantity draws are inactive but still unknown. Evaluating
+  // a complete data-only UDF here also handles recursion without trying to
+  // turn a dynamic call stack into finite inline instructions.
+  std::function<bool(const mir::Expr&, double*)> extern_real;
   // Where `target +=` accumulates, or -1 when the region may not have
   // one. Set by the caller, which also seeds it to zero.
   int target_reg = -1;
@@ -475,6 +487,64 @@ struct ProgramCompiler {
     return e.type_ == "UInt" || e.unsized.leaf == mir::UnsizedLeaf::Int;
   }
 
+  double creal(const mir::Expr& e) {
+    if (e.data_only && extern_real && e.type_ == "UReal") {
+      double value = 0.0;
+      if (extern_real(e, &value)) return value;
+    }
+    switch (e.kind) {
+      case mir::Expr::LitInt:
+        return static_cast<double>(e.lit_i);
+      case mir::Expr::LitReal:
+        return e.lit;
+      case mir::Expr::Var: {
+        auto real = known_reals.find(e.name);
+        if (real != known_reals.end()) return real->second;
+        auto integer = ints.find(e.name);
+        if (integer != ints.end() && integer->second.size() == 1)
+          return static_cast<double>(integer->second[0]);
+        bail("real " + e.name + " is not known at compile time");
+      }
+      case mir::Expr::Promotion:
+        if (e.args.size() != 1) bail("real promotion form");
+        return creal(e.args[0]);
+      case mir::Expr::TernaryIf:
+        if (e.args.size() != 3) bail("real conditional form");
+        return creal(e.args[cint(e.args[0]) != 0 ? 1 : 2]);
+      case mir::Expr::FunApp:
+        if (const auto value = mir::nullary_constant(e)) return *value;
+        if (e.args.size() == 1) {
+          if (e.name == "PMinus__" || e.name == "minus")
+            return -creal(e.args[0]);
+          if (e.name == "PPlus__" || e.name == "plus") return creal(e.args[0]);
+        }
+        if (e.args.size() == 2) {
+          const double lhs = creal(e.args[0]);
+          const double rhs = creal(e.args[1]);
+          if (e.name == "Plus__" || e.name == "add") return lhs + rhs;
+          if (e.name == "Minus__" || e.name == "subtract") return lhs - rhs;
+          if (e.name == "Times__" || e.name == "multiply" ||
+              e.name == "elt_multiply")
+            return lhs * rhs;
+          if (e.name == "Divide__" || e.name == "divide" ||
+              e.name == "elt_divide")
+            return lhs / rhs;
+        }
+        bail("real function " + e.name + " is not known at compile time");
+      default:
+        bail("real expression is not known at compile time");
+    }
+  }
+
+  bool try_creal(const mir::Expr& e, double* out) {
+    try {
+      *out = creal(e);
+      return true;
+    } catch (Bail&) {
+      return false;
+    }
+  }
+
   long cint(const mir::Expr& e) {
     switch (e.kind) {
       case mir::Expr::LitInt:
@@ -603,6 +673,15 @@ struct ProgramCompiler {
             if (e.name == "Leq__") return cint(e.args[0]) <= cint(e.args[1]);
             if (e.name == "Greater__") return cint(e.args[0]) > cint(e.args[1]);
             if (e.name == "Geq__") return cint(e.args[0]) >= cint(e.args[1]);
+          }
+          double lhs = 0.0, rhs = 0.0;
+          if (try_creal(e.args[0], &lhs) && try_creal(e.args[1], &rhs)) {
+            if (e.name == "Equals__") return lhs == rhs;
+            if (e.name == "NEquals__") return lhs != rhs;
+            if (e.name == "Less__") return lhs < rhs;
+            if (e.name == "Leq__") return lhs <= rhs;
+            if (e.name == "Greater__") return lhs > rhs;
+            if (e.name == "Geq__") return lhs >= rhs;
           }
         }
         if (e.args.size() == 1 && e.name == "PMinus__") return -cint(e.args[0]);
@@ -1844,6 +1923,8 @@ struct ProgramCompiler {
           arg.int_dims =
               view.dims.empty() ? std::vector<int64_t>{view.len} : view.dims;
         } else {
+          if (a.type_ == "UReal")
+            arg.is_const_real = try_creal(a, &arg.const_real);
           arg.real = expr(a);
         }
         args.push_back(std::move(arg));
@@ -3141,6 +3222,7 @@ struct ProgramCompiler {
     // restore afterwards. Registers are never reused, so nothing aliases.
     auto saved_reals = reals;
     auto saved_ints = ints;
+    auto saved_known_reals = known_reals;
     auto saved_known_int_arrays = known_int_arrays;
     auto saved_known_int_array_dims = known_int_array_dims;
     auto saved_int_array_names = int_array_names;
@@ -3150,6 +3232,7 @@ struct ProgramCompiler {
     const int saved_branch_depth = branch_depth;
     reals.clear();
     ints.clear();
+    known_reals.clear();
     known_int_arrays.clear();
     known_int_array_dims.clear();
     int_array_names.clear();
@@ -3158,6 +3241,8 @@ struct ProgramCompiler {
     extern_bound.clear();
     branch_depth = 0;
     inline_stack.push_back(f.name);
+    std::set<std::string> assigned;
+    for (const auto& statement : f.body) assigned_names(statement, &assigned);
     for (size_t k = 0; k < f.arg_names.size(); ++k) {
       if (args[k].is_const_int) {
         if (args[k].int_dims.empty()) {
@@ -3171,6 +3256,8 @@ struct ProgramCompiler {
         int_decl_at[f.arg_names[k]] = {0, loops.size()};
       } else {
         reals[f.arg_names[k]] = args[k].real;
+        if (args[k].is_const_real && !assigned.count(f.arg_names[k]))
+          known_reals[f.arg_names[k]] = args[k].const_real;
       }
     }
     Range out{0, 0};
@@ -3183,6 +3270,7 @@ struct ProgramCompiler {
       inline_stack.pop_back();
       reals = std::move(saved_reals);
       ints = std::move(saved_ints);
+      known_reals = std::move(saved_known_reals);
       known_int_arrays = std::move(saved_known_int_arrays);
       known_int_array_dims = std::move(saved_known_int_array_dims);
       int_array_names = std::move(saved_int_array_names);
@@ -3196,6 +3284,7 @@ struct ProgramCompiler {
     inline_stack.pop_back();
     reals = std::move(saved_reals);
     ints = std::move(saved_ints);
+    known_reals = std::move(saved_known_reals);
     known_int_arrays = std::move(saved_known_int_arrays);
     known_int_array_dims = std::move(saved_known_int_array_dims);
     int_array_names = std::move(saved_int_array_names);
