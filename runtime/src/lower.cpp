@@ -804,7 +804,6 @@ struct Lowering {
   // return use the promoted type, but a direct formal reference keeps its own.
   std::map<std::string, bool> udf_formal_autodiff;
   std::map<std::string, bool> effectful_cache;
-  std::set<std::string> effectful_visiting;
   std::set<std::string> int_locals;  // SInt locals in log_prob (data-only)
   int udf_depth = 0;
   // Names the reduce_sum rewrite binds its lowered slice under, kept
@@ -3375,16 +3374,70 @@ struct Lowering {
   bool fun_effectful(const std::string& name) {
     auto memo = effectful_cache.find(name);
     if (memo != effectful_cache.end()) return memo->second;
-    if (!effectful_visiting.insert(name).second) return true;
-    bool effect = false;
-    auto f = fun_defs.find(name);
-    if (f != fun_defs.end())
-      for (const auto& s : f->second->body)
-        if (stmt_effectful(s)) {
-          effect = true;
-          break;
-        }
-    effectful_visiting.erase(name);
+
+    // Recursion is not itself an observable effect.  Walk the complete
+    // reachable call graph for this query, treating an edge back into the
+    // active component as already being examined.  Do not memoize an
+    // intermediate node: in an effectful recursive component its answer can
+    // depend on statements that the outer frame has not visited yet.
+    std::set<std::string> visiting;
+    std::function<bool(const std::string&)> visit_fun;
+    std::function<bool(const mir::Expr&)> visit_expr;
+    std::function<bool(const mir::Stmt&)> visit_stmt;
+
+    visit_fun = [&](const std::string& called) {
+      auto known = effectful_cache.find(called);
+      if (known != effectful_cache.end()) return known->second;
+      if (!visiting.insert(called).second) return false;
+      bool found = false;
+      auto f = fun_defs.find(called);
+      if (f != fun_defs.end())
+        for (const auto& s : f->second->body)
+          if (visit_stmt(s)) {
+            found = true;
+            break;
+          }
+      visiting.erase(called);
+      return found;
+    };
+
+    visit_expr = [&](const mir::Expr& e) {
+      if (e.kind == mir::Expr::FunApp && e.name.size() >= 4 &&
+          e.name.compare(e.name.size() - 4, 4, "_rng") == 0)
+        return true;
+      if (e.kind == mir::Expr::FunApp &&
+          e.fn_lib == mir::Expr::Lib::UserDefined && visit_fun(e.name))
+        return true;
+      if (mir::is_reduce_sum(e)) {
+        if (e.args.empty() || e.args[0].kind != mir::Expr::Var) return true;
+        bool propto = false;
+        const mir::FunDef* partial = mir::resolve_reduce_sum_partial(
+            fun_defs, mir::reduce_sum_partial_name(e.args[0].name, &propto),
+            mir::reduce_sum_partial_views(e));
+        if (partial == nullptr || visit_fun(partial->name)) return true;
+      }
+      for (const auto& a : e.args)
+        if (visit_expr(a)) return true;
+      return false;
+    };
+
+    visit_stmt = [&](const mir::Stmt& s) {
+      if (s.kind == mir::Stmt::NRFunApp && message_action(s.fn_name))
+        return true;
+      for (const auto& e : s.fn_args)
+        if (visit_expr(e)) return true;
+      if (s.has_init && visit_expr(s.init)) return true;
+      if (visit_expr(s.rhs) || visit_expr(s.target) || visit_expr(s.lower) ||
+          visit_expr(s.upper) || visit_expr(s.cond))
+        return true;
+      for (const auto& e : s.lhs_idx)
+        if (visit_expr(e)) return true;
+      for (const auto& child : s.body)
+        if (visit_stmt(child)) return true;
+      return false;
+    };
+
+    const bool effect = visit_fun(name);
     effectful_cache[name] = effect;
     return effect;
   }

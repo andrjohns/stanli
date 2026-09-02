@@ -1113,6 +1113,17 @@ struct ProgramCompiler {
 
   // ---- expressions ---------------------------------------------------------
   Range expr(const mir::Expr& e) {
+    // A complete, concretely evaluable pure UDF is already executable by the
+    // surrounding MIR interpreter. Materialize its result once instead of
+    // expanding its call tree into a finite register program. The successful
+    // callback is the proof of concreteness: stanc can label the recursive
+    // remainder AutoDiffable even after all its actuals became data literals.
+    if (e.kind == mir::Expr::FunApp &&
+        e.fn_lib == mir::Expr::Lib::UserDefined && e.type_ == "UReal" &&
+        extern_real) {
+      double value = 0.0;
+      if (extern_real(e, &value)) return {konst(value), 1};
+    }
     switch (e.kind) {
       case mir::Expr::LitInt:
         return {konst((double)e.lit_i), 1};

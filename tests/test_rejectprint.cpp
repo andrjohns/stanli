@@ -266,6 +266,46 @@ int main() {
            message == "negative x=-0.1");
   }
 
+  // A recursive cycle is not itself an effect, but an effect reachable in
+  // that cycle still prevents compile-time evaluation. The untaken runtime
+  // arm must therefore be silent, and the taken arm emits each print once.
+  {
+    std::vector<std::string> lines;
+    set_message_sink([&lines](const char* text, size_t len) {
+      lines.emplace_back(text, len);
+    });
+    DataMap d;
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/known_real_udf_effect.tmir.sexp"), d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    std::vector<double> g((size_t)ex.n_params());
+
+    ex.params_data()[0] = 0.25;
+    const double untaken_lp = ex.gradient(g.data());
+    expect("effectful recursive UDF untaken lp",
+           untaken_lp == -0.5 * 0.25 * 0.25);
+    expect("effectful recursive UDF untaken gradient", g[0] == -0.25);
+    expect("effectful recursive UDF is not evaluated during compilation",
+           lines.empty());
+
+    ex.params_data()[0] = 101.0;
+    const double taken_lp = ex.gradient(g.data());
+    set_message_sink(nullptr);
+    expect("effectful recursive UDF taken lp",
+           taken_lp == -0.5 * 101.0 * 101.0);
+    expect("effectful recursive UDF taken gradient", g[0] == -101.0);
+    expect("effectful recursive UDF emits exactly twice, got " +
+               std::to_string(lines.size()),
+           lines.size() == 2);
+    if (lines.size() == 2) {
+      expect("recursive effect remains ordered: " + lines[0],
+             lines[0] == "recursive base");
+      expect("outer recursive print remains ordered: " + lines[1],
+             lines[1] == "known effectful recursive real: -0.5");
+    }
+  }
+
   if (failures == 0) std::printf("test_rejectprint: all checks passed\n");
   return failures == 0 ? 0 : 1;
 }

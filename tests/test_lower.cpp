@@ -5282,9 +5282,9 @@ int main() {
   }
 
   // A transformed-data real passed to a recursive UDF inside parameter-
-  // dependent control flow remains known while ProgramCompiler inlines the
-  // call. Each recursive condition therefore folds, while the surrounding
-  // branch itself remains a runtime island.
+  // dependent control flow remains known. A complete pure call is evaluated
+  // once by the data interpreter instead of requiring a finite expansion of
+  // its recursive call tree, while the surrounding branch remains an island.
   {
     CompiledModel km = compile_model(
         slurp("tests/fixtures/known_real_udf.tmir.sexp"), DataMap());
@@ -5297,6 +5297,25 @@ int main() {
     const double lp = kex.gradient(gradient);
     expect_eq("known-real UDF lp", lp, -0.5 * 0.25 * 0.25);
     expect_eq("known-real UDF gradient", gradient[0], -0.25);
+  }
+
+  // Forty recursive steps exceed ProgramCompiler's inlining budget but stay
+  // within the MIR interpreter's supported call depth. This is the regression
+  // boundary: concrete pure recursion must use the latter rather than fail
+  // while trying to manufacture a finite register call stack.
+  {
+    CompiledModel km = compile_model(
+        slurp("tests/fixtures/known_real_udf_deep.tmir.sexp"), DataMap());
+    check(km.n_unconstrained == 1, "deep known-real UDF parameter width");
+    check(count_opcode(km, OP_ISLAND) > 0,
+          "deep known-real UDF runtime island");
+    Executor kex(std::move(km.graph));
+    km.bind(kex);
+    kex.params_data()[0] = 0.25;
+    double gradient[1];
+    const double lp = kex.gradient(gradient);
+    expect_eq("deep known-real UDF lp", lp, -0.5 * 0.25 * 0.25);
+    expect_eq("deep known-real UDF gradient", gradient[0], -0.25);
   }
 
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations
