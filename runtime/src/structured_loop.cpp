@@ -936,17 +936,40 @@ double handle(int64_t at, bool active) {
 
 // Dynamic counted-loop iterators are inactive int32 scalars.  Keep their
 // exact value in a disjoint handle band instead of allocating a value and a
-// generic Ref for every reached iteration.  Ordinary inactive Ref handles
-// occupy [-2^52, -1]; this band occupies the next 2^32 exact integers and
-// remains strictly inside binary64's exact-integer range.
+// generic Ref for every reached iteration. Ordinary inactive Ref handles use
+// the first 2^40 negative integers, an unreachable 24-TiB table ceiling. Arena
+// locations use the rest of the original 2^52 band, and inline int32 values
+// occupy the next 2^32 exact integers.
+constexpr int64_t ordinary_ref_limit = int64_t{1} << 40;
 constexpr int64_t inline_int_count = int64_t{1} << 32;
 constexpr int64_t inline_int_first = exact_limit + 1;
 constexpr int64_t inline_int_last = exact_limit + inline_int_count;
-static_assert(inline_int_last < (int64_t{1} << 53),
-              "inline integer handles must remain exact doubles");
+constexpr int64_t arena_location_first = ordinary_ref_limit + 1;
+constexpr int64_t arena_location_count = exact_limit - arena_location_first + 1;
+constexpr size_t arena_location_offset_bits = 24;
+constexpr size_t arena_location_block_values = size_t{1}
+                                               << arena_location_offset_bits;
+constexpr uint64_t arena_location_block_count =
+    static_cast<uint64_t>(arena_location_count) >> arena_location_offset_bits;
+static_assert(std::numeric_limits<double>::is_iec559 &&
+                  std::numeric_limits<double>::digits == 53,
+              "structured handles require IEEE binary64 doubles");
+static_assert(ordinary_ref_limit < arena_location_first &&
+                  arena_location_first <= exact_limit &&
+                  exact_limit < inline_int_first &&
+                  inline_int_last <= (int64_t{1} << 53),
+              "structured handle bands must be disjoint");
+static_assert(arena_location_count > 0 &&
+                  (arena_location_count % arena_location_block_values) == 0,
+              "arena handle range must contain complete blocks");
 
 bool is_inline_int(double h) noexcept {
   return h < -static_cast<double>(exact_limit);
+}
+
+bool is_arena_location(double h) noexcept {
+  return h < -static_cast<double>(ordinary_ref_limit) &&
+         h >= -static_cast<double>(exact_limit);
 }
 
 double inline_int_handle(int32_t value) noexcept {
@@ -1164,6 +1187,12 @@ struct Execution {
 // unused loop capacity consume no numerical history. Blocks keep every frame
 // address stable without a geometrically over-allocated contiguous vector.
 struct DynamicArena {
+  struct Allocation {
+    double* data = nullptr;
+    size_t block = 0;
+    size_t offset = 0;
+    size_t count = 0;
+  };
   struct Block {
     std::unique_ptr<double[]> data;
     size_t capacity = 0;
@@ -1180,29 +1209,65 @@ struct DynamicArena {
     used_values = capacity_values = 0;
   }
 
-  double* allocate(int64_t count) {
+  Allocation allocate_located(int64_t count) {
     if (count < 0 ||
         static_cast<uint64_t>(count) > std::numeric_limits<size_t>::max())
       throw std::length_error("dynamic structured history overflow");
     const size_t n = static_cast<size_t>(count);
-    if (n == 0) return nullptr;
+    if (n == 0) return {};
     if (blocks.empty() || n > blocks.back().capacity - blocks.back().used) {
       const size_t capacity = std::max(n, next_capacity);
       if (capacity > std::numeric_limits<uint64_t>::max() - capacity_values)
         throw std::length_error("dynamic structured history overflow");
       blocks.push_back({std::make_unique<double[]>(capacity), capacity, 0});
       capacity_values += capacity;
-      constexpr size_t maximum_block = size_t{1} << 24;  // 128 MiB
-      if (next_capacity < maximum_block)
-        next_capacity = std::min(maximum_block, next_capacity * 2);
+      if (next_capacity < arena_location_block_values)
+        next_capacity =
+            std::min(arena_location_block_values, next_capacity * 2);
     }
+    const size_t block_index = blocks.size() - 1;
     Block& block = blocks.back();
     if (n > std::numeric_limits<uint64_t>::max() - used_values)
       throw std::length_error("dynamic structured history overflow");
-    double* result = block.data.get() + block.used;
+    const size_t block_offset = block.used;
+    double* result = block.data.get() + block_offset;
     block.used += n;
     used_values += n;
-    return result;
+    return {result, block_index, block_offset, n};
+  }
+
+  double* allocate(int64_t count) { return allocate_located(count).data; }
+
+  bool location_handle(const Allocation& allocation, size_t relative,
+                       int64_t len, double& result) const noexcept {
+    if (len <= 0 || allocation.block >= arena_location_block_count ||
+        allocation.block >= blocks.size() || relative > allocation.count ||
+        static_cast<uint64_t>(len) > allocation.count - relative ||
+        allocation.offset >= arena_location_block_values ||
+        relative > arena_location_block_values - allocation.offset ||
+        static_cast<uint64_t>(len) >
+            arena_location_block_values - allocation.offset - relative)
+      return false;
+    const uint64_t code = (static_cast<uint64_t>(allocation.block)
+                           << arena_location_offset_bits) |
+                          static_cast<uint64_t>(allocation.offset + relative);
+    if (code >= static_cast<uint64_t>(arena_location_count)) return false;
+    result =
+        -static_cast<double>(arena_location_first + static_cast<int64_t>(code));
+    return true;
+  }
+
+  double* value(double h) const noexcept {
+    // location_handle() validates every coordinate before publication. Arena
+    // blocks remain stable until all evaluation-local handles are discarded.
+    const uint64_t code =
+        static_cast<uint64_t>(-h - static_cast<double>(arena_location_first));
+    const size_t block_index =
+        static_cast<size_t>(code >> arena_location_offset_bits);
+    const size_t block_offset = static_cast<size_t>(
+        code & static_cast<uint64_t>(arena_location_block_values - 1));
+    const Block& block = blocks[block_index];
+    return block.data.get() + block_offset;
   }
 };
 
@@ -1220,6 +1285,7 @@ struct DynamicAllocationProfile {
     uint64_t inactive_transient_values = 0;
     uint64_t inactive_output_values = 0;
     uint64_t inactive_output_refs = 0;
+    uint64_t arena_location_refs = 0;
     uint64_t arena_values = 0;
     uint64_t input_handle_values = 0;
     uint64_t output_values = 0;
@@ -1308,7 +1374,8 @@ struct DynamicAllocationProfile {
   }
 
   void note_inactive_split(const Op& op, const Node& node,
-                           int64_t retained_outputs) noexcept {
+                           int64_t retained_outputs,
+                           uint64_t arena_locations) noexcept {
     Bucket* b = bucket(op);
     if (!b) return;
     const uint64_t inputs = count(op.n_in);
@@ -1326,6 +1393,10 @@ struct DynamicAllocationProfile {
     const uint64_t new_padding = new_frame >= outputs ? new_frame - outputs : 0;
     if (new_frame < outputs) overflow = true;
     const uint64_t refs = op.out2 >= 0 ? 2 : 1;
+    if (arena_locations > refs) {
+      arena_locations = refs;
+      overflow = true;
+    }
     uint64_t transient = inputs;
     add(transient, scratch);
     add(transient, old_padding);
@@ -1334,7 +1405,9 @@ struct DynamicAllocationProfile {
     add(b->arena_values, new_frame);
     add(b->output_values, outputs);
     add(b->padding_values, new_padding);
-    add(b->refs, refs);
+    add(b->refs, refs - arena_locations);
+    add(b->elided_refs, arena_locations);
+    add(b->arena_location_refs, arena_locations);
     add(b->referenced_values, outputs);
     add(b->inactive_transient_values, transient);
     add(b->inactive_output_values, outputs);
@@ -1659,6 +1732,7 @@ void report_memory_profile(const StructuredLoop& p,
   uint64_t inactive_transient_values = 0;
   uint64_t inactive_output_values = 0;
   uint64_t inactive_output_refs = 0;
+  uint64_t arena_location_refs = 0;
   for (const auto& bucket : allocation->buckets) {
     kernel_arena_values = profile_add(kernel_arena_values, bucket.arena_values,
                                       allocation_overflow);
@@ -1698,6 +1772,8 @@ void report_memory_profile(const StructuredLoop& p,
     inactive_output_refs =
         profile_add(inactive_output_refs, bucket.inactive_output_refs,
                     allocation_overflow);
+    arena_location_refs = profile_add(
+        arena_location_refs, bucket.arena_location_refs, allocation_overflow);
   }
   uint64_t profiled_arena_values =
       profile_add(allocation->initial_arena_values, kernel_arena_values,
@@ -1723,7 +1799,7 @@ void report_memory_profile(const StructuredLoop& p,
       "actual_records=%zu records_match=%d inline_integer_calls=%llu "
       "elided_arena_values=%llu elided_refs=%llu "
       "inactive_transient_values=%llu inactive_output_values=%llu "
-      "inactive_output_refs=%llu\n",
+      "inactive_output_refs=%llu arena_location_refs=%llu\n",
       static_cast<const void*>(&p), allocation_overflow ? 1 : 0,
       static_cast<unsigned long long>(allocation->initial_arena_values),
       static_cast<unsigned long long>(kernel_arena_values),
@@ -1751,7 +1827,8 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(elided_refs),
       static_cast<unsigned long long>(inactive_transient_values),
       static_cast<unsigned long long>(inactive_output_values),
-      static_cast<unsigned long long>(inactive_output_refs));
+      static_cast<unsigned long long>(inactive_output_refs),
+      static_cast<unsigned long long>(arena_location_refs));
 
   for (uint16_t opcode = 0; opcode < OP_COUNT_; ++opcode) {
     const auto& bucket = allocation->buckets[opcode];
@@ -1768,6 +1845,7 @@ void report_memory_profile(const StructuredLoop& p,
         "elided_arena_values=%llu elided_refs=%llu arena_values=%llu "
         "inactive_transient_values=%llu inactive_output_values=%llu "
         "inactive_output_refs=%llu "
+        "arena_location_refs=%llu "
         "input_handle_values=%llu output_values=%llu scratch_values=%llu "
         "padding_values=%llu refs=%llu active_refs=%llu "
         "referenced_values=%llu conceptual_adjoint_values=%llu "
@@ -1787,6 +1865,7 @@ void report_memory_profile(const StructuredLoop& p,
         static_cast<unsigned long long>(bucket.inactive_transient_values),
         static_cast<unsigned long long>(bucket.inactive_output_values),
         static_cast<unsigned long long>(bucket.inactive_output_refs),
+        static_cast<unsigned long long>(bucket.arena_location_refs),
         static_cast<unsigned long long>(bucket.input_handle_values),
         static_cast<unsigned long long>(bucket.output_values),
         static_cast<unsigned long long>(bucket.scratch_values),
@@ -1837,9 +1916,9 @@ struct DynamicExecution {
   }
 
   DynamicLoopState::Ref& ref(double h) {
-    if (is_inline_int(h))
+    if (is_inline_int(h) || is_arena_location(h))
       throw std::logic_error(
-          "dynamic structured inline integer used as a reference");
+          "dynamic structured immediate handle used as a reference");
     return ordinary_ref(h);
   }
 
@@ -1849,7 +1928,7 @@ struct DynamicExecution {
     if (len < 0)
       throw std::logic_error(
           "dynamic structured reference has negative length");
-    if (state.refs.size() >= static_cast<size_t>(exact_limit))
+    if (state.refs.size() >= static_cast<size_t>(ordinary_ref_limit))
       throw std::length_error("dynamic structured reference overflow");
     DynamicLoopState::Ref r;
     r.value = value;
@@ -1886,7 +1965,10 @@ struct DynamicExecution {
   }
 
   double scalar_value(double h) {
-    return is_inline_int(h) ? inline_int_value(h) : ordinary_ref(h).value[0];
+    if (h < -static_cast<double>(exact_limit)) return inline_int_value(h);
+    return h < -static_cast<double>(ordinary_ref_limit)
+               ? state.arena.value(h)[0]
+               : ordinary_ref(h).value[0];
   }
 
   double scalar_value(int slot) {
@@ -1894,25 +1976,32 @@ struct DynamicExecution {
   }
 
   void copy_value(double h, int64_t len, double* output) {
-    if (is_inline_int(h)) {
+    if (h < -static_cast<double>(exact_limit)) {
       if (len != 1)
         throw std::logic_error(
             "dynamic structured inline integer has nonscalar extent");
       output[0] = inline_int_value(h);
       return;
     }
-    std::copy_n(ordinary_ref(h).value, len, output);
+    std::copy_n(h < -static_cast<double>(ordinary_ref_limit)
+                    ? state.arena.value(h)
+                    : ordinary_ref(h).value,
+                len, output);
   }
 
   bool value_overlaps(double h, int64_t len, Desc other) {
-    if (is_inline_int(h)) {
+    if (h < -static_cast<double>(exact_limit)) {
       if (len != 1)
         throw std::logic_error(
             "dynamic structured inline integer has nonscalar extent");
       (void)inline_int_value(h);
       return false;
     }
-    return overlaps({ordinary_ref(h).value, len}, other);
+    return overlaps(
+        {h < -static_cast<double>(ordinary_ref_limit) ? state.arena.value(h)
+                                                      : ordinary_ref(h).value,
+         len},
+        other);
   }
 
   void begin_loop_invariant_scope(const Node& n) noexcept {
@@ -2290,7 +2379,7 @@ struct DynamicExecution {
       c.state = nullptr;
       for (int k = 0; k < op.n_in; ++k) {
         const double h = frame[k];
-        if (is_inline_int(h)) {
+        if (h < -static_cast<double>(exact_limit)) {
           if (c.in[k].len != 1)
             throw std::logic_error(
                 "dynamic structured inline integer has nonscalar input");
@@ -2306,9 +2395,10 @@ struct DynamicExecution {
             inline_inputs[static_cast<size_t>(k)] = inline_int_value(h);
             c.in[k].data = &inline_inputs[static_cast<size_t>(k)];
           }
-        } else {
+        } else if (h < -static_cast<double>(ordinary_ref_limit))
+          c.in[k].data = state.arena.value(h);
+        else
           c.in[k].data = ordinary_ref(h).value;
-        }
         c.in_adj[k].data = backward ? adj(h, c.in[k].len) : nullptr;
       }
       int64_t pos = op.n_in;
@@ -2436,15 +2526,20 @@ struct DynamicExecution {
       throw std::logic_error("compact structured update arity is invalid");
     const int cell = n.compact_update_cell;
     const double base_handle = state.bindings[static_cast<size_t>(op.in[0])];
-    if (is_inline_int(base_handle)) return false;
-    DynamicLoopState::Ref& base = ordinary_ref(base_handle);
-    if (state.compact_primal_by_cell[static_cast<size_t>(cell)] != base.value)
+    double* base = nullptr;
+    if (base_handle < -static_cast<double>(exact_limit))
+      return false;
+    else if (base_handle < -static_cast<double>(ordinary_ref_limit))
+      base = state.arena.value(base_handle);
+    else
+      base = ordinary_ref(base_handle).value;
+    if (state.compact_primal_by_cell[static_cast<size_t>(cell)] != base)
       return false;
 
     double handles[6] = {};
     for (int k = 0; k < op.n_in; ++k)
       handles[k] = state.bindings[static_cast<size_t>(op.in[k])];
-    ContextLease context(*this, n, handles, false, -1, -1, base.value);
+    ContextLease context(*this, n, handles, false, -1, -1, base);
     KernelCtx& c = context.get();
     if (overlaps(c.out, c.in[1]) || overlaps(c.out, c.in[2])) return false;
     const auto& spec = *static_cast<const DynamicIndexSpec*>(op.udata);
@@ -2499,11 +2594,12 @@ struct DynamicExecution {
         add(p.body.slots[static_cast<size_t>(op.out)].len,
             op.out2 >= 0 ? p.body.slots[static_cast<size_t>(op.out2)].len : 0);
     const int64_t retained_outputs = output_values;
-    double* outputs = output_values > 0 ? state.arena.allocate(output_values)
-                                        : &state.inactive_empty_value;
-    double* output2 =
-        op.out2 >= 0 ? outputs + p.body.slots[static_cast<size_t>(op.out)].len
-                     : nullptr;
+    const DynamicArena::Allocation allocation =
+        state.arena.allocate_located(output_values);
+    double* outputs =
+        output_values > 0 ? allocation.data : &state.inactive_empty_value;
+    const int64_t primary_len = p.body.slots[static_cast<size_t>(op.out)].len;
+    double* output2 = op.out2 >= 0 ? outputs + primary_len : nullptr;
     ContextLease context(*this, n, handles, false, -1, -1, outputs, output2,
                          state.inactive_scratch.get());
     KernelCtx& c = context.get();
@@ -2511,17 +2607,36 @@ struct DynamicExecution {
     // and scratch stop entering persistent history; output storage remains in
     // the stable arena and is published after successful completion.
     n.forward(c);
-    state.bindings[static_cast<size_t>(op.out)] =
-        make_ref(c.out.data, c.out.len, false);
-    if (op.out2 >= 0)
-      state.bindings[static_cast<size_t>(op.out2)] =
-          make_ref(c.out2.data, c.out2.len, false);
+    uint64_t arena_locations = 0;
+    const auto output_handle = [&](double* actual, double* expected,
+                                   int64_t actual_len, int64_t expected_len,
+                                   size_t relative) {
+      double packed = 0.0;
+      if (actual == expected && actual_len == expected_len &&
+          state.arena.location_handle(allocation, relative, expected_len,
+                                      packed)) {
+        ++arena_locations;
+        return packed;
+      }
+      return make_ref(actual, actual_len, false);
+    };
+    const double out =
+        output_handle(c.out.data, outputs, c.out.len, primary_len, 0);
+    const double out2 =
+        op.out2 >= 0
+            ? output_handle(c.out2.data, output2, c.out2.len,
+                            p.body.slots[static_cast<size_t>(op.out2)].len,
+                            static_cast<size_t>(primary_len))
+            : -1;
+    state.bindings[static_cast<size_t>(op.out)] = out;
+    if (op.out2 >= 0) state.bindings[static_cast<size_t>(op.out2)] = out2;
     if (n.compact_update_cell >= 0)
       state.compact_primal_by_cell[static_cast<size_t>(n.compact_update_cell)] =
           c.out.data;
     publish_loop_invariant(n);
     if (state.allocation_profile)
-      state.allocation_profile->note_inactive_split(op, n, retained_outputs);
+      state.allocation_profile->note_inactive_split(op, n, retained_outputs,
+                                                    arena_locations);
     return true;
   }
 

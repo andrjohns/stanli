@@ -916,6 +916,105 @@ static std::shared_ptr<StructuredLoop> inactive_zero_output_plan() {
   return plan;
 }
 
+static void redirect_inactive_output(KernelCtx& context) {
+  context.out.data = context.in[0].data;
+}
+
+static std::shared_ptr<StructuredLoop> redirected_inactive_output_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int source = scalar(*plan, 42);
+  const int zero = scalar(*plan, 0);
+  const int result = plan->body.add_slot(1, false);
+  Node redirected = call(*plan, OP_ADD, {source, zero}, result);
+  const int redirected_op = redirected.op;
+  plan->root = std::move(redirected);
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(set_forward(plan->root, redirected_op, redirect_inactive_output),
+        "find redirected inactive callback");
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> inactive_location_target_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int two = scalar(*plan, 2);
+  const int three = scalar(*plan, 3);
+  const int result = plan->body.add_slot(1, false);
+  Node target;
+  target.kind = Node::Target;
+  target.src = result;
+  plan->root =
+      sequence({call(*plan, OP_ADD, {two, three}, result), std::move(target)});
+  plan->has_target = true;
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> inactive_location_bound_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int one = scalar(*plan, 1);
+  const int two = scalar(*plan, 2);
+  const int upper = plan->body.add_slot(1, false);
+  const int iterator = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->root =
+      sequence({call(*plan, OP_ADD, {one, two}, upper),
+                counted(one, upper, iterator, 3, alias(result, iterator))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> inactive_location_reverse_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int two = scalar(*plan, 2);
+  const int three = scalar(*plan, 3);
+  const int inactive = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+  plan->root = sequence({call(*plan, OP_ADD, {two, three}, inactive),
+                         call(*plan, OP_MUL, {theta, inactive}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> inactive_location_update_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int base = plan->body.add_slot(3, false);
+  plan->fills.push_back({base, {10, 20, 30}});
+  const int current = plan->body.add_slot(3, false);
+  const int rhs = scalar(*plan, 7);
+  const int updated = plan->body.add_slot(3, false);
+  const int result = plan->body.add_slot(1, false);
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
+  spec->selected_size = 1;
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, rhs}, updated);
+  plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  plan->root =
+      sequence({alias(current, base),
+                counted(lower, upper, iterator, 3,
+                        sequence({std::move(update), alias(current, updated)})),
+                call(*plan, OP_SUM_VEC, {current}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->compact_update_sites == 1,
+        "inactive location update selects compact history");
+  return plan;
+}
+
 static int active_workspace_forward_calls = 0;
 static int active_workspace_backward_calls = 0;
 static double* active_workspace_address = nullptr;
@@ -1110,6 +1209,33 @@ static void compact_integer_result_tests() {
         "inactive zero-output callbacks execute without arena anchors");
   check(inactive_workspace_stable && inactive_workspace_disjoint,
         "inactive zero-output workspace remains stable and disjoint");
+
+  Executor redirected(outer(redirected_inactive_output_plan()));
+  const Evaluation redirected_result = evaluate(redirected, 0, 0);
+  close(redirected_result.value, 42,
+        "redirected inactive output keeps ordinary reference fallback");
+
+  Executor inactive_target(outer(inactive_location_target_plan()));
+  const Evaluation targeted = evaluate(inactive_target, 0, 0);
+  close(targeted.value, 5, "inactive arena handle reaches target reduction");
+
+  Executor inactive_bound(outer(inactive_location_bound_plan()));
+  const Evaluation bounded = evaluate(inactive_bound, 0, 0);
+  close(bounded.value, 3, "inactive arena handle supplies counted-loop bound");
+
+  Executor inactive_reverse(outer(inactive_location_reverse_plan()));
+  const Evaluation reversed = evaluate(inactive_reverse, 4, 0);
+  close(reversed.value, 20,
+        "active operation reads inactive arena-handle primal");
+  close(reversed.gradient[0], 5,
+        "reverse operation reads inactive arena-handle primal");
+  close(reversed.gradient[1], 0,
+        "inactive arena-handle input has no adjoint storage");
+
+  Executor inactive_update(outer(inactive_location_update_plan()));
+  const Evaluation updated = evaluate(inactive_update, 0, 0);
+  close(updated.value, 21,
+        "inactive arena handle supplies compact-update base");
 
   active_workspace_forward_calls = 0;
   active_workspace_backward_calls = 0;
