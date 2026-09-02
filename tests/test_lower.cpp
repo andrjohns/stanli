@@ -5148,6 +5148,76 @@ int main() {
     }
   }
 
+  // Runtime-control Programs materialize matrix rows into contiguous
+  // registers, but min/max must retain the source Matrix<var> scalar
+  // traversal. Interior NaNs and signed-zero ties make that grouping
+  // observable in both the value and the selected adjoint.
+  {
+    DataMap data;
+    data.set_int("mode", 1);
+    CompiledModel mm = compile_model(
+        slurp("tests/fixtures/runtime_extrema_grouping.tmir.sexp"), data);
+    check(count_opcode(mm, OP_ISLAND) > 0,
+          "runtime extrema grouping uses a control-flow island");
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    const double q[] = {0.1, -4.0, -4.0,
+                        std::numeric_limits<double>::quiet_NaN(), -4.0};
+    for (int i = 0; i < 5; ++i) mex.params_data()[i] = q[i];
+    double grad[5] = {0};
+    expect_eq("runtime row min lp", mex.gradient(grad), -0.25);
+    expect_eq("runtime row min selected grad", grad[1], -0.0625);
+    expect_eq("runtime row min NaN grad", grad[3], 0.0);
+  }
+  {
+    DataMap data;
+    data.set_int("mode", 2);
+    CompiledModel mm = compile_model(
+        slurp("tests/fixtures/runtime_extrema_grouping.tmir.sexp"), data);
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    const double q[] = {0.1, -0.0, -2.0, +0.0, -3.0};
+    for (int i = 0; i < 5; ++i) mex.params_data()[i] = q[i];
+    double grad[5] = {0};
+    const double lp = mex.gradient(grad);
+    check(std::isinf(lp) && std::signbit(lp),
+          "runtime row max retains the first signed-zero tie");
+    check(std::isinf(grad[1]) && std::signbit(grad[1]),
+          "runtime row max routes the tied adjoint to the first coefficient");
+    expect_eq("runtime row max second tie grad", grad[3], 0.0);
+  }
+
+  // Every callable Jacobian transform, including the two stochastic-matrix
+  // families and representative array overloads. The unconditional call is
+  // graph-lowered; the parameter-dependent transformed-parameter branch is
+  // compiled into a typed Program::TRANSFORM and replayed under var.
+  {
+    CompiledModel jm = compile_model(
+        slurp("tests/fixtures/callable_jacobians.tmir.sexp"), DataMap());
+    check(jm.n_unconstrained == 37, "callable jacobians parameter width");
+    check(count_opcode(jm, OP_CONSTRAIN_STOCHASTIC_COLUMN) > 0,
+          "callable stochastic-column graph kernel");
+    check(count_opcode(jm, OP_CONSTRAIN_STOCHASTIC_ROW) > 0,
+          "callable stochastic-row graph kernel");
+    check(count_opcode(jm, OP_ISLAND) > 0,
+          "callable jacobians runtime-control island");
+    Executor jex(std::move(jm.graph));
+    jm.bind(jex);
+    std::vector<double> gradient((size_t)jm.n_unconstrained);
+    double lp[2] = {0, 0};
+    for (int side = 0; side < 2; ++side) {
+      for (int64_t i = 0; i < jm.n_unconstrained; ++i)
+        jex.params_data()[i] = 0.025 * (double)(i + 1);
+      jex.params_data()[0] = side ? 0.5 : -0.5;
+      lp[side] = jex.gradient(gradient.data());
+      check(std::isfinite(lp[side]), "callable jacobians finite log density");
+      check(std::all_of(gradient.begin(), gradient.end(),
+                        [](double x) { return std::isfinite(x); }),
+            "callable jacobians finite gradient");
+    }
+    check(lp[0] != lp[1], "callable jacobians runtime branch changes target");
+  }
+
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations
   // themselves. An infinite bound is no bound -- the element is the
   // identity and adds no jacobian term -- and the kernels used to

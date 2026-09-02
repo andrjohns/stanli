@@ -516,6 +516,29 @@ void test_uninitialized_real() {
            {std::move(entry)}, 1.0, {std::numeric_limits<double>::quiet_NaN()});
 }
 
+void test_nullary_constants() {
+  // All public nullary constants, plus stanc's internal negative-infinity
+  // spelling, share one resolver across ProgramCompiler and MirInterp.
+  const auto check = [&](const std::string& name, Expr value, double expected) {
+    FunDef entry = rhs_function("nullary_" + name + "_rhs",
+                                {return_value(make_array({std::move(value)}))});
+    run_case("nullary " + name, "constant compiles identically",
+             {std::move(entry)}, 1.0, {expected});
+  };
+  check("e", fun("e", {}, "UReal"), stan::math::e());
+  check("pi", fun("pi", {}, "UReal"), stan::math::pi());
+  check("machine_precision", fun("machine_precision", {}, "UReal"),
+        std::numeric_limits<double>::epsilon());
+  check("negative_infinity", fun("negative_infinity", {}, "UReal"),
+        -std::numeric_limits<double>::infinity());
+  check("positive_infinity", fun("positive_infinity", {}, "UReal"),
+        std::numeric_limits<double>::infinity());
+  check("not_a_number", fun("not_a_number", {}, "UReal"),
+        std::numeric_limits<double>::quiet_NaN());
+  check("FnNegInf", fun("FnNegInf", {}, "UReal", Expr::Lib::Internal),
+        -std::numeric_limits<double>::infinity());
+}
+
 void test_full_span_ode_vector() {
   // ODE RHS compilation is one production caller of ProgramCompiler. The
   // destination is vector[1], and y supplies a vector view of exactly that
@@ -611,6 +634,105 @@ void test_full_span_program_views() {
   }
 }
 
+void test_program_extrema() {
+  // ProgramCompiler must use the same language-level overload classifier as
+  // graph lowering and MirInterp. Exercise every one-argument surface plus
+  // the scalar integer pair, and verify that min/max share one instruction
+  // whose immediate selects the operation.
+  stanli::Program program;
+  std::map<std::string, const FunDef*> functions;
+  stanli::ProgramCompiler compiler{program, functions};
+  const double values[] = {3.0, -2.0, 7.0, 1.0};
+
+  auto bind = [&](const std::string& name, const std::string& type,
+                  UnsizedLeaf leaf, uint8_t depth, stanli::ViewKind kind) {
+    stanli::Range range{compiler.alloc(4), 4};
+    range.kind = kind;
+    if (kind == stanli::ViewKind::Matrix) {
+      range.rows = 2;
+      range.cols = 2;
+    }
+    if (kind == stanli::ViewKind::Array) {
+      range.dims = {4};
+      range.leaf = stanli::ViewKind::Flat;
+    }
+    compiler.emit_const(range.reg, values, 4);
+    compiler.reals[name] = range;
+    Expr input = var(name, type);
+    input.unsized = {depth, leaf};
+    input.data_only = leaf != UnsizedLeaf::Int;
+    return input;
+  };
+  auto reduce = [&](const char* name, Expr input, const char* result_type,
+                    UnsizedLeaf result_leaf) {
+    Expr call = fun(name, {std::move(input)}, result_type);
+    call.unsized = {0, result_leaf};
+    return compiler.expr(call).reg;
+  };
+
+  std::vector<int> outputs;
+  outputs.push_back(reduce(
+      "min",
+      bind("v", "UVector", UnsizedLeaf::Vector, 0, stanli::ViewKind::Vector),
+      "UReal", UnsizedLeaf::Real));
+  outputs.push_back(reduce("max",
+                           bind("rv", "URowVector", UnsizedLeaf::RowVector, 0,
+                                stanli::ViewKind::RowVector),
+                           "UReal", UnsizedLeaf::Real));
+  outputs.push_back(reduce(
+      "min",
+      bind("m", "UMatrix", UnsizedLeaf::Matrix, 0, stanli::ViewKind::Matrix),
+      "UReal", UnsizedLeaf::Real));
+  outputs.push_back(reduce(
+      "max",
+      bind("ar", "UArray", UnsizedLeaf::Real, 1, stanli::ViewKind::Array),
+      "UReal", UnsizedLeaf::Real));
+  outputs.push_back(reduce(
+      "min", bind("ai", "UArray", UnsizedLeaf::Int, 1, stanli::ViewKind::Array),
+      "UInt", UnsizedLeaf::Int));
+
+  Expr lhs = lit_int(9);
+  Expr rhs = lit_int(-4);
+  lhs.unsized = rhs.unsized = {0, UnsizedLeaf::Int};
+  Expr pair = fun("max", {std::move(lhs), std::move(rhs)}, "UInt");
+  pair.unsized = {0, UnsizedLeaf::Int};
+  outputs.push_back(compiler.expr(pair).reg);
+  compiler.finish();
+
+  int extrema_count = 0;
+  int min_count = 0;
+  int max_count = 0;
+  int packet_count = 0;
+  int scalar_count = 0;
+  for (const auto& instruction : program.code) {
+    if (instruction.code != stanli::Program::EXTREMA_RANGE) continue;
+    ++extrema_count;
+    instruction.b == 0 ? ++min_count : ++max_count;
+    if (instruction.c & stanli::kProgramExtremaScalar)
+      ++scalar_count;
+    else
+      ++packet_count;
+  }
+  if (extrema_count != 6 || min_count != 3 || max_count != 3 ||
+      packet_count != 4 || scalar_count != 2) {
+    ++failures;
+    std::printf(
+        "FAIL Program extrema opcode/grouping: total=%d min=%d max=%d "
+        "packet=%d scalar=%d\n",
+        extrema_count, min_count, max_count, packet_count, scalar_count);
+  }
+
+  std::vector<double> registers(static_cast<size_t>(program.n_regs));
+  stanli::run_program(program, registers);
+  const double expected[] = {-2.0, 7.0, -2.0, 7.0, -2.0, 9.0};
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    if (registers[static_cast<size_t>(outputs[i])] == expected[i]) continue;
+    ++failures;
+    std::printf("FAIL Program extrema output %zu: got %.17g, want %.17g\n", i,
+                registers[static_cast<size_t>(outputs[i])], expected[i]);
+  }
+}
+
 void test_matrix_row_indexing() {
   // A[1] is the complete first row.  For [[1,2],[3,4]], sum(A[1]) is 3;
   // indexing a flattened register is not the same operation.
@@ -672,7 +794,7 @@ void test_nested_print_effect() {
   run_case("nested print effect",
            "print in a UDF emits exactly once before returning",
            {std::move(entry), std::move(echo)}, 1.0, {1.0},
-           "nested print x=1\n", "FnPrint");
+           "nested print x=1\n");
 }
 
 void test_print_then_reject_effects() {
@@ -688,7 +810,8 @@ void test_print_then_reject_effects() {
   run_domain_error_case(
       "print then reject effects",
       "print occurs first; reject throws domain_error with its full message",
-      {std::move(entry)}, 1.0, "bad rhs t=1", "before reject t=1\n", "FnPrint");
+      {std::move(entry)}, 1.0, "bad rhs t=1", "before reject t=1\n",
+      "FnReject");
 }
 
 FunDef runtime_effect_rhs() {
@@ -715,11 +838,11 @@ void test_runtime_guarded_effects() {
   const FunDef entry = runtime_effect_rhs();
   run_case("untaken runtime effects",
            "a false branch emits nothing and evaluation continues", {entry},
-           1.0, {1.0}, {}, "FnPrint");
+           1.0, {1.0}, {}, "FnReject");
   run_domain_error_case(
       "taken runtime effects",
       "a true branch prints once, then reject terminates evaluation", {entry},
-      -1.0, "negative t rejected: -1", "negative branch t=-1\n", "FnPrint");
+      -1.0, "negative t rejected: -1", "negative branch t=-1\n", "FnReject");
 }
 
 void test_unknown_nrfunapp_fails_loud() {
@@ -744,8 +867,10 @@ int main() {
   test_short_circuit_or_requires_rhs();
   test_short_circuit_and_requires_rhs();
   test_uninitialized_real();
+  test_nullary_constants();
   test_full_span_ode_vector();
   test_full_span_program_views();
+  test_program_extrema();
   test_matrix_row_indexing();
   test_mixed_integer_udf_arguments();
   test_nested_print_effect();

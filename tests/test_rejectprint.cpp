@@ -169,12 +169,10 @@ int main() {
              lines[0] == "before scalar=0.1");
   }
 
-  // ---- parameter-dependent effects fail loud ---------------------------
-  // Generated Stan executes the taken print/reject once while evaluating
-  // the model. Necessity islands replay their register program for reverse
-  // mode, so they cannot preserve that contract yet. Refusal is the honest
-  // boundary: silently dropping either effect changes observable behavior,
-  // and dropping reject changes the posterior support.
+  // ---- parameter-dependent print executes only in the forward ---------
+  // Necessity islands replay their register program for reverse mode. The
+  // PRINT instruction is double-only, so the taken arm emits once during
+  // the forward and is silent during the var replay.
   //
   // The generated-Stan oracle at x=0.1 and x=-0.04 is:
   //
@@ -184,36 +182,81 @@ int main() {
   //      2   0.10    0.10     1  none (reject arm untaken)
   //      2  -0.04       -     -  throws domain_error once
   //
-  // Construction cannot know which parameter point a host will evaluate,
-  // so it must refuse both models before either arm can run.
   {
     const std::string effect_mir =
         slurp("tests/fixtures/necessity_effects.tmir.sexp");
-    for (int mode = 1; mode <= 2; ++mode) {
-      std::vector<std::string> lines;
-      set_message_sink([&lines](const char* text, size_t len) {
-        lines.emplace_back(text, len);
-      });
-      bool threw = false;
-      std::string msg;
-      try {
-        DataMap d;
-        d.set_int("mode", mode);
-        (void)compile_model(effect_mir, d);
-      } catch (const CompileError& e) {
-        threw = true;
-        msg = e.what();
-      }
-      set_message_sink(nullptr);
+    DataMap d;
+    d.set_int("mode", 1);
+    CompiledModel cm = compile_model(effect_mir, d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    std::vector<double> g((size_t)ex.n_params());
+    std::vector<std::string> lines;
+    set_message_sink([&lines](const char* text, size_t len) {
+      lines.emplace_back(text, len);
+    });
 
-      const std::string effect = mode == 1 ? "FnPrint" : "FnReject";
-      const std::string tag = "necessity " + effect;
-      expect(tag + " refuses compilation", threw);
-      expect(tag + " names the unsupported effect: " + msg,
-             msg.find("runtime-control region") != std::string::npos &&
-                 msg.find(effect) != std::string::npos);
-      expect(tag + " is not executed while refusing", lines.empty());
+    ex.params_data()[0] = 0.1;
+    const double positive_lp = ex.gradient(g.data());
+    expect("necessity print positive lp", positive_lp == 0.1);
+    expect("necessity print positive gradient", g[0] == 1.0);
+    expect("necessity print runs once, got " + std::to_string(lines.size()),
+           lines.size() == 1);
+    if (lines.size() == 1)
+      expect("necessity print message: " + lines[0],
+             lines[0] == "positive x=0.1");
+
+    lines.clear();
+    ex.params_data()[0] = -0.04;
+    const double negative_lp = ex.gradient(g.data());
+    expect("necessity print negative lp", negative_lp == -0.04);
+    expect("necessity print negative gradient", g[0] == 1.0);
+    expect("untaken necessity print is silent", lines.empty());
+    set_message_sink(nullptr);
+  }
+
+  // An effect is sufficient reason to retain an island even when it has no
+  // numeric live-out and contributes nothing to target.
+  {
+    const std::string print_only_mir =
+        slurp("tests/fixtures/necessity_print_only.tmir.sexp");
+    DataMap d;
+    CompiledModel cm = compile_model(print_only_mir, d);
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    std::vector<double> g((size_t)ex.n_params());
+    std::vector<std::string> lines;
+    set_message_sink([&lines](const char* text, size_t len) {
+      lines.emplace_back(text, len);
+    });
+    ex.params_data()[0] = 0.2;
+    const double lp = ex.gradient(g.data());
+    set_message_sink(nullptr);
+    expect("print-only necessity island has zero lp", lp == 0.0);
+    expect("print-only necessity island has zero gradient", g[0] == 0.0);
+    expect("print-only necessity island is retained and executes once",
+           lines.size() == 1 && lines[0] == "print-only x=0.2");
+  }
+
+  // A runtime-valued reject message remains unsupported. Unlike print, its
+  // text must be preserved in the exception, so keep refusing it until the
+  // register program has a rendered-reject payload too.
+  {
+    bool threw = false;
+    std::string msg;
+    try {
+      DataMap d;
+      d.set_int("mode", 2);
+      (void)compile_model(slurp("tests/fixtures/necessity_effects.tmir.sexp"),
+                          d);
+    } catch (const CompileError& e) {
+      threw = true;
+      msg = e.what();
     }
+    expect("necessity runtime-valued reject refuses compilation", threw);
+    expect("necessity reject error names the unsupported effect: " + msg,
+           msg.find("runtime-control region") != std::string::npos &&
+               msg.find("FnReject") != std::string::npos);
   }
 
   if (failures == 0) std::printf("test_rejectprint: all checks passed\n");

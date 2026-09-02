@@ -509,26 +509,38 @@ void expect_compiled_scalar_rng() {
   stanli_model_free(model);
 }
 
-void expect_necessity_effects_refused() {
+void expect_necessity_effects() {
   const std::string mir = slurp("tests/fixtures/necessity_effects.tmir.sexp");
-  for (int mode = 1; mode <= 2; ++mode) {
-    const std::string effect = mode == 1 ? "FnPrint" : "FnReject";
-    const std::string data = "{\"mode\":" + std::to_string(mode) + "}";
-    char err[8192]{};
-    stanli_model* model =
-        stanli_model_new(mir.c_str(), data.c_str(), err, sizeof err);
-    if (model != nullptr) {
+  char err[8192]{};
+  stanli_model* model =
+      stanli_model_new(mir.c_str(), "{\"mode\":1}", err, sizeof err);
+  if (model == nullptr) {
+    ++failures;
+    std::printf("FAIL C API refused necessity print: %s\n", err);
+  } else {
+    const double q = 0.1;
+    double lp = 0, grad = 0;
+    if (stanli_grad(model, &q, &lp, &grad) != 0 || lp != 0.1 || grad != 1.0) {
       ++failures;
-      std::printf("FAIL C API accepted necessity island containing %s\n",
-                  effect.c_str());
-      stanli_model_free(model);
-      continue;
+      std::printf(
+          "FAIL C API necessity print evaluation: lp %.17g grad %.17g\n", lp,
+          grad);
     }
+    stanli_model_free(model);
+  }
+
+  std::fill(std::begin(err), std::end(err), '\0');
+  model = stanli_model_new(mir.c_str(), "{\"mode\":2}", err, sizeof err);
+  if (model != nullptr) {
+    ++failures;
+    std::printf("FAIL C API accepted runtime-valued necessity reject\n");
+    stanli_model_free(model);
+  } else {
     const std::string msg = err;
     if (msg.find("runtime-control region") == std::string::npos ||
-        msg.find(effect) == std::string::npos) {
+        msg.find("FnReject") == std::string::npos) {
       ++failures;
-      std::printf("FAIL C API necessity %s error: %s\n", effect.c_str(), err);
+      std::printf("FAIL C API necessity FnReject error: %s\n", err);
     }
   }
 }
@@ -792,7 +804,7 @@ int main() {
   expect_categorical_check();
   expect_categorical_interpreted_write_array();
   expect_compiled_scalar_rng();
-  expect_necessity_effects_refused();
+  expect_necessity_effects();
   expect_pathfinder();
   expect_sampling_progress();
   expect_streaming_stats();

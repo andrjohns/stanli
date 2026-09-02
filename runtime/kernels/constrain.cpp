@@ -431,6 +431,8 @@ enum class StructuredKind {
   CholeskyCorr,
   UnitVector,
   SumToZero,
+  StochasticColumn,
+  StochasticRow,
   CorrMatrix,
   CovMatrix,
   CholeskyCov
@@ -451,6 +453,10 @@ auto apply_structured(Y& y, Lp& lp, const KernelCtx& ctx) {
   else if constexpr (K == StructuredKind::SumToZero)
     // Volume preserving: intentionally leave lp untouched.
     return stan::math::sum_to_zero_constrain(y);
+  else if constexpr (K == StructuredKind::StochasticColumn)
+    return stan::math::stochastic_column_constrain(y, lp);
+  else if constexpr (K == StructuredKind::StochasticRow)
+    return stan::math::stochastic_row_constrain(y, lp);
   else if constexpr (K == StructuredKind::CorrMatrix)
     return stan::math::corr_matrix_constrain(y, (Eigen::Index)ctx.idata[2], lp);
   else if constexpr (K == StructuredKind::CovMatrix)
@@ -463,7 +469,12 @@ auto apply_structured(Y& y, Lp& lp, const KernelCtx& ctx) {
 template <StructuredKind K>
 constexpr bool kMatrixStructured =
     K == StructuredKind::CholeskyCorr || K == StructuredKind::CorrMatrix ||
-    K == StructuredKind::CovMatrix || K == StructuredKind::CholeskyCov;
+    K == StructuredKind::CovMatrix || K == StructuredKind::CholeskyCov ||
+    K == StructuredKind::StochasticColumn || K == StructuredKind::StochasticRow;
+
+template <StructuredKind K>
+constexpr bool kMatrixInput =
+    K == StructuredKind::StochasticColumn || K == StructuredKind::StochasticRow;
 
 template <StructuredKind K>
 int64_t structured_output_width(const KernelCtx& ctx) {
@@ -479,11 +490,23 @@ void structured_fwd(KernelCtx& ctx) {
   const int64_t inner_con = structured_output_width<K>(ctx);
   double lp = 0.0;
   for (int64_t b = 0; b < nb; ++b) {
-    const Eigen::Map<const Eigen::VectorXd> y(ctx.in[0].data + b * inner_raw,
-                                              inner_raw);
-    const auto x = apply_structured<K>(y, lp, ctx);
-    for (int64_t i = 0; i < inner_con; ++i)
-      ctx.out.data[b * inner_con + i] = x.data()[i];
+    if constexpr (kMatrixInput<K>) {
+      const int64_t raw_rows =
+          ctx.idata[2] - (K == StructuredKind::StochasticColumn ? 1 : 0);
+      const int64_t raw_cols =
+          ctx.idata[3] - (K == StructuredKind::StochasticRow ? 1 : 0);
+      const Eigen::Map<const Eigen::MatrixXd> y(ctx.in[0].data + b * inner_raw,
+                                                raw_rows, raw_cols);
+      const auto x = apply_structured<K>(y, lp, ctx);
+      for (int64_t i = 0; i < inner_con; ++i)
+        ctx.out.data[b * inner_con + i] = x.data()[i];
+    } else {
+      const Eigen::Map<const Eigen::VectorXd> y(ctx.in[0].data + b * inner_raw,
+                                                inner_raw);
+      const auto x = apply_structured<K>(y, lp, ctx);
+      for (int64_t i = 0; i < inner_con; ++i)
+        ctx.out.data[b * inner_con + i] = x.data()[i];
+    }
   }
   ctx.out2.data[0] = lp;
 }
@@ -496,26 +519,43 @@ void structured_bwd(KernelCtx& ctx) {
   using stan::math::var;
   for (int64_t b = 0; b < nb; ++b) {
     stan::math::nested_rev_autodiff nested;
-    Eigen::Matrix<var, -1, 1> y(inner_raw);
-    for (int64_t i = 0; i < inner_raw; ++i)
-      y(i) = ctx.in[0].data[b * inner_raw + i];
     var lp = 0.0;
-    const auto x = apply_structured<K>(y, lp, ctx);
     const Eigen::Map<const Eigen::VectorXd> seed(
         ctx.out_adj_vec.data + b * inner_con, inner_con);
-    if constexpr (kMatrixStructured<K>) {
+    if constexpr (kMatrixInput<K>) {
+      const int64_t raw_rows =
+          ctx.idata[2] - (K == StructuredKind::StochasticColumn ? 1 : 0);
+      const int64_t raw_cols =
+          ctx.idata[3] - (K == StructuredKind::StochasticRow ? 1 : 0);
+      Eigen::Matrix<var, -1, -1> y(raw_rows, raw_cols);
+      for (int64_t i = 0; i < inner_raw; ++i)
+        y.data()[i] = ctx.in[0].data[b * inner_raw + i];
+      const auto x = apply_structured<K>(y, lp, ctx);
       // Eigen storage is column-major here, matching the old explicit
       // j*rows+i flattening and therefore its dot-product construction order.
       Eigen::Matrix<var, -1, 1> flat(inner_con);
       for (int64_t i = 0; i < inner_con; ++i) flat(i) = x.data()[i];
       var objective = stan::math::dot_product(seed, flat) + ctx.out2_adj * lp;
       stan::math::grad(objective.vi_);
+      for (int64_t i = 0; i < inner_raw; ++i)
+        ctx.in_adj[0].data[b * inner_raw + i] += y.data()[i].adj();
     } else {
-      var objective = stan::math::dot_product(seed, x) + ctx.out2_adj * lp;
-      stan::math::grad(objective.vi_);
+      Eigen::Matrix<var, -1, 1> y(inner_raw);
+      for (int64_t i = 0; i < inner_raw; ++i)
+        y(i) = ctx.in[0].data[b * inner_raw + i];
+      const auto x = apply_structured<K>(y, lp, ctx);
+      if constexpr (kMatrixStructured<K>) {
+        Eigen::Matrix<var, -1, 1> flat(inner_con);
+        for (int64_t i = 0; i < inner_con; ++i) flat(i) = x.data()[i];
+        var objective = stan::math::dot_product(seed, flat) + ctx.out2_adj * lp;
+        stan::math::grad(objective.vi_);
+      } else {
+        var objective = stan::math::dot_product(seed, x) + ctx.out2_adj * lp;
+        stan::math::grad(objective.vi_);
+      }
+      for (int64_t i = 0; i < inner_raw; ++i)
+        ctx.in_adj[0].data[b * inner_raw + i] += y(i).adj();
     }
-    for (int64_t i = 0; i < inner_raw; ++i)
-      ctx.in_adj[0].data[b * inner_raw + i] += y(i).adj();
   }
 }
 
@@ -653,6 +693,10 @@ void register_constrain_kernels() {
   register_structured<StructuredKind::Ordered>(OP_CONSTRAIN_ORDERED);
   register_structured<StructuredKind::PositiveOrdered>(
       OP_CONSTRAIN_POS_ORDERED);
+  register_structured<StructuredKind::StochasticColumn>(
+      OP_CONSTRAIN_STOCHASTIC_COLUMN);
+  register_structured<StructuredKind::StochasticRow>(
+      OP_CONSTRAIN_STOCHASTIC_ROW);
 }
 
 }  // namespace stanli

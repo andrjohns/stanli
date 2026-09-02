@@ -95,8 +95,8 @@ constexpr uint8_t kIslandCallVariant = 2;
 void island_calls_fwd(KernelCtx& ctx);
 
 // True when the region's program has an observable effect: a draw from the
-// caller's stream, or a reject. A pass that reasons about purity has to
-// leave such a region alone even when every one of its inputs is data.
+// caller's stream, a print, or a reject. A pass that reasons about purity has
+// to leave such a region alone even when every one of its inputs is data.
 // Nothing depends on this for correctness -- an effect kernel refuses to run
 // without the evaluation state a compile-time pass has no business owning,
 // so folding one fails rather than erasing it -- but that refusal costs the

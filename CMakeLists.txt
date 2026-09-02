@@ -279,6 +279,7 @@ set(STANLI_RUNTIME_SOURCES
   runtime/kernels/ode.cpp
   runtime/src/ode_prog.cpp
   runtime/src/program.cpp
+  runtime/src/program_transform.cpp
   runtime/kernels/constrain.cpp
   runtime/kernels/eltwise_expr.cpp
   runtime/kernels/mixture.cpp

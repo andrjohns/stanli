@@ -1502,7 +1502,137 @@ struct ProgramCompiler {
     return out;
   }
 
+  Range transform_call(const mir::Expr& e, const CallableTransformSpec& spec) {
+    if (e.args.size() != spec.arity)
+      bail(e.name + ": wrong number of arguments");
+    if (spec.structured && spec.direction == TransformDirection::Unconstrain)
+      bail(e.name +
+           ": structured inverse is not supported in a runtime region");
+
+    Program::Transform tr;
+    tr.kind = spec.kind;
+    tr.direction = spec.direction;
+    tr.n_in = spec.structured ? 1 : (int8_t)spec.arity;
+    std::vector<Range> args;
+    args.reserve((size_t)tr.n_in);
+    for (int k = 0; k < tr.n_in; ++k) {
+      args.push_back(expr(e.args[(size_t)k]));
+      tr.in[k] = args.back().reg;
+      tr.in_len[k] = args.back().len;
+    }
+    Range out = args[0];
+    if (!spec.structured) {
+      for (int k = 1; k < tr.n_in; ++k)
+        if (args[k].len != 1 && args[k].len != args[0].len)
+          bail(e.name + ": bound is neither scalar nor the input size");
+      tr.out_len = args[0].len;
+      tr.inner_raw = args[0].len;
+    } else {
+      ViewKind leaf = args[0].kind;
+      std::vector<int64_t> dims;
+      if (leaf == ViewKind::Array) {
+        dims = args[0].dims;
+        leaf = args[0].leaf;
+      } else if (leaf == ViewKind::Matrix) {
+        dims = {args[0].rows, args[0].cols};
+      } else if (leaf == ViewKind::Vector || leaf == ViewKind::RowVector) {
+        dims = {args[0].len};
+      }
+      const size_t rank = leaf_rank(leaf);
+      if (rank == 0 || dims.size() < rank)
+        bail(e.name + ": invalid input container");
+      const size_t outer_rank = dims.size() - rank;
+      int64_t batch = 1;
+      for (size_t i = 0; i < outer_rank; ++i) batch *= dims[i];
+      int64_t raw_rows = leaf == ViewKind::Matrix ? dims[dims.size() - 2] : 0;
+      int64_t raw_cols = leaf == ViewKind::Matrix ? dims.back() : 0;
+      int64_t rows = 0, cols = 0;
+      ViewKind out_leaf = leaf;
+      switch (spec.kind) {
+        case CallableTransformKind::Ordered:
+        case CallableTransformKind::PositiveOrdered:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          rows = dims.back();
+          break;
+        case CallableTransformKind::Simplex:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          rows = dims.back() + 1;
+          break;
+        case CallableTransformKind::UnitVector:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          rows = dims.back();
+          break;
+        case CallableTransformKind::SumToZero:
+          if (leaf == ViewKind::Vector) {
+            rows = dims.back() + 1;
+          } else if (leaf == ViewKind::Matrix) {
+            rows = raw_rows + 1;
+            cols = raw_cols + 1;
+          } else {
+            bail(e.name + ": expected vector or matrix");
+          }
+          break;
+        case CallableTransformKind::StochasticColumn:
+        case CallableTransformKind::StochasticRow:
+          if (leaf != ViewKind::Matrix) bail(e.name + ": expected matrix");
+          rows =
+              raw_rows + (spec.kind == CallableTransformKind::StochasticColumn);
+          cols = raw_cols + (spec.kind == CallableTransformKind::StochasticRow);
+          break;
+        case CallableTransformKind::CholeskyFactorCorr:
+        case CallableTransformKind::CorrMatrix:
+        case CallableTransformKind::CovMatrix:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          out_leaf = ViewKind::Matrix;
+          rows = cols = cint(e.args[1]);
+          break;
+        case CallableTransformKind::CholeskyFactorCov:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          out_leaf = ViewKind::Matrix;
+          rows = cint(e.args[1]);
+          cols = cint(e.args[2]);
+          break;
+        default:
+          bail(e.name + ": invalid structured transform");
+      }
+      if (batch < 0 || rows < 0 || cols < 0) bail(e.name + ": invalid shape");
+      tr.batch = (int32_t)batch;
+      tr.inner_raw = leaf == ViewKind::Matrix ? (int32_t)(raw_rows * raw_cols)
+                                              : (int32_t)dims.back();
+      tr.out_rows = (int32_t)rows;
+      tr.out_cols = (int32_t)cols;
+      const int64_t inner_con =
+          out_leaf == ViewKind::Matrix ? rows * cols : rows;
+      if (inner_con < 0 || batch > kMaxRegs ||
+          (batch && inner_con > kMaxRegs / batch))
+        bail(e.name + ": result needs too many registers");
+      tr.out_len = (int32_t)(batch * inner_con);
+      out.len = tr.out_len;
+      out.kind = outer_rank ? ViewKind::Array : out_leaf;
+      out.rows = out.kind == ViewKind::Matrix ? rows : 0;
+      out.cols = out.kind == ViewKind::Matrix ? cols : 0;
+      if (outer_rank) {
+        out.dims.assign(dims.begin(), dims.begin() + outer_rank);
+        out.dims.push_back(rows);
+        if (out_leaf == ViewKind::Matrix) out.dims.push_back(cols);
+        out.leaf = out_leaf;
+      }
+    }
+    tr.out = alloc(tr.out_len);
+    tr.jac = alloc(1);
+    out.reg = tr.out;
+    p.transforms.push_back(tr);
+    p.code.push_back(
+        Program::Instr{Program::TRANSFORM, 0, (int)p.transforms.size() - 1});
+    if (spec.direction == TransformDirection::Jacobian && !in_write_array) {
+      if (target_reg < 0) bail("jacobian transform has no target");
+      emit(Program::ADD, target_reg, target_reg, tr.jac);
+    }
+    return out;
+  }
+
   Range fun(const mir::Expr& e) {
+    if (const auto value = mir::nullary_constant(e)) return {konst(*value), 1};
     // A shape query is a constant whatever surrounds it. Ahead of every
     // other case because `FnLength` is an internal function and the rest
     // are library ones, and they are all answered the same way: from the
@@ -1557,6 +1687,9 @@ struct ProgramCompiler {
       return out;
     }
     if (rng_call_name(e.name)) return rng_call(e);
+    CallableTransformSpec transform;
+    if (callable_transform(e.name, &transform))
+      return transform_call(e, transform);
     if (e.name == "tcrossprod" && e.args.size() == 1)
       return matrix_gram(expr(e.args[0]), false);
     if (e.name == "crossprod" && e.args.size() == 1)
@@ -1785,12 +1918,8 @@ struct ProgramCompiler {
         }
         return out;
       }
-      if (e.name == "FnNegInf" && e.args.empty())
-        return {konst(-std::numeric_limits<double>::infinity()), 1};
       bail("internal function " + e.name);
     }
-    if (e.args.empty() && e.name == "negative_infinity")
-      return {konst(-std::numeric_limits<double>::infinity()), 1};
     if (e.args.size() == 2 && e.name == "append_array") {
       const Range a = expr(e.args[0]);
       const Range b = expr(e.args[1]);
@@ -1947,12 +2076,45 @@ struct ProgramCompiler {
       out.cols = cols;
       return out;
     }
-    if (e.args.size() == 1 && e.name == "max") {
-      const Range a = expr(e.args[0]);
+    const mir::ExtremaCall extrema = mir::extrema_call(e);
+    if (extrema.kind != mir::ExtremaKind::Legacy) {
+      Range a;
+      if (extrema.surface == mir::ExtremaSurface::IntPair) {
+        const Range lhs = expr(e.args[0]);
+        const Range rhs = expr(e.args[1]);
+        if (!is_scalar(lhs) || !is_scalar(rhs))
+          bail("min/max integer pair needs scalar arguments");
+        a = Range{alloc(2), 2};
+        emit(Program::MOV, a.reg, lhs.reg);
+        emit(Program::MOV, a.reg + 1, rhs.reg);
+      } else {
+        a = expr(e.args[0]);
+      }
       const int r = alloc(1);
-      p.code.push_back(
-          Program::Instr{Program::MAX_RANGE, r, a.reg, 0, 0, a.len});
-      return {r, 1};
+      const bool maximum = extrema.kind == mir::ExtremaKind::Max;
+      const bool integer = extrema.surface == mir::ExtremaSurface::IntArray ||
+                           extrema.surface == mir::ExtremaSurface::IntPair;
+      // Matrix<var>, vector<var>, and std::vector<var> all reduce in ascending
+      // scalar order. Otherwise retain the source expression's double
+      // evaluator grouping even though `expr` materialized it into a flat
+      // register run above. This mirrors Lowering::reduction_grouping.
+      const bool active = !in_write_array && !e.args[0].data_only;
+      const ExpressionLayout layout =
+          integer || active ? ExpressionLayout::scalar()
+                            : mir::source_expression_layout(e.args[0]);
+      if (!layout.known()) bail("min/max expression grouping is not native");
+      int32_t flags = integer ? kProgramExtremaInteger : 0;
+      if (layout.kind == ExpressionLayout::Kind::Scalar) {
+        flags |= kProgramExtremaScalar;
+      } else if (layout.kind == ExpressionLayout::Kind::Direct &&
+                 layout.element_offset != 0) {
+        flags |= kProgramExtremaPhased;
+        const int64_t phase = layout.element_offset % extrema_phase_modulus();
+        flags |= static_cast<int32_t>(phase << kProgramExtremaPhaseShift);
+      }
+      p.code.push_back(Program::Instr{Program::EXTREMA_RANGE, r, a.reg,
+                                      maximum ? 1 : 0, flags, a.len});
+      return typed(Range{r, 1}, e.type_);
     }
     // Ahead of the arity-keyed blocks below: those end in a bail on an
     // unknown name, so while this table sat after them a two-argument
@@ -2923,6 +3085,25 @@ struct ProgramCompiler {
       }
       case mir::Stmt::NRFunApp:
         if (s.fn_name == "FnValidateSize") return;
+        if (s.fn_name == "FnPrint") {
+          Program::Print print;
+          std::string pending;
+          for (const auto& a : s.fn_args) {
+            if (a.kind == mir::Expr::LitStr) {
+              pending += a.lit_s;
+              continue;
+            }
+            print.chunks.push_back(std::move(pending));
+            pending.clear();
+            const Range value = expr(a);
+            print.value_reg.push_back(value.reg);
+            print.value_len.push_back(value.len);
+          }
+          print.chunks.push_back(std::move(pending));
+          p.prints.push_back(std::move(print));
+          emit(Program::PRINT, 0, (int)p.prints.size() - 1);
+          return;
+        }
         if (s.fn_name == "FnReject") {
           // Only a literal message: interleaving a runtime value would need
           // to format it into the thrown string at forward time, which this
