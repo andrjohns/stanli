@@ -16,32 +16,33 @@ void run_transform(const Program::Transform& tr, T* reg) {
   switch (tr.kind) {
     case CallableTransformKind::Lower:
       for (int i = 0; i < tr.out_len; ++i)
-        reg[tr.out + i] = tr.direction == TransformDirection::Unconstrain
-                              ? stan::math::lb_free(reg[tr.in[0] + i], bound(1, i))
-                              : stan::math::lb_constrain(reg[tr.in[0] + i],
-                                                         bound(1, i), lp);
+        reg[tr.out + i] =
+            tr.direction == TransformDirection::Unconstrain
+                ? stan::math::lb_free(reg[tr.in[0] + i], bound(1, i))
+                : stan::math::lb_constrain(reg[tr.in[0] + i], bound(1, i), lp);
       break;
     case CallableTransformKind::Upper:
       for (int i = 0; i < tr.out_len; ++i)
-        reg[tr.out + i] = tr.direction == TransformDirection::Unconstrain
-                              ? stan::math::ub_free(reg[tr.in[0] + i], bound(1, i))
-                              : stan::math::ub_constrain(reg[tr.in[0] + i],
-                                                         bound(1, i), lp);
+        reg[tr.out + i] =
+            tr.direction == TransformDirection::Unconstrain
+                ? stan::math::ub_free(reg[tr.in[0] + i], bound(1, i))
+                : stan::math::ub_constrain(reg[tr.in[0] + i], bound(1, i), lp);
       break;
     case CallableTransformKind::LowerUpper:
       for (int i = 0; i < tr.out_len; ++i)
-        reg[tr.out + i] = tr.direction == TransformDirection::Unconstrain
-                              ? stan::math::lub_free(reg[tr.in[0] + i], bound(1, i),
-                                                     bound(2, i))
-                              : stan::math::lub_constrain(reg[tr.in[0] + i],
-                                                          bound(1, i), bound(2, i), lp);
+        reg[tr.out + i] =
+            tr.direction == TransformDirection::Unconstrain
+                ? stan::math::lub_free(reg[tr.in[0] + i], bound(1, i),
+                                       bound(2, i))
+                : stan::math::lub_constrain(reg[tr.in[0] + i], bound(1, i),
+                                            bound(2, i), lp);
       break;
     case CallableTransformKind::OffsetMultiplier:
       for (int i = 0; i < tr.out_len; ++i)
         reg[tr.out + i] =
             tr.direction == TransformDirection::Unconstrain
-                ? stan::math::offset_multiplier_free(reg[tr.in[0] + i], bound(1, i),
-                                                      bound(2, i))
+                ? stan::math::offset_multiplier_free(reg[tr.in[0] + i],
+                                                     bound(1, i), bound(2, i))
                 : stan::math::offset_multiplier_constrain(
                       reg[tr.in[0] + i], bound(1, i), bound(2, i), lp);
       break;
@@ -56,11 +57,11 @@ void run_transform(const Program::Transform& tr, T* reg) {
             tr.kind == CallableTransformKind::StochasticRow ||
             (tr.kind == CallableTransformKind::SumToZero && tr.out_cols)) {
           const int rr = tr.out_rows -
-              (tr.kind == CallableTransformKind::StochasticColumn ||
-               tr.kind == CallableTransformKind::SumToZero);
-          const int rc = tr.out_cols -
-              (tr.kind == CallableTransformKind::StochasticRow ||
-               tr.kind == CallableTransformKind::SumToZero);
+                         (tr.kind == CallableTransformKind::StochasticColumn ||
+                          tr.kind == CallableTransformKind::SumToZero);
+          const int rc =
+              tr.out_cols - (tr.kind == CallableTransformKind::StochasticRow ||
+                             tr.kind == CallableTransformKind::SumToZero);
           Eigen::Map<const Mat> y(input, rr, rc);
           Mat x;
           if (tr.kind == CallableTransformKind::StochasticColumn)
@@ -112,8 +113,7 @@ void run_program_transform(const Program::Transform& tr, double* reg) {
   run_transform(tr, reg);
 }
 
-void run_program_transform(const Program::Transform& tr,
-                           stan::math::var* reg) {
+void run_program_transform(const Program::Transform& tr, stan::math::var* reg) {
   run_transform(tr, reg);
 }
 

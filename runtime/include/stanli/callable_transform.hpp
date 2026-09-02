@@ -73,17 +73,20 @@ inline bool callable_transform(std::string_view name,
   else if (stem == "upper_bound")
     s = {CallableTransformKind::Upper, direction, OP_CONSTRAIN_UPPER, 2, false};
   else if (stem == "lower_upper_bound")
-    s = {CallableTransformKind::LowerUpper, direction, OP_CONSTRAIN_LU, 3, false};
+    s = {CallableTransformKind::LowerUpper, direction, OP_CONSTRAIN_LU, 3,
+         false};
   else if (stem == "offset_multiplier")
     s = {CallableTransformKind::OffsetMultiplier, direction,
          OP_CONSTRAIN_OFFSET_MULT, 3, false};
   else if (stem == "ordered")
-    s = {CallableTransformKind::Ordered, direction, OP_CONSTRAIN_ORDERED, 1, true};
+    s = {CallableTransformKind::Ordered, direction, OP_CONSTRAIN_ORDERED, 1,
+         true};
   else if (stem == "positive_ordered")
     s = {CallableTransformKind::PositiveOrdered, direction,
          OP_CONSTRAIN_POS_ORDERED, 1, true};
   else if (stem == "simplex")
-    s = {CallableTransformKind::Simplex, direction, OP_CONSTRAIN_SIMPLEX, 1, true};
+    s = {CallableTransformKind::Simplex, direction, OP_CONSTRAIN_SIMPLEX, 1,
+         true};
   else if (stem == "stochastic_column")
     s = {CallableTransformKind::StochasticColumn, direction,
          OP_CONSTRAIN_STOCHASTIC_COLUMN, 1, true};
@@ -91,20 +94,20 @@ inline bool callable_transform(std::string_view name,
     s = {CallableTransformKind::StochasticRow, direction,
          OP_CONSTRAIN_STOCHASTIC_ROW, 1, true};
   else if (stem == "sum_to_zero")
-    s = {CallableTransformKind::SumToZero, direction,
-         OP_CONSTRAIN_SUM_TO_ZERO, 1, true};
+    s = {CallableTransformKind::SumToZero, direction, OP_CONSTRAIN_SUM_TO_ZERO,
+         1, true};
   else if (stem == "unit_vector")
-    s = {CallableTransformKind::UnitVector, direction,
-         OP_CONSTRAIN_UNIT_VECTOR, 1, true};
+    s = {CallableTransformKind::UnitVector, direction, OP_CONSTRAIN_UNIT_VECTOR,
+         1, true};
   else if (stem == "cholesky_factor_corr")
     s = {CallableTransformKind::CholeskyFactorCorr, direction,
          OP_CONSTRAIN_CHOL_CORR, 2, true};
   else if (stem == "corr_matrix")
-    s = {CallableTransformKind::CorrMatrix, direction,
-         OP_CONSTRAIN_CORR_MATRIX, 2, true};
+    s = {CallableTransformKind::CorrMatrix, direction, OP_CONSTRAIN_CORR_MATRIX,
+         2, true};
   else if (stem == "cov_matrix")
-    s = {CallableTransformKind::CovMatrix, direction,
-         OP_CONSTRAIN_COV_MATRIX, 2, true};
+    s = {CallableTransformKind::CovMatrix, direction, OP_CONSTRAIN_COV_MATRIX,
+         2, true};
   else if (stem == "cholesky_factor_cov")
     s = {CallableTransformKind::CholeskyFactorCov, direction,
          OP_CONSTRAIN_CHOL_COV, 3, true};

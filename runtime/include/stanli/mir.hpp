@@ -75,14 +75,12 @@ enum class NullaryConstantKind : uint8_t {
   NotANumber,
 };
 
-inline std::optional<NullaryConstantKind> nullary_constant_kind(
-    const Expr& e) {
+inline std::optional<NullaryConstantKind> nullary_constant_kind(const Expr& e) {
   if (e.kind != Expr::FunApp || !e.args.empty()) return std::nullopt;
   if (e.fn_lib == Expr::Lib::Internal)
-    return e.name == "FnNegInf"
-               ? std::optional<NullaryConstantKind>(
-                     NullaryConstantKind::NegativeInfinity)
-               : std::nullopt;
+    return e.name == "FnNegInf" ? std::optional<NullaryConstantKind>(
+                                      NullaryConstantKind::NegativeInfinity)
+                                : std::nullopt;
   if (e.fn_lib != Expr::Lib::StanLib) return std::nullopt;
   if (e.name == "e") return NullaryConstantKind::E;
   if (e.name == "pi") return NullaryConstantKind::Pi;

@@ -1632,8 +1632,7 @@ struct ProgramCompiler {
   }
 
   Range fun(const mir::Expr& e) {
-    if (const auto value = mir::nullary_constant(e))
-      return {konst(*value), 1};
+    if (const auto value = mir::nullary_constant(e)) return {konst(*value), 1};
     // A shape query is a constant whatever surrounds it. Ahead of every
     // other case because `FnLength` is an internal function and the rest
     // are library ones, and they are all answered the same way: from the
@@ -2096,8 +2095,7 @@ struct ProgramCompiler {
       const bool integer = extrema.surface == mir::ExtremaSurface::IntArray ||
                            extrema.surface == mir::ExtremaSurface::IntPair;
       p.code.push_back(Program::Instr{Program::EXTREMA_RANGE, r, a.reg,
-                                      maximum ? 1 : 0, integer ? 1 : 0,
-                                      a.len});
+                                      maximum ? 1 : 0, integer ? 1 : 0, a.len});
       return typed(Range{r, 1}, e.type_);
     }
     // Ahead of the arity-keyed blocks below: those end in a bail on an

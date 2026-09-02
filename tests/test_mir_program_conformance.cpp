@@ -520,9 +520,8 @@ void test_nullary_constants() {
   // All public nullary constants, plus stanc's internal negative-infinity
   // spelling, share one resolver across ProgramCompiler and MirInterp.
   const auto check = [&](const std::string& name, Expr value, double expected) {
-    FunDef entry = rhs_function(
-        "nullary_" + name + "_rhs",
-        {return_value(make_array({std::move(value)}))});
+    FunDef entry = rhs_function("nullary_" + name + "_rhs",
+                                {return_value(make_array({std::move(value)}))});
     run_case("nullary " + name, "constant compiles identically",
              {std::move(entry)}, 1.0, {expected});
   };
@@ -671,22 +670,25 @@ void test_program_extrema() {
   };
 
   std::vector<int> outputs;
-  outputs.push_back(reduce("min", bind("v", "UVector", UnsizedLeaf::Vector,
-                                       0, stanli::ViewKind::Vector),
+  outputs.push_back(reduce(
+      "min",
+      bind("v", "UVector", UnsizedLeaf::Vector, 0, stanli::ViewKind::Vector),
+      "UReal", UnsizedLeaf::Real));
+  outputs.push_back(reduce("max",
+                           bind("rv", "URowVector", UnsizedLeaf::RowVector, 0,
+                                stanli::ViewKind::RowVector),
                            "UReal", UnsizedLeaf::Real));
-  outputs.push_back(reduce("max", bind("rv", "URowVector",
-                                       UnsizedLeaf::RowVector, 0,
-                                       stanli::ViewKind::RowVector),
-                           "UReal", UnsizedLeaf::Real));
-  outputs.push_back(reduce("min", bind("m", "UMatrix", UnsizedLeaf::Matrix,
-                                       0, stanli::ViewKind::Matrix),
-                           "UReal", UnsizedLeaf::Real));
-  outputs.push_back(reduce("max", bind("ar", "UArray", UnsizedLeaf::Real, 1,
-                                       stanli::ViewKind::Array),
-                           "UReal", UnsizedLeaf::Real));
-  outputs.push_back(reduce("min", bind("ai", "UArray", UnsizedLeaf::Int, 1,
-                                       stanli::ViewKind::Array),
-                           "UInt", UnsizedLeaf::Int));
+  outputs.push_back(reduce(
+      "min",
+      bind("m", "UMatrix", UnsizedLeaf::Matrix, 0, stanli::ViewKind::Matrix),
+      "UReal", UnsizedLeaf::Real));
+  outputs.push_back(reduce(
+      "max",
+      bind("ar", "UArray", UnsizedLeaf::Real, 1, stanli::ViewKind::Array),
+      "UReal", UnsizedLeaf::Real));
+  outputs.push_back(reduce(
+      "min", bind("ai", "UArray", UnsizedLeaf::Int, 1, stanli::ViewKind::Array),
+      "UInt", UnsizedLeaf::Int));
 
   Expr lhs = lit_int(9);
   Expr rhs = lit_int(-4);
@@ -715,8 +717,8 @@ void test_program_extrema() {
   for (size_t i = 0; i < outputs.size(); ++i) {
     if (registers[static_cast<size_t>(outputs[i])] == expected[i]) continue;
     ++failures;
-    std::printf("FAIL Program extrema output %zu: got %.17g, want %.17g\n",
-                i, registers[static_cast<size_t>(outputs[i])], expected[i]);
+    std::printf("FAIL Program extrema output %zu: got %.17g, want %.17g\n", i,
+                registers[static_cast<size_t>(outputs[i])], expected[i]);
   }
 }
 
