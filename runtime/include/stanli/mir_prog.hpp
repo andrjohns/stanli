@@ -2079,12 +2079,28 @@ struct ProgramCompiler {
       out.cols = cols;
       return out;
     }
-    if (e.args.size() == 1 && e.name == "max") {
-      const Range a = expr(e.args[0]);
+    const mir::ExtremaCall extrema = mir::extrema_call(e);
+    if (extrema.kind != mir::ExtremaKind::Legacy) {
+      Range a;
+      if (extrema.surface == mir::ExtremaSurface::IntPair) {
+        const Range lhs = expr(e.args[0]);
+        const Range rhs = expr(e.args[1]);
+        if (!is_scalar(lhs) || !is_scalar(rhs))
+          bail("min/max integer pair needs scalar arguments");
+        a = Range{alloc(2), 2};
+        emit(Program::MOV, a.reg, lhs.reg);
+        emit(Program::MOV, a.reg + 1, rhs.reg);
+      } else {
+        a = expr(e.args[0]);
+      }
       const int r = alloc(1);
-      p.code.push_back(
-          Program::Instr{Program::MAX_RANGE, r, a.reg, 0, 0, a.len});
-      return {r, 1};
+      const bool maximum = extrema.kind == mir::ExtremaKind::Max;
+      const bool integer = extrema.surface == mir::ExtremaSurface::IntArray ||
+                           extrema.surface == mir::ExtremaSurface::IntPair;
+      p.code.push_back(Program::Instr{Program::EXTREMA_RANGE, r, a.reg,
+                                      maximum ? 1 : 0, integer ? 1 : 0,
+                                      a.len});
+      return typed(Range{r, 1}, e.type_);
     }
     // Ahead of the arity-keyed blocks below: those end in a bail on an
     // unknown name, so while this table sat after them a two-argument

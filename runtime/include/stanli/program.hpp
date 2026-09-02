@@ -94,7 +94,8 @@ enum ProgramOpFlag : uint16_t {
   X(EQ, kProgramReadB)                                                       \
   X(NE, kProgramReadB)                                                       \
   X(DYN_INDEX, kProgramReadB | kProgramNoAdjoint)                            \
-  X(MAX_RANGE, kProgramRangeA | kProgramNoAdjoint)                           \
+  /* b selects max (1) or min (0); c marks the integer-container surface. */ \
+  X(EXTREMA_RANGE, kProgramRangeA | kProgramNoAdjoint)                       \
   X(JZ, kProgramNoAdjoint | kProgramNoOutput)                                \
   X(JMP, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)            \
   X(LOG_RANGE, kProgramRangeA | kProgramSaveA | kProgramRangeOutput)         \
@@ -472,11 +473,21 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
         d() = reg[(size_t)(I.a + I.c + static_cast<int32_t>(raw) - 1)];
         break;
       }
-      case Program::MAX_RANGE: {
+      case Program::EXTREMA_RANGE: {
+        if (I.c != 0 && I.len == 0) {
+          // The register file stores integers as doubles, so call the actual
+          // integer overload solely to preserve Stan Math's empty-container
+          // exception instead of returning a floating-point infinity.
+          const std::vector<int> empty;
+          if (I.b != 0)
+            (void)stan::math::max(empty);
+          else
+            (void)stan::math::min(empty);
+        }
         std::vector<T> owning;
         if (I.len > 0)
           owning.assign(&reg[(size_t)I.a], &reg[(size_t)(I.a + I.len)]);
-        d() = stan::math::max(owning);
+        d() = I.b != 0 ? stan::math::max(owning) : stan::math::min(owning);
         break;
       }
       case Program::JZ:
