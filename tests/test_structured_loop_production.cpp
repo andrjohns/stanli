@@ -817,6 +817,138 @@ struct ScopedKernelOverride {
   ~ScopedKernelOverride() { register_kernel(opcode, saved); }
 };
 
+static int inactive_workspace_calls = 0;
+static double* inactive_workspace_address = nullptr;
+static bool inactive_workspace_stable = true;
+static bool inactive_workspace_disjoint = true;
+static bool inactive_workspace_throw_once = false;
+
+static int64_t inactive_workspace_size(const Op&, const Slot*) { return 3; }
+
+static void inactive_workspace_forward(KernelCtx& context) {
+  ++inactive_workspace_calls;
+  if (!inactive_workspace_address) {
+    inactive_workspace_address = context.scratch;
+  } else {
+    inactive_workspace_stable &= inactive_workspace_address == context.scratch;
+  }
+  inactive_workspace_disjoint &=
+      context.scratch && context.scratch != context.in[0].data &&
+      context.scratch != context.in[1].data &&
+      context.scratch != context.out.data &&
+      (!context.out2.data || context.scratch != context.out2.data) &&
+      (context.out.len == 0 || !context.out2.data || context.out2.len == 0 ||
+       context.out.data != context.out2.data);
+  context.scratch[0] = context.in[0].data[0];
+  context.scratch[1] = context.in[1].data[0];
+  context.scratch[2] = context.scratch[0] + context.scratch[1];
+  if (inactive_workspace_throw_once && context.scratch[0] == 2) {
+    inactive_workspace_throw_once = false;
+    throw std::runtime_error("injected inactive workspace failure");
+  }
+  if (context.out.len > 0) context.out.data[0] = context.scratch[2];
+  if (context.out2.data)
+    context.out2.data[0] = context.scratch[0] * context.scratch[1];
+}
+
+static std::shared_ptr<StructuredLoop> inactive_workspace_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int two = scalar(*plan, 2);
+  const int first = plan->body.add_slot(1, false);
+  const int second = plan->body.add_slot(1, false);
+  const int combined = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int result = plan->body.add_slot(1, false);
+  Node workspace = call(*plan, OP_INT_ARITH, {iterator, two}, first);
+  plan->body.ops[static_cast<size_t>(workspace.op)].out2 = second;
+  plan->root = sequence(
+      {alias(result, zero),
+       counted(lower, upper, iterator, 3,
+               sequence({std::move(workspace),
+                         call(*plan, OP_ADD, {first, second}, combined),
+                         alias(result, combined)}))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> inactive_zero_output_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int two = scalar(*plan, 2);
+  const int empty = plan->body.add_slot(0, false);
+  const int second_empty = plan->body.add_slot(0, false);
+  const int second = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int result = plan->body.add_slot(1, false);
+  Node empty_call = call(*plan, OP_INT_ARITH, {iterator, two}, empty);
+  Node second_call = call(*plan, OP_INT_ARITH, {iterator, two}, second_empty);
+  plan->body.ops[static_cast<size_t>(second_call.op)].out2 = second;
+  plan->root =
+      sequence({alias(result, zero),
+                counted(lower, upper, iterator, 3,
+                        sequence({std::move(empty_call), std::move(second_call),
+                                  alias(result, second)}))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static int active_workspace_forward_calls = 0;
+static int active_workspace_backward_calls = 0;
+static double* active_workspace_address = nullptr;
+static bool active_workspace_history_ok = true;
+
+static void active_workspace_forward(KernelCtx& context) {
+  ++active_workspace_forward_calls;
+  active_workspace_address = context.scratch;
+  context.scratch[0] = context.in[0].data[0];
+  context.scratch[1] = context.in[1].data[0];
+  context.scratch[2] = context.scratch[0] * context.scratch[1];
+  context.out.data[0] = context.scratch[2];
+  context.out2.data[0] = context.scratch[0] + context.scratch[1];
+}
+
+static void active_workspace_backward(KernelCtx& context) {
+  ++active_workspace_backward_calls;
+  active_workspace_history_ok &=
+      context.scratch == active_workspace_address &&
+      context.scratch[0] == context.in[0].data[0] &&
+      context.scratch[1] == context.in[1].data[0] &&
+      context.scratch[2] == context.in[0].data[0] * context.in[1].data[0];
+  if (context.in_adj[0].data)
+    context.in_adj[0].data[0] +=
+        context.scratch[1] * context.out_adj + context.out2_adj;
+  if (context.in_adj[1].data)
+    context.in_adj[1].data[0] +=
+        context.scratch[0] * context.out_adj + context.out2_adj;
+}
+
+static std::shared_ptr<StructuredLoop> active_workspace_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int two = scalar(*plan, 2);
+  const int product = plan->body.add_slot(1, false);
+  const int sum = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+  Node workspace = call(*plan, OP_INT_ARITH, {theta, two}, product);
+  plan->body.ops[static_cast<size_t>(workspace.op)].out2 = sum;
+  plan->root = sequence(
+      {std::move(workspace), call(*plan, OP_ADD, {product, sum}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
 static std::shared_ptr<StructuredLoop> custom_integer_plan() {
   auto plan = integer_output_plan(2, 3);
   check(set_forward(plan->root, 0, custom_integer_forward),
@@ -909,6 +1041,82 @@ static void compact_integer_result_tests() {
   }
   check(custom_integer_calls == 1,
         "pre-prepare custom integer callback keeps ordinary path");
+
+  inactive_workspace_calls = 0;
+  inactive_workspace_address = nullptr;
+  inactive_workspace_stable = true;
+  inactive_workspace_disjoint = true;
+  inactive_workspace_throw_once = true;
+  {
+    Kernel replacement = *find_kernel(OP_INT_ARITH);
+    replacement.forward = inactive_workspace_forward;
+    replacement.scratch_size = inactive_workspace_size;
+    ScopedKernelOverride overridden(OP_INT_ARITH, replacement);
+    Executor workspace(outer(inactive_workspace_plan()));
+    bool workspace_threw = false;
+    try {
+      (void)evaluate(workspace, 0, 0);
+    } catch (const std::runtime_error& error) {
+      workspace_threw =
+          std::string(error.what()) == "injected inactive workspace failure";
+    }
+    check(workspace_threw, "inactive workspace preserves callback exception");
+    const Evaluation workspace_result = evaluate(workspace, 0, 0);
+    close(workspace_result.value, 11,
+          "inactive workspace preserves second output and retry");
+    close(workspace_result.gradient[0], 0,
+          "inactive workspace retry theta gradient");
+    close(workspace_result.gradient[1], 0,
+          "inactive workspace retry beta gradient");
+  }
+  check(inactive_workspace_calls == 5,
+        "inactive workspace executes reached callbacks only");
+  check(inactive_workspace_stable,
+        "inactive callback scratch is reused across calls and retry");
+  check(inactive_workspace_disjoint,
+        "inactive callback workspace descriptors remain disjoint");
+
+  inactive_workspace_calls = 0;
+  inactive_workspace_address = nullptr;
+  inactive_workspace_stable = true;
+  inactive_workspace_disjoint = true;
+  inactive_workspace_throw_once = false;
+  {
+    Kernel replacement = *find_kernel(OP_INT_ARITH);
+    replacement.forward = inactive_workspace_forward;
+    replacement.scratch_size = inactive_workspace_size;
+    ScopedKernelOverride overridden(OP_INT_ARITH, replacement);
+    Executor zero_output(outer(inactive_zero_output_plan()));
+    const Evaluation result = evaluate(zero_output, 0, 0);
+    close(result.value, 6,
+          "inactive workspace preserves zero primary and second output");
+  }
+  check(inactive_workspace_calls == 6,
+        "inactive zero-output callbacks execute without arena anchors");
+  check(inactive_workspace_stable && inactive_workspace_disjoint,
+        "inactive zero-output workspace remains stable and disjoint");
+
+  active_workspace_forward_calls = 0;
+  active_workspace_backward_calls = 0;
+  active_workspace_address = nullptr;
+  active_workspace_history_ok = true;
+  {
+    Kernel replacement = *find_kernel(OP_INT_ARITH);
+    replacement.forward = active_workspace_forward;
+    replacement.backward = active_workspace_backward;
+    replacement.scratch_size = inactive_workspace_size;
+    ScopedKernelOverride overridden(OP_INT_ARITH, replacement);
+    Executor active_workspace(outer(active_workspace_plan()));
+    const Evaluation active = evaluate(active_workspace, 3, 0);
+    close(active.value, 11, "active scratchful callback value");
+    close(active.gradient[0], 3, "active scratchful callback gradient");
+    close(active.gradient[1], 0, "active scratchful callback beta gradient");
+  }
+  check(active_workspace_forward_calls == 1 &&
+            active_workspace_backward_calls == 1,
+        "active scratchful callback retains reverse record");
+  check(active_workspace_history_ok,
+        "active scratchful callback retains forward scratch for reverse");
 }
 
 static std::atomic<int> invariant_first_calls{0};

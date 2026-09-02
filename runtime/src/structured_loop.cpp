@@ -1217,6 +1217,9 @@ struct DynamicAllocationProfile {
     uint64_t inline_integer_calls = 0;
     uint64_t elided_arena_values = 0;
     uint64_t elided_refs = 0;
+    uint64_t inactive_transient_values = 0;
+    uint64_t inactive_output_values = 0;
+    uint64_t inactive_output_refs = 0;
     uint64_t arena_values = 0;
     uint64_t input_handle_values = 0;
     uint64_t output_values = 0;
@@ -1294,6 +1297,48 @@ struct DynamicAllocationProfile {
     add(b->conceptual_adjoint_values, active ? outputs : 0);
     add(b->physical_adjoint_values, active ? outputs : 0);
     add(b->records, active ? 1 : 0);
+    if (!active) {
+      uint64_t transient = inputs;
+      add(transient, scratch);
+      add(transient, padding);
+      add(b->inactive_transient_values, transient);
+      add(b->inactive_output_values, outputs);
+      add(b->inactive_output_refs, refs);
+    }
+  }
+
+  void note_inactive_split(const Op& op, const Node& node,
+                           int64_t retained_outputs) noexcept {
+    Bucket* b = bucket(op);
+    if (!b) return;
+    const uint64_t inputs = count(op.n_in);
+    const uint64_t outputs = count(node.frame_size - 6 - node.kernel_scratch);
+    const uint64_t scratch = count(node.kernel_scratch);
+    const uint64_t old_frame = count(std::max<int64_t>(
+        1, node.frame_size - (6 - static_cast<int64_t>(op.n_in))));
+    uint64_t old_components = inputs;
+    add(old_components, outputs);
+    add(old_components, scratch);
+    const uint64_t old_padding =
+        old_frame >= old_components ? old_frame - old_components : 0;
+    if (old_frame < old_components) overflow = true;
+    const uint64_t new_frame = count(retained_outputs);
+    const uint64_t new_padding = new_frame >= outputs ? new_frame - outputs : 0;
+    if (new_frame < outputs) overflow = true;
+    const uint64_t refs = op.out2 >= 0 ? 2 : 1;
+    uint64_t transient = inputs;
+    add(transient, scratch);
+    add(transient, old_padding);
+
+    add(b->ordinary_visits, 1);
+    add(b->arena_values, new_frame);
+    add(b->output_values, outputs);
+    add(b->padding_values, new_padding);
+    add(b->refs, refs);
+    add(b->referenced_values, outputs);
+    add(b->inactive_transient_values, transient);
+    add(b->inactive_output_values, outputs);
+    add(b->inactive_output_refs, refs);
   }
 
   void note_compact(const Op& op, int64_t retained, int64_t output_len,
@@ -1361,6 +1406,11 @@ struct DynamicLoopState final : KernelState {
   // output range to preserve the ordinary callback's distinct descriptors.
   std::unique_ptr<double[]> compact_adjoint_work;
   int64_t compact_adjoint_work_size = 0;
+  // Reused only by synchronous inactive forward callbacks. Its maximum size
+  // is immutable body metadata, so no per-visit scratch enters the tape.
+  std::unique_ptr<double[]> inactive_scratch;
+  int64_t inactive_scratch_size = 0;
+  double inactive_empty_value = 0.0;
   // Pointer-free call-site templates. They retain only immutable graph
   // structure between calls; context() refreshes every evaluation-local
   // pointer and adjoint before each reached forward or reverse callback.
@@ -1420,21 +1470,24 @@ struct DynamicLoopState final : KernelState {
       if (op.out2 >= 0) c.out2 = {nullptr, p.body.slots[op.out2].len};
       context_templates.push_back(c);
     }
-    const auto visit_compact = [&](const auto& self, const Node& n) -> void {
-      if (n.kind == Node::KernelCall && n.compact_update_cell >= 0) {
+    const auto visit_workspace = [&](const auto& self, const Node& n) -> void {
+      if (n.kind == Node::KernelCall) {
         if (n.op < 0 || static_cast<size_t>(n.op) >= p.body.ops.size())
-          throw std::invalid_argument(
-              "compact dynamic structured body op is invalid");
-        const Op& op = p.body.ops[static_cast<size_t>(n.op)];
-        const int64_t len = p.body.slots[static_cast<size_t>(op.out)].len;
-        if (len <= 0)
-          throw std::invalid_argument(
-              "compact dynamic structured output extent is invalid");
-        compact_adjoint_work_size = std::max(compact_adjoint_work_size, len);
+          throw std::invalid_argument("dynamic structured body op is invalid");
+        inactive_scratch_size =
+            std::max(inactive_scratch_size, n.kernel_scratch);
+        if (n.compact_update_cell >= 0) {
+          const Op& op = p.body.ops[static_cast<size_t>(n.op)];
+          const int64_t len = p.body.slots[static_cast<size_t>(op.out)].len;
+          if (len <= 0)
+            throw std::invalid_argument(
+                "compact dynamic structured output extent is invalid");
+          compact_adjoint_work_size = std::max(compact_adjoint_work_size, len);
+        }
       }
       for (const auto& child : n.children) self(self, child);
     };
-    visit_compact(visit_compact, p.root);
+    visit_workspace(visit_workspace, p.root);
     if (compact_adjoint_work_size < 0 ||
         static_cast<uint64_t>(compact_adjoint_work_size) >
             std::numeric_limits<size_t>::max())
@@ -1442,6 +1495,20 @@ struct DynamicLoopState final : KernelState {
     if (compact_adjoint_work_size > 0)
       compact_adjoint_work.reset(
           new double[static_cast<size_t>(compact_adjoint_work_size)]);
+    try {
+      if (inactive_scratch_size < 0 ||
+          static_cast<uint64_t>(inactive_scratch_size) >
+              std::numeric_limits<size_t>::max())
+        throw std::length_error("inactive structured scratch overflow");
+      if (inactive_scratch_size > 0)
+        inactive_scratch.reset(
+            new double[static_cast<size_t>(inactive_scratch_size)]);
+    } catch (...) {
+      // This workspace is optional. Preserve the ordinary retained-frame path
+      // if validation or eager allocation cannot be satisfied at bind time.
+      inactive_scratch.reset();
+      inactive_scratch_size = 0;
+    }
     // This body-sized proof is built once with the bound Executor and never
     // rebuilt from reached iterations or observed parameter values.
     try {
@@ -1539,6 +1606,9 @@ void report_memory_profile(const StructuredLoop& p,
       state.undos.capacity(), sizeof(DynamicLoopState::Undo), overflow);
   const uint64_t planned_adjoint = profile_bytes(
       static_cast<uint64_t>(state.adjoint_size), sizeof(double), overflow);
+  const uint64_t inactive_scratch =
+      profile_bytes(static_cast<uint64_t>(state.inactive_scratch_size),
+                    sizeof(double), overflow);
   const uint64_t iterator_value_bytes =
       profile_bytes(state.iterator_values, sizeof(double), overflow);
   const uint64_t iterator_ref_bytes = profile_bytes(
@@ -1557,7 +1627,7 @@ void report_memory_profile(const StructuredLoop& p,
       "ref_count=%zu ref_used_bytes=%llu ref_capacity_bytes=%llu "
       "record_count=%zu record_used_bytes=%llu record_capacity_bytes=%llu "
       "undo_count=%zu undo_used_bytes=%llu undo_capacity_bytes=%llu "
-      "planned_adjoint_bytes=%llu\n",
+      "planned_adjoint_bytes=%llu inactive_scratch_bytes=%llu\n",
       static_cast<const void*>(&p), p.node_count, p.body.ops.size(),
       overflow ? 1 : 0, static_cast<unsigned long long>(state.iterator_values),
       static_cast<unsigned long long>(iterator_value_bytes),
@@ -1571,7 +1641,8 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(record_capacity), state.undos.size(),
       static_cast<unsigned long long>(undo_used),
       static_cast<unsigned long long>(undo_capacity),
-      static_cast<unsigned long long>(planned_adjoint));
+      static_cast<unsigned long long>(planned_adjoint),
+      static_cast<unsigned long long>(inactive_scratch));
 
   const auto* allocation = state.allocation_profile.get();
   if (!allocation) {
@@ -1593,6 +1664,9 @@ void report_memory_profile(const StructuredLoop& p,
   uint64_t inline_integer_calls = 0;
   uint64_t elided_arena_values = 0;
   uint64_t elided_refs = 0;
+  uint64_t inactive_transient_values = 0;
+  uint64_t inactive_output_values = 0;
+  uint64_t inactive_output_refs = 0;
   for (const auto& bucket : allocation->buckets) {
     kernel_arena_values = profile_add(kernel_arena_values, bucket.arena_values,
                                       allocation_overflow);
@@ -1623,6 +1697,15 @@ void report_memory_profile(const StructuredLoop& p,
         elided_arena_values, bucket.elided_arena_values, allocation_overflow);
     elided_refs =
         profile_add(elided_refs, bucket.elided_refs, allocation_overflow);
+    inactive_transient_values =
+        profile_add(inactive_transient_values,
+                    bucket.inactive_transient_values, allocation_overflow);
+    inactive_output_values =
+        profile_add(inactive_output_values, bucket.inactive_output_values,
+                    allocation_overflow);
+    inactive_output_refs =
+        profile_add(inactive_output_refs, bucket.inactive_output_refs,
+                    allocation_overflow);
   }
   uint64_t profiled_arena_values =
       profile_add(allocation->initial_arena_values, kernel_arena_values,
@@ -1646,7 +1729,9 @@ void report_memory_profile(const StructuredLoop& p,
       "referenced_values=%llu conceptual_adjoint_values=%llu "
       "physical_adjoint_values=%llu profiled_records=%llu "
       "actual_records=%zu records_match=%d inline_integer_calls=%llu "
-      "elided_arena_values=%llu elided_refs=%llu\n",
+      "elided_arena_values=%llu elided_refs=%llu "
+      "inactive_transient_values=%llu inactive_output_values=%llu "
+      "inactive_output_refs=%llu\n",
       static_cast<const void*>(&p), allocation_overflow ? 1 : 0,
       static_cast<unsigned long long>(allocation->initial_arena_values),
       static_cast<unsigned long long>(kernel_arena_values),
@@ -1671,7 +1756,10 @@ void report_memory_profile(const StructuredLoop& p,
       profiled_records == state.records.size() ? 1 : 0,
       static_cast<unsigned long long>(inline_integer_calls),
       static_cast<unsigned long long>(elided_arena_values),
-      static_cast<unsigned long long>(elided_refs));
+      static_cast<unsigned long long>(elided_refs),
+      static_cast<unsigned long long>(inactive_transient_values),
+      static_cast<unsigned long long>(inactive_output_values),
+      static_cast<unsigned long long>(inactive_output_refs));
 
   for (uint16_t opcode = 0; opcode < OP_COUNT_; ++opcode) {
     const auto& bucket = allocation->buckets[opcode];
@@ -1686,6 +1774,8 @@ void report_memory_profile(const StructuredLoop& p,
         "invariant_reuses=%llu inactive_control_calls=%llu "
         "direct_control_calls=%llu inline_integer_calls=%llu "
         "elided_arena_values=%llu elided_refs=%llu arena_values=%llu "
+        "inactive_transient_values=%llu inactive_output_values=%llu "
+        "inactive_output_refs=%llu "
         "input_handle_values=%llu output_values=%llu scratch_values=%llu "
         "padding_values=%llu refs=%llu active_refs=%llu "
         "referenced_values=%llu conceptual_adjoint_values=%llu "
@@ -1702,6 +1792,9 @@ void report_memory_profile(const StructuredLoop& p,
         static_cast<unsigned long long>(bucket.elided_arena_values),
         static_cast<unsigned long long>(bucket.elided_refs),
         static_cast<unsigned long long>(bucket.arena_values),
+        static_cast<unsigned long long>(bucket.inactive_transient_values),
+        static_cast<unsigned long long>(bucket.inactive_output_values),
+        static_cast<unsigned long long>(bucket.inactive_output_refs),
         static_cast<unsigned long long>(bucket.input_handle_values),
         static_cast<unsigned long long>(bucket.output_values),
         static_cast<unsigned long long>(bucket.scratch_values),
@@ -2182,12 +2275,15 @@ struct DynamicExecution {
   KernelCtx& context(const Node& n, double* frame, bool backward,
                      std::array<double, 6>& inline_inputs,
                      double out_handle = -1, double out2_handle = -1,
-                     double* output_override = nullptr) {
+                     double* output_override = nullptr,
+                     double* output2_override = nullptr,
+                     double* scratch_override = nullptr) {
     const Op& op = p.body.ops[n.op];
     if (op.n_in < 0 || op.n_in > 6)
       throw std::logic_error("dynamic structured frame arity is invalid");
-    if (output_override && op.out2 >= 0)
-      throw std::logic_error("compact structured update has second output");
+    if ((output2_override != nullptr) !=
+        (output_override != nullptr && op.out2 >= 0))
+      throw std::logic_error("structured output overrides are inconsistent");
     if (n.op < 0 || static_cast<size_t>(n.op) >= state.context_templates.size())
       throw std::logic_error(
           "dynamic structured context template is out of range");
@@ -2232,11 +2328,11 @@ struct DynamicExecution {
       c.out2.data = nullptr;
       c.out2_adj = 0.0;
       if (op.out2 >= 0) {
-        c.out2.data = frame + pos;
+        c.out2.data = output2_override ? output2_override : frame + pos;
         if (backward) c.out2_adj = *adj(out2_handle, c.out2.len);
         pos += c.out2.len;
       }
-      c.scratch = output_override ? nullptr : frame + pos;
+      c.scratch = output_override ? scratch_override : frame + pos;
     } catch (...) {
       clear_context(c);
       throw;
@@ -2257,10 +2353,13 @@ struct DynamicExecution {
 
     ContextLease(DynamicExecution& execution, const Node& n, double* frame,
                  bool backward, double out_handle = -1, double out2_handle = -1,
-                 double* output_override = nullptr)
+                 double* output_override = nullptr,
+                 double* output2_override = nullptr,
+                 double* scratch_override = nullptr)
         : execution(execution) {
       call = &execution.context(n, frame, backward, inline_inputs, out_handle,
-                                out2_handle, output_override);
+                                out2_handle, output_override, output2_override,
+                                scratch_override);
     }
     ContextLease(const ContextLease&) = delete;
     ContextLease& operator=(const ContextLease&) = delete;
@@ -2395,6 +2494,49 @@ struct DynamicExecution {
     return true;
   }
 
+  bool transient_inactive_call(const Node& n, double* handles, bool& active) {
+    const Op& op = p.body.ops[static_cast<size_t>(n.op)];
+    bool any_active_input = false;
+    for (int k = 0; k < op.n_in; ++k) {
+      handles[k] = state.bindings[static_cast<size_t>(op.in[k])];
+      any_active_input |= handles[k] >= 0;
+    }
+    active = n.backward && any_active_input;
+    if (active) return false;
+    if (n.kernel_scratch > state.inactive_scratch_size ||
+        (n.kernel_scratch > 0 && !state.inactive_scratch))
+      return false;
+
+    const int64_t output_values =
+        add(p.body.slots[static_cast<size_t>(op.out)].len,
+            op.out2 >= 0 ? p.body.slots[static_cast<size_t>(op.out2)].len : 0);
+    const int64_t retained_outputs = output_values;
+    double* outputs = output_values > 0 ? state.arena.allocate(output_values)
+                                        : &state.inactive_empty_value;
+    double* output2 =
+        op.out2 >= 0 ? outputs + p.body.slots[static_cast<size_t>(op.out)].len
+                     : nullptr;
+    ContextLease context(*this, n, handles, false, -1, -1, outputs, output2,
+                         state.inactive_scratch.get());
+    KernelCtx& c = context.get();
+    // The same callback runs in the same order. Only its call-local handles
+    // and scratch stop entering persistent history; output storage remains in
+    // the stable arena and is published after successful completion.
+    n.forward(c);
+    state.bindings[static_cast<size_t>(op.out)] =
+        make_ref(c.out.data, c.out.len, false);
+    if (op.out2 >= 0)
+      state.bindings[static_cast<size_t>(op.out2)] =
+          make_ref(c.out2.data, c.out2.len, false);
+    if (n.compact_update_cell >= 0)
+      state.compact_primal_by_cell[static_cast<size_t>(n.compact_update_cell)] =
+          c.out.data;
+    publish_loop_invariant(n);
+    if (state.allocation_profile)
+      state.allocation_profile->note_inactive_split(op, n, retained_outputs);
+    return true;
+  }
+
   enum Flow { Normal, Break, Continue };
   Flow forward(const Node& n) {
     switch (n.kind) {
@@ -2434,19 +2576,18 @@ struct DynamicExecution {
           return Normal;
         }
         if (compact_update(n)) return Normal;
+        double handles[6] = {};
+        bool active = false;
+        if (transient_inactive_call(n, handles, active)) return Normal;
         const int64_t retained = retained_frame_values(n);
         double* frame = state.arena.allocate(retained);
-        for (int k = 0; k < op.n_in; ++k)
-          frame[k] = state.bindings[static_cast<size_t>(op.in[k])];
+        std::copy_n(handles, op.n_in, frame);
         ContextLease context(*this, n, frame, false);
         KernelCtx& c = context.get();
         // Preserve the kernel's exception type and message. In particular,
         // reject/domain errors and bounds errors are part of Stan's visible
         // behavior and must match the ordinary graph path.
         n.forward(c);
-        bool active = false;
-        for (int k = 0; k < c.n_in; ++k) active |= frame[k] >= 0;
-        active &= n.backward != nullptr;
         const double out = make_ref(c.out.data, c.out.len, active);
         state.bindings[static_cast<size_t>(op.out)] = out;
         double out2 = -1;
