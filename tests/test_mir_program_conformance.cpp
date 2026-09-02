@@ -672,7 +672,7 @@ void test_nested_print_effect() {
   run_case("nested print effect",
            "print in a UDF emits exactly once before returning",
            {std::move(entry), std::move(echo)}, 1.0, {1.0},
-           "nested print x=1\n", "FnPrint");
+           "nested print x=1\n");
 }
 
 void test_print_then_reject_effects() {
@@ -688,7 +688,8 @@ void test_print_then_reject_effects() {
   run_domain_error_case(
       "print then reject effects",
       "print occurs first; reject throws domain_error with its full message",
-      {std::move(entry)}, 1.0, "bad rhs t=1", "before reject t=1\n", "FnPrint");
+      {std::move(entry)}, 1.0, "bad rhs t=1", "before reject t=1\n",
+      "FnReject");
 }
 
 FunDef runtime_effect_rhs() {
@@ -715,11 +716,11 @@ void test_runtime_guarded_effects() {
   const FunDef entry = runtime_effect_rhs();
   run_case("untaken runtime effects",
            "a false branch emits nothing and evaluation continues", {entry},
-           1.0, {1.0}, {}, "FnPrint");
+           1.0, {1.0}, {}, "FnReject");
   run_domain_error_case(
       "taken runtime effects",
       "a true branch prints once, then reject terminates evaluation", {entry},
-      -1.0, "negative t rejected: -1", "negative branch t=-1\n", "FnPrint");
+      -1.0, "negative t rejected: -1", "negative branch t=-1\n", "FnReject");
 }
 
 void test_unknown_nrfunapp_fails_loud() {

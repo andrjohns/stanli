@@ -19,6 +19,7 @@
 #include <stanli/message_sink.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/packet.hpp>
+#include <stanli/program.hpp>
 #include <stanli/structured_check.hpp>
 
 #include <stan/math/prim/err/check_cholesky_factor.hpp>
@@ -44,6 +45,27 @@
 #include <vector>
 
 namespace stanli {
+
+void emit_program_print(const Program::Print& print, const double* reg) {
+  std::ostringstream out;
+  for (size_t k = 0; k < print.chunks.size(); ++k) {
+    out << print.chunks[k];
+    if (k >= print.value_reg.size()) continue;
+    const int32_t first = print.value_reg[k];
+    const int32_t len = print.value_len[k];
+    if (len == 1) {
+      out << reg[first];
+    } else {
+      out << '[';
+      for (int32_t i = 0; i < len; ++i) {
+        if (i) out << ',';
+        out << reg[first + i];
+      }
+      out << ']';
+    }
+  }
+  emit_message(out.str());
+}
 
 namespace {
 

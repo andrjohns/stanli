@@ -791,36 +791,52 @@ void test_print_callback() {
   bs_model_destruct(m);
 }
 
-void test_necessity_effects_refused() {
+void test_necessity_effects() {
   const std::string mir = slurp("tests/fixtures/necessity_effects.tmir.sexp");
   char* err = nullptr;
   expect_eq_int("necessity callback install",
                 bs_set_print_callback(&collect_print, &err), 0);
 
-  for (int mode = 1; mode <= 2; ++mode) {
-    const std::string effect = mode == 1 ? "FnPrint" : "FnReject";
-    nlohmann::json root = {{"mode", mode}};
-    root["__stanli"] = {{"build_id", stanli::bs_build_id()},
-                        {"mir", mir},
-                        {"name", "necessity_effects"}};
-    g_printed.clear();
-    err = nullptr;
-    bs_model* m = bs_model_construct(root.dump().c_str(), 1, &err);
-    if (m != nullptr) {
-      fail("BridgeStan accepted necessity island containing " + effect);
-      bs_model_destruct(m);
-    } else if (err == nullptr ||
-               std::string(err).find("runtime-control region") ==
-                   std::string::npos ||
-               std::string(err).find(effect) == std::string::npos) {
-      fail("BridgeStan necessity " + effect +
-           " error: " + (err != nullptr ? err : "(no message)"));
-    }
+  nlohmann::json root = {{"mode", 1}};
+  root["__stanli"] = {{"build_id", stanli::bs_build_id()},
+                      {"mir", mir},
+                      {"name", "necessity_effects"}};
+  g_printed.clear();
+  bs_model* m = bs_model_construct(root.dump().c_str(), 1, &err);
+  if (m == nullptr) {
+    fail("BridgeStan refused necessity print: " +
+         std::string(err != nullptr ? err : "(no message)"));
     bs_free_error_msg(err);
-    if (!g_printed.empty())
-      fail("BridgeStan executed " + effect + " while refusing: [" + g_printed +
-           "]");
+  } else {
+    const double q = 0.1;
+    double lp = 0, grad = 0;
+    g_printed.clear();
+    expect_eq_int("BridgeStan necessity print gradient",
+                  bs_log_density_gradient(m, true, true, &q, &lp, &grad, &err),
+                  0);
+    if (g_printed != "positive x=0.1\n")
+      fail("BridgeStan necessity print did not execute exactly once: [" +
+           g_printed + "]");
+    bs_model_destruct(m);
   }
+
+  root["mode"] = 2;
+  g_printed.clear();
+  err = nullptr;
+  m = bs_model_construct(root.dump().c_str(), 1, &err);
+  if (m != nullptr) {
+    fail("BridgeStan accepted runtime-valued necessity reject");
+    bs_model_destruct(m);
+  } else if (err == nullptr ||
+             std::string(err).find("runtime-control region") ==
+                 std::string::npos ||
+             std::string(err).find("FnReject") == std::string::npos) {
+    fail("BridgeStan necessity FnReject error: " +
+         std::string(err != nullptr ? err : "(no message)"));
+  }
+  bs_free_error_msg(err);
+  if (!g_printed.empty())
+    fail("BridgeStan executed FnReject while refusing: [" + g_printed + "]");
 
   err = nullptr;
   expect_eq_int("necessity callback clear",
@@ -1115,7 +1131,7 @@ int main() {
   test_unsupported();
   test_initialize();
   test_print_callback();
-  test_necessity_effects_refused();
+  test_necessity_effects();
   test_manifest();
   test_embedded_manifest();
   test_construct_errors();

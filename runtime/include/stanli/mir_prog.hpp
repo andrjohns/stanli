@@ -2923,6 +2923,25 @@ struct ProgramCompiler {
       }
       case mir::Stmt::NRFunApp:
         if (s.fn_name == "FnValidateSize") return;
+        if (s.fn_name == "FnPrint") {
+          Program::Print print;
+          std::string pending;
+          for (const auto& a : s.fn_args) {
+            if (a.kind == mir::Expr::LitStr) {
+              pending += a.lit_s;
+              continue;
+            }
+            print.chunks.push_back(std::move(pending));
+            pending.clear();
+            const Range value = expr(a);
+            print.value_reg.push_back(value.reg);
+            print.value_len.push_back(value.len);
+          }
+          print.chunks.push_back(std::move(pending));
+          p.prints.push_back(std::move(print));
+          emit(Program::PRINT, 0, (int)p.prints.size() - 1);
+          return;
+        }
         if (s.fn_name == "FnReject") {
           // Only a literal message: interleaving a runtime value would need
           // to format it into the thrown string at forward time, which this

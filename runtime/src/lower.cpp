@@ -2729,10 +2729,9 @@ struct Lowering {
     // inliner's zero-length sentinel and the region's assignment sized it.
     std::vector<Range> out_views;
     bool has_target = false;  // the region contributed to the target
-    // The region compiled a reject(): it has an observable effect even when
-    // every data live-out is empty, so an emitter must not treat it as
-    // having nothing to produce.
-    bool has_reject = false;
+    // A print or reject is observable even when every data live-out is empty,
+    // so an emitter must not treat the region as having nothing to produce.
+    bool has_effect = false;
   };
 
   // Does `s` increment the target anywhere?
@@ -3021,14 +3020,11 @@ struct Lowering {
     // as `matrix[0, 0]` from a dimension table does, so there is nothing
     // for the program to carry out. Finding no live-out at all is the
     // mistake this catches -- a region that lost what it was to produce --
-    // unless the region's entire purpose was a conditional reject(): that
-    // has no data output by design, its value being the exception it may
-    // throw.
-    reg->has_reject = std::any_of(
-        prog->code.begin(), prog->code.end(),
-        [](const Program::Instr& i) { return i.code == Program::REJECT; });
+    // unless the region's entire purpose was a conditional effect: that has
+    // no data output by design, its value being the output or exception.
+    reg->has_effect = island_has_effect(*prog);
     if (prog->out_regs.empty() && !(e && expr_out->len == 0) &&
-        (s == nullptr || reg->out_names.empty()) && !reg->has_reject)
+        (s == nullptr || reg->out_names.empty()) && !reg->has_effect)
       fail("runtime-control region produces nothing", s ? s->raw : e->raw);
     // A region with a runtime branch keeps the var replay -- reversing
     // control flow needs the structured form the flat program has already
@@ -3139,8 +3135,8 @@ struct Lowering {
     // zero-width, so the region has no observable effect and its values
     // keep the empty shape they already have outside. A `target +=` would
     // have put its own register here, so this cannot drop one -- and a
-    // reject() has no live-out by design, so it cannot either.
-    if (prog->out_regs.empty() && !reg.has_reject) return;
+    // print()/reject() have no live-out by design, so it cannot either.
+    if (prog->out_regs.empty() && !reg.has_effect) return;
     std::vector<int> out_slots;
     emit_island(prog, reg, out_lens, &out_slots);
     // Later statements read the island's results, not the old values.

@@ -119,6 +119,7 @@ enum ProgramOpFlag : uint16_t {
   X(MULT_LOWER_TRI_SELF_TRANSPOSE, kProgramRangeA | kProgramNoAdjoint)       \
   X(DENSITY, 0)                                                              \
   X(CALL, 0)                                                                 \
+  X(PRINT, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)          \
   X(REJECT, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)         \
   X(DENSITY_VEC, kProgramNoAdjoint)
 
@@ -196,6 +197,16 @@ struct Program {
     int32_t bwd_adj_out = 0;
   };
 
+  // A PRINT's payload: literal chunks interleaved with register ranges.
+  // The double forward renders it once; a var replay deliberately skips it,
+  // because replay exists only to recover derivatives and must not repeat an
+  // observable Stan statement.
+  struct Print {
+    std::vector<std::string> chunks;
+    std::vector<int32_t> value_reg;
+    std::vector<int32_t> value_len;
+  };
+
   // A DENSITY_VEC's payload: same density id DENSITY uses, but one or more
   // arguments is a same-length container rather than a scalar, evaluated
   // with one propto-OFF call the way CmdStan's generated code would (its
@@ -215,8 +226,9 @@ struct Program {
   };
 
   std::vector<Instr> code;
-  std::vector<Call> calls;   // CALL payloads, indexed by Instr::a
-  std::vector<double> pool;  // CONSTR data
+  std::vector<Call> calls;    // CALL payloads, indexed by Instr::a
+  std::vector<Print> prints;  // PRINT payloads, indexed by Instr::a
+  std::vector<double> pool;   // CONSTR data
   // REJECT's literal message text, indexed by Instr::a. Never touched as a
   // register (REJECT is kProgramNoInputs), so it rides beside the register
   // file rather than in it.
@@ -226,6 +238,11 @@ struct Program {
   int n_regs = 0;
   std::vector<int> out_regs;  // the values the caller reads back
 };
+
+// Render one register-program print through the same sink and formatting as
+// graph OP_PRINT. Kept out of the evaluator template so only the double path
+// needs to know how messages are assembled.
+void emit_program_print(const Program::Print& print, const double* reg);
 
 struct ProgramOpSpec {
   const char* name;
@@ -603,6 +620,10 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
           // a gradient.
           throw std::logic_error("CALL instruction in a var replay");
         }
+        break;
+      case Program::PRINT:
+        if constexpr (std::is_same_v<T, double>)
+          emit_program_print(p.prints[(size_t)I.a], reg);
         break;
       // reject(): the same exception CmdStan's generated code throws from
       // the same place, so the sampler counts it as a rejected proposal

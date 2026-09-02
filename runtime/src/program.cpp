@@ -69,6 +69,12 @@ void each_read(const Program& p, const Program::Instr& I, F fn) {
       fn(Span{v.arg_reg[k], ((v.container_mask >> k) & 1u) ? v.len : 1});
     return;
   }
+  if (I.code == Program::PRINT) {
+    const Program::Print& print = p.prints[(size_t)I.a];
+    for (size_t k = 0; k < print.value_reg.size(); ++k)
+      fn(Span{print.value_reg[k], print.value_len[k]});
+    return;
+  }
   const ProgramOpSpec& spec = program_code_spec(I.code);
   if (spec.has(kProgramNoInputs)) return;
   fn(Span{I.a, spec.has(kProgramRangeA) ? I.len : 1});
@@ -86,6 +92,12 @@ void remap(Program::Call& c, const std::vector<int>& m) {
 
 void remap(Program::VecDensity& v, const std::vector<int>& m) {
   for (int k = 0; k < v.arity; ++k) v.arg_reg[k] = m[(size_t)v.arg_reg[k]];
+}
+
+void remap(Program::Print& print, const std::vector<int>& m) {
+  for (size_t k = 0; k < print.value_reg.size(); ++k)
+    if (print.value_len[k] > 0)
+      print.value_reg[k] = m[(size_t)print.value_reg[k]];
 }
 
 void remap(Program::Instr& I, const std::vector<int>& m) {
@@ -245,6 +257,8 @@ bool compact_program_gated(Program& p, std::vector<std::pair<int, int>>& seeded,
       return false;
     if (I.code == Program::DENSITY_VEC &&
         (I.a < 0 || (size_t)I.a >= p.vec_densities.size()))
+      return false;
+    if (I.code == Program::PRINT && (I.a < 0 || (size_t)I.a >= p.prints.size()))
       return false;
   }
 
@@ -443,6 +457,7 @@ bool compact_program_gated(Program& p, std::vector<std::pair<int, int>>& seeded,
     if (I.code == Program::CALL) remap(p.calls[(size_t)I.a], map);
     if (I.code == Program::DENSITY_VEC)
       remap(p.vec_densities[(size_t)I.a], map);
+    if (I.code == Program::PRINT) remap(p.prints[(size_t)I.a], map);
     remap(I, map);
     if (branches(I.code)) I.dst = new_pc[(size_t)I.dst];
     code.push_back(I);
