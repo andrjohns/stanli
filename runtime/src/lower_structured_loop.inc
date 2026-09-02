@@ -780,6 +780,7 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
     stride = checked_product({stride, dims[d]}, "index strides");
   }
   std::vector<Val> indices;
+  std::vector<int64_t> index_offsets;
   std::vector<int64_t> output_dims;
   std::vector<int> output_runtime_dims;
   int64_t index_width = 0, selected = 1;
@@ -798,12 +799,14 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
       axis.count = 1;
       Val v = lower_expr(ix->args[0]);
       if (g.slots[v.slot].len != 1) fail("non-scalar structured index");
+      index_offsets.push_back(index_width);
       indices.push_back(v);
       ++index_width;
     } else if (ix->name == "IndexMulti" && ix->args.size() == 1) {
       axis.kind = DynamicIndexSpec::Axis::Multi;
       Val v = lower_expr(ix->args[0]);
       axis.count = g.slots[v.slot].len;
+      index_offsets.push_back(index_width);
       indices.push_back(v);
       index_width += axis.count;
       int runtime_count = -1;
@@ -812,6 +815,7 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
         axis.count_input_offset = index_width;
         Val count{runtime_count, false, view_of("UInt")};
         count.si.param_free = true;
+        index_offsets.push_back(index_width);
         indices.push_back(count);
         ++index_width;
       }
@@ -825,6 +829,7 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
       axis.count = std::max<int64_t>(
           0, (runtime_upper ? dims[d] : int64_t(hi->hi)) - lo->lo + 1);
       Val lower = lower_expr(ix->args[0]);
+      index_offsets.push_back(index_width);
       indices.push_back(lower);
       ++index_width;
       int runtime_count = -1;
@@ -833,6 +838,7 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
           fail("structured varying slice currently needs 1:n bounds");
         Val upper = lower_expr(ix->args[1]);
         axis.count_input_offset = index_width;
+        index_offsets.push_back(index_width);
         indices.push_back(upper);
         ++index_width;
         runtime_count = upper.slot;
@@ -846,6 +852,7 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
       axis.extent_input_offset = index_width;
       Val extent{base_runtime_dim, false, view_of("UInt")};
       extent.si.param_free = true;
+      index_offsets.push_back(index_width);
       indices.push_back(extent);
       ++index_width;
       if (axis.kind == DynamicIndexSpec::Axis::All) {
@@ -861,11 +868,6 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
     spec->axes.push_back(axis);
   }
   spec->selected_size = selected;
-  Val packed = indices.empty() ? constant(0) : indices[0];
-  for (size_t i = 1; i < indices.size(); ++i)
-    packed =
-        emit_value(OP_CONCAT2, {packed, indices[i]},
-                   g.slots[packed.slot].len + g.slots[indices[i].slot].len);
   SlotInfo si = view_of(type);
   if (type == "UMatrix") {
     if (output_dims.size() < 2) fail("structured matrix selection shape");
@@ -874,16 +876,68 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
     si = array_view(output_dims, leaf_kind(result_view.leaf));
   }
   Val result;
-  if (rhs) {
-    if (g.slots[rhs->slot].len != selected)
-      fail("structured indexed assignment width mismatch");
-    result = emit_value(OP_SET_INDEX_DYNAMIC, {base, packed, *rhs},
-                        g.slots[base.slot].len, base.si);
-    // An element update changes values, not the declaration-time logical
-    // extents of the containing array.
-    result.runtime_dims = base.runtime_dims;
-  } else
-    result = emit_value(OP_INDEX_DYNAMIC, {base, packed}, selected, si);
+  // Keep the packed ABI for variable-width selectors, active selectors, and
+  // indexed updates. Direct scalar data operands avoid recording CONCAT2
+  // intermediates without changing their adjoint or aliasing semantics.
+  const bool direct_inputs =
+      !rhs && indices.size() >= 2 && indices.size() <= 5 &&
+      std::all_of(indices.begin(), indices.end(), [&](const Val& input) {
+        return g.slots[input.slot].len == 1 && !input.autodiff &&
+               input.si.param_free;
+      }) &&
+      std::getenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS") == nullptr;
+  if (direct_inputs) {
+    const auto remap = [&](int64_t* offset, int* input) {
+      for (size_t i = 0; i < indices.size(); ++i) {
+        const int64_t begin = index_offsets[i];
+        const int64_t len = g.slots[indices[i].slot].len;
+        if (*offset >= begin && *offset < begin + len) {
+          *offset -= begin;
+          *input = static_cast<int>(i + 1);
+          return;
+        }
+      }
+      fail("structured direct index operand has no source");
+    };
+    for (auto& axis : spec->axes) {
+      if (axis.kind != DynamicIndexSpec::Axis::All)
+        remap(&axis.input_offset, &axis.selector_input);
+      if (axis.count_input_offset >= 0)
+        remap(&axis.count_input_offset, &axis.count_input);
+      if (axis.extent_input_offset >= 0)
+        remap(&axis.extent_input_offset, &axis.extent_input);
+    }
+    spec->input_count = static_cast<int>(indices.size() + 1);
+    std::vector<int> inputs;
+    inputs.reserve(indices.size() + 1);
+    inputs.push_back(base.slot);
+    si.param_free = base.si.param_free;
+    bool autodiff = base.autodiff;
+    for (const Val& input : indices) {
+      inputs.push_back(input.slot);
+      si.param_free = si.param_free && input.si.param_free;
+      autodiff = autodiff || input.autodiff;
+    }
+    result = emit_raw(OP_INDEX_DYNAMIC, std::move(inputs), selected, si, {}, -1,
+                      autodiff);
+  } else {
+    Val packed = indices.empty() ? constant(0) : indices[0];
+    for (size_t i = 1; i < indices.size(); ++i)
+      packed = emit_value(
+          OP_CONCAT2, {packed, indices[i]},
+          g.slots[packed.slot].len + g.slots[indices[i].slot].len);
+    if (rhs) {
+      if (g.slots[rhs->slot].len != selected)
+        fail("structured indexed assignment width mismatch");
+      result = emit_value(OP_SET_INDEX_DYNAMIC, {base, packed, *rhs},
+                          g.slots[base.slot].len, base.si);
+      // An element update changes values, not the declaration-time logical
+      // extents of the containing array.
+      result.runtime_dims = base.runtime_dims;
+    } else {
+      result = emit_value(OP_INDEX_DYNAMIC, {base, packed}, selected, si);
+    }
+  }
   if (!rhs &&
       std::any_of(output_runtime_dims.begin(), output_runtime_dims.end(),
                   [](int slot) { return slot >= 0; }))
