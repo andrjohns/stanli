@@ -1,3 +1,4 @@
+#include <stanli/callable_transform.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/optable.hpp>
 
@@ -332,20 +333,11 @@ void validate_funapp_arity(const Expr& e) {
     return;
   }
 
-  const auto validate_transform_call = [&](const char* stem, size_t arity) {
-    const std::string prefix(stem);
-    if (e.name.compare(0, prefix.size(), prefix) != 0) return false;
-    const std::string tail = e.name.substr(prefix.size());
-    if (tail != "constrain" && tail != "jacobian" && tail != "unconstrain")
-      return false;
-    require_arity(e, arity);
-    return true;
-  };
-  if (validate_transform_call("lower_bound_", 2) ||
-      validate_transform_call("upper_bound_", 2) ||
-      validate_transform_call("lower_upper_bound_", 3) ||
-      validate_transform_call("offset_multiplier_", 3))
+  CallableTransformSpec transform;
+  if (callable_transform(e.name, &transform)) {
+    require_arity(e, transform.arity);
     return;
+  }
 
   std::string ode_name = e.name;
   bool ode_tolerance = false;

@@ -756,6 +756,7 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
       case Program::MDIVIDE_RIGHT_SPD:
       case Program::QUAD_FORM_SYM:
       case Program::MULT_LOWER_TRI_SELF_TRANSPOSE:
+      case Program::TRANSFORM:
       case Program::PRINT:
       case Program::REJECT:
       case Program::DENSITY_VEC:

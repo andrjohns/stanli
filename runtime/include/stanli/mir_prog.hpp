@@ -1502,6 +1502,135 @@ struct ProgramCompiler {
     return out;
   }
 
+  Range transform_call(const mir::Expr& e, const CallableTransformSpec& spec) {
+    if (e.args.size() != spec.arity)
+      bail(e.name + ": wrong number of arguments");
+    if (spec.structured && spec.direction == TransformDirection::Unconstrain)
+      bail(e.name +
+           ": structured inverse is not supported in a runtime region");
+
+    Program::Transform tr;
+    tr.kind = spec.kind;
+    tr.direction = spec.direction;
+    tr.n_in = spec.structured ? 1 : (int8_t)spec.arity;
+    std::vector<Range> args;
+    args.reserve((size_t)tr.n_in);
+    for (int k = 0; k < tr.n_in; ++k) {
+      args.push_back(expr(e.args[(size_t)k]));
+      tr.in[k] = args.back().reg;
+      tr.in_len[k] = args.back().len;
+    }
+    Range out = args[0];
+    if (!spec.structured) {
+      for (int k = 1; k < tr.n_in; ++k)
+        if (args[k].len != 1 && args[k].len != args[0].len)
+          bail(e.name + ": bound is neither scalar nor the input size");
+      tr.out_len = args[0].len;
+      tr.inner_raw = args[0].len;
+    } else {
+      ViewKind leaf = args[0].kind;
+      std::vector<int64_t> dims;
+      if (leaf == ViewKind::Array) {
+        dims = args[0].dims;
+        leaf = args[0].leaf;
+      } else if (leaf == ViewKind::Matrix) {
+        dims = {args[0].rows, args[0].cols};
+      } else if (leaf == ViewKind::Vector || leaf == ViewKind::RowVector) {
+        dims = {args[0].len};
+      }
+      const size_t rank = leaf_rank(leaf);
+      if (rank == 0 || dims.size() < rank)
+        bail(e.name + ": invalid input container");
+      const size_t outer_rank = dims.size() - rank;
+      int64_t batch = 1;
+      for (size_t i = 0; i < outer_rank; ++i) batch *= dims[i];
+      int64_t raw_rows = leaf == ViewKind::Matrix ? dims[dims.size() - 2] : 0;
+      int64_t raw_cols = leaf == ViewKind::Matrix ? dims.back() : 0;
+      int64_t rows = 0, cols = 0;
+      ViewKind out_leaf = leaf;
+      switch (spec.kind) {
+        case CallableTransformKind::Ordered:
+        case CallableTransformKind::PositiveOrdered:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          rows = dims.back();
+          break;
+        case CallableTransformKind::Simplex:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          rows = dims.back() + 1;
+          break;
+        case CallableTransformKind::UnitVector:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          rows = dims.back();
+          break;
+        case CallableTransformKind::SumToZero:
+          if (leaf == ViewKind::Vector) {
+            rows = dims.back() + 1;
+          } else if (leaf == ViewKind::Matrix) {
+            rows = raw_rows + 1;
+            cols = raw_cols + 1;
+          } else {
+            bail(e.name + ": expected vector or matrix");
+          }
+          break;
+        case CallableTransformKind::StochasticColumn:
+        case CallableTransformKind::StochasticRow:
+          if (leaf != ViewKind::Matrix) bail(e.name + ": expected matrix");
+          rows =
+              raw_rows + (spec.kind == CallableTransformKind::StochasticColumn);
+          cols = raw_cols + (spec.kind == CallableTransformKind::StochasticRow);
+          break;
+        case CallableTransformKind::CholeskyFactorCorr:
+        case CallableTransformKind::CorrMatrix:
+        case CallableTransformKind::CovMatrix:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          out_leaf = ViewKind::Matrix;
+          rows = cols = cint(e.args[1]);
+          break;
+        case CallableTransformKind::CholeskyFactorCov:
+          if (leaf != ViewKind::Vector) bail(e.name + ": expected vector");
+          out_leaf = ViewKind::Matrix;
+          rows = cint(e.args[1]);
+          cols = cint(e.args[2]);
+          break;
+        default:
+          bail(e.name + ": invalid structured transform");
+      }
+      if (batch < 0 || rows < 0 || cols < 0) bail(e.name + ": invalid shape");
+      tr.batch = (int32_t)batch;
+      tr.inner_raw = leaf == ViewKind::Matrix ? (int32_t)(raw_rows * raw_cols)
+                                              : (int32_t)dims.back();
+      tr.out_rows = (int32_t)rows;
+      tr.out_cols = (int32_t)cols;
+      const int64_t inner_con =
+          out_leaf == ViewKind::Matrix ? rows * cols : rows;
+      if (inner_con < 0 || batch > kMaxRegs ||
+          (batch && inner_con > kMaxRegs / batch))
+        bail(e.name + ": result needs too many registers");
+      tr.out_len = (int32_t)(batch * inner_con);
+      out.len = tr.out_len;
+      out.kind = outer_rank ? ViewKind::Array : out_leaf;
+      out.rows = out.kind == ViewKind::Matrix ? rows : 0;
+      out.cols = out.kind == ViewKind::Matrix ? cols : 0;
+      if (outer_rank) {
+        out.dims.assign(dims.begin(), dims.begin() + outer_rank);
+        out.dims.push_back(rows);
+        if (out_leaf == ViewKind::Matrix) out.dims.push_back(cols);
+        out.leaf = out_leaf;
+      }
+    }
+    tr.out = alloc(tr.out_len);
+    tr.jac = alloc(1);
+    out.reg = tr.out;
+    p.transforms.push_back(tr);
+    p.code.push_back(
+        Program::Instr{Program::TRANSFORM, 0, (int)p.transforms.size() - 1});
+    if (spec.direction == TransformDirection::Jacobian && !in_write_array) {
+      if (target_reg < 0) bail("jacobian transform has no target");
+      emit(Program::ADD, target_reg, target_reg, tr.jac);
+    }
+    return out;
+  }
+
   Range fun(const mir::Expr& e) {
     // A shape query is a constant whatever surrounds it. Ahead of every
     // other case because `FnLength` is an internal function and the rest
@@ -1557,6 +1686,9 @@ struct ProgramCompiler {
       return out;
     }
     if (rng_call_name(e.name)) return rng_call(e);
+    CallableTransformSpec transform;
+    if (callable_transform(e.name, &transform))
+      return transform_call(e, transform);
     if (e.name == "tcrossprod" && e.args.size() == 1)
       return matrix_gram(expr(e.args[0]), false);
     if (e.name == "crossprod" && e.args.size() == 1)

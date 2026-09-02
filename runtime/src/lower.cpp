@@ -1,4 +1,5 @@
 #include <stanli/algebra.hpp>
+#include <stanli/callable_transform.hpp>
 #include <stanli/compile.hpp>
 #include <stanli/unconstrain.hpp>
 #include <stanli/constfold.hpp>
@@ -384,18 +385,9 @@ Addr flat_addr(const std::vector<int64_t>& D, bool mat,
 
 std::vector<double> graph_order(const DataMap::Entry& en,
                                 bool standalone_matrix, bool innermost_matrix) {
-  std::vector<double> vals = en.r;
-  if (standalone_matrix || en.dims.size() <= 1) return vals;
-  std::vector<int64_t> ix(en.dims.size(), 0);
-  for (size_t src = 0; src < en.r.size(); ++src) {
-    int64_t t = (int64_t)src;
-    for (size_t d = 0; d < en.dims.size(); ++d) {
-      ix[d] = t % en.dims[d];
-      t /= en.dims[d];
-    }
-    vals[(size_t)flat_addr(en.dims, innermost_matrix, ix).off] = en.r[src];
-  }
-  return vals;
+  if (standalone_matrix || en.dims.size() <= 1) return en.r;
+  const size_t outer_rank = en.dims.size() - (innermost_matrix ? 2u : 0u);
+  return graph_container_order(en.r, en.dims, outer_rank);
 }
 
 struct Lowering {
@@ -636,7 +628,7 @@ struct Lowering {
     CategoricalRng,
     ScalarRng,
     Density,
-    BoundTransform,
+    CallableTransform,
     Elementwise,
     AppendArray,
     Matrix,
@@ -675,19 +667,6 @@ struct Lowering {
   static bool ends_with(std::string_view name, std::string_view suffix) {
     return name.size() >= suffix.size() &&
            name.substr(name.size() - suffix.size()) == suffix;
-  }
-
-  static bool bound_transform_name(std::string_view name) {
-    static constexpr std::string_view kStems[] = {
-        "lower_bound_", "upper_bound_", "lower_upper_bound_",
-        "offset_multiplier_"};
-    for (std::string_view stem : kStems) {
-      if (name.size() < stem.size() || name.substr(0, stem.size()) != stem)
-        continue;
-      const std::string_view tail = name.substr(stem.size());
-      return tail == "constrain" || tail == "jacobian" || tail == "unconstrain";
-    }
-    return false;
   }
 
   static BuiltinDispatch resolve_builtin(const mir::Expr& e) {
@@ -826,7 +805,9 @@ struct Lowering {
         ends_with(e.name, "_cdf") || ends_with(e.name, "_ccdf") ||
         ends_with(e.name, "_lcdf") || ends_with(e.name, "_lccdf"))
       return {BuiltinFamily::Density};
-    if (bound_transform_name(e.name)) return {BuiltinFamily::BoundTransform};
+    CallableTransformSpec transform;
+    if (callable_transform(e.name, &transform))
+      return {BuiltinFamily::CallableTransform};
     return {};
   }
 
@@ -2734,9 +2715,35 @@ struct Lowering {
     bool has_effect = false;
   };
 
-  // Does `s` increment the target anywhere?
+  static bool expr_has_jacobian(const mir::Expr& e) {
+    if (e.kind == mir::Expr::FunApp) {
+      CallableTransformSpec transform;
+      if (callable_transform(e.name, &transform) &&
+          transform.direction == TransformDirection::Jacobian)
+        return true;
+      // Stan permits Jacobian adjustments in a UDF precisely when its name
+      // has this suffix. Conservatively carry a target through such a call;
+      // an unused zero is cheaper than dropping a nested adjustment.
+      if (e.fn_lib == mir::Expr::Lib::UserDefined &&
+          transform_suffix(e.name, "_jacobian"))
+        return true;
+    }
+    for (const auto& a : e.args)
+      if (expr_has_jacobian(a)) return true;
+    return false;
+  }
+
+  // Does `s` increment the target, explicitly or through a Jacobian call?
   static bool has_target_pe(const mir::Stmt& s) {
     if (s.kind == mir::Stmt::TargetPE) return true;
+    if ((s.has_init && expr_has_jacobian(s.init)) || expr_has_jacobian(s.rhs) ||
+        expr_has_jacobian(s.target) || expr_has_jacobian(s.lower) ||
+        expr_has_jacobian(s.upper) || expr_has_jacobian(s.cond))
+      return true;
+    for (const auto& e : s.fn_args)
+      if (expr_has_jacobian(e)) return true;
+    for (const auto& e : s.lhs_idx)
+      if (expr_has_jacobian(e)) return true;
     for (const auto& k : s.body)
       if (has_target_pe(k)) return true;
     return false;
@@ -2926,9 +2933,8 @@ struct Lowering {
       r->kind = si.kind;
       if (is_array(si)) {
         const ArrayShape& arr = array_shape(si);
-        if (arr.leaf == ViewKind::Matrix)
-          c.bail("matrix-leaf arrays are unsupported by a runtime region");
         r->dims = arr.dims;
+        r->leaf = arr.leaf;
       }
       if (len > 0) {
         prog->ins.push_back(IslandProg::LiveIn{r->reg, (int)len});
@@ -2966,8 +2972,11 @@ struct Lowering {
           view.rows = dl->second.si.rows;
           view.cols = dl->second.si.cols;
           view.kind = dl->second.si.kind;
-          if (is_array(dl->second.si))
-            view.dims = array_shape(dl->second.si).dims;
+          if (is_array(dl->second.si)) {
+            const ArrayShape& arr = array_shape(dl->second.si);
+            view.dims = arr.dims;
+            view.leaf = arr.leaf;
+          }
           const double fill =
               dl->second.int_array
                   ? static_cast<double>(std::numeric_limits<int>::min())
@@ -3835,33 +3844,138 @@ struct Lowering {
   // library pairs it either with scalar bounds or with bounds of exactly
   // its own type, and none of them widens a scalar first argument against a
   // container bound.
-  std::optional<Val> lower_bound_transform(const mir::Expr& e,
-                                           CallArguments& actuals) {
-    struct Transform {
-      const char* stem;
-      uint16_t opcode;
-      size_t arity;
-    };
-    static const Transform kTransforms[] = {
-        {"lower_bound_", OP_CONSTRAIN_LOWER, 2},
-        {"upper_bound_", OP_CONSTRAIN_UPPER, 2},
-        {"lower_upper_bound_", OP_CONSTRAIN_LU, 3},
-        {"offset_multiplier_", OP_CONSTRAIN_OFFSET_MULT, 3},
-    };
-    const Transform* tr = nullptr;
-    std::string direction;
-    for (const Transform& t : kTransforms) {
-      const std::string prefix(t.stem);
-      if (e.name.compare(0, prefix.size(), prefix) != 0) continue;
-      const std::string tail = e.name.substr(prefix.size());
-      if (tail != "constrain" && tail != "jacobian" && tail != "unconstrain")
-        continue;
-      tr = &t;
-      direction = tail;
-    }
-    if (tr == nullptr) return std::nullopt;
+  std::optional<Val> lower_callable_transform(const mir::Expr& e,
+                                              CallArguments& actuals) {
+    CallableTransformSpec tr;
+    if (!callable_transform(e.name, &tr)) return std::nullopt;
+    actuals.require_arity(tr.arity);
 
-    actuals.require_arity(tr->arity);
+    if (tr.structured) {
+      // The inverse structured transforms are not needed by Jacobian calls
+      // and do not share the constrain kernels' two-output protocol.
+      if (tr.direction == TransformDirection::Unconstrain) return std::nullopt;
+      Val raw = actuals.at(0).value();
+      ViewKind leaf = raw.si.kind;
+      std::vector<int64_t> dims;
+      if (is_array(raw.si)) {
+        const ArrayShape& a = array_shape(raw.si);
+        dims = a.dims;
+        leaf = a.leaf;
+      } else if (is_matrix(raw.si)) {
+        dims = {raw.si.rows, raw.si.cols};
+      } else if (is_vector(raw.si) || is_row_vector(raw.si)) {
+        dims = {g.slots[raw.slot].len};
+      }
+      const size_t rank = (size_t)leaf_rank(leaf);
+      if (rank == 0 || dims.size() < rank)
+        fail(e.name + ": first argument has an invalid container type", e.raw);
+      const size_t outer_rank = dims.size() - rank;
+      std::vector<int64_t> outer(dims.begin(), dims.begin() + outer_rank);
+      const int64_t batch = checked_product(outer, e.name + " batch");
+      int64_t raw_rows = leaf == ViewKind::Matrix ? dims[dims.size() - 2] : 0;
+      int64_t raw_cols = leaf == ViewKind::Matrix ? dims.back() : 0;
+      int64_t out_rows = 0, out_cols = 0;
+      ViewKind out_leaf = leaf;
+      uint16_t opcode = tr.opcode;
+
+      switch (tr.kind) {
+        case CallableTransformKind::Ordered:
+        case CallableTransformKind::PositiveOrdered:
+          if (leaf != ViewKind::Vector)
+            fail(e.name + ": expected vector", e.raw);
+          out_rows = dims.back();
+          break;
+        case CallableTransformKind::Simplex:
+          if (leaf != ViewKind::Vector)
+            fail(e.name + ": expected vector", e.raw);
+          out_rows = dims.back() + 1;
+          break;
+        case CallableTransformKind::UnitVector:
+          if (leaf != ViewKind::Vector)
+            fail(e.name + ": expected vector", e.raw);
+          out_rows = dims.back();
+          break;
+        case CallableTransformKind::SumToZero:
+          if (leaf == ViewKind::Vector) {
+            out_rows = dims.back() + 1;
+          } else if (leaf == ViewKind::Matrix) {
+            out_rows = raw_rows + 1;
+            out_cols = raw_cols + 1;
+            opcode = OP_CONSTRAIN_SUM_TO_ZERO_MAT;
+          } else {
+            fail(e.name + ": expected vector or matrix", e.raw);
+          }
+          break;
+        case CallableTransformKind::StochasticColumn:
+        case CallableTransformKind::StochasticRow:
+          if (leaf != ViewKind::Matrix)
+            fail(e.name + ": expected matrix", e.raw);
+          out_rows =
+              raw_rows + (tr.kind == CallableTransformKind::StochasticColumn);
+          out_cols =
+              raw_cols + (tr.kind == CallableTransformKind::StochasticRow);
+          break;
+        case CallableTransformKind::CholeskyFactorCorr:
+        case CallableTransformKind::CorrMatrix:
+        case CallableTransformKind::CovMatrix: {
+          if (leaf != ViewKind::Vector)
+            fail(e.name + ": expected vector", e.raw);
+          const int64_t k =
+              actuals.at(1).require_constant_int("matrix dimension");
+          out_leaf = ViewKind::Matrix;
+          out_rows = out_cols = k;
+          break;
+        }
+        case CallableTransformKind::CholeskyFactorCov:
+          if (leaf != ViewKind::Vector)
+            fail(e.name + ": expected vector", e.raw);
+          out_leaf = ViewKind::Matrix;
+          out_rows = actuals.at(1).require_constant_int("matrix rows");
+          out_cols = actuals.at(2).require_constant_int("matrix columns");
+          break;
+        default:
+          fail(e.name + ": invalid structured transform", e.raw);
+      }
+      if (out_rows < 0 || out_cols < 0)
+        fail(e.name + ": negative result dimension", e.raw);
+      const int64_t inner_raw =
+          leaf == ViewKind::Matrix
+              ? checked_product({raw_rows, raw_cols}, e.name + " raw matrix")
+              : dims.back();
+      const int64_t inner_con =
+          out_leaf == ViewKind::Matrix
+              ? checked_product({out_rows, out_cols}, e.name)
+              : out_rows;
+      const int64_t out_len = checked_product({batch, inner_con}, e.name);
+      SlotInfo si;
+      if (outer_rank != 0) {
+        outer.push_back(out_rows);
+        if (out_leaf == ViewKind::Matrix) outer.push_back(out_cols);
+        si = array_view(std::move(outer), out_leaf, raw.si.param_free);
+      } else if (out_leaf == ViewKind::Matrix) {
+        si = matrix_view(out_rows, out_cols, raw.si.param_free);
+      } else {
+        si =
+            view_of(out_leaf == ViewKind::RowVector ? "URowVector" : "UVector");
+        si.param_free = raw.si.param_free;
+      }
+      std::vector<int> idata = {
+          checked_immediate(batch, e.name + " batch"),
+          checked_immediate(inner_raw, e.name + " raw leaf"),
+          checked_immediate(out_leaf == ViewKind::Matrix ? out_rows : inner_con,
+                            e.name + " result rows")};
+      if (out_leaf == ViewKind::Matrix)
+        idata.push_back(
+            checked_immediate(out_cols, e.name + " result columns"));
+      const int jac = add_slot(1, false);
+      Val v = emit_raw(opcode, {raw.slot}, out_len, si, std::move(idata), jac,
+                       raw.autodiff);
+      v.layout = owning_layout(si);
+      if (tr.direction == TransformDirection::Jacobian && !in_write_array)
+        target_terms.push_back(jac);
+      return v;
+    }
+
     std::vector<Val> a;
     a.reserve(actuals.size());
     for (size_t i = 0; i < actuals.size(); ++i)
@@ -3880,7 +3994,8 @@ struct Lowering {
       ins.push_back(v.slot);
     }
 
-    if (direction == "unconstrain") return free_transform(tr->opcode, a, si, n);
+    if (tr.direction == TransformDirection::Unconstrain)
+      return free_transform(tr.opcode, a, si, n);
     // The declaration kernels, unchanged: they carry the arithmetic that was
     // measured against stan-math's rev overloads, which composing exp,
     // inv_logit, and fma out of the elementwise ops would not reproduce.
@@ -3888,9 +4003,10 @@ struct Lowering {
     // and simply leaves it unrooted -- no term reaches the target, and its
     // adjoint stays zero, which is exactly the no-lp overload's gradient.
     const int jac = add_slot(1, /*is_param=*/false);
-    Val v = emit_raw(tr->opcode, ins, n, si, {}, jac, autodiff);
+    Val v = emit_raw(tr.opcode, ins, n, si, {}, jac, autodiff);
     v.layout = owning_layout(si);
-    if (direction == "jacobian" && !in_write_array) target_terms.push_back(jac);
+    if (tr.direction == TransformDirection::Jacobian && !in_write_array)
+      target_terms.push_back(jac);
     return v;
   }
 
@@ -4774,8 +4890,8 @@ struct Lowering {
       case BuiltinFamily::Density:
         if (auto v = lower_density_fn(e, actuals)) return *v;
         break;
-      case BuiltinFamily::BoundTransform:
-        if (auto v = lower_bound_transform(e, actuals)) return *v;
+      case BuiltinFamily::CallableTransform:
+        if (auto v = lower_callable_transform(e, actuals)) return *v;
         break;
       case BuiltinFamily::Elementwise:
         if (auto v = lower_eltwise_fn(

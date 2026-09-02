@@ -783,49 +783,6 @@ class MirInterp {
 
   static double val(const T& x) { return stan::math::value_of(x); }
 
-  // Arity of a bound transform called as a function, or 0 for any other
-  // name. The three directions of one transform share an arity, so the name
-  // alone decides how many arguments to expect.
-  static size_t bound_transform_arity(const std::string& name) {
-    static const std::pair<const char*, size_t> kStems[] = {
-        {"lower_bound_", 2},
-        {"upper_bound_", 2},
-        {"lower_upper_bound_", 3},
-        {"offset_multiplier_", 3}};
-    for (const auto& stem : kStems) {
-      const std::string prefix(stem.first);
-      if (name.compare(0, prefix.size(), prefix) != 0) continue;
-      const std::string tail = name.substr(prefix.size());
-      if (tail == "constrain" || tail == "jacobian" || tail == "unconstrain")
-        return stem.second;
-    }
-    return 0;
-  }
-
-  // One element of a bound transform, through stan-math's own scalar
-  // overloads: the free direction is stan-math's inverse rather than a
-  // hand-written one, so the two directions cannot drift apart here. `b2` is
-  // unread by the two-argument transforms.
-  static T bound_transform(const std::string& name, const T& x, const T& b1,
-                           const T& b2) {
-    if (name == "lower_bound_unconstrain") return stan::math::lb_free(x, b1);
-    if (name == "upper_bound_unconstrain") return stan::math::ub_free(x, b1);
-    if (name == "lower_upper_bound_unconstrain")
-      return stan::math::lub_free(x, b1, b2);
-    if (name == "offset_multiplier_unconstrain")
-      return stan::math::offset_multiplier_free(x, b1, b2);
-    // The constrain and jacobian directions differ only in a target
-    // increment, and this path has no target.
-    if (name == "lower_bound_constrain" || name == "lower_bound_jacobian")
-      return stan::math::lb_constrain(x, b1);
-    if (name == "upper_bound_constrain" || name == "upper_bound_jacobian")
-      return stan::math::ub_constrain(x, b1);
-    if (name == "lower_upper_bound_constrain" ||
-        name == "lower_upper_bound_jacobian")
-      return stan::math::lub_constrain(x, b1, b2);
-    return stan::math::offset_multiplier_constrain(x, b1, b2);
-  }
-
   static bool check_scalar_type(const mir::Expr& e) {
     return e.unsized.depth == 0 && (e.unsized.leaf == mir::UnsizedLeaf::Int ||
                                     e.unsized.leaf == mir::UnsizedLeaf::Real);
@@ -1792,27 +1749,109 @@ class MirInterp {
                                  c.r[c.r.size() == 1 ? 0 : i]);
       return o;
     }
-    // Stan's bound transforms, callable as functions rather than written on
-    // a declaration: elementwise over every container shape, with each bound
-    // either one value for the whole container or one value per element.
-    // The interpreter serves transformed data and the interpreted
-    // write_array, both of which the generated model instantiates with
-    // `jacobian__ = false`, so the `_jacobian` direction is the constrained
-    // value and nothing else -- there is no target here to increment.
-    const size_t bound_arity = bound_transform_arity(e.name);
-    if (bound_arity != 0 && bound_arity == e.args.size()) {
+    // Callable transforms share their name/arity dispatch and their typed
+    // execution with graph lowering and runtime-control Programs. The
+    // interpreter is used for write_array with jacobian__ false, so it keeps
+    // the constrained value and deliberately discards the auxiliary lp.
+    CallableTransformSpec transform;
+    if (callable_transform(e.name, &transform) &&
+        transform.arity == e.args.size()) {
+      if (transform.structured &&
+          transform.direction == TransformDirection::Unconstrain)
+        fail(e.name + ": structured inverse is unsupported", e.raw);
       std::vector<Value> a;
       a.reserve(e.args.size());
       for (const mir::Expr& arg : e.args) a.push_back(eval(arg));
-      const auto at = [&](size_t k, size_t i) {
-        return a[k].r[a[k].r.size() == 1 ? 0 : i];
-      };
+      Program::Transform tr;
+      tr.kind = transform.kind;
+      tr.direction = transform.direction;
+      tr.n_in = transform.structured ? 1 : (int8_t)transform.arity;
       Value o;
       o.dims = a[0].dims;
-      o.r.resize(a[0].r.size());
-      for (size_t i = 0; i < o.r.size(); ++i)
-        o.r[i] = bound_transform(e.name, at(0, i), at(1, i),
-                                 a.size() > 2 ? at(2, i) : T(0));
+      size_t outer_rank = 0;
+      if (!transform.structured) {
+        for (int k = 1; k < tr.n_in; ++k) {
+          const size_t n = a[(size_t)k].r.size();
+          if (n != 1 && n != a[0].r.size())
+            fail(e.name + ": bound has incompatible size", e.raw);
+        }
+        tr.out_len = (int32_t)a[0].r.size();
+        tr.inner_raw = tr.out_len;
+      } else {
+        outer_rank = e.args[0].unsized.depth;
+        const bool input_matrix =
+            e.args[0].unsized.leaf == mir::UnsizedLeaf::Matrix;
+        if (o.dims.size() < outer_rank + (input_matrix ? 2u : 1u))
+          fail(e.name + ": incomplete input dimensions", e.raw);
+        int64_t batch = 1;
+        for (size_t i = 0; i < outer_rank; ++i) batch *= o.dims[i];
+        const int64_t raw_rows =
+            input_matrix ? o.dims[outer_rank] : o.dims.back();
+        const int64_t raw_cols = input_matrix ? o.dims[outer_rank + 1] : 0;
+        int64_t rows = 0, cols = 0;
+        switch (transform.kind) {
+          case CallableTransformKind::Ordered:
+          case CallableTransformKind::PositiveOrdered:
+          case CallableTransformKind::UnitVector:
+            rows = raw_rows;
+            break;
+          case CallableTransformKind::Simplex:
+            rows = raw_rows + 1;
+            break;
+          case CallableTransformKind::SumToZero:
+            rows = raw_rows + 1;
+            if (input_matrix) cols = raw_cols + 1;
+            break;
+          case CallableTransformKind::StochasticColumn:
+            rows = raw_rows + 1;
+            cols = raw_cols;
+            break;
+          case CallableTransformKind::StochasticRow:
+            rows = raw_rows;
+            cols = raw_cols + 1;
+            break;
+          case CallableTransformKind::CholeskyFactorCorr:
+          case CallableTransformKind::CorrMatrix:
+          case CallableTransformKind::CovMatrix:
+            rows = cols = as_int(e.args[1]);
+            break;
+          case CallableTransformKind::CholeskyFactorCov:
+            rows = as_int(e.args[1]);
+            cols = as_int(e.args[2]);
+            break;
+          default:
+            fail(e.name + ": invalid structured transform", e.raw);
+        }
+        tr.batch = (int32_t)batch;
+        tr.inner_raw =
+            input_matrix ? (int32_t)(raw_rows * raw_cols) : (int32_t)raw_rows;
+        tr.out_rows = (int32_t)rows;
+        tr.out_cols = (int32_t)cols;
+        const bool output_matrix = e.unsized.leaf == mir::UnsizedLeaf::Matrix;
+        const int64_t inner_con = output_matrix ? rows * cols : rows;
+        tr.out_len = (int32_t)(batch * inner_con);
+        o.dims.resize(outer_rank);
+        o.dims.push_back(rows);
+        if (output_matrix) o.dims.push_back(cols);
+      }
+      std::vector<T> reg;
+      for (int k = 0; k < tr.n_in; ++k) {
+        tr.in[k] = (int32_t)reg.size();
+        std::vector<T> input =
+            transform.structured && k == 0 && outer_rank > 0
+                ? graph_container_order(a[0].r, a[0].dims, outer_rank)
+                : a[(size_t)k].r;
+        tr.in_len[k] = (int32_t)input.size();
+        reg.insert(reg.end(), input.begin(), input.end());
+      }
+      tr.out = (int32_t)reg.size();
+      reg.resize(reg.size() + (size_t)tr.out_len);
+      tr.jac = (int32_t)reg.size();
+      reg.emplace_back(T(0));
+      run_program_transform(tr, reg.data());
+      o.r.assign(reg.begin() + tr.out, reg.begin() + tr.out + tr.out_len);
+      if (transform.structured && outer_rank > 0)
+        o.r = serialized_container_order(o.r, o.dims, outer_rank);
       return o;
     }
     // minus and plus are the named spellings of the unary operators, so

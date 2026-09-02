@@ -20,6 +20,7 @@
 #ifndef STANLI_PROGRAM_HPP
 #define STANLI_PROGRAM_HPP
 
+#include <stanli/callable_transform.hpp>
 #include <stanli/kernel_types.hpp>
 #include <stanli/program_density.hpp>
 
@@ -119,6 +120,7 @@ enum ProgramOpFlag : uint16_t {
   X(MULT_LOWER_TRI_SELF_TRANSPOSE, kProgramRangeA | kProgramNoAdjoint)       \
   X(DENSITY, 0)                                                              \
   X(CALL, 0)                                                                 \
+  X(TRANSFORM, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)      \
   X(PRINT, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)          \
   X(REJECT, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)         \
   X(DENSITY_VEC, kProgramNoAdjoint)
@@ -207,6 +209,24 @@ struct Program {
     std::vector<int32_t> value_len;
   };
 
+  // A callable constraint transform. Unlike CALL this is scalar-templated:
+  // runtime-control programs execute it for both double and var, while its
+  // kind comes from the same descriptor graph lowering uses.
+  struct Transform {
+    CallableTransformKind kind = CallableTransformKind::Ordered;
+    TransformDirection direction = TransformDirection::Constrain;
+    int8_t n_in = 0;
+    int32_t in[3] = {0, 0, 0};
+    int32_t in_len[3] = {0, 0, 0};
+    int32_t out = 0;
+    int32_t out_len = 0;
+    int32_t jac = 0;
+    int32_t batch = 1;
+    int32_t inner_raw = 0;
+    int32_t out_rows = 0;
+    int32_t out_cols = 0;
+  };
+
   // A DENSITY_VEC's payload: same density id DENSITY uses, but one or more
   // arguments is a same-length container rather than a scalar, evaluated
   // with one propto-OFF call the way CmdStan's generated code would (its
@@ -226,9 +246,10 @@ struct Program {
   };
 
   std::vector<Instr> code;
-  std::vector<Call> calls;    // CALL payloads, indexed by Instr::a
-  std::vector<Print> prints;  // PRINT payloads, indexed by Instr::a
-  std::vector<double> pool;   // CONSTR data
+  std::vector<Call> calls;            // CALL payloads, indexed by Instr::a
+  std::vector<Transform> transforms;  // TRANSFORM payloads, indexed by Instr::a
+  std::vector<Print> prints;          // PRINT payloads, indexed by Instr::a
+  std::vector<double> pool;           // CONSTR data
   // REJECT's literal message text, indexed by Instr::a. Never touched as a
   // register (REJECT is kProgramNoInputs), so it rides beside the register
   // file rather than in it.
@@ -331,6 +352,9 @@ template <>
 struct ProgramCallCtx<true> {
   KernelCtx ctx;
 };
+
+void run_program_transform(const Program::Transform& tr, double* reg);
+void run_program_transform(const Program::Transform& tr, stan::math::var* reg);
 
 template <bool ReuseCallCtx, typename T>
 void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
@@ -620,6 +644,9 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
           // a gradient.
           throw std::logic_error("CALL instruction in a var replay");
         }
+        break;
+      case Program::TRANSFORM:
+        run_program_transform(p.transforms[(size_t)I.a], reg);
         break;
       case Program::PRINT:
         if constexpr (std::is_same_v<T, double>)
