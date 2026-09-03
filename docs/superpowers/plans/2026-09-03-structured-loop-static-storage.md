@@ -645,3 +645,122 @@ dev-only LLVM dependency.
    Linux (CI), Windows later, wasm never.
 3. Whether Stage 1 alone (portable, no machine code) is where to stop if the
    measured gap after segments is mostly bookkeeping rather than dispatch.
+
+## Addendum: per-iteration frames for flat loops (JIT stage 1)
+
+After segments, the scalar recurrence spends 41% of a gradient on tape
+bookkeeping: a frame allocation, live-in copies, versions, a record per
+segment per iteration, and the reverse record loop. All of it is dynamic
+storage for something that is static: in a loop whose body has no nested
+loop and no parameter-dependent control, every value has a fixed place in
+an iteration's frame, and every active input of every node comes from a
+statically known place: the same frame, the previous iteration's frame, or
+a value that entered the loop.
+
+### Flat loops
+
+A For or While node L is flat when `escape[L]` is false and its body,
+walking Sequences but treating memo nodes as opaque, contains only:
+
+- Segment nodes;
+- KernelCall nodes with storage Retained or Transient, not
+  `invariant_loop >= 0 && active`, not `is_effectful_op`;
+- Alias nodes;
+- Target nodes;
+- memo nodes (any content; they run or replay as today);
+- traced If nodes whose arms, recursively, contain only Alias nodes of
+  slots with `param_dep == false`, memo nodes, and such Ifs.
+
+No nested non-memo For/While, no InPlace, no Break/Continue, no untraced If.
+A loop that is not flat keeps today's path. `STANLI_NO_STRUCTURED_FRAMES=1`
+disables frame planning for A/B tests.
+
+### Frame plan (prepare)
+
+Walk the flat body in order with a definition table `def[slot]` for the
+slots written by Segment and KernelCall nodes and Aliases of them:
+
+- Segment out `(slot, reg)`: `def[slot] = {Same, seg_base + reg, seg_adj_base
+  + adj_reg[reg] if active else -1}`.
+- KernelCall out/out2: the node gets a frame region `[out | out2 | scratch]`
+  at `kernel_base`, and adjoint cells for out/out2 when active;
+  `def[out] = {Same, kernel_base, kernel_adj_base}`.
+- Alias `dst = src` outside any If: `def[dst] = def[src]` (a rename; nothing
+  runs at execution time for it), unless `src` has no entry in `def`, in
+  which case `def[dst]` is cleared (dst now names an outside value).
+- The For iterator: one frame cell, `def[iterator] = {Iterator, iter_off}`.
+
+The frame `stride` is the sum of the regions plus the iterator and one
+control word per traced If in the body; `adj_stride` is the sum of the
+adjoint regions.
+
+Each node input (Segment live-in, KernelCall input) resolves to a
+`Provenance {kind, value_off, adj_off, slot}` at plan time using the table
+as it stands at that node: `Same` if `def[slot]` was written earlier in this
+iteration; `Previous` if the slot is written somewhere in the body but not
+yet at this point (its value is the previous iteration's final definition:
+resolve against the table as it stands at the END of the body; for the first
+executed iteration the entry binding is used); `Outside` otherwise (the
+binding as it stands when the node runs; the value pointer is saved in the
+iteration's pointer area and the adjoint, if the entry binding is active,
+goes to the version captured at loop entry). Data-only inputs never need an
+adjoint; `Iterator` reads the frame cell.
+
+Slots written in the body and read by anything that reads bindings at run
+time (Alias inside an If, memo nodes, If conditions, Target, and the code
+after the loop) get a `moving` version: one Version per such slot created at
+loop entry whose `value` pointer is updated after its writer runs each
+iteration (adjoint -1 while moving). After the loop, every written slot is
+rebound to a fresh version at its final definition in the last executed
+frame with the matching adjoint cell, so outside consumers and the reverse
+seeding work exactly as before. A zero-trip loop leaves bindings unchanged.
+
+### Executor
+
+- Loop entry: capture entry handles (`bindings[slot]` for every slot some
+  input resolves to `Outside` or `Previous`), push them to `handles`; record
+  the first frame index in `frames` (a `std::vector<double*>` in LoopState)
+  and the adjoint base; create the moving versions.
+- Each executed iteration k: `frame = arena.allocate(stride)`,
+  `frames.push_back(frame)`, `reserve_adjoint(adj_stride)`, write the
+  iterator cell; then the body in order: Segment copies its live-ins from
+  their provenance and runs `run_program` in place; KernelCall binds its
+  prebound ctx pointers (inputs by provenance, Outside pointers saved into
+  the iteration's slot of `outside_ptrs`, outputs/scratch in the frame) and
+  calls forward; Alias does nothing; Target pushes a version for the leaf
+  at its frame cell; memo/If nodes run as today with control words written
+  to the frame; after every writer, update its moving versions. Bump
+  `effects` per Segment/KernelCall so traced-For iteration skipping keeps
+  working (skipped iterations get no frame).
+- Loop exit: push one `Record{Loop, site, frames_first, count, adj_base,
+  handles_first}` (Record stays 32 bytes: `handles` = entry handles offset,
+  `out` = first frame index, `other` = adjoint base; the count is
+  `frames.size()` at exit minus the first index, stored by the next record's
+  first index or a parallel `loop_counts` vector) and rebind written slots.
+- Backward for a Loop record: for k = count-1 down to 0, frame = frames[k],
+  adjoint file = adjoints + adj_base + k * adj_stride; visit body nodes in
+  reverse; Segment: `run_adjoint(program, adj, frame + seg_base, file +
+  seg_adj_base)` then harvest each active live-in into its provenance's
+  adjoint (Same: this file; Previous: file of k-1, or the entry version when
+  k == 0; Outside: the entry version); KernelCall: bind values and adjoints
+  the same way and call backward; Target and Alias: nothing; traced If: read
+  the control word and descend the taken arm (only memo/Alias inside, so
+  nothing to do beyond descending).
+
+### Tests
+
+Programmatic plans: the three-kernel scalar recurrence as a flat For (assert
+one Loop record per gradient via the tape line, values and gradients equal
+to the same plan under `STANLI_NO_STRUCTURED_FRAMES=1` at two parameter
+values, bitwise); a KernelCall-resident node with a matrix input wider than
+16 (m4's shape); a loop-carried cell written by a Segment and read by the
+next iteration's KernelCall; a data-only traced If with an Alias in each
+arm feeding a Segment live-in; a Target inside the body; a flat While; a
+flat traced For with skipped iterations; a zero-trip flat loop; a loop with
+a parameter-dependent If falling back; two executors on one graph.
+Fixture-based retained-vs-unrolled comparisons stay at 1e-12.
+
+### Expected effect
+
+m1 (N=10k, `=1`): 462 µs toward ~250 µs; m4 gains from the KernelCall-
+resident path; ctsem unchanged (its loops nest and are not flat).
