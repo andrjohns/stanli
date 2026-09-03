@@ -37,6 +37,40 @@ void index_backward(KernelCtx& c);
 int64_t scalar_index_forward(KernelCtx& c);
 void set_index_forward(KernelCtx& c);
 void set_index_backward(KernelCtx& c);
+struct IndexInputLayout {
+  int expected = 0;
+  int selector_end = 0;
+  int rhs = -1;
+};
+bool index_input_layout(const DynamicIndexSpec& p, bool update,
+                        IndexInputLayout& result) noexcept {
+  if (p.input_count < 0 || p.input_count > 6) return false;
+  if (!update) {
+    if (p.rhs_input != -1) return false;
+    if (p.input_count == 0) {
+      result = {2, 2, -1};
+      return true;
+    }
+    if (p.input_count < 2) return false;
+    result = {p.input_count, p.input_count, -1};
+    return true;
+  }
+  if (p.input_count == 0) {
+    if (p.rhs_input != -1) return false;
+    result = {3, 2, 2};
+    return true;
+  }
+  if (p.input_count < 3 || p.rhs_input != p.input_count - 1) return false;
+  result = {p.input_count, p.rhs_input, p.rhs_input};
+  return true;
+}
+IndexInputLayout require_index_input_layout(const DynamicIndexSpec& p,
+                                            bool update) {
+  IndexInputLayout result;
+  if (!index_input_layout(p, update, result))
+    throw std::logic_error("invalid structured index input count");
+  return result;
+}
 bool index_selection_is_ordered_unique(const DynamicIndexSpec& p) {
   return std::all_of(p.axes.begin(), p.axes.end(), [](const auto& axis) {
     return axis.kind != DynamicIndexSpec::Axis::Multi || axis.count <= 1;
@@ -226,22 +260,28 @@ void classify_compact_updates(StructuredLoop& p) {
         const Op& op = p.body.ops[static_cast<size_t>(call.op)];
         if (op.opcode != OP_SET_INDEX_DYNAMIC) continue;
         if (install.src != op.out || install.dst != op.in[0]) continue;
-        if (op.n_in != 3 || op.out2 >= 0 || call.forward != set_index_forward ||
+        if (op.out2 >= 0 || call.forward != set_index_forward ||
             call.backward != set_index_backward)
           continue;
-        if (op.out == op.in[0] || op.in[1] == op.in[0] ||
-            op.in[2] == op.in[0] || op.in[1] == op.out || op.in[2] == op.out ||
-            op.in[1] == op.in[2] || call.kernel_scratch != 0)
-          continue;
-        const int cell = install.dst;
         const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
-        if (!spec || spec->axes.empty() || spec->selected_size < 0 ||
-            spec->input_count != 0 || !index_selection_is_ordered_unique(*spec))
+        IndexInputLayout layout;
+        if (!spec || !index_input_layout(*spec, true, layout) ||
+            op.n_in != layout.expected || spec->axes.empty() ||
+            spec->selected_size < 0 ||
+            !index_selection_is_ordered_unique(*spec) ||
+            call.kernel_scratch != 0)
           continue;
+        bool invalid_alias = op.out == op.in[0];
+        for (int k = 1; k < op.n_in; ++k)
+          invalid_alias |=
+              op.in[k] == op.in[0] || op.in[k] == op.out ||
+              (k < layout.selector_end && op.in[k] == op.in[layout.rhs]);
+        if (invalid_alias) continue;
+        const int cell = install.dst;
         if (p.body.slots[static_cast<size_t>(op.out)].len == 0 ||
             p.body.slots[static_cast<size_t>(op.out)].len !=
                 p.body.slots[static_cast<size_t>(cell)].len ||
-            p.body.slots[static_cast<size_t>(op.in[2])].len !=
+            p.body.slots[static_cast<size_t>(op.in[layout.rhs])].len !=
                 spec->selected_size)
           continue;
         const auto& output = uses[static_cast<size_t>(op.out)];
@@ -2342,11 +2382,11 @@ struct DynamicExecution {
       throw std::logic_error("record scalar index node is invalid");
     const Op& op = p.body.ops[static_cast<size_t>(node.op)];
     const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
-    if (!spec || op.n_in < 2 || op.n_in > 6 ||
-        op.n_in != (spec->input_count > 0 ? spec->input_count : 2) ||
-        node.forward != index_forward || node.backward != index_backward ||
-        op.opcode != OP_INDEX_DYNAMIC || op.out2 >= 0 ||
-        spec->selected_size != 1 ||
+    IndexInputLayout layout;
+    if (!spec || !index_input_layout(*spec, false, layout) ||
+        op.n_in != layout.expected || node.forward != index_forward ||
+        node.backward != index_backward || op.opcode != OP_INDEX_DYNAMIC ||
+        op.out2 >= 0 || spec->selected_size != 1 ||
         p.body.slots[static_cast<size_t>(op.out)].len != 1 ||
         node.kernel_scratch != 0)
       throw std::logic_error("record scalar index record is invalid");
@@ -2849,19 +2889,22 @@ struct DynamicExecution {
   }
 
   int64_t compact_adjoint_offset(double base_handle, int64_t base_len,
-                                 int64_t output_len, double selector_handle,
-                                 int64_t selector_len, double rhs_handle,
-                                 int64_t rhs_len) {
+                                 int64_t output_len, const double* handles,
+                                 const KernelCtx& c) {
     if (base_handle < 0 || is_record_scalar(base_handle)) return -1;
     const auto& base = ref(base_handle);
     if (is_import_ref(base) || base.adjoint_or_import < 0 || base_len <= 0 ||
-        base_len != output_len ||
-        adjoint_ranges_overlap(base_handle, base_len, selector_handle,
-                               selector_len) ||
-        adjoint_ranges_overlap(base_handle, base_len, rhs_handle, rhs_len) ||
-        adjoint_ranges_overlap(selector_handle, selector_len, rhs_handle,
-                               rhs_len))
+        base_len != output_len)
       return -1;
+    for (int k = 1; k < c.n_in; ++k) {
+      if (adjoint_ranges_overlap(base_handle, base_len, handles[k],
+                                 c.in[k].len))
+        return -1;
+      for (int j = k + 1; j < c.n_in; ++j)
+        if (adjoint_ranges_overlap(handles[k], c.in[k].len, handles[j],
+                                   c.in[j].len))
+      return -1;
+    }
     return base.adjoint_or_import;
   }
 
@@ -3211,8 +3254,12 @@ struct DynamicExecution {
   bool compact_update(const Node& n) {
     if (n.compact_update_cell < 0) return false;
     const Op& op = p.body.ops[n.op];
-    if (op.n_in != 3 || op.out2 >= 0)
+    const auto* spec_ptr = static_cast<const DynamicIndexSpec*>(op.udata);
+    IndexInputLayout layout;
+    if (!spec_ptr || !index_input_layout(*spec_ptr, true, layout) ||
+        op.n_in != layout.expected || op.out2 >= 0)
       throw std::logic_error("compact structured update arity is invalid");
+    const auto& spec = *spec_ptr;
     const int cell = n.compact_update_cell;
     const double base_handle = state.bindings[static_cast<size_t>(op.in[0])];
     double* base = nullptr;
@@ -3232,16 +3279,15 @@ struct DynamicExecution {
       handles[k] = state.bindings[static_cast<size_t>(op.in[k])];
     ContextLease context(*this, n, handles, false, -1, -1, base);
     KernelCtx& c = context.get();
-    if (overlaps(c.out, c.in[1]) || overlaps(c.out, c.in[2])) return false;
-    const auto& spec = *static_cast<const DynamicIndexSpec*>(op.udata);
+    for (int k = 1; k < c.n_in; ++k)
+      if (overlaps(c.out, c.in[k])) return false;
     const bool scalar_site = scalar_compact_update_spec(spec);
     bool active = false;
     for (int k = 0; k < c.n_in; ++k) active |= handles[k] >= 0;
     active &= n.backward != nullptr;
     const int64_t shared_adjoint =
         active ? compact_adjoint_offset(base_handle, c.in[0].len, c.out.len,
-                                        handles[1], c.in[1].len, handles[2],
-                                        c.in[2].len)
+                                        handles, c)
                : -1;
 
     if (!scalar_site) {
@@ -3267,7 +3313,7 @@ struct DynamicExecution {
         const int64_t position = static_cast<int64_t>(delta[i]);
         delta[selected + i] = c.out.data[position];
       }
-      if (active) delta[2 * selected] = handles[2];
+      if (active) delta[2 * selected] = handles[layout.rhs];
       const double out =
           make_ref(c.out.data, c.out.len, active, shared_adjoint);
       DynamicLoopState::Record record;
@@ -3276,12 +3322,13 @@ struct DynamicExecution {
       record.out2 = static_cast<double>(selected);
       record.site = n.record_site;
       record.code = DynamicLoopState::delta_record;
-      const bool resident_rhs = is_record_scalar(handles[2]);
-      const double resident_rhs_value = resident_rhs ? c.in[2].data[0] : 0.0;
+      const bool resident_rhs = is_record_scalar(handles[layout.rhs]);
+      const double resident_rhs_value =
+          resident_rhs ? c.in[layout.rhs].data[0] : 0.0;
       state.records.push_back(record);
       for (int64_t i = 0; i < selected; ++i)
         c.out.data[static_cast<int64_t>(delta[i])] =
-            resident_rhs ? resident_rhs_value : c.in[2].data[i];
+            resident_rhs ? resident_rhs_value : c.in[layout.rhs].data[i];
       state.bindings[static_cast<size_t>(op.out)] = out;
       if (state.allocation_profile)
         state.allocation_profile->note_delta_compact(op, selected, c.out.len,
@@ -3316,7 +3363,7 @@ struct DynamicExecution {
           "compact structured adjoint exceeds preallocated work");
     DynamicLoopState::Record record;
     if (frame_free && active)
-      record.rhs_handle = handles[2];
+      record.rhs_handle = handles[layout.rhs];
     else
       record.frame = frame;
     record.out = out;
@@ -3324,7 +3371,7 @@ struct DynamicExecution {
     record.site = n.record_site;
     record.code = frame_free ? static_cast<uint32_t>(position)
                              : DynamicLoopState::retained_scalar_record;
-    const double rhs_value = c.in[2].data[0];
+    const double rhs_value = c.in[layout.rhs].data[0];
     state.records.push_back(record);
     c.out.data[position] = rhs_value;
     state.bindings[static_cast<size_t>(op.out)] = out;
@@ -3579,8 +3626,13 @@ struct DynamicExecution {
 
   bool prepare_shared_compact_adjoint(const DynamicLoopState::Record& record,
                                       KernelCtx& c) {
+    const Node& node = record_node(record);
+    const Op& op = p.body.ops[static_cast<size_t>(node.op)];
+    const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+    IndexInputLayout layout;
     if (record.code != DynamicLoopState::retained_scalar_record ||
-        record.out < 0 || c.n_in != 3)
+        record.out < 0 || !spec || !index_input_layout(*spec, true, layout) ||
+        op.n_in != layout.expected || c.n_in != layout.expected)
       return false;
     const double base_handle = record.frame[0];
     if (base_handle < 0) return false;
@@ -3596,14 +3648,15 @@ struct DynamicExecution {
       throw std::logic_error(
           "shared compact structured adjoint layout is invalid");
     Desc conceptual_output{state.compact_adjoint_work.get(), c.out_adj_vec.len};
-    if (overlaps(c.in_adj[0], c.in_adj[1]) ||
-        overlaps(c.in_adj[0], c.in_adj[2]) ||
-        overlaps(conceptual_output, c.in_adj[0]) ||
-        overlaps(conceptual_output, c.in_adj[1]) ||
-        overlaps(conceptual_output, c.in_adj[2]) ||
-        overlaps(c.in_adj[1], c.in_adj[2]))
+    for (int k = 0; k < c.n_in; ++k) {
+      if (overlaps(conceptual_output, c.in_adj[k]))
+        throw std::logic_error(
+            "shared compact structured adjoints are not disjoint");
+      for (int j = k + 1; j < c.n_in; ++j)
+        if (overlaps(c.in_adj[k], c.in_adj[j]))
       throw std::logic_error(
           "shared compact structured adjoints are not disjoint");
+    }
 
     // The ordinary callback sees a distinct zero-initialized conceptual base
     // and the exact output-adjoint bits. Clear with +0.0, then let its existing
@@ -3623,8 +3676,9 @@ struct DynamicExecution {
       throw std::logic_error("compact scalar index node is invalid");
     const Op& op = p.body.ops[static_cast<size_t>(node.op)];
     const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
-    if (!spec || op.n_in < 2 || op.n_in > 6 ||
-        op.n_in != (spec->input_count > 0 ? spec->input_count : 2))
+    IndexInputLayout layout;
+    if (!spec || !index_input_layout(*spec, false, layout) ||
+        op.n_in != layout.expected)
       throw std::logic_error("compact scalar index record is invalid");
     const int64_t base_len = p.body.slots[static_cast<size_t>(op.in[0])].len;
     if (node.forward != index_forward || node.backward != index_backward ||
@@ -3674,14 +3728,20 @@ struct DynamicExecution {
       throw std::logic_error("delta compact structured record is invalid");
     const Op& op = p.body.ops[static_cast<size_t>(node.op)];
     const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+    IndexInputLayout layout;
     const int64_t selected = static_cast<int64_t>(record.out2);
     const int64_t output_len = p.body.slots[static_cast<size_t>(op.out)].len;
-    const int64_t rhs_len = p.body.slots[static_cast<size_t>(op.in[2])].len;
     if (!spec || node.forward != set_index_forward ||
         node.backward != set_index_backward ||
-        op.opcode != OP_SET_INDEX_DYNAMIC || op.n_in != 3 || op.out2 >= 0 ||
-        selected > spec->selected_size || rhs_len != spec->selected_size ||
-        output_len <= 0 || (selected > 0 && !record.frame))
+        op.opcode != OP_SET_INDEX_DYNAMIC ||
+        !index_input_layout(*spec, true, layout) ||
+        op.n_in != layout.expected || op.out2 >= 0 ||
+        selected > spec->selected_size || output_len <= 0 ||
+        (selected > 0 && !record.frame))
+      throw std::logic_error("delta compact structured record is invalid");
+    const int64_t rhs_len =
+        p.body.slots[static_cast<size_t>(op.in[layout.rhs])].len;
+    if (rhs_len != spec->selected_size)
       throw std::logic_error("delta compact structured record is invalid");
 
     double* const delta = record.frame;
@@ -3738,11 +3798,15 @@ struct DynamicExecution {
                                    int64_t position) {
     const Node& node = record_node(record);
     const Op& op = p.body.ops[static_cast<size_t>(node.op)];
+    const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+    IndexInputLayout layout;
     const int64_t output_len = p.body.slots[static_cast<size_t>(op.out)].len;
     if (record.out < 0 || node.backward != set_index_backward ||
-        op.opcode != OP_SET_INDEX_DYNAMIC || op.n_in != 3 || op.out2 >= 0 ||
-        p.body.slots[static_cast<size_t>(op.in[2])].len != 1 || position < 0 ||
-        position >= output_len || output_len <= 0 ||
+        op.opcode != OP_SET_INDEX_DYNAMIC || !spec ||
+        !index_input_layout(*spec, true, layout) ||
+        op.n_in != layout.expected || op.out2 >= 0 ||
+        p.body.slots[static_cast<size_t>(op.in[layout.rhs])].len != 1 ||
+        position < 0 || position >= output_len || output_len <= 0 ||
         output_len > state.compact_adjoint_work_size ||
         !state.compact_adjoint_work)
       throw std::logic_error("frame-free compact structured record is invalid");
@@ -4315,16 +4379,11 @@ int64_t selected_position(const DynamicIndexSpec& p, const KernelCtx& c,
 }
 IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
                             bool update) {
-  if (p.input_count < 0 || p.input_count > 6)
-    throw std::logic_error("invalid structured index input count");
-  const int expected_inputs =
-      !update && p.input_count > 0 ? p.input_count : (update ? 3 : 2);
-  if (c.n_in != expected_inputs || (update && p.input_count > 0) ||
-      (p.matrix_leaf && p.axes.size() < 2))
+  const IndexInputLayout layout = require_index_input_layout(p, update);
+  if (c.n_in != layout.expected || (p.matrix_leaf && p.axes.size() < 2))
     throw std::logic_error("invalid structured index descriptor");
-  const int selector_end = p.input_count > 0 ? p.input_count : 2;
   const auto validate_selector_input = [&](int input, const char* what) {
-    if (input < 1 || input >= selector_end)
+    if (input < 1 || input >= layout.selector_end)
       throw std::logic_error(std::string("invalid ") + what + " input");
   };
   IndexRuntime runtime(p.axes.size());
@@ -4410,7 +4469,8 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
   }
   if (capacity != c.in[0].len || logical_size > capacity ||
       runtime.selected > p.selected_size ||
-      (update ? (c.out.len != capacity || c.in[2].len != p.selected_size)
+      (update
+           ? (c.out.len != capacity || c.in[layout.rhs].len != p.selected_size)
               : c.out.len != p.selected_size))
     throw std::logic_error("invalid structured index storage");
   return runtime;
@@ -4471,13 +4531,14 @@ void index_backward(KernelCtx& c) {
 }
 void set_index_forward(KernelCtx& c) {
   const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);
+  const IndexInputLayout layout = require_index_input_layout(p, true);
   const IndexRuntime runtime = validate_index(p, c, true);
   std::copy_n(c.in[0].data, c.in[0].len, c.out.data);
   const bool may_repeat = !index_selection_is_ordered_unique(p);
   if (may_repeat) std::fill(c.scratch, c.scratch + c.in[0].len, -1.0);
   for (int64_t i = 0; i < runtime.selected; ++i) {
     const int64_t at = selected_position(p, c, runtime, i);
-    c.out.data[at] = c.in[2].data[i];
+    c.out.data[at] = c.in[layout.rhs].data[i];
     if (may_repeat)
       c.scratch[at] =
           static_cast<double>(i);  // last write wins for duplicate indices
@@ -4485,6 +4546,9 @@ void set_index_forward(KernelCtx& c) {
 }
 void set_index_backward(KernelCtx& c) {
   const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);
+  const IndexInputLayout layout = require_index_input_layout(p, true);
+  if (c.n_in != layout.expected)
+    throw std::logic_error("invalid structured index descriptor");
   if (index_selection_is_ordered_unique(p)) {
     const IndexRuntime runtime = validate_index(p, c, true);
     int64_t selected = 0;
@@ -4492,8 +4556,8 @@ void set_index_backward(KernelCtx& c) {
         runtime.selected > 0 ? selected_position(p, c, runtime, 0) : -1;
     for (int64_t i = 0; i < c.out.len; ++i) {
       if (selected < runtime.selected && i == selected_at) {
-        if (c.in_adj[2].data)
-          c.in_adj[2].data[selected] += c.out_adj_vec.data[i];
+        if (c.in_adj[layout.rhs].data)
+          c.in_adj[layout.rhs].data[selected] += c.out_adj_vec.data[i];
         ++selected;
         if (selected < runtime.selected)
           selected_at = selected_position(p, c, runtime, selected);
@@ -4509,8 +4573,8 @@ void set_index_backward(KernelCtx& c) {
     const int64_t selected = static_cast<int64_t>(c.scratch[i]);
     if (selected < 0) {
       if (c.in_adj[0].data) c.in_adj[0].data[i] += c.out_adj_vec.data[i];
-    } else if (c.in_adj[2].data) {
-      c.in_adj[2].data[selected] += c.out_adj_vec.data[i];
+    } else if (c.in_adj[layout.rhs].data) {
+      c.in_adj[layout.rhs].data[selected] += c.out_adj_vec.data[i];
     }
   }
 }

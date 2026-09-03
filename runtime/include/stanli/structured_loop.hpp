@@ -33,9 +33,11 @@ struct DynamicIndexSpec {
   bool matrix_leaf = false;
   int64_t selected_size = 0;
   // Zero preserves the original two-input read / three-input update ABI.
-  // A positive value is the exact direct-input arity for a read. Updates keep
-  // the packed ABI until their compact-update alias contract is generalized.
+  // A positive value is the exact direct-input arity. Direct updates keep the
+  // RHS last and record its descriptor index explicitly; reads and packed
+  // updates leave rhs_input at -1.
   int input_count = 0;
+  int rhs_input = -1;
 };
 
 // One ordered stream: scalar leaves and counted fragments from retained

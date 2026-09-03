@@ -343,6 +343,186 @@ static void direct_index_kernel_tests() {
   check(extent_output[0] == 1 && extent_output[1] == 2 &&
             extent_output[2] == 0 && extent_output[3] == 0,
         "direct logical extent preserves output capacity and zero fill");
+
+  const Kernel* dynamic_update = find_kernel(OP_SET_INDEX_DYNAMIC);
+  check(dynamic_update && dynamic_update->forward && dynamic_update->backward,
+        "dynamic update kernel registered");
+  if (!dynamic_update || !dynamic_update->forward || !dynamic_update->backward)
+    return;
+
+  DynamicIndexSpec packed_update;
+  packed_update.matrix_leaf = true;
+  packed_update.axes = {
+      {DynamicIndexSpec::Axis::Single, 2, 1, 1, 0},
+      {DynamicIndexSpec::Axis::Range, 3, 2, 3, 1},
+  };
+  packed_update.axes[1].count_input_offset = 2;
+  packed_update.axes[1].extent_input_offset = 3;
+  packed_update.selected_size = 3;
+  double update_selectors[] = {2, 1, 3, 3};
+  double update_rhs[] = {10, 20, 30};
+  double update_seed[] = {1, 2, 3, 4, 5, 6};
+  double packed_update_output[6] = {};
+  double packed_update_base_adj[6] = {};
+  double packed_update_rhs_adj[3] = {};
+  KernelCtx packed_update_context{};
+  packed_update_context.n_in = 3;
+  packed_update_context.in[0] = {base, 6};
+  packed_update_context.in[1] = {update_selectors, 4};
+  packed_update_context.in[2] = {update_rhs, 3};
+  packed_update_context.in_adj[0] = {packed_update_base_adj, 6};
+  packed_update_context.in_adj[1] = {nullptr, 4};
+  packed_update_context.in_adj[2] = {packed_update_rhs_adj, 3};
+  packed_update_context.out = {packed_update_output, 6};
+  packed_update_context.out_adj_vec = {update_seed, 6};
+  packed_update_context.udata = &packed_update;
+  dynamic_update->forward(packed_update_context);
+  dynamic_update->backward(packed_update_context);
+
+  DynamicIndexSpec direct_update = packed_update;
+  direct_update.input_count = 6;
+  direct_update.rhs_input = 5;
+  direct_update.axes[0].selector_input = 1;
+  direct_update.axes[0].input_offset = 0;
+  direct_update.axes[1].selector_input = 2;
+  direct_update.axes[1].input_offset = 0;
+  direct_update.axes[1].count_input = 3;
+  direct_update.axes[1].count_input_offset = 0;
+  direct_update.axes[1].extent_input = 4;
+  direct_update.axes[1].extent_input_offset = 0;
+  double update_row = 2, update_lower = 1, update_upper = 3, update_extent = 3;
+  double direct_update_output[6] = {};
+  double direct_update_base_adj[6] = {};
+  double direct_update_rhs_adj[3] = {};
+  KernelCtx direct_update_context{};
+  direct_update_context.n_in = 6;
+  direct_update_context.in[0] = {base, 6};
+  direct_update_context.in[1] = {&update_row, 1};
+  direct_update_context.in[2] = {&update_lower, 1};
+  direct_update_context.in[3] = {&update_upper, 1};
+  direct_update_context.in[4] = {&update_extent, 1};
+  direct_update_context.in[5] = {update_rhs, 3};
+  direct_update_context.in_adj[0] = {direct_update_base_adj, 6};
+  direct_update_context.in_adj[1] = {nullptr, 1};
+  direct_update_context.in_adj[2] = {nullptr, 1};
+  direct_update_context.in_adj[3] = {nullptr, 1};
+  direct_update_context.in_adj[4] = {nullptr, 1};
+  direct_update_context.in_adj[5] = {direct_update_rhs_adj, 3};
+  direct_update_context.out = {direct_update_output, 6};
+  direct_update_context.out_adj_vec = {update_seed, 6};
+  direct_update_context.udata = &direct_update;
+  dynamic_update->forward(direct_update_context);
+  dynamic_update->backward(direct_update_context);
+  check(std::memcmp(packed_update_output, direct_update_output,
+                    sizeof(packed_update_output)) == 0,
+        "direct update matches packed values bitwise");
+  check(std::memcmp(packed_update_base_adj, direct_update_base_adj,
+                    sizeof(packed_update_base_adj)) == 0 &&
+            std::memcmp(packed_update_rhs_adj, direct_update_rhs_adj,
+                        sizeof(packed_update_rhs_adj)) == 0,
+        "direct update matches packed adjoints bitwise");
+
+  direct_update_context.n_in = 5;
+  try {
+    dynamic_update->forward(direct_update_context);
+    check(false, "direct update validates input arity");
+  } catch (const std::logic_error&) {
+  }
+  direct_update_context.n_in = 6;
+  DynamicIndexSpec invalid_update = direct_update;
+  invalid_update.axes[1].count_input = invalid_update.rhs_input;
+  direct_update_context.udata = &invalid_update;
+  try {
+    dynamic_update->forward(direct_update_context);
+    check(false, "direct update rejects the RHS as a selector descriptor");
+  } catch (const std::logic_error&) {
+  }
+  invalid_update = direct_update;
+  invalid_update.rhs_input = -1;
+  direct_update_context.udata = &invalid_update;
+  try {
+    dynamic_update->forward(direct_update_context);
+    check(false, "direct update requires an explicit direct RHS");
+  } catch (const std::logic_error&) {
+  }
+  DynamicIndexSpec invalid_read = direct_spec;
+  invalid_read.rhs_input = direct_spec.input_count - 1;
+  direct.udata = &invalid_read;
+  try {
+    dynamic_index->forward(direct);
+    check(false, "direct read rejects an RHS descriptor");
+  } catch (const std::logic_error&) {
+  }
+  direct.udata = &direct_spec;
+
+  DynamicIndexSpec packed_duplicate;
+  packed_duplicate.axes = {{DynamicIndexSpec::Axis::Multi, 4, 1, 3, 0}};
+  packed_duplicate.axes[0].count_input_offset = 3;
+  packed_duplicate.selected_size = 3;
+  double duplicate_base[] = {1, 2, 3, 4};
+  double duplicate_selector[] = {2, 2, 4, 3};
+  double duplicate_values[] = {10, 20, 30};
+  double duplicate_seed[] = {1, 2, 3, 4};
+  double packed_duplicate_output[4] = {};
+  double packed_duplicate_scratch[4] = {};
+  double packed_duplicate_base_adj[4] = {};
+  double packed_duplicate_rhs_adj[3] = {};
+  KernelCtx packed_duplicate_context{};
+  packed_duplicate_context.n_in = 3;
+  packed_duplicate_context.in[0] = {duplicate_base, 4};
+  packed_duplicate_context.in[1] = {duplicate_selector, 4};
+  packed_duplicate_context.in[2] = {duplicate_values, 3};
+  packed_duplicate_context.in_adj[0] = {packed_duplicate_base_adj, 4};
+  packed_duplicate_context.in_adj[1] = {nullptr, 4};
+  packed_duplicate_context.in_adj[2] = {packed_duplicate_rhs_adj, 3};
+  packed_duplicate_context.out = {packed_duplicate_output, 4};
+  packed_duplicate_context.out_adj_vec = {duplicate_seed, 4};
+  packed_duplicate_context.scratch = packed_duplicate_scratch;
+  packed_duplicate_context.udata = &packed_duplicate;
+  dynamic_update->forward(packed_duplicate_context);
+  dynamic_update->backward(packed_duplicate_context);
+
+  DynamicIndexSpec direct_duplicate = packed_duplicate;
+  direct_duplicate.input_count = 4;
+  direct_duplicate.rhs_input = 3;
+  direct_duplicate.axes[0].selector_input = 1;
+  direct_duplicate.axes[0].input_offset = 0;
+  direct_duplicate.axes[0].count_input = 2;
+  direct_duplicate.axes[0].count_input_offset = 0;
+  double duplicate_count = 3;
+  double direct_duplicate_output[4] = {};
+  double direct_duplicate_scratch[4] = {};
+  double direct_duplicate_base_adj[4] = {};
+  double direct_duplicate_rhs_adj[3] = {};
+  KernelCtx direct_duplicate_context{};
+  direct_duplicate_context.n_in = 4;
+  direct_duplicate_context.in[0] = {duplicate_base, 4};
+  direct_duplicate_context.in[1] = {duplicate_selector, 3};
+  direct_duplicate_context.in[2] = {&duplicate_count, 1};
+  direct_duplicate_context.in[3] = {duplicate_values, 3};
+  direct_duplicate_context.in_adj[0] = {direct_duplicate_base_adj, 4};
+  direct_duplicate_context.in_adj[1] = {nullptr, 3};
+  direct_duplicate_context.in_adj[2] = {nullptr, 1};
+  direct_duplicate_context.in_adj[3] = {direct_duplicate_rhs_adj, 3};
+  direct_duplicate_context.out = {direct_duplicate_output, 4};
+  direct_duplicate_context.out_adj_vec = {duplicate_seed, 4};
+  direct_duplicate_context.scratch = direct_duplicate_scratch;
+  direct_duplicate_context.udata = &direct_duplicate;
+  dynamic_update->forward(direct_duplicate_context);
+  dynamic_update->backward(direct_duplicate_context);
+  check(std::memcmp(packed_duplicate_output, direct_duplicate_output,
+                    sizeof(packed_duplicate_output)) == 0 &&
+            std::memcmp(packed_duplicate_base_adj, direct_duplicate_base_adj,
+                        sizeof(packed_duplicate_base_adj)) == 0 &&
+            std::memcmp(packed_duplicate_rhs_adj, direct_duplicate_rhs_adj,
+                        sizeof(packed_duplicate_rhs_adj)) == 0,
+        "direct duplicate update matches packed value and adjoints bitwise");
+  check(
+      direct_duplicate_output[0] == 1 && direct_duplicate_output[1] == 20 &&
+          direct_duplicate_output[2] == 3 && direct_duplicate_output[3] == 30 &&
+          direct_duplicate_rhs_adj[0] == 0 &&
+          direct_duplicate_rhs_adj[1] == 2 && direct_duplicate_rhs_adj[2] == 4,
+      "direct duplicate update preserves last-write semantics");
 }
 
 static std::string fixture_mir(const std::string& name) {
@@ -684,12 +864,14 @@ static std::shared_ptr<StructuredLoop> nested_iterator_plan() {
 
 static std::shared_ptr<StructuredLoop> iterator_update_plan(
     void (*backward)(KernelCtx&) = trace_update_backward,
-    void (*forward)(KernelCtx&) = nullptr) {
+    void (*forward)(KernelCtx&) = nullptr, bool direct = false,
+    bool separate_extent = false) {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int lower = scalar(*plan, 1);
   const int upper = scalar(*plan, 3);
   const int iterator = plan->body.add_slot(1, false);
+  const int extent = scalar(*plan, 3);
   const int base = plan->body.add_slot(3, false);
   plan->fills.push_back({base, {10, 20, 30}});
   const int current = plan->body.add_slot(3, false);
@@ -701,8 +883,18 @@ static std::shared_ptr<StructuredLoop> iterator_update_plan(
   auto spec = std::make_shared<DynamicIndexSpec>();
   spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
   spec->selected_size = 1;
-  Node update =
-      call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, rhs}, updated);
+  spec->input_count = direct ? (separate_extent ? 4 : 3) : 0;
+  spec->rhs_input = direct ? spec->input_count - 1 : -1;
+  if (separate_extent) {
+    check(direct, "separate update extent requires direct inputs");
+    spec->axes[0].extent_input = 2;
+    spec->axes[0].extent_input_offset = 0;
+  }
+  Node update = separate_extent
+                    ? call(*plan, OP_SET_INDEX_DYNAMIC,
+                           {current, iterator, extent, rhs}, updated)
+                    : call(*plan, OP_SET_INDEX_DYNAMIC,
+                           {current, iterator, rhs}, updated);
   const int update_op = update.op;
   plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
   plan->body.udata_pool.push_back(spec);
@@ -726,7 +918,8 @@ static std::shared_ptr<StructuredLoop> iterator_update_plan(
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> range_update_plan(bool force_ordinary) {
+static std::shared_ptr<StructuredLoop> range_update_plan(
+    bool force_ordinary, bool direct = false, bool separate_extent = false) {
   auto plan = std::make_shared<StructuredLoop>();
   const int base = plan->body.add_slot(6, false);
   const int theta = plan->body.add_slot(1, false);
@@ -735,6 +928,7 @@ static std::shared_ptr<StructuredLoop> range_update_plan(bool force_ordinary) {
   const int upper = scalar(*plan, 3);
   const int iterator = plan->body.add_slot(1, false);
   const int selector = scalar(*plan, 1);
+  const int extent = scalar(*plan, 6);
   const int weights = plan->body.add_slot(6, false);
   plan->fills.push_back({weights, {1, 2, 4, 8, 16, 32}});
   const int current = plan->body.add_slot(6, false);
@@ -752,8 +946,18 @@ static std::shared_ptr<StructuredLoop> range_update_plan(bool force_ordinary) {
   auto spec = std::make_shared<DynamicIndexSpec>();
   spec->axes = {{DynamicIndexSpec::Axis::Range, 6, 1, 2, 0}};
   spec->selected_size = 2;
-  Node update =
-      call(*plan, OP_SET_INDEX_DYNAMIC, {current, selector, rhs}, updated);
+  spec->input_count = direct ? (separate_extent ? 4 : 3) : 0;
+  spec->rhs_input = direct ? spec->input_count - 1 : -1;
+  if (separate_extent) {
+    check(direct, "separate range extent requires direct inputs");
+    spec->axes[0].extent_input = 2;
+    spec->axes[0].extent_input_offset = 0;
+  }
+  Node update = separate_extent
+                    ? call(*plan, OP_SET_INDEX_DYNAMIC,
+                           {current, selector, extent, rhs}, updated)
+                    : call(*plan, OP_SET_INDEX_DYNAMIC,
+                           {current, selector, rhs}, updated);
   const int update_op = update.op;
   plan->body.ops[static_cast<size_t>(update_op)].udata = spec.get();
   plan->body.udata_pool.push_back(spec);
@@ -761,6 +965,8 @@ static std::shared_ptr<StructuredLoop> range_update_plan(bool force_ordinary) {
   zero_spec->axes = {{DynamicIndexSpec::Axis::Range, 6, 1, 2, 0}};
   zero_spec->axes[0].count_input_offset = 1;
   zero_spec->selected_size = 2;
+  zero_spec->input_count = direct ? 3 : 0;
+  zero_spec->rhs_input = direct ? 2 : -1;
   Node zero_update = call(*plan, OP_SET_INDEX_DYNAMIC,
                           {current, zero_selector, rhs}, zero_updated);
   const int zero_update_op = zero_update.op;
@@ -1572,13 +1778,23 @@ static void compact_iterator_history_tests() {
 
   Executor frame_free(outer(iterator_update_plan(nullptr)));
   Executor retained(outer(iterator_update_plan(retained_update_backward)));
+  Executor direct_retained(outer(
+      iterator_update_plan(retained_update_backward, nullptr, true, true)));
   const Evaluation compact = evaluate(frame_free, .25, 0);
   const Evaluation reference = evaluate(retained, .25, 0);
+  const Evaluation direct_reference = evaluate(direct_retained, .25, 0);
   check(std::memcmp(&compact, &reference, sizeof(Evaluation)) == 0,
         "frame-free compact reverse has bitwise ordinary-path parity");
+  check(std::memcmp(&reference, &direct_reference, sizeof(Evaluation)) == 0,
+        "multi-descriptor retained scalar reverse has bitwise packed parity");
   const Evaluation repeated = evaluate(frame_free, .25, 0);
   check(std::memcmp(&compact, &repeated, sizeof(Evaluation)) == 0,
         "frame-free compact reverse resets between evaluations");
+  Executor direct_frame_free(
+      outer(iterator_update_plan(nullptr, nullptr, true)));
+  const Evaluation direct_compact = evaluate(direct_frame_free, .25, 0);
+  check(std::memcmp(&compact, &direct_compact, sizeof(Evaluation)) == 0,
+        "direct-input frame-free compact reverse has bitwise packed parity");
   ordinary_update_forward_calls = 0;
   Executor custom_forward(
       outer(iterator_update_plan(nullptr, ordinary_update_forward)));
@@ -1594,10 +1810,12 @@ static void compact_iterator_history_tests() {
     std::vector<std::array<double, 6>> reverse_values;
     std::vector<const double*> forward_addresses;
   };
-  const auto run_range = [](bool ordinary) {
+  const auto run_range = [](bool ordinary, bool direct = false,
+                            bool separate_extent = false) {
     range_update_reverse_values.clear();
     range_update_forward_addresses.clear();
-    Executor executor(range_update_outer(range_update_plan(ordinary)));
+    Executor executor(range_update_outer(
+        range_update_plan(ordinary, direct, separate_extent)));
     const double point[] = {10, 20, 30, 40, 50, 60, .25, -.5};
     std::copy(std::begin(point), std::end(point), executor.params_data());
     RangeEvaluation result;
@@ -1610,10 +1828,15 @@ static void compact_iterator_history_tests() {
   range_update_forward_addresses.clear();
   const RangeEvaluation delta = run_range(false);
   const RangeEvaluation ordinary = run_range(true);
+  const RangeEvaluation direct_delta = run_range(false, true, true);
   check(std::memcmp(&delta.value, &ordinary.value, sizeof(double)) == 0 &&
             std::memcmp(delta.gradient, ordinary.gradient,
                         sizeof(delta.gradient)) == 0,
         "ordered range delta has bitwise ordinary-path parity");
+  check(std::memcmp(&delta.value, &direct_delta.value, sizeof(double)) == 0 &&
+            std::memcmp(delta.gradient, direct_delta.gradient,
+                        sizeof(delta.gradient)) == 0,
+        "multi-descriptor range delta has bitwise packed parity");
   check(
       ordinary_update_forward_calls == 4 && ordinary_update_backward_calls == 4,
       "custom ordered range callbacks force the ordinary path");
@@ -1628,7 +1851,8 @@ static void compact_iterator_history_tests() {
       {{.25, -.5, 30, 40, 50, 60}},
   };
   check(delta.reverse_values == expected_reverse &&
-            ordinary.reverse_values == expected_reverse,
+            ordinary.reverse_values == expected_reverse &&
+            direct_delta.reverse_values == expected_reverse,
         "ordered range delta restores historical primals in LIFO order");
   check(delta.forward_addresses.size() == 3 &&
             delta.forward_addresses[0] == delta.forward_addresses[1] &&
@@ -3189,16 +3413,25 @@ static void direct_index_lowering_tests() {
   const StructuredLoop* packed_plan = retained(packed);
   check(direct_plan && packed_plan,
         "direct-index ablation keeps structured execution");
-  size_t direct_reads = 0, direct_concats = 0, packed_reads = 0,
-         packed_concats = 0;
+  if (direct_plan && packed_plan)
+    check(direct_plan->compact_update_sites ==
+                  packed_plan->compact_update_sites &&
+              direct_plan->compact_update_sites > 0,
+          "direct updates preserve compact-update admission");
+  size_t direct_reads = 0, direct_updates = 0, direct_concats = 0,
+         packed_reads = 0, packed_updates = 0, packed_concats = 0;
   bool direct_multi_selector = false;
   if (direct_plan)
     for (const auto& op : direct_plan->body.ops) {
       direct_concats += op.opcode == OP_CONCAT2;
       if (op.opcode == OP_SET_INDEX_DYNAMIC) {
         const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
-        check(spec && spec->input_count == 0 && op.n_in == 3,
-              "indexed updates preserve the packed ABI");
+        if (spec && spec->input_count > 0) {
+          ++direct_updates;
+          check(op.n_in == spec->input_count && op.n_in >= 4 && op.n_in <= 6 &&
+                    spec->rhs_input == op.n_in - 1,
+                "indexed updates bind direct selectors before the RHS");
+        }
       } else if (op.opcode == OP_INDEX_DYNAMIC) {
         const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
         if (spec && spec->input_count > 0) {
@@ -3214,16 +3447,26 @@ static void direct_index_lowering_tests() {
   if (packed_plan)
     for (const auto& op : packed_plan->body.ops) {
       packed_concats += op.opcode == OP_CONCAT2;
-      if (op.opcode != OP_INDEX_DYNAMIC) continue;
+      if (op.opcode == OP_INDEX_DYNAMIC) {
       ++packed_reads;
       const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
-      check(spec && spec->input_count == 0 && op.n_in == 2,
+        check(spec && spec->input_count == 0 && spec->rhs_input == -1 &&
+                  op.n_in == 2,
             "direct-index ablation preserves packed read ABI");
+      } else if (op.opcode == OP_SET_INDEX_DYNAMIC) {
+        ++packed_updates;
+        const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+        check(spec && spec->input_count == 0 && spec->rhs_input == -1 &&
+                  op.n_in == 3,
+              "direct-index ablation preserves packed update ABI");
+      }
     }
   check(direct_reads > 0 && packed_reads >= direct_reads,
         "structured model exposes direct-index read sites");
   check(direct_multi_selector,
         "fixed-capacity multi-index binds a direct data operand");
+  check(direct_updates > 0 && packed_updates >= direct_updates,
+        "structured model exposes direct-index update sites");
   check(direct_concats < packed_concats,
         "direct selectors remove packing operations");
   compare_gradients(direct, packed, {{.1, .7}, {-.2, .3}, {0, .5}},
