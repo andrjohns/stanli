@@ -963,6 +963,8 @@ double handle(int64_t at, bool active) {
 // locations use the rest of the original 2^52 band, and inline int32 values
 // occupy the next 2^32 exact integers.
 constexpr int64_t ordinary_ref_limit = int64_t{1} << 40;
+constexpr int64_t record_scalar_first = ordinary_ref_limit;
+constexpr int64_t record_scalar_count = exact_limit - record_scalar_first + 1;
 constexpr int64_t inline_int_count = int64_t{1} << 32;
 constexpr int64_t inline_int_first = exact_limit + 1;
 constexpr int64_t inline_int_last = exact_limit + inline_int_count;
@@ -981,6 +983,8 @@ static_assert(ordinary_ref_limit < arena_location_first &&
                   exact_limit < inline_int_first &&
                   inline_int_last <= (int64_t{1} << 53),
               "structured handle bands must be disjoint");
+static_assert(record_scalar_count > 0,
+              "structured record-scalar handle band must be nonempty");
 static_assert(arena_location_count > 0 &&
                   (arena_location_count % arena_location_block_values) == 0,
               "arena handle range must contain complete blocks");
@@ -992,6 +996,18 @@ bool is_inline_int(double h) noexcept {
 bool is_arena_location(double h) noexcept {
   return h < -static_cast<double>(ordinary_ref_limit) &&
          h >= -static_cast<double>(exact_limit);
+}
+
+bool is_record_scalar(double h) noexcept {
+  return h >= static_cast<double>(record_scalar_first) &&
+         h <= static_cast<double>(exact_limit);
+}
+
+double record_scalar_handle(uint64_t ordinal) {
+  if (ordinal >= static_cast<uint64_t>(record_scalar_count))
+    throw std::length_error("dynamic structured record-scalar overflow");
+  return static_cast<double>(record_scalar_first) +
+         static_cast<double>(ordinal);
 }
 
 double inline_int_handle(int32_t value) noexcept {
@@ -1333,6 +1349,10 @@ struct DynamicAllocationProfile {
     uint64_t referenced_values = 0;
     uint64_t conceptual_adjoint_values = 0;
     uint64_t physical_adjoint_values = 0;
+    uint64_t record_embedded_primal_values = 0;
+    uint64_t record_embedded_adjoint_values = 0;
+    uint64_t embedded_scalar_index_visits = 0;
+    uint64_t empty_embedded_scalar_index_visits = 0;
     uint64_t records = 0;
   };
 
@@ -1495,21 +1515,31 @@ struct DynamicAllocationProfile {
     add(b->records, 1);
   }
 
-  void note_compact_index(const Op& op) noexcept {
+  void note_compact_index(const Op& op, bool embedded,
+                          bool empty = false) noexcept {
     Bucket* b = bucket(op);
     if (!b) return;
     add(b->compact_visits, 1);
     add(b->frame_free_compact_visits, 1);
     add(b->active_visits, 1);
-    add(b->arena_values, 1);
     add(b->record_handle_values, 1);
     add(b->output_values, 1);
-    add(b->refs, 1);
-    add(b->active_refs, 1);
     add(b->referenced_values, 1);
     add(b->conceptual_adjoint_values, 1);
     add(b->physical_adjoint_values, 1);
     add(b->records, 1);
+    if (embedded) {
+      add(b->elided_arena_values, 1);
+      add(b->elided_refs, 1);
+      add(b->record_embedded_primal_values, 1);
+      add(b->record_embedded_adjoint_values, 1);
+      add(b->embedded_scalar_index_visits, 1);
+      add(b->empty_embedded_scalar_index_visits, empty ? 1 : 0);
+    } else {
+      add(b->arena_values, 1);
+      add(b->refs, 1);
+      add(b->active_refs, 1);
+    }
   }
 
   void note_inline_integer(const Op& op, int64_t retained) noexcept {
@@ -1527,7 +1557,8 @@ struct DynamicLoopState final : KernelState {
   static constexpr uint32_t retained_scalar_record = ordinary_record - 1;
   static constexpr uint32_t delta_record = ordinary_record - 2;
   static constexpr uint32_t scalar_index_record = ordinary_record - 3;
-  static constexpr uint32_t max_frame_free_position = ordinary_record - 4;
+  static constexpr uint32_t scalar_index_empty_record = ordinary_record - 4;
+  static constexpr uint32_t max_frame_free_position = ordinary_record - 5;
 
   struct Ref {
     double* value = nullptr;
@@ -1548,9 +1579,10 @@ struct DynamicLoopState final : KernelState {
     };
     double out = -1;
     // Ordinary calls store the optional second-output handle. Scalar compact
-    // updates store the overwritten value; compact scalar reads store their
-    // exact reached position, or -1 for an empty selection. Delta compact
-    // updates store their exact reached selection count.
+    // updates store the overwritten value. Ref-backed compact scalar reads
+    // store their exact reached position, or -1 for an empty selection;
+    // record-resident reads use this cell as their local adjoint. Delta
+    // compact updates store their exact reached selection count.
     double out2 = -1;
     uint32_t site = ~uint32_t{0};
     // Reserved tags identify ordinary, retained scalar update, ordered-delta,
@@ -1594,6 +1626,7 @@ struct DynamicLoopState final : KernelState {
   uint64_t iterator_values = 0;
   bool loop_invariant_reuse = false;
   bool inactive_control_reuse = false;
+  bool record_scalar_reuse = false;
   bool memory_profile = false;
   bool cached_context_in_use = false;
   // A dynamic tape belongs to exactly one completed forward sweep.  Forward
@@ -1842,6 +1875,10 @@ void report_memory_profile(const StructuredLoop& p,
   uint64_t referenced_values = 0;
   uint64_t conceptual_adjoint_values = 0;
   uint64_t physical_adjoint_values = 0;
+  uint64_t record_embedded_primal_values = 0;
+  uint64_t record_embedded_adjoint_values = 0;
+  uint64_t embedded_scalar_index_visits = 0;
+  uint64_t empty_embedded_scalar_index_visits = 0;
   uint64_t profiled_records = 0;
   uint64_t frame_free_compact_visits = 0;
   uint64_t inline_integer_calls = 0;
@@ -1884,6 +1921,18 @@ void report_memory_profile(const StructuredLoop& p,
     physical_adjoint_values =
         profile_add(physical_adjoint_values, bucket.physical_adjoint_values,
                     allocation_overflow);
+    record_embedded_primal_values =
+        profile_add(record_embedded_primal_values,
+                    bucket.record_embedded_primal_values, allocation_overflow);
+    record_embedded_adjoint_values =
+        profile_add(record_embedded_adjoint_values,
+                    bucket.record_embedded_adjoint_values, allocation_overflow);
+    embedded_scalar_index_visits =
+        profile_add(embedded_scalar_index_visits,
+                    bucket.embedded_scalar_index_visits, allocation_overflow);
+    empty_embedded_scalar_index_visits = profile_add(
+        empty_embedded_scalar_index_visits,
+        bucket.empty_embedded_scalar_index_visits, allocation_overflow);
     profiled_records =
         profile_add(profiled_records, bucket.records, allocation_overflow);
     frame_free_compact_visits =
@@ -1930,7 +1979,11 @@ void report_memory_profile(const StructuredLoop& p,
       "import_refs=%llu kernel_refs=%llu profiled_refs=%llu "
       "actual_refs=%zu refs_match=%d active_refs=%llu "
       "referenced_values=%llu conceptual_adjoint_values=%llu "
-      "physical_adjoint_values=%llu profiled_records=%llu "
+      "physical_adjoint_values=%llu "
+      "record_embedded_primal_values=%llu "
+      "record_embedded_adjoint_values=%llu "
+      "embedded_scalar_index_visits=%llu "
+      "empty_embedded_scalar_index_visits=%llu profiled_records=%llu "
       "actual_records=%zu records_match=%d inline_integer_calls=%llu "
       "frame_free_compact_visits=%llu "
       "elided_arena_values=%llu elided_refs=%llu "
@@ -1960,6 +2013,10 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(referenced_values),
       static_cast<unsigned long long>(conceptual_adjoint_values),
       static_cast<unsigned long long>(physical_adjoint_values),
+      static_cast<unsigned long long>(record_embedded_primal_values),
+      static_cast<unsigned long long>(record_embedded_adjoint_values),
+      static_cast<unsigned long long>(embedded_scalar_index_visits),
+      static_cast<unsigned long long>(empty_embedded_scalar_index_visits),
       static_cast<unsigned long long>(profiled_records), state.records.size(),
       profiled_records == state.records.size() ? 1 : 0,
       static_cast<unsigned long long>(inline_integer_calls),
@@ -1994,7 +2051,11 @@ void report_memory_profile(const StructuredLoop& p,
         "output_values=%llu scratch_values=%llu "
         "padding_values=%llu refs=%llu active_refs=%llu "
         "referenced_values=%llu conceptual_adjoint_values=%llu "
-        "physical_adjoint_values=%llu records=%llu\n",
+        "physical_adjoint_values=%llu "
+        "record_embedded_primal_values=%llu "
+        "record_embedded_adjoint_values=%llu "
+        "embedded_scalar_index_visits=%llu "
+        "empty_embedded_scalar_index_visits=%llu records=%llu\n",
         static_cast<const void*>(&p), static_cast<unsigned>(opcode),
         opcode_name(opcode),
         static_cast<unsigned long long>(bucket.ordinary_visits),
@@ -2025,6 +2086,11 @@ void report_memory_profile(const StructuredLoop& p,
         static_cast<unsigned long long>(bucket.referenced_values),
         static_cast<unsigned long long>(bucket.conceptual_adjoint_values),
         static_cast<unsigned long long>(bucket.physical_adjoint_values),
+        static_cast<unsigned long long>(bucket.record_embedded_primal_values),
+        static_cast<unsigned long long>(bucket.record_embedded_adjoint_values),
+        static_cast<unsigned long long>(bucket.embedded_scalar_index_visits),
+        static_cast<unsigned long long>(
+            bucket.empty_embedded_scalar_index_visits),
         static_cast<unsigned long long>(bucket.records));
   }
   errno = saved_errno;
@@ -2074,8 +2140,47 @@ struct DynamicExecution {
     return state.refs[static_cast<size_t>(id)];
   }
 
+  const Node& validate_record_scalar(
+      const DynamicLoopState::Record& record) const {
+    const Node& node = record_node(record);
+    if (node.op < 0 || static_cast<size_t>(node.op) >= p.body.ops.size())
+      throw std::logic_error("record scalar index node is invalid");
+    const Op& op = p.body.ops[static_cast<size_t>(node.op)];
+    const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+    if (!spec || op.n_in < 2 || op.n_in > 6 ||
+        op.n_in != (spec->input_count > 0 ? spec->input_count : 2) ||
+        node.forward != index_forward || node.backward != index_backward ||
+        op.opcode != OP_INDEX_DYNAMIC || op.out2 >= 0 ||
+        spec->selected_size != 1 ||
+        p.body.slots[static_cast<size_t>(op.out)].len != 1 ||
+        node.kernel_scratch != 0)
+      throw std::logic_error("record scalar index record is invalid");
+    const int64_t base_len = p.body.slots[static_cast<size_t>(op.in[0])].len;
+    const bool empty =
+        record.code == DynamicLoopState::scalar_index_empty_record;
+    if (base_len < 0 ||
+        (!empty && (record.code > DynamicLoopState::max_frame_free_position ||
+                    static_cast<uint64_t>(record.code) >=
+                        static_cast<uint64_t>(base_len))))
+      throw std::logic_error("record scalar index record is invalid");
+    return node;
+  }
+
+  size_t record_scalar_id(double h) const {
+    const uint64_t id =
+        static_cast<uint64_t>(h - static_cast<double>(record_scalar_first));
+    if (id >= state.records.size())
+      throw std::logic_error(
+          "dynamic structured record-scalar handle out of range");
+    return static_cast<size_t>(id);
+  }
+
+  DynamicLoopState::Record& record_scalar(double h) {
+    return state.records[record_scalar_id(h)];
+  }
+
   DynamicLoopState::Ref& ref(double h) {
-    if (is_inline_int(h) || is_arena_location(h))
+    if (is_inline_int(h) || is_arena_location(h) || is_record_scalar(h))
       throw std::logic_error(
           "dynamic structured immediate handle used as a reference");
     return ordinary_ref(h);
@@ -2154,10 +2259,10 @@ struct DynamicExecution {
   }
 
   double scalar_value(double h) {
-    if (h < -static_cast<double>(exact_limit)) return inline_int_value(h);
-    return h < -static_cast<double>(ordinary_ref_limit)
-               ? state.arena.value(h)[0]
-               : ordinary_ref(h).value[0];
+    if (is_inline_int(h)) return inline_int_value(h);
+    if (is_arena_location(h)) return state.arena.value(h)[0];
+    if (is_record_scalar(h)) return record_scalar(h).out;
+    return ordinary_ref(h).value[0];
   }
 
   double scalar_value(int slot) {
@@ -2165,30 +2270,41 @@ struct DynamicExecution {
   }
 
   void copy_value(double h, int64_t len, double* output) {
-    if (h < -static_cast<double>(exact_limit)) {
+    if (is_inline_int(h)) {
       if (len != 1)
         throw std::logic_error(
             "dynamic structured inline integer has nonscalar extent");
       output[0] = inline_int_value(h);
       return;
     }
-    std::copy_n(h < -static_cast<double>(ordinary_ref_limit)
-                    ? state.arena.value(h)
-                    : ordinary_ref(h).value,
-                len, output);
+    if (is_record_scalar(h)) {
+      if (len != 1)
+        throw std::logic_error(
+            "dynamic structured record scalar has nonscalar extent");
+      output[0] = record_scalar(h).out;
+      return;
+    }
+    std::copy_n(
+        is_arena_location(h) ? state.arena.value(h) : ordinary_ref(h).value,
+        len, output);
   }
 
   bool value_overlaps(double h, int64_t len, Desc other) {
-    if (h < -static_cast<double>(exact_limit)) {
+    if (is_inline_int(h)) {
       if (len != 1)
         throw std::logic_error(
             "dynamic structured inline integer has nonscalar extent");
       (void)inline_int_value(h);
       return false;
     }
+    if (is_record_scalar(h)) {
+      if (len != 1)
+        throw std::logic_error(
+            "dynamic structured record scalar has nonscalar extent");
+      return overlaps({&record_scalar(h).out, 1}, other);
+    }
     return overlaps(
-        {h < -static_cast<double>(ordinary_ref_limit) ? state.arena.value(h)
-                                                      : ordinary_ref(h).value,
+        {is_arena_location(h) ? state.arena.value(h) : ordinary_ref(h).value,
          len},
         other);
   }
@@ -2439,6 +2555,12 @@ struct DynamicExecution {
     if (h < 0) return nullptr;
     if (expected_len < 0)
       throw std::logic_error("dynamic structured adjoint has negative length");
+    if (is_record_scalar(h)) {
+      if (expected_len != 1)
+        throw std::logic_error(
+            "dynamic structured record scalar has nonscalar adjoint");
+      return &record_scalar(h).out2;
+    }
     const auto& r = ordinary_ref(h);
     if (is_import_ref(r)) {
       const auto& import = import_ref(r);
@@ -2467,6 +2589,20 @@ struct DynamicExecution {
     if (first_handle < 0 || second_handle < 0) return false;
     if (first_len < 0 || second_len < 0)
       throw std::logic_error("structured adjoint range has negative length");
+    const bool first_record = is_record_scalar(first_handle);
+    const bool second_record = is_record_scalar(second_handle);
+    const size_t first_id = first_record ? record_scalar_id(first_handle) : 0;
+    const size_t second_id =
+        second_record ? record_scalar_id(second_handle) : 0;
+    if (!first_record) (void)ref(first_handle);
+    if (!second_record) (void)ref(second_handle);
+    if (first_record || second_record) {
+      if ((first_record && first_len != 1) ||
+          (second_record && second_len != 1))
+        throw std::logic_error(
+            "structured record-scalar adjoint has nonscalar extent");
+      return first_record && second_record && first_id == second_id;
+    }
     const auto& first = ref(first_handle);
     const auto& second = ref(second_handle);
     const bool first_import = is_import_ref(first);
@@ -2505,7 +2641,7 @@ struct DynamicExecution {
                                  int64_t output_len, double selector_handle,
                                  int64_t selector_len, double rhs_handle,
                                  int64_t rhs_len) {
-    if (base_handle < 0) return -1;
+    if (base_handle < 0 || is_record_scalar(base_handle)) return -1;
     const auto& base = ref(base_handle);
     if (is_import_ref(base) || base.adjoint_or_import < 0 || base_len <= 0 ||
         base_len != output_len ||
@@ -2569,7 +2705,7 @@ struct DynamicExecution {
       c.state = nullptr;
       for (int k = 0; k < op.n_in; ++k) {
         const double h = frame[k];
-        if (h < -static_cast<double>(exact_limit)) {
+        if (is_inline_int(h)) {
           if (c.in[k].len != 1)
             throw std::logic_error(
                 "dynamic structured inline integer has nonscalar input");
@@ -2585,9 +2721,14 @@ struct DynamicExecution {
             inline_inputs[static_cast<size_t>(k)] = inline_int_value(h);
             c.in[k].data = &inline_inputs[static_cast<size_t>(k)];
           }
-        } else if (h < -static_cast<double>(ordinary_ref_limit))
+        } else if (is_arena_location(h))
           c.in[k].data = state.arena.value(h);
-        else
+        else if (is_record_scalar(h)) {
+          if (c.in[k].len != 1)
+            throw std::logic_error(
+                "dynamic structured record scalar has nonscalar input");
+          c.in[k].data = &record_scalar(h).out;
+        } else
           c.in[k].data = ordinary_ref(h).value;
         c.in_adj[k].data = backward ? adj(h, c.in[k].len) : nullptr;
       }
@@ -2727,15 +2868,45 @@ struct DynamicExecution {
     }
     if (!active) return false;
 
-    // Keep the selected value immutable, but move the historical base handle
-    // into the fixed-size reverse record and save the validated position
-    // instead of retaining every selector handle. The shared helper is also
-    // the built-in callback's scalar path, so validation and exception order
-    // remain identical and every allocation precedes publication.
-    double* const output = state.arena.allocate(1);
-    ContextLease context(*this, n, handles, false, -1, -1, output);
+    // Keep the selected value and its adjoint inside the already-required
+    // reverse record. The public handle contains only the record ordinal, so
+    // vector growth cannot leave a dangling pointer. The shared helper is
+    // also the built-in callback's scalar path, preserving validation and
+    // exception order.
+    double output = 0.0;
+    ContextLease context(*this, n, handles, false, -1, -1, &output);
     const int64_t position = scalar_index_forward(context.get());
-    const double out = make_ref(output, 1, true);
+    const bool encodable_record =
+        state.record_scalar_reuse &&
+        state.records.size() < static_cast<uint64_t>(record_scalar_count);
+    const bool encodable_position =
+        position == -1 ||
+        (position >= 0 && static_cast<uint64_t>(position) <=
+                              DynamicLoopState::max_frame_free_position);
+    if (encodable_record && encodable_position) {
+      const size_t ordinal = state.records.size();
+      const double out = record_scalar_handle(ordinal);
+      state.conceptual_adjoint_size =
+          add(state.conceptual_adjoint_size, int64_t{1});
+      DynamicLoopState::Record record;
+      record.base_handle = handles[0];
+      record.out = output;
+      record.out2 = 0.0;
+      record.site = n.record_site;
+      record.code = position < 0 ? DynamicLoopState::scalar_index_empty_record
+                                 : static_cast<uint32_t>(position);
+      state.records.push_back(record);
+      state.bindings[static_cast<size_t>(op.out)] = out;
+      if (state.allocation_profile)
+        state.allocation_profile->note_compact_index(op, true, position < 0);
+      return true;
+    }
+
+    // Preserve the H6N Ref-backed form as the exact fallback when a record
+    // ordinal or reached position cannot be encoded in the compact bands.
+    double* const stored_output = state.arena.allocate(1);
+    stored_output[0] = output;
+    const double out = make_ref(stored_output, 1, true);
     DynamicLoopState::Record record;
     record.base_handle = handles[0];
     record.out = out;
@@ -2745,7 +2916,7 @@ struct DynamicExecution {
     state.records.push_back(record);
     state.bindings[static_cast<size_t>(op.out)] = out;
     if (state.allocation_profile)
-      state.allocation_profile->note_compact_index(op);
+      state.allocation_profile->note_compact_index(op, false);
     return true;
   }
 
@@ -2757,7 +2928,7 @@ struct DynamicExecution {
     const int cell = n.compact_update_cell;
     const double base_handle = state.bindings[static_cast<size_t>(op.in[0])];
     double* base = nullptr;
-    if (base_handle < -static_cast<double>(exact_limit))
+    if (is_inline_int(base_handle) || is_record_scalar(base_handle))
       return false;
     else if (base_handle < -static_cast<double>(ordinary_ref_limit))
       base = state.arena.value(base_handle);
@@ -2817,9 +2988,12 @@ struct DynamicExecution {
       record.out2 = static_cast<double>(selected);
       record.site = n.record_site;
       record.code = DynamicLoopState::delta_record;
+      const bool resident_rhs = is_record_scalar(handles[2]);
+      const double resident_rhs_value = resident_rhs ? c.in[2].data[0] : 0.0;
       state.records.push_back(record);
       for (int64_t i = 0; i < selected; ++i)
-        c.out.data[static_cast<int64_t>(delta[i])] = c.in[2].data[i];
+        c.out.data[static_cast<int64_t>(delta[i])] =
+            resident_rhs ? resident_rhs_value : c.in[2].data[i];
       state.bindings[static_cast<size_t>(op.out)] = out;
       if (state.allocation_profile)
         state.allocation_profile->note_delta_compact(op, selected, c.out.len,
@@ -2862,8 +3036,9 @@ struct DynamicExecution {
     record.site = n.record_site;
     record.code = frame_free ? static_cast<uint32_t>(position)
                              : DynamicLoopState::retained_scalar_record;
+    const double rhs_value = c.in[2].data[0];
     state.records.push_back(record);
-    c.out.data[position] = c.in[2].data[0];
+    c.out.data[position] = rhs_value;
     state.bindings[static_cast<size_t>(op.out)] = out;
     if (state.allocation_profile)
       state.allocation_profile->note_compact(
@@ -2902,6 +3077,9 @@ struct DynamicExecution {
     // and scratch stop entering persistent history; output storage remains in
     // the stable arena and is published after successful completion.
     n.forward(c);
+    stabilize_ephemeral_aliased_output(c.out, outputs, handles, c);
+    if (op.out2 >= 0)
+      stabilize_ephemeral_aliased_output(c.out2, output2, handles, c);
     uint64_t arena_locations = 0;
     const auto output_handle = [&](double* actual, double* expected,
                                    int64_t actual_len, int64_t expected_len,
@@ -2933,6 +3111,22 @@ struct DynamicExecution {
       state.allocation_profile->note_inactive_split(op, n, retained_outputs,
                                                     arena_locations);
     return true;
+  }
+
+  void stabilize_ephemeral_aliased_output(Desc& output, double* stable,
+                                          const double* handles,
+                                          const KernelCtx& context) {
+    if (!output.data) return;
+    for (int k = 0; k < context.n_in; ++k) {
+      if (!is_record_scalar(handles[k]) && !is_inline_int(handles[k])) continue;
+      if (output.data != context.in[k].data) continue;
+      if (output.len != context.in[k].len)
+        throw std::logic_error(
+            "dynamic structured ephemeral input aliases mismatched output");
+      std::copy_n(output.data, output.len, stable);
+      output.data = stable;
+      return;
+    }
   }
 
   enum Flow { Normal, Break, Continue };
@@ -2990,6 +3184,13 @@ struct DynamicExecution {
         // reject/domain errors and bounds errors are part of Stan's visible
         // behavior and must match the ordinary graph path.
         n.forward(c);
+        // Callback output redirection may alias an input. Record storage can
+        // move at the next push, so materialize that special case into the
+        // stable frame before publishing a persistent Ref.
+        stabilize_ephemeral_aliased_output(c.out, frame + op.n_in, handles, c);
+        if (op.out2 >= 0)
+          stabilize_ephemeral_aliased_output(
+              c.out2, frame + op.n_in + c.out.len, handles, c);
         const double out = make_ref(c.out.data, c.out.len, active);
         state.bindings[static_cast<size_t>(op.out)] = out;
         double out2 = -1;
@@ -3139,6 +3340,23 @@ struct DynamicExecution {
     base_adjoint[static_cast<int64_t>(record.out2)] += output_adjoint[0];
   }
 
+  void backward_record_scalar_index(const DynamicLoopState::Record& record,
+                                    double output_handle) {
+    const Node& node = validate_record_scalar(record);
+    const Op& op = p.body.ops[static_cast<size_t>(node.op)];
+    const int64_t base_len = p.body.slots[static_cast<size_t>(op.in[0])].len;
+    const bool empty =
+        record.code == DynamicLoopState::scalar_index_empty_record;
+
+    double* const base_adjoint = adj(record.base_handle, base_len);
+    if (!base_adjoint || empty) return;
+    double* const output_adjoint = adj(output_handle, 1);
+    if (!output_adjoint ||
+        adjoint_ranges_overlap(record.base_handle, base_len, output_handle, 1))
+      throw std::logic_error("record scalar index adjoints overlap");
+    base_adjoint[record.code] += output_adjoint[0];
+  }
+
   void backward_delta_compact(const DynamicLoopState::Record& record) {
     const Node& node = record_node(record);
     if (node.op < 0 || static_cast<size_t>(node.op) >= p.body.ops.size() ||
@@ -3264,6 +3482,11 @@ struct DynamicExecution {
         backward_delta_compact(record);
       } else if (record.code == DynamicLoopState::scalar_index_record) {
         backward_compact_scalar_index(record);
+      } else if (p.body.ops[static_cast<size_t>(node.op)].opcode ==
+                     OP_INDEX_DYNAMIC &&
+                 (record.code == DynamicLoopState::scalar_index_empty_record ||
+                  record.code <= DynamicLoopState::max_frame_free_position)) {
+        backward_record_scalar_index(record, record_scalar_handle(i));
       } else if (record.code != DynamicLoopState::ordinary_record) {
         const bool frame_free =
             record.code != DynamicLoopState::retained_scalar_record;
@@ -3340,6 +3563,8 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   s.inactive_control_reuse =
       s.inactive_control_plan &&
       std::getenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL") == nullptr;
+  s.record_scalar_reuse =
+      std::getenv("STANLI_NO_STRUCTURED_RECORD_SCALARS") == nullptr;
   struct ReleaseOnFailure {
     DynamicLoopState& state;
     bool published = false;

@@ -569,6 +569,10 @@ static void ordinary_index_backward(KernelCtx& context) {
   find_kernel(OP_INDEX_DYNAMIC)->backward(context);
 }
 
+static void redirect_first_input(KernelCtx& context) {
+  context.out.data = context.in[0].data;
+}
+
 static void duplicate_site_backward(KernelCtx& context) {
   ++duplicate_site_backward_calls;
   find_kernel(OP_MUL)->backward(context);
@@ -1229,6 +1233,144 @@ static Graph scalar_index_after_updates_outer(
   return graph;
 }
 
+static std::shared_ptr<StructuredLoop> scalar_index_redirect_plan(
+    bool active_redirect) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int base = plan->body.add_slot(32, false);
+  const int one = scalar(*plan, 1);
+  const int upper = scalar(*plan, 32);
+  const int zero = scalar(*plan, 0);
+  const int iterator = plan->body.add_slot(1, false);
+  const int selected = plan->body.add_slot(1, false);
+  const int redirected = plan->body.add_slot(1, false);
+  const int later = plan->body.add_slot(1, false);
+  plan->imports = {{base, 0, 0}};
+
+  auto first_spec = std::make_shared<DynamicIndexSpec>();
+  first_spec->axes = {{DynamicIndexSpec::Axis::Single, 32, 1, 1, 0}};
+  first_spec->selected_size = 1;
+  Node first = call(*plan, OP_INDEX_DYNAMIC, {base, one}, selected);
+  plan->body.ops[static_cast<size_t>(first.op)].udata = first_spec.get();
+  plan->body.udata_pool.push_back(first_spec);
+
+  Node redirect = call(*plan, active_redirect ? OP_ADD : OP_COMPARE,
+                       {selected, zero}, redirected);
+  const int redirect_op = redirect.op;
+  auto later_spec = std::make_shared<DynamicIndexSpec>();
+  later_spec->axes = {{DynamicIndexSpec::Axis::Single, 32, 1, 1, 0}};
+  later_spec->selected_size = 1;
+  Node later_index = call(*plan, OP_INDEX_DYNAMIC, {base, iterator}, later);
+  plan->body.ops[static_cast<size_t>(later_index.op)].udata = later_spec.get();
+  plan->body.udata_pool.push_back(later_spec);
+  plan->root =
+      sequence({std::move(first), std::move(redirect),
+                counted(one, upper, iterator, 32, std::move(later_index))});
+  plan->outputs = {redirected};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(set_forward(plan->root, redirect_op, redirect_first_input),
+        "find record-scalar redirect callback");
+  if (!active_redirect)
+    check(set_backward(plan->root, redirect_op, nullptr),
+          "disable record-scalar redirect backward callback");
+  return plan;
+}
+
+static Graph scalar_index_redirect_outer(std::shared_ptr<StructuredLoop> plan) {
+  Graph graph;
+  graph.add_slot(32, true);
+  const int output = graph.add_slot(1, false);
+  const int op = graph.add_op(OP_LOOP, {0}, output);
+  graph.ops[op].udata = plan.get();
+  graph.udata_pool.push_back(std::move(plan));
+  graph.result_slot = output;
+  return graph;
+}
+
+static std::shared_ptr<StructuredLoop> scalar_index_target_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int base = plan->body.add_slot(3, false);
+  const int one = scalar(*plan, 1);
+  const int selected = plan->body.add_slot(1, false);
+  plan->imports = {{base, 0, 0}};
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
+  spec->selected_size = 1;
+  Node index = call(*plan, OP_INDEX_DYNAMIC, {base, one}, selected);
+  plan->body.ops[static_cast<size_t>(index.op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  Node target;
+  target.kind = Node::Target;
+  target.src = selected;
+  plan->root = sequence({std::move(index), std::move(target)});
+  plan->has_target = true;
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static Graph scalar_index_three_parameter_outer(
+    std::shared_ptr<StructuredLoop> plan) {
+  Graph graph;
+  graph.add_slot(3, true);
+  const int output = graph.add_slot(1, false);
+  const int op = graph.add_op(OP_LOOP, {0}, output);
+  graph.ops[op].udata = plan.get();
+  graph.udata_pool.push_back(std::move(plan));
+  graph.result_slot = output;
+  return graph;
+}
+
+static std::shared_ptr<StructuredLoop> scalar_index_update_rhs_plan(
+    bool force_ordinary_index) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int base = plan->body.add_slot(3, false);
+  const int one = scalar(*plan, 1);
+  const int two = scalar(*plan, 2);
+  const int iterator = plan->body.add_slot(1, false);
+  const int current = plan->body.add_slot(3, false);
+  const int updated = plan->body.add_slot(3, false);
+  const int selected = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{base, 0, 0}};
+
+  auto update_spec = std::make_shared<DynamicIndexSpec>();
+  update_spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
+  update_spec->selected_size = 1;
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, selected}, updated);
+  plan->body.ops[static_cast<size_t>(update.op)].udata = update_spec.get();
+  plan->body.udata_pool.push_back(update_spec);
+
+  auto index_spec = std::make_shared<DynamicIndexSpec>();
+  index_spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
+  index_spec->selected_size = 1;
+  Node index = call(*plan, OP_INDEX_DYNAMIC, {base, one}, selected);
+  const int index_op = index.op;
+  plan->body.ops[static_cast<size_t>(index.op)].udata = index_spec.get();
+  plan->body.udata_pool.push_back(index_spec);
+  plan->root =
+      sequence({std::move(index), alias(current, base),
+                counted(one, two, iterator, 2,
+                        sequence({std::move(update), alias(current, updated)})),
+                call(*plan, OP_SUM_VEC, {current}, result)});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(
+      plan->compact_update_sites == 1 &&
+          plan->root.children[2].children[0].children[0].compact_update_cell >=
+              0,
+      "record-scalar RHS update selects compact history");
+  if (force_ordinary_index) {
+    check(set_forward(plan->root, index_op, ordinary_index_forward),
+          "find record-scalar RHS index forward callback");
+    check(set_backward(plan->root, index_op, ordinary_index_backward),
+          "find record-scalar RHS index backward callback");
+  }
+  return plan;
+}
+
 static void compact_scalar_index_tests() {
   const double point[] = {7, 1e16, -1e16, 1, 9, .25};
   const double expected_gradient[] = {0, .25, .25, .25, 0, 0};
@@ -1297,6 +1439,64 @@ static void compact_scalar_index_tests() {
   for (size_t i = 0; i < std::size(expected_updated_gradient); ++i)
     close(updated_gradient[i], expected_updated_gradient[i],
           "scalar index routes through a shared update adjoint");
+
+  std::array<double, 32> redirect_point{};
+  for (size_t i = 0; i < redirect_point.size(); ++i)
+    redirect_point[i] = static_cast<double>(i + 1);
+  for (bool active_redirect : {false, true}) {
+    Executor redirected(scalar_index_redirect_outer(
+        scalar_index_redirect_plan(active_redirect)));
+    std::copy(redirect_point.begin(), redirect_point.end(),
+              redirected.params_data());
+    std::array<double, 32> redirect_gradient{};
+    close(redirected.gradient(redirect_gradient.data()), 1,
+          "record scalar survives redirected output and record relocation");
+    for (size_t i = 0; i < redirect_gradient.size(); ++i)
+      close(redirect_gradient[i], active_redirect && i == 0 ? 1 : 0,
+            "redirected record scalar gradient follows callback contract");
+  }
+
+  Executor targeted(
+      scalar_index_three_parameter_outer(scalar_index_target_plan()));
+  const double target_point[] = {2, 3, 4};
+  std::copy(std::begin(target_point), std::end(target_point),
+            targeted.params_data());
+  double target_gradient[3] = {};
+  close(targeted.gradient(target_gradient), 2,
+        "record scalar contributes a target leaf");
+  close(target_gradient[0], 1,
+        "record scalar receives and scatters a target adjoint");
+  close(target_gradient[1], 0,
+        "record scalar target leaves unselected input unchanged");
+  close(target_gradient[2], 0,
+        "record scalar target leaves final input unchanged");
+
+  ordinary_index_forward_calls = ordinary_index_backward_calls = 0;
+  Executor update_rhs(
+      scalar_index_three_parameter_outer(scalar_index_update_rhs_plan(false)));
+  Executor ordinary_update_rhs(
+      scalar_index_three_parameter_outer(scalar_index_update_rhs_plan(true)));
+  std::copy(std::begin(target_point), std::end(target_point),
+            update_rhs.params_data());
+  std::copy(std::begin(target_point), std::end(target_point),
+            ordinary_update_rhs.params_data());
+  double update_rhs_gradient[3] = {};
+  double ordinary_update_rhs_gradient[3] = {};
+  const double update_rhs_value = update_rhs.gradient(update_rhs_gradient);
+  const double ordinary_update_rhs_value =
+      ordinary_update_rhs.gradient(ordinary_update_rhs_gradient);
+  check(std::memcmp(&update_rhs_value, &ordinary_update_rhs_value,
+                    sizeof(double)) == 0 &&
+            std::memcmp(update_rhs_gradient, ordinary_update_rhs_gradient,
+                        sizeof(update_rhs_gradient)) == 0,
+        "record scalar RHS has bitwise ordinary-path parity");
+  close(update_rhs_value, 8, "record scalar RHS update value");
+  const double expected_rhs_gradient[] = {2, 0, 1};
+  for (size_t i = 0; i < std::size(expected_rhs_gradient); ++i)
+    close(update_rhs_gradient[i], expected_rhs_gradient[i],
+          "record scalar RHS update gradient");
+  check(ordinary_index_forward_calls == 1 && ordinary_index_backward_calls == 1,
+        "record scalar RHS ordinary comparison replays its callback");
 }
 
 static void compact_iterator_history_tests() {
@@ -2862,6 +3062,7 @@ int main() {
   test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
   test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+  test_unsetenv("STANLI_NO_STRUCTURED_RECORD_SCALARS");
   if (failures == 0) std::printf("test_structured_loop_production OK\n");
   return failures != 0;
 }
