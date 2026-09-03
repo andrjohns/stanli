@@ -1,4 +1,5 @@
 #include "env_helpers.hpp"
+#include "stdout_capture.hpp"
 
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
@@ -3527,7 +3528,8 @@ static void trace_tests() {
               body.children[0].children.size() == 3 &&
               body.children[0].children[2].kind == Node::If &&
               body.children[0].memo_outs.empty() && body.children[1].trace &&
-              plan->memo_count == 1 && plan->trace_count == 1,
+              plan->root.trace && plan->memo_count == 1 &&
+              plan->trace_count == 2,
           "guard chain groups its data-only branch into one memo node");
     memo_index_calls = memo_compare_calls = 0;
     Executor executor(outer(plan, {1, 1}, {3}));
@@ -3550,8 +3552,9 @@ static void trace_tests() {
     const Node* branch_node = find_kind(plan->root, Node::If);
     check(guard && guard->children.size() == 2 && guard->memo_outs.empty(),
           "guard cone feeding only a traced branch has no live-outs");
-    check(branch_node && branch_node->trace && plan->trace_count == 1,
-          "data-only branch with an active arm is traced");
+    check(branch_node && branch_node->trace && plan->root.trace &&
+              plan->trace_count == 2,
+          "data-only branch with an active arm is traced under a traced for");
     memo_index_calls = memo_compare_calls = 0;
     Executor executor(outer(plan, {1, 1}, {3}));
     const Evaluation first = evaluate_traced(executor, .25, {1, 0, 2});
@@ -3655,6 +3658,300 @@ static void trace_tests() {
   }
 }
 
+// theta * sum of the iterators whose table entry is positive over `rows`
+// rows; `param_guard` also adds theta per row while theta > 0.
+static std::shared_ptr<StructuredLoop> row_scan_plan(int rows,
+                                                     bool param_guard) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int table = plan->body.add_slot(rows, false);
+  const int one = scalar(*plan, 1);
+  const int last = scalar(*plan, rows);
+  const int zero = scalar(*plan, 0);
+  const int iterator = plan->body.add_slot(1, false);
+  const int picked = plan->body.add_slot(1, false);
+  const int guard = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int acc = plan->body.add_slot(1, false);
+  plan->fills.push_back({acc, {0}});
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false}, {table, 2, 0, false, true}};
+  Node index = call(*plan, OP_INDEX_DYNAMIC, {table, iterator}, picked);
+  attach(*plan, index.op, single_spec(rows));
+  const int index_op = index.op;
+  Node compare = call(*plan, OP_COMPARE, {picked, zero}, guard);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+  const int compare_op = compare.op;
+  Node scale = call(*plan, OP_MUL, {theta, iterator}, term);
+  const int scale_op = scale.op;
+  std::vector<Node> body;
+  body.push_back(std::move(index));
+  body.push_back(std::move(compare));
+  body.push_back(
+      branch(guard,
+             sequence({std::move(scale), call(*plan, OP_ADD, {acc, term}, next),
+                       alias(acc, next)}),
+             sequence({})));
+  if (param_guard) {
+    const int positive = plan->body.add_slot(1, false);
+    const int bumped = plan->body.add_slot(1, false);
+    Node sign = call(*plan, OP_COMPARE, {theta, zero}, positive);
+    plan->body.ops[static_cast<size_t>(sign.op)].variant = 2;
+    body.push_back(std::move(sign));
+    body.push_back(branch(positive,
+                          sequence({call(*plan, OP_ADD, {acc, theta}, bumped),
+                                    alias(acc, bumped)}),
+                          sequence({})));
+  }
+  plan->root = counted(one, last, iterator, sequence(std::move(body)));
+  plan->outputs = {acc};
+  plan->prepare();
+  check(set_forward(plan->root, index_op, count_memo_index) &&
+            set_forward(plan->root, compare_op, count_memo_compare) &&
+            set_forward(plan->root, scale_op, record_arm_mul),
+        "find row scan callbacks");
+  return plan;
+}
+
+// theta * sum of k over the cells (k, i) of a 3 x 100 table holding a
+// positive entry, scanned by nested loops through a data-only flat index.
+static std::shared_ptr<StructuredLoop> nested_scan_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int table = plan->body.add_slot(300, false);
+  const int one = scalar(*plan, 1);
+  const int three = scalar(*plan, 3);
+  const int hundred = scalar(*plan, 100);
+  const int zero = scalar(*plan, 0);
+  const int k = plan->body.add_slot(1, false);
+  const int i = plan->body.add_slot(1, false);
+  const int previous = plan->body.add_slot(1, false);
+  const int base = plan->body.add_slot(1, false);
+  const int flat = plan->body.add_slot(1, false);
+  const int picked = plan->body.add_slot(1, false);
+  const int guard = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int acc = plan->body.add_slot(1, false);
+  plan->fills.push_back({acc, {0}});
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false}, {table, 2, 0, false, true}};
+  Node decrement = call(*plan, OP_INT_ARITH, {k, one}, previous);
+  plan->body.ops[static_cast<size_t>(decrement.op)].variant = 1;
+  Node stride = call(*plan, OP_INT_ARITH, {previous, hundred}, base);
+  plan->body.ops[static_cast<size_t>(stride.op)].variant = 2;
+  Node offset = call(*plan, OP_INT_ARITH, {base, i}, flat);
+  Node index = call(*plan, OP_INDEX_DYNAMIC, {table, flat}, picked);
+  attach(*plan, index.op, single_spec(300));
+  const int index_op = index.op;
+  Node compare = call(*plan, OP_COMPARE, {picked, zero}, guard);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+  Node scale = call(*plan, OP_MUL, {theta, k}, term);
+  const int scale_op = scale.op;
+  Node inner = counted(
+      one, hundred, i,
+      sequence({std::move(decrement), std::move(stride), std::move(offset),
+                std::move(index), std::move(compare),
+                branch(guard,
+                       sequence({std::move(scale),
+                                 call(*plan, OP_ADD, {acc, term}, next),
+                                 alias(acc, next)}),
+                       sequence({}))}));
+  plan->root = counted(one, three, k, sequence({std::move(inner)}));
+  plan->outputs = {acc};
+  plan->prepare();
+  check(set_forward(plan->root, index_op, count_memo_index) &&
+            set_forward(plan->root, scale_op, record_arm_mul),
+        "find nested scan callbacks");
+  return plan;
+}
+
+// theta * sum of the iterators before the first row whose entry is positive.
+static std::shared_ptr<StructuredLoop> break_scan_plan(int rows) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int table = plan->body.add_slot(rows, false);
+  const int one = scalar(*plan, 1);
+  const int last = scalar(*plan, rows);
+  const int zero = scalar(*plan, 0);
+  const int iterator = plan->body.add_slot(1, false);
+  const int picked = plan->body.add_slot(1, false);
+  const int guard = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int acc = plan->body.add_slot(1, false);
+  plan->fills.push_back({acc, {0}});
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false}, {table, 2, 0, false, true}};
+  Node index = call(*plan, OP_INDEX_DYNAMIC, {table, iterator}, picked);
+  attach(*plan, index.op, single_spec(rows));
+  const int index_op = index.op;
+  Node compare = call(*plan, OP_COMPARE, {picked, zero}, guard);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+  Node scale = call(*plan, OP_MUL, {theta, iterator}, term);
+  const int scale_op = scale.op;
+  Node exit;
+  exit.kind = Node::Break;
+  plan->root = counted(
+      one, last, iterator,
+      sequence({std::move(index), std::move(compare),
+                branch(guard, std::move(exit), sequence({})), std::move(scale),
+                call(*plan, OP_ADD, {acc, term}, next), alias(acc, next)}));
+  plan->outputs = {acc};
+  plan->prepare();
+  check(set_forward(plan->root, index_op, count_memo_index) &&
+            set_forward(plan->root, scale_op, record_arm_mul),
+        "find break scan callbacks");
+  return plan;
+}
+
+static Evaluation evaluate_rows(Executor& executor, double theta,
+                                const std::vector<double>& table) {
+  std::copy(table.begin(), table.end(), executor.value_ptr(2));
+  traced_arm_iterators.clear();
+  return evaluate(executor, theta, 0);
+}
+
+static std::vector<double> sparse_rows(int rows, std::vector<int> positive) {
+  std::vector<double> table(static_cast<size_t>(rows), 0.0);
+  for (int row : positive) table[static_cast<size_t>(row - 1)] = 1;
+  return table;
+}
+
+static size_t reported_visits(const std::string& diagnostics) {
+  const size_t at = diagnostics.find("visits=");
+  return at == std::string::npos ? std::numeric_limits<size_t>::max()
+                                 : std::stoul(diagnostics.substr(at + 7));
+}
+
+// Replays under STANLI_STRUCTURED_LOOP_DIAGNOSTICS and returns the node
+// visits the tape line reports for that evaluation.
+static size_t replay_visits(const std::function<Evaluation()>& replay,
+                            Evaluation& result) {
+  stanli_test::StdoutCapture captured(stderr);
+  result = replay();
+  return reported_visits(captured.finish());
+}
+
+static Executor diagnosed_executor(Graph graph) {
+  test_setenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS", "1");
+  Executor executor(std::move(graph));
+  test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
+  return executor;
+}
+
+static void for_trace_tests() {
+  {
+    auto plan = row_scan_plan(1000, false);
+    check(plan->root.trace && plan->trace_count == 2,
+          "data-only row scan is a traced for");
+    const std::vector<double> table = sparse_rows(1000, {7, 500, 1000});
+    memo_index_calls = memo_compare_calls = 0;
+    Executor executor = diagnosed_executor(outer(plan, {1, 1}, {1000}));
+    const Evaluation first = evaluate_rows(executor, .25, table);
+    close(first.value, 1507 * .25, "row scan first value");
+    close(first.gradient[0], 1507, "row scan first gradient");
+    check(traced_arm_iterators == std::vector<double>{7, 500, 1000} &&
+              memo_index_calls == 1000 && memo_compare_calls == 1000,
+          "row scan records every row once");
+    Evaluation second;
+    const size_t visits = replay_visits(
+        [&] { return evaluate_rows(executor, .5, table); }, second);
+    close(second.value, 1507 * .5, "row scan replayed value");
+    close(second.gradient[0], 1507, "row scan replayed gradient");
+    check(traced_arm_iterators == std::vector<double>{7, 500, 1000},
+          "row scan replays only the effective rows");
+    check(memo_index_calls == 1000 && memo_compare_calls == 1000,
+          "row scan replays without guard kernel calls");
+    check(visits < 40, "row scan replay visits only the effective rows");
+  }
+  {
+    auto plan = row_scan_plan(1000, true);
+    check(!plan->root.trace && plan->trace_count == 1,
+          "row scan with a parameter branch is not a traced for");
+    const std::vector<double> table = sparse_rows(1000, {7, 500, 1000});
+    Executor executor = diagnosed_executor(outer(plan, {1, 1}, {1000}));
+    const Evaluation first = evaluate_rows(executor, -.5, table);
+    close(first.value, 1507 * -.5, "parameter branch first value");
+    close(first.gradient[0], 1507, "parameter branch first gradient");
+    Evaluation second;
+    const size_t visits = replay_visits(
+        [&] { return evaluate_rows(executor, .25, table); }, second);
+    close(second.value, 2507 * .25, "parameter branch switched value");
+    close(second.gradient[0], 2507, "parameter branch switched gradient");
+    check(traced_arm_iterators == std::vector<double>{7, 500, 1000},
+          "data branch still replays under an untraced for");
+    check(visits >= 1000, "untraced for visits every row on replay");
+  }
+  {
+    auto plan = nested_scan_plan();
+    const Node& inner = plan->root.children[0].children[0];
+    check(plan->root.trace && inner.kind == Node::For && inner.trace &&
+              plan->trace_count == 3,
+          "nested data-only scans are both traced");
+    const std::vector<double> table = sparse_rows(300, {5, 250});
+    memo_index_calls = 0;
+    Executor executor = diagnosed_executor(outer(plan, {1, 1}, {300}));
+    const Evaluation first = evaluate_rows(executor, .25, table);
+    close(first.value, 1, "nested scan first value");
+    close(first.gradient[0], 4, "nested scan first gradient");
+    check(traced_arm_iterators == std::vector<double>{1, 3} &&
+              memo_index_calls == 300,
+          "nested scan records every cell once");
+    Evaluation second;
+    const size_t visits = replay_visits(
+        [&] { return evaluate_rows(executor, .5, table); }, second);
+    close(second.value, 2, "nested scan replayed value");
+    close(second.gradient[0], 4, "nested scan replayed gradient");
+    check(traced_arm_iterators == std::vector<double>{1, 3} &&
+              memo_index_calls == 300,
+          "nested scan replays only the effective cells");
+    check(visits < 40, "nested scan replay skips empty outer iterations");
+  }
+  {
+    auto plan = break_scan_plan(100);
+    check(plan->root.trace && plan->trace_count == 2,
+          "scan with a data-only break is a traced for");
+    const std::vector<double> table = sparse_rows(100, {5});
+    memo_index_calls = 0;
+    Executor executor = diagnosed_executor(outer(plan, {1, 1}, {100}));
+    const Evaluation first = evaluate_rows(executor, .25, table);
+    close(first.value, 2.5, "break scan first value");
+    close(first.gradient[0], 10, "break scan first gradient");
+    check(traced_arm_iterators == std::vector<double>{1, 2, 3, 4} &&
+              memo_index_calls == 5,
+          "break scan stops at the breaking row");
+    Evaluation second;
+    const size_t visits = replay_visits(
+        [&] { return evaluate_rows(executor, .5, table); }, second);
+    close(second.value, 5, "break scan replayed value");
+    close(second.gradient[0], 10, "break scan replayed gradient");
+    check(traced_arm_iterators == std::vector<double>{1, 2, 3, 4} &&
+              memo_index_calls == 5,
+          "break scan replays through the breaking row");
+    check(visits < 60, "break scan replay visits rows up to the break");
+  }
+  {
+    const Graph graph = outer(row_scan_plan(1000, false), {1, 1}, {1000});
+    Executor first(graph), second(graph);
+    const std::vector<double> a = sparse_rows(1000, {7, 500, 1000});
+    const std::vector<double> b = sparse_rows(1000, {1, 2});
+    memo_index_calls = 0;
+    close(evaluate_rows(first, .25, a).value, 1507 * .25,
+          "first executor row scan value");
+    close(evaluate_rows(second, .25, b).value, 3 * .25,
+          "second executor row scan value");
+    check(memo_index_calls == 2000, "each executor records its own rows");
+    close(evaluate_rows(first, .5, a).value, 1507 * .5,
+          "first executor replayed row scan value");
+    check(traced_arm_iterators == std::vector<double>{7, 500, 1000},
+          "first executor replays its own rows");
+    close(evaluate_rows(second, .5, b).value, 3 * .5,
+          "second executor replayed row scan value");
+    check(traced_arm_iterators == std::vector<double>{1, 2},
+          "second executor replays its own rows");
+    check(memo_index_calls == 2000, "executors replay rows independently");
+  }
+}
+
 int main() {
   test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
   transient_classification_tests();
@@ -3680,6 +3977,7 @@ int main() {
   direct_index_lowering_tests();
   memo_tests();
   trace_tests();
+  for_trace_tests();
   test_unsetenv("STANLI_STRUCTURED_LOOPS");
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
   if (failures == 0) std::printf("test_structured_loop OK\n");
