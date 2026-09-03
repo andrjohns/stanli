@@ -5780,6 +5780,33 @@ int main() {
           "adjoint ODE taken callback gradient");
   }
 
+  // solve_*_tol controls reach Stan Math. One Powell evaluation cannot reach
+  // the root of x^2 - 4 from x = 1, so max_num_steps = 1 raises the solver's
+  // iteration-limit error in both the value and the gradient pass.
+  {
+    CompiledModel tm = compile_model(
+        slurp("tests/fixtures/algebra_tol_controls.tmir.sexp"), DataMap());
+    Executor tex(std::move(tm.graph));
+    tm.bind(tex);
+    tex.params_data()[0] = 4.0;
+    double gradient[1] = {};
+    bool value_threw = false;
+    try {
+      (void)tex.forward_value_only();
+    } catch (const std::domain_error&) {
+      value_threw = true;
+    }
+    check(value_threw, "solve_powell_tol max_num_steps in the value pass");
+    bool gradient_threw = false;
+    try {
+      (void)tex.gradient(gradient);
+    } catch (const std::domain_error&) {
+      gradient_threw = true;
+    }
+    check(gradient_threw,
+          "solve_powell_tol max_num_steps in the gradient pass");
+  }
+
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations
   // themselves. An infinite bound is no bound -- the element is the
   // identity and adds no jacobian term -- and the kernels used to

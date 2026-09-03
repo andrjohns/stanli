@@ -2853,16 +2853,7 @@ struct Lowering {
     auto spec = std::make_shared<AlgebraSpec>();
     spec->adopt(fun_defs);
     spec->system_name = system->name;
-    spec->solver = call->method == mir::AlgebraMethod::Newton
-                       ? AlgebraSpec::Newton
-                       : AlgebraSpec::Powell;
-    spec->variadic = true;
-    if (spec->solver == AlgebraSpec::Newton) {
-      spec->relative_tolerance = 1e-3;
-      spec->max_num_steps = 200;
-    } else {
-      spec->max_num_steps = 200;
-    }
+    spec->select(*call);
 
     std::vector<Range> active;
     int active_len = 0;
@@ -3521,12 +3512,7 @@ struct Lowering {
     auto spec = std::make_shared<AlgebraSpec>();
     spec->adopt(fun_defs);
     spec->system_name = system->name;
-    spec->solver = e.name == "algebra_solver_newton" ? AlgebraSpec::Newton
-                                                     : AlgebraSpec::Powell;
-    if (spec->solver == AlgebraSpec::Newton) {
-      spec->relative_tolerance = 1e-3;
-      spec->max_num_steps = 200;
-    }
+    spec->select(*mir::algebra_call(e.name));
     spec->x_r = std::move(xr.r);
     spec->x_i.assign(xi.i.begin(), xi.i.end());
     if (e.args.size() == 8) {
@@ -7408,12 +7394,7 @@ struct Lowering {
     auto spec = std::make_shared<AlgebraSpec>();
     spec->adopt(fun_defs);
     spec->system_name = f.name;
-    spec->solver = e.name == "algebra_solver_newton" ? AlgebraSpec::Newton
-                                                     : AlgebraSpec::Powell;
-    if (spec->solver == AlgebraSpec::Newton) {
-      spec->relative_tolerance = 1e-3;
-      spec->max_num_steps = 200;
-    }
+    spec->select(*mir::algebra_call(e.name));
     spec->x_r = actuals.at(3).require_constant_reals("algebra_solver x_r");
     spec->x_i = actuals.at(4).require_constant_ints("algebra_solver x_i");
     if (actuals.size() == 8) {

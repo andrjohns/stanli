@@ -114,8 +114,12 @@ Eigen::VectorXd solve_double(const AlgebraSpec& spec, const Desc& x_desc,
   Eigen::Map<const Eigen::VectorXd> y(y_desc.data, y_desc.len);
   if (spec.variadic) {
     if (spec.solver == AlgebraSpec::Newton)
-      return stan::math::solve_newton(MirVariadicSystem{&spec}, x, nullptr, y);
-    return stan::math::solve_powell(MirVariadicSystem{&spec}, x, nullptr, y);
+      return stan::math::solve_newton_tol(
+          MirVariadicSystem{&spec}, x, spec.relative_tolerance,
+          spec.function_tolerance, spec.max_num_steps, nullptr, y);
+    return stan::math::solve_powell_tol(
+        MirVariadicSystem{&spec}, x, spec.relative_tolerance,
+        spec.function_tolerance, spec.max_num_steps, nullptr, y);
   }
   if (spec.solver == AlgebraSpec::Newton)
     return stan::math::algebra_solver_newton(
@@ -156,10 +160,12 @@ void algebra_fwd(KernelCtx& ctx) {
       [&](const auto& y_var) {
         if (spec.variadic) {
           if (spec.solver == AlgebraSpec::Newton)
-            return stan::math::solve_newton(MirVariadicSystem{&spec}, x,
-                                            nullptr, y_var);
-          return stan::math::solve_powell(MirVariadicSystem{&spec}, x, nullptr,
-                                          y_var);
+            return stan::math::solve_newton_tol(
+                MirVariadicSystem{&spec}, x, spec.relative_tolerance,
+                spec.function_tolerance, spec.max_num_steps, nullptr, y_var);
+          return stan::math::solve_powell_tol(
+              MirVariadicSystem{&spec}, x, spec.relative_tolerance,
+              spec.function_tolerance, spec.max_num_steps, nullptr, y_var);
         }
         if (spec.solver == AlgebraSpec::Newton)
           return stan::math::algebra_solver_newton(

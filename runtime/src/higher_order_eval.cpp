@@ -354,13 +354,7 @@ bool evaluate_retained_higher_order(
     spec->adopt(funs);
     spec->system_name = callback(funs, e.args.at(0), e.name).name;
     spec->callback_name = spec->system_name;
-    spec->solver = meta->method == mir::AlgebraMethod::Newton
-                       ? AlgebraSpec::Newton
-                       : AlgebraSpec::Powell;
-    if (spec->solver == AlgebraSpec::Newton && meta->legacy) {
-      spec->relative_tolerance = 1e-3;
-      spec->max_num_steps = 200;
-    }
+    spec->select(*meta);
     std::vector<std::vector<double>> in;
     in.push_back(real_values(eval(e.args[1]), "algebra initial guess"));
     if (meta->legacy) {
@@ -391,7 +385,6 @@ bool evaluate_retained_higher_order(
       spec->prog =
           compile_rhs_args(adapted, *spec->funs(), (int)in[0].size(), args);
     } else {
-      spec->variadic = true;
       if (meta->with_tolerance) {
         spec->relative_tolerance =
             scalar_real(eval(e.args[2]), "algebra relative tolerance");
