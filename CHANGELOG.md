@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Retained loops store one version per write
+
+The structured loop executor (`STANLI_STRUCTURED_LOOPS`) decides every body
+kernel's storage when the model compiles: data-only intermediates read once
+reuse a fixed cell, values with a reverse pass are appended to a growing tape,
+and `x[i] = v` mutates its container in place with an undo log, so gradient
+memory is proportional to the work done rather than to container size times
+trip count. `while` loops no longer need a compile-time iteration bound and
+`for` loops accept bounds without a known range. `STANLI_STRUCTURED_HISTORY_BYTES`
+and `STANLI_STRUCTURED_MEMORY_PROFILE` are gone.
+
 ## 0.11.0
 
 ### Call Stan functions from Python
