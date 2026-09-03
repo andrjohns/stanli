@@ -369,21 +369,14 @@ bool evaluate_retained_higher_order(
         spec->max_num_steps =
             scalar_int(eval(e.args[7]), "algebra maximum steps");
       }
-      mir::FunDef adapted = *spec->system();
-      adapted.arg_names.insert(adapted.arg_names.begin(),
-                               "__stanli_unused_time");
-      adapted.arg_types.insert(adapted.arg_types.begin(), "UReal");
-      adapted.arg_views.insert(adapted.arg_views.begin(),
-                               mir::UnsizedView{0, mir::UnsizedLeaf::Real});
-      adapted.arg_data_only.insert(adapted.arg_data_only.begin(), true);
       std::vector<RhsArg> args(3);
       args[0].is_param = true;
       args[0].len = (int)in[1].size();
       args[1].len = (int)spec->x_r.size();
       args[2].is_int = true;
       args[2].ints = spec->x_i;
-      spec->prog =
-          compile_rhs_args(adapted, *spec->funs(), (int)in[0].size(), args);
+      spec->prog = compile_rhs_args(with_leading_time(*spec->system()),
+                                    *spec->funs(), (int)in[0].size(), args);
     } else {
       if (meta->with_tolerance) {
         spec->relative_tolerance =
@@ -396,15 +389,9 @@ bool evaluate_retained_higher_order(
       in.push_back({0.0});
       pack_data_callback(*spec, e.args, meta->callback_args_begin,
                          e.args.size(), eval);
-      mir::FunDef adapted = *spec->system();
-      adapted.arg_names.insert(adapted.arg_names.begin(),
-                               "__stanli_unused_time");
-      adapted.arg_types.insert(adapted.arg_types.begin(), "UReal");
-      adapted.arg_views.insert(adapted.arg_views.begin(),
-                               mir::UnsizedView{0, mir::UnsizedLeaf::Real});
-      adapted.arg_data_only.insert(adapted.arg_data_only.begin(), true);
-      spec->prog = compile_rhs_args(adapted, *spec->funs(), (int)in[0].size(),
-                                    spec->args);
+      spec->prog =
+          compile_rhs_args(with_leading_time(*spec->system()), *spec->funs(),
+                           (int)in[0].size(), spec->args);
     }
     const int64_t size = (int64_t)in[0].size();
     *out = invoke(OP_ALGEBRA_SOLVER, 0, std::move(in), size, {size}, spec);

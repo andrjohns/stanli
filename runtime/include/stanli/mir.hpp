@@ -552,7 +552,6 @@ enum class HigherOrderFamily : uint8_t {
 
 struct HigherOrderCall {
   HigherOrderFamily family;
-  size_t callback_arg = 0;
 };
 
 enum class QuadratureMethod : uint8_t {

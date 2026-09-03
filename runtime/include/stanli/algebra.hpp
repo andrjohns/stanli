@@ -37,12 +37,21 @@ struct AlgebraSpec : RetainedCallback {
     function_tolerance = 1e-6;
     max_num_steps = call.legacy && solver == Powell ? 1000 : 200;
   }
-
-  // Algebra systems have (unknown, parameters, real data, integer data),
-  // while RhsProgram's seed convention has an extra leading scalar time.
-  // Lowering compiles a synthetic, unused time formal so the mature ODE
-  // register machine can be shared without changing either Stan signature.
 };
+
+// Algebra systems take (unknown, ...) while RhsProgram seeds a leading
+// scalar time. A synthetic, unused time formal lets the ODE register
+// machine compile the system unchanged; the retained definition keeps the
+// source signature for the interpreter fallback.
+inline mir::FunDef with_leading_time(const mir::FunDef& system) {
+  mir::FunDef adapted = system;
+  adapted.arg_names.insert(adapted.arg_names.begin(), "__stanli_unused_time");
+  adapted.arg_types.insert(adapted.arg_types.begin(), "UReal");
+  adapted.arg_views.insert(adapted.arg_views.begin(),
+                           mir::UnsizedView{0, mir::UnsizedLeaf::Real});
+  adapted.arg_data_only.insert(adapted.arg_data_only.begin(), true);
+  return adapted;
+}
 
 }  // namespace stanli
 
