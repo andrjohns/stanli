@@ -1,7 +1,8 @@
 // Compile-time description of an ODE solve, attached to its op through the
 // graph's user-data channel. Owns everything the integrator needs that is
 // fixed at lowering time: the right-hand side's MIR, the function table it
-// may call into, the solve times, the data arrays, and the tolerances.
+// may call into, default/data-only solve times, data arrays, and tolerances.
+// Modern calls may instead supply t0 and ts as runtime operands.
 #ifndef STANLI_ODE_HPP
 #define STANLI_ODE_HPP
 

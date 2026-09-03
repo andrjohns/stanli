@@ -5,6 +5,7 @@
 #include <stanli/constfold.hpp>
 #include <stanli/cse.hpp>
 #include <stanli/dae.hpp>
+#include <stanli/higher_order_eval.hpp>
 #include <stanli/expression_layout.hpp>
 #include <stanli/inplace.hpp>
 #include <stanli/mir_message.hpp>
@@ -781,6 +782,12 @@ struct Lowering {
                  if (it == int_env.end()) return false;
                  *out = it->second;
                  return true;
+               },
+               [this](const mir::Expr& e, DataMap::Entry* out) {
+                 return evaluate_retained_higher_order(
+                     fun_defs, e,
+                     [this](const mir::Expr& arg) { return td.eval(arg); },
+                     out);
                }}};
   Graph g;
   CompiledModel out;
@@ -3103,17 +3110,26 @@ struct Lowering {
     spec->legacy = call->legacy;
     spec->stiff = solver == OdeSpec::BDF || solver == OdeSpec::ADAMS;
     stamp_ode_defaults(*spec);
-    spec->t0 = scalar_real(2, "ODE initial time");
-    DataMap::Entry times = constant(3, "ODE output times");
-    if (times.is_int) c.bail("ODE output times must be real");
-    spec->ts = std::move(times.r);
-
     const Range z0 = c.expr(e.args[1]);
     if ((!call->legacy && z0.kind != ViewKind::Vector) ||
         (call->legacy && z0.kind != ViewKind::Array))
       c.bail(e.name + ": initial state has the wrong logical type");
     const int S = z0.len;
-    const int64_t N = (int64_t)spec->ts.size();
+    Range t0{0, 1}, ts;
+    if (call->legacy) {
+      spec->t0 = scalar_real(2, "ODE initial time");
+      DataMap::Entry times = constant(3, "ODE output times");
+      if (times.is_int) c.bail("ODE output times must be real");
+      spec->ts = std::move(times.r);
+    } else {
+      t0 = c.expr(e.args[2]);
+      ts = c.expr(e.args[3]);
+      if (!c.is_scalar(t0)) c.bail("ODE initial time must be scalar");
+      if (ts.kind != ViewKind::Array)
+        c.bail("ODE output times must be an array");
+      spec->ts.resize((size_t)ts.len);
+    }
+    const int64_t N = call->legacy ? (int64_t)spec->ts.size() : ts.len;
     if (S < 0 || N < 0 || (N && S > ProgramCompiler::kMaxRegs / N))
       c.bail(e.name + ": result is too large");
 
@@ -3199,10 +3215,18 @@ struct Lowering {
     result.dims = {N, S};
     result.leaf = call->legacy ? ViewKind::Flat : ViewKind::Vector;
     const uint8_t activity = static_cast<uint8_t>(
-        (e.args[1].data_only ? 0u : 0x1u) | (theta_active ? 0x2u : 0u));
-    *out_range = c.kernel_call(OP_ODE, {z0, theta}, result,
-                               static_cast<uint8_t>(0x4u | activity), activity,
-                               {(int)N, S}, spec, e.name);
+        (e.args[1].data_only ? 0u : 0x1u) | (theta_active ? 0x2u : 0u) |
+        (!call->legacy && !e.args[2].data_only ? 0x4u : 0u) |
+        (!call->legacy && !e.args[3].data_only ? 0x8u : 0u));
+    if (call->legacy) {
+      *out_range = c.kernel_call(OP_ODE, {z0, theta}, result,
+                                 static_cast<uint8_t>(0x4u | activity),
+                                 activity, {(int)N, S}, spec, e.name);
+    } else {
+      *out_range = c.kernel_call(OP_ODE, {z0, theta, t0, ts}, result,
+                                 static_cast<uint8_t>(0x10u | activity),
+                                 activity, {(int)N, S}, spec, e.name);
+    }
     return true;
   }
 
@@ -7467,7 +7491,9 @@ struct Lowering {
   // The op tail both ODE families share: report an interpreter fallback,
   // emit OP_ODE and hand the spec to the graph.
   Val emit_ode(std::shared_ptr<OdeSpec> spec, const Val& z0, const Val& theta,
-               int64_t N, int64_t S, SlotInfo result_si) {
+               int64_t N, int64_t S, SlotInfo result_si,
+               std::optional<Val> t0 = std::nullopt,
+               std::optional<Val> ts = std::nullopt) {
     // Falling back to the interpreter is correct but ~30x slower, so make
     // it findable rather than silent.
     if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ODE"))
@@ -7495,13 +7521,20 @@ struct Lowering {
                      "stanli: ODE right-hand side %s keeps the RK oracle: %s\n",
                      spec->rhs_name.c_str(), spec->direct_rk_why.c_str());
     }
-    Val v = emit_value(OP_ODE, {z0, theta}, N * S, result_si, {(int)N, (int)S});
-    // Bit 2 says the low bits explicitly describe the C++ scalar types
-    // selected by stanc's adlevels: bit 0 for y0, bit 1 for theta. Runtime
-    // adjoint storage is deliberately not used for this decision -- a
-    // write_array value can depend on q while still instantiating on double.
-    g.ops.back().variant = (uint8_t)(0x4u | (z0.autodiff ? 0x1u : 0u) |
-                                     (theta.autodiff ? 0x2u : 0u));
+    Val v = t0 && ts ? emit_value(OP_ODE, {z0, theta, *t0, *ts}, N * S,
+                                  result_si, {(int)N, (int)S})
+                     : emit_value(OP_ODE, {z0, theta}, N * S, result_si,
+                                  {(int)N, (int)S});
+    // The new four-input form uses bit 4 as its marker and includes initial
+    // and output-time scalar types in bits 2 and 3. The old two-input form
+    // retains its bit-2 compatibility encoding.
+    g.ops.back().variant =
+        t0 && ts
+            ? (uint8_t)(0x10u | (z0.autodiff ? 0x1u : 0u) |
+                        (theta.autodiff ? 0x2u : 0u) |
+                        (t0->autodiff ? 0x4u : 0u) | (ts->autodiff ? 0x8u : 0u))
+            : (uint8_t)(0x4u | (z0.autodiff ? 0x1u : 0u) |
+                        (theta.autodiff ? 0x2u : 0u));
     g.ops.back().udata = spec.get();
     g.udata_pool.push_back(std::move(spec));
     return v;
@@ -7563,8 +7596,18 @@ struct Lowering {
     spec->stiff =
         spec->solver == OdeSpec::BDF || spec->solver == OdeSpec::ADAMS;
     stamp_ode_defaults(*spec);
-    spec->t0 = actuals.at(2).require_constant_reals("ODE initial time").at(0);
-    spec->ts = actuals.at(3).require_constant_reals("ODE output times");
+    const bool runtime_times = !e.args[2].data_only || !e.args[3].data_only;
+    Val t0, ts;
+    if (runtime_times) {
+      t0 = actuals.at(2).value();
+      ts = actuals.at(3).value();
+      if (!is_scalar(t0) || !is_array(ts.si))
+        fail(e.name + ": initial time or output times has the wrong type",
+             e.raw);
+    } else {
+      spec->t0 = actuals.at(2).require_constant_reals("ODE initial time").at(0);
+      spec->ts = actuals.at(3).require_constant_reals("ODE output times");
+    }
     if (call->with_tolerance) {
       spec->rtol =
           actuals.at(4).require_constant_reals("ODE relative tolerance").at(0);
@@ -7613,7 +7656,9 @@ struct Lowering {
 
     Val z0 = actuals.at(1).value();
     const int64_t S = g.slots[z0.slot].len;
-    const int64_t N = (int64_t)spec->ts.size();
+    const int64_t N =
+        runtime_times ? g.slots[ts.slot].len : (int64_t)spec->ts.size();
+    if (runtime_times) spec->ts.resize((size_t)N);
 
     // One contiguous theta. A model with a single parameter argument --
     // which is most of them -- gets its slot used directly and pays for
@@ -7635,6 +7680,9 @@ struct Lowering {
 
     spec->args = rargs;
     spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), (int)S, rargs);
+    if (runtime_times)
+      return emit_ode(std::move(spec), z0, theta, N, S,
+                      ode_result_view(e, N, S), t0, ts);
     return emit_ode(std::move(spec), z0, theta, N, S, ode_result_view(e, N, S));
   }
 

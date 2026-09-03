@@ -17,7 +17,12 @@ the same retained-callback and graph/Program kernel-call infrastructure.
 `ode_adjoint_region.stan` covers the CVODES adjoint solver across ordinary and
 runtime-control expressions, including active initial/output times. The
 quadrature family has focused graph/runtime-control coverage in
-`quadrature_region.stan`;
+`quadrature_region.stan`; `ode_active_times.stan` and
+`ode_time_activity.stan` cover the modern forward-solvers' independently
+active initial and output times. `higher_order_transformed_data.stan` runs the
+same retained ODE, adjoint-ODE, DAE, algebra, and quadrature kernels from the
+preparation and interpreted-write-array backends, with structural map/reduce
+calls alongside them;
 `gaussian_dlm_obs_lpdf` is explicitly unsupported, not silently skipped.
 Parameter declaration transforms remain in their dedicated tests; a transform
 being supported in a declaration does not imply its named function is callable.

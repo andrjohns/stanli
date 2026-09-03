@@ -5366,6 +5366,39 @@ int main() {
     expect_eq("reduce_sum taken gradient", gradient[0], 10.0);
   }
 
+  // The preparation interpreter routes retained higher-order calls through
+  // the same registered kernels as graph and runtime-control execution.
+  // map_rect and reduce_sum remain shared structural interpreter operations.
+  {
+    CompiledModel hm = compile_model(
+        slurp("tests/fixtures/higher_order_transformed_data.tmir.sexp"),
+        DataMap());
+    check(hm.n_unconstrained == 1, "transformed-data HOF parameter width");
+    Executor hex(std::move(hm.graph));
+    hm.bind(hex);
+    hex.params_data()[0] = 0.0;
+    double gradient[1] = {};
+    const double lp = hex.gradient(gradient);
+    const double expected = 3.0 + 10.0 + 2.0 + 0.5 + 0.2 + 0.2 + 0.2;
+    check(std::fabs(lp + 0.5 * expected * expected) < 1e-7,
+          "transformed-data HOF lp");
+    check(std::fabs(gradient[0] - expected) < 1e-7,
+          "transformed-data HOF gradient");
+    check(hm.write_array && hm.write_array->interp,
+          "higher-order write_array interpreter selected");
+    if (hm.write_array && hm.write_array->interp) {
+      WaRng rng(123);
+      const auto row =
+          hm.write_array->interp->eval(hm.constrained_env(hex), rng);
+      const std::vector<double> want{0.0, 10.0, 2.0, 0.5, 0.2, 0.2, 1e-10, 0.2};
+      check(row.size() == want.size(), "higher-order write_array row width");
+      if (row.size() == want.size())
+        for (size_t i = 0; i < row.size(); ++i)
+          check(std::fabs(row[i] - want[i]) < 1e-7,
+                "higher-order write_array value " + std::to_string(i));
+    }
+  }
+
   // Serial map_rect has statically-shaped jobs, so a runtime-control program
   // expands them into ordinary callback invocations and concatenates their
   // vector results. Shared and per-job parameters retain their adjoints;
@@ -5552,6 +5585,76 @@ int main() {
     check(std::fabs(gradient[0] + 1.0) < 1e-8, "DAE taken gate gradient");
     check(std::fabs(gradient[1]) < 1e-7, "DAE taken initial gradient");
     check(std::fabs(gradient[2] + 2.6) < 1e-7, "DAE taken rate gradient");
+  }
+
+  // Modern forward ODE times are AutoDiffable in Stan. Runtime-valued t0 and
+  // ts therefore travel as kernel operands, sharing the same graph/Program
+  // call in ordinary expressions and parameter-dependent control flow.
+  {
+    CompiledModel om = compile_model(
+        slurp("tests/fixtures/ode_active_times.tmir.sexp"), DataMap());
+    check(om.n_unconstrained == 5, "active-time ODE parameter width");
+    check(count_opcode(om, OP_ISLAND) > 0, "active-time ODE runtime island");
+    Executor oex(std::move(om.graph));
+    om.bind(oex);
+    double gradient[5] = {};
+    const double duration = std::log(0.3);
+
+    oex.params_data()[0] = -1.0;
+    oex.params_data()[1] = 2.0;
+    oex.params_data()[2] = 0.1;
+    oex.params_data()[3] = duration;
+    oex.params_data()[4] = 3.0;
+    double lp = oex.gradient(gradient);
+    const double prior = -0.5 * (1.0 + 4.0 + 0.01 + duration * duration + 9.0);
+    check(std::fabs(lp - (prior + 2.9)) < 1e-8, "active-time ODE untaken lp");
+    check(std::fabs(gradient[0] - 1.0) < 1e-7,
+          "active-time ODE untaken gate gradient");
+    check(std::fabs(gradient[1] + 1.0) < 1e-7,
+          "active-time ODE untaken initial gradient");
+    check(std::fabs(gradient[2] + 0.1) < 1e-7,
+          "active-time ODE untaken translated-time gradient");
+    check(std::fabs(gradient[3] - (-duration + 0.9)) < 1e-6,
+          "active-time ODE untaken duration gradient");
+    check(std::fabs(gradient[4] + 2.7) < 1e-6,
+          "active-time ODE untaken rate gradient");
+
+    oex.params_data()[0] = 1.0;
+    lp = oex.gradient(gradient);
+    check(std::fabs(lp - (prior + 5.8)) < 1e-8, "active-time ODE taken lp");
+    check(std::fabs(gradient[0] + 1.0) < 1e-7,
+          "active-time ODE taken gate gradient");
+    check(std::fabs(gradient[1]) < 1e-7,
+          "active-time ODE taken initial gradient");
+    check(std::fabs(gradient[2] + 0.1) < 1e-7,
+          "active-time ODE taken translated-time gradient");
+    check(std::fabs(gradient[3] - (-duration + 1.8)) < 1e-6,
+          "active-time ODE taken duration gradient");
+    check(std::fabs(gradient[4] + 2.4) < 1e-6,
+          "active-time ODE taken rate gradient");
+  }
+
+  // Preserve Stan's mixed scalar instantiations too: making an inactive time
+  // a var changes the coupled adaptive system, so t0-only and ts-only calls
+  // have distinct activity bits rather than one combined "time" bit.
+  {
+    CompiledModel om = compile_model(
+        slurp("tests/fixtures/ode_time_activity.tmir.sexp"), DataMap());
+    Executor oex(std::move(om.graph));
+    om.bind(oex);
+    const double start_log = std::log(0.3);
+    const double finish_log = std::log(0.4);
+    oex.params_data()[0] = start_log;
+    oex.params_data()[1] = finish_log;
+    double gradient[2] = {};
+    const double lp = oex.gradient(gradient);
+    const double want_lp =
+        -0.5 * (start_log * start_log + finish_log * finish_log) + 0.7;
+    check(std::fabs(lp - want_lp) < 1e-8, "mixed-time ODE lp");
+    check(std::fabs(gradient[0] - (-start_log + 0.3)) < 1e-6,
+          "t0-only ODE gradient");
+    check(std::fabs(gradient[1] - (-finish_log + 0.4)) < 1e-6,
+          "ts-only ODE gradient");
   }
 
   // The CVODES adjoint frontend uses the same retained callback packing in an
