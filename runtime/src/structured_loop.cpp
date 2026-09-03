@@ -387,16 +387,21 @@ struct Memoizer {
     std::vector<Node> grouped, run;
     const auto flush = [&] {
       if (run.empty()) return;
-      Node block;
-      block.memo = true;
-      block.children = std::move(run);
-      grouped.push_back(std::move(block));
-      ++p.node_count;
+      if (run.size() == 1 && run[0].kind != Node::KernelCall &&
+          run[0].kind != Node::Alias) {
+        run[0].memo = true;
+        grouped.push_back(std::move(run[0]));
+      } else {
+        Node block;
+        block.memo = true;
+        block.children = std::move(run);
+        grouped.push_back(std::move(block));
+        ++p.node_count;
+      }
       run.clear();
     };
     for (auto& c : n.children) {
-      if ((c.kind == Node::KernelCall || c.kind == Node::Alias) && ok &&
-          memoizable(c, 0)) {
+      if (ok && memoizable(c, 0)) {
         run.push_back(std::move(c));
         continue;
       }

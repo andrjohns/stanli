@@ -3464,7 +3464,87 @@ static std::shared_ptr<StructuredLoop> traced_while_plan(bool param_break) {
   return plan;
 }
 
+// theta * sum of the iterators with 0 < table entry < 3; the guard is the
+// short-circuit chain `table[i] > 0 && table[i] < 3` lowered as a branch.
+static std::shared_ptr<StructuredLoop> traced_chain_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int table = plan->body.add_slot(3, false);
+  const int one = scalar(*plan, 1);
+  const int three = scalar(*plan, 3);
+  const int zero = scalar(*plan, 0);
+  const int iterator = plan->body.add_slot(1, false);
+  const int picked = plan->body.add_slot(1, false);
+  const int positive = plan->body.add_slot(1, false);
+  const int again = plan->body.add_slot(1, false);
+  const int small = plan->body.add_slot(1, false);
+  const int guard = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int acc = plan->body.add_slot(1, false);
+  plan->fills.push_back({acc, {0}});
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false}, {table, 2, 0, false, true}};
+  Node index = call(*plan, OP_INDEX_DYNAMIC, {table, iterator}, picked);
+  attach(*plan, index.op, single_spec(3));
+  const int index_op = index.op;
+  Node compare = call(*plan, OP_COMPARE, {picked, zero}, positive);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+  const int compare_op = compare.op;
+  Node index2 = call(*plan, OP_INDEX_DYNAMIC, {table, iterator}, again);
+  attach(*plan, index2.op, single_spec(3));
+  const int index2_op = index2.op;
+  Node compare2 = call(*plan, OP_COMPARE, {again, three}, small);
+  const int compare2_op = compare2.op;
+  Node scale = call(*plan, OP_MUL, {theta, iterator}, term);
+  const int scale_op = scale.op;
+  plan->root = counted(
+      one, three, iterator,
+      sequence({std::move(index), std::move(compare),
+                branch(positive,
+                       sequence({std::move(index2), std::move(compare2),
+                                 alias(guard, small)}),
+                       alias(guard, zero)),
+                branch(guard,
+                       sequence({std::move(scale),
+                                 call(*plan, OP_ADD, {acc, term}, next),
+                                 alias(acc, next)}),
+                       sequence({}))}));
+  plan->outputs = {acc};
+  plan->prepare();
+  check(set_forward(plan->root, index_op, count_memo_index) &&
+            set_forward(plan->root, compare_op, count_memo_compare) &&
+            set_forward(plan->root, index2_op, count_memo_index) &&
+            set_forward(plan->root, compare2_op, count_memo_compare) &&
+            set_forward(plan->root, scale_op, record_arm_mul),
+        "find traced chain callbacks");
+  return plan;
+}
+
 static void trace_tests() {
+  {
+    auto plan = traced_chain_plan();
+    const Node& body = plan->root.children[0];
+    check(body.children.size() == 2 && body.children[0].memo &&
+              body.children[0].children.size() == 3 &&
+              body.children[0].children[2].kind == Node::If &&
+              body.children[0].memo_outs.empty() && body.children[1].trace &&
+              plan->memo_count == 1 && plan->trace_count == 1,
+          "guard chain groups its data-only branch into one memo node");
+    memo_index_calls = memo_compare_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {3}));
+    const Evaluation first = evaluate_traced(executor, .25, {1, 0, 2});
+    close(first.value, 1, "guard chain first value");
+    close(first.gradient[0], 4, "guard chain first gradient");
+    check(memo_index_calls == 5 && memo_compare_calls == 5,
+          "guard chain records both comparisons");
+    const Evaluation second = evaluate_traced(executor, .5, {1, 0, 2});
+    close(second.value, 2, "guard chain replayed value");
+    close(second.gradient[0], 4, "guard chain replayed gradient");
+    check(traced_arm_iterators == std::vector<double>{1, 3},
+          "guard chain replays the recorded arms");
+    check(memo_index_calls == 5 && memo_compare_calls == 5,
+          "guard chain replays without guard kernel calls");
+  }
   {
     auto plan = traced_branch_plan(false);
     const Node* guard = find_memo(plan->root);
