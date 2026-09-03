@@ -592,6 +592,15 @@ struct Segmenter {
                                 [](const IslandProg::LiveIn& in) {
                                   return in.active;
                                 });
+    if (std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS"))
+      std::fprintf(stderr,
+                   "stanli_structured segment: items=%zu instr=%zu calls=%zu "
+                   "regs=%d ins=%zu outs=%zu adj=%zu adj_regs=%d active=%d\n",
+                   items.size(), segment.program.code.size(),
+                   segment.program.calls.size(), segment.program.n_regs,
+                   segment.ins.size(), segment.outs.size(),
+                   segment.program.adj.code.size(), segment.program.adj.n_regs,
+                   result.active ? 1 : 0);
     p.segments.push_back(std::move(segment));
     return true;
   }
@@ -623,6 +632,12 @@ struct Segmenter {
         }
         const size_t stop = std::max(j, i + 1);
         while (i < stop) grouped.push_back(std::move(n.children[i++]));
+      }
+      if (grouped.size() == 1 && grouped[0].kind == Node::Segment) {
+        Node only = std::move(grouped[0]);
+        n = std::move(only);
+        --p.node_count;
+        return;
       }
       n.children = std::move(grouped);
     }
@@ -736,14 +751,10 @@ void classify(StructuredLoop& p) {
   };
   walk(p.root, loops, mark_written);
 
-  std::vector<char> inplace_base(slots, 0), active_reader(slots, 0);
   auto mark_invariant = [&](Node& n, const std::vector<int>& enclosing) {
-    if (n.kind != Node::KernelCall) return;
+    if (n.kind != Node::KernelCall || n.storage == Node::InPlace) return;
     const Op& op = p.body.ops[n.op];
-    if (n.storage == Node::InPlace) inplace_base[op.in[0]] = 1;
-    if (n.active)
-      for (int k = 0; k < op.n_in; ++k) active_reader[op.in[k]] = 1;
-    if (n.storage == Node::InPlace || is_effectful_op(op.opcode)) return;
+    if (is_effectful_op(op.opcode)) return;
     for (int loop : enclosing) {
       bool varies = false;
       for (int k = 0; k < op.n_in; ++k) varies |= written[loop][op.in[k]] != 0;
@@ -754,6 +765,28 @@ void classify(StructuredLoop& p) {
     }
   };
   walk(p.root, loops, mark_invariant);
+
+  p.segments.clear();
+  if (!std::getenv("STANLI_NO_STRUCTURED_SEGMENTS"))
+    form_segments(p, uses, active);
+  p.site_count = 0;
+  auto renumber = [&](Node& n, const std::vector<int>&) {
+    if (n.kind == Node::KernelCall)
+      n.site = static_cast<uint32_t>(p.site_count++);
+  };
+  walk(p.root, loops, renumber);
+
+  // A segment's backward reads the frame it copied its inputs into, so only
+  // the kernel calls left standing hold their inputs' versions.
+  std::vector<char> inplace_base(slots, 0), active_reader(slots, 0);
+  auto mark_readers = [&](Node& n, const std::vector<int>&) {
+    if (n.kind != Node::KernelCall) return;
+    const Op& op = p.body.ops[n.op];
+    if (n.storage == Node::InPlace) inplace_base[op.in[0]] = 1;
+    if (n.active)
+      for (int k = 0; k < op.n_in; ++k) active_reader[op.in[k]] = 1;
+  };
+  walk(p.root, loops, mark_readers);
 
   const auto retained = [&](int s) {
     return uses.alias[s] || uses.target[s] || uses.output[s] ||
@@ -787,16 +820,6 @@ void classify(StructuredLoop& p) {
             add(add(length(p, op.out), length(p, op.out2)), n.kernel_scratch));
   };
   walk(p.root, loops, classify_transient);
-
-  p.segments.clear();
-  if (!std::getenv("STANLI_NO_STRUCTURED_SEGMENTS"))
-    form_segments(p, uses, active);
-  p.site_count = 0;
-  auto renumber = [&](Node& n, const std::vector<int>&) {
-    if (n.kind == Node::KernelCall)
-      n.site = static_cast<uint32_t>(p.site_count++);
-  };
-  walk(p.root, loops, renumber);
 }
 
 void compare_forward(KernelCtx& c) {
@@ -1715,8 +1738,11 @@ struct Execution {
       handles = static_cast<int64_t>(s.handles.size());
       for (const auto& in : segment.ins) s.handles.push_back(s.bindings[in.slot]);
     }
-    for (const auto& in : segment.ins)
-      std::copy_n(value(in.slot), in.len, frame + in.reg);
+    for (const auto& in : segment.ins) {
+      const double* v = value(in.slot);
+      double* r = frame + in.reg;
+      for (int i = 0; i < in.len; ++i) r[i] = v[i];
+    }
     run_program(program, frame, outer.eval_state);
     const int64_t base = n.active ? reserve_adjoint(program.adj.n_regs) : -1;
     for (const auto& out : segment.outs)

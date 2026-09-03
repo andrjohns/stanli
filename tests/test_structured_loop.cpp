@@ -4311,8 +4311,7 @@ static void segment_tests() {
               count_kind(plan->root, Node::Alias) == 1,
           "recurrence body is one segment node");
     const Node* loop = find_kind(plan->root, Node::For);
-    check(loop && loop->children[0].children.size() == 1 &&
-              loop->children[0].children[0].kind == Node::Segment,
+    check(loop && loop->children[0].kind == Node::Segment,
           "segment node replaces the loop body");
     if (!plan->segments.empty()) {
       const Segment& segment = plan->segments[0];
