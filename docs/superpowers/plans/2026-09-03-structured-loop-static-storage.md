@@ -268,3 +268,73 @@ by that kernel's backward).
 Retained-vs-unrolled comparisons of `lp` and gradients use a relative
 tolerance of 1e-12: the region sums its target leaves with its own six-way
 tree, so bitwise parity with the unrolled reduction is not expected.
+
+## Addendum: memoizing data-only subtrees across evaluations
+
+Measured after the rewrite on ctsem N=33: 11.1M kernel calls per gradient, of
+which 10.8M are inactive and 9.7M Transient. The active work is 210K records
+and 127K in-place updates. Almost all of the inactive work is data-only
+bookkeeping (`for (ri in 1:size(ms))` scans with a `while (whenyes == 0 ...)`
+inside, row-boundary searches) whose values and control are identical in every
+evaluation because they depend on data only. The unrolled path folds all of
+it at compile time; the retained loop re-executes it per gradient, and the
+one version per loop iteration and per persistent inactive value is where the
+432 MB (vs 86 MB before the rewrite) went.
+
+Fix: memoize whole data-only subtrees by visit ordinal, persisting across
+evaluations in the executor state.
+
+### Static analysis (prepare)
+
+- `Import.data_only` comes from the parent `Val::si.param_free`.
+- `param_dep[slot]` fixed point over the tree, independent of `active`:
+  imports start at `!data_only`; every KernelCall (backward or not) makes
+  `out`/`out2` param_dep if any input is; Alias propagates src to dst; InPlace
+  makes the base param_dep if the rhs or any selector is. Control dependence:
+  a write (kernel out/out2, alias dst, in-place base, for iterator) executed
+  under any enclosing If/While whose condition slot is param_dep, or For whose
+  bound slots are param_dep, makes the written slot param_dep.
+- A node is `memo` when it is a maximal such node: it is a For, While, If, or
+  a Sequence created by grouping a maximal run of consecutive KernelCall/Alias
+  children of one Sequence, and inside it every KernelCall has all inputs
+  data-only and is not `is_effectful_op`, there is no InPlace, no Target, no
+  Break/Continue that would leave the node (a Break/Continue whose target loop
+  is inside the node is fine), every If/While condition and For bound is
+  data-only, and every enclosing If/While/For up to the root is data-only
+  controlled. Do not mark a child of a memo node.
+- `memo_outs`: the slots written inside the node (kernel out/out2, alias dst,
+  for iterator) that are read anywhere outside it (kernel input, alias src,
+  control, target, output). `memo_index` numbers memo nodes densely;
+  `memo_count` goes on the payload.
+
+Group runs before classification so the tree seen by the executor has the
+grouping Sequences. A run of length one is still grouped (a lone data-only
+kernel whose result feeds a parameter-dependent branch is worth skipping).
+
+### Executor
+
+`LoopState` gains `std::vector<std::vector<double>> memo_tape` (one per memo
+node, entries of `memo_outs` total length, persistent across evaluations),
+`std::vector<int64_t> memo_ordinal` (reset per forward), and `bool
+memo_ready` (false until one forward completes; never cleared afterwards, a
+failed later forward does not invalidate data-only values). `release()` does
+not touch the tapes.
+
+Forward, on reaching a memo node m: `k = memo_ordinal[m]++`.
+- If `memo_ready`: require `k < entries(m)` else throw
+  `logic_error("structured memo trace mismatch")`; for each live-out slot
+  `bindings[slot] = make_version(tape[m].data() + k * total + offset, -1)`;
+  return Normal without visiting children.
+- Else: execute the node normally; afterwards append the live-out values
+  (`value(slot)`, `len` each) to `tape[m]`. Pointers into `tape[m]` are only
+  handed out once `memo_ready`, so growth during the first forward is safe.
+
+Set `memo_ready = true` at the end of a successful forward. Memoized nodes
+create no records, so backward is unchanged.
+
+### Expected effect
+
+ctsem N=33: the `while (whenyes ...)` loop (4.8M calls) and the per-row
+condition cones (5 kernels x 700K visits) become one ordinal load and one
+version per visit. Kernel calls should drop from 11.1M to well under 2M and
+RSS back below the pre-rewrite 86 MB.
