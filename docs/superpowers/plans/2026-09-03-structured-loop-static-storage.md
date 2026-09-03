@@ -348,48 +348,71 @@ followed by an active arm, `for (ri in 1:size(ms)) if (m == ms[ri,7] && ...)
 `If` reads it, so every visit restores a value and creates or moves a version.
 The unrolled path keeps only the iterations whose guard is true.
 
-The decision itself is data-only, so record it instead of the value.
+The decision itself is data-only, so record it instead of the value, and
+record which iterations of a data-only loop do anything at all.
 
 ### Static
 
 In `group()`, when a node is reached with `ok == true` (every enclosing
 If/While/For is data-only controlled) and is not memoizable as a whole:
 
-- An `If` with `!controlled(n)` gets `trace = true` and a dense `trace_index`.
+- An `If` with `!controlled(n)` gets `trace = true`.
+- A `For` with `!controlled(n)` whose body contains no parameter-dependent
+  control (every If/While/For under it is `!controlled`) gets `trace = true`.
+  The restriction keeps the set of effective iterations independent of the
+  parameters.
 - A `While` with `!controlled(n)` whose condition child `children[0]` is
-  memoizable gets `trace = true` and a `trace_index`.
+  memoizable, and whose slots written there have no consumer outside it other
+  than the loop's own condition read, gets `trace = true`; replay skips
+  `children[0]` entirely.
 
-`For` nodes are not traced. Reads of `n.condition` by a traced node are not
-outside reads in `number()` (subtract them from `uses.control`), so a guard
-cone whose only consumer is a traced node has no live-outs.
-
-As implemented: a `While` is traced only when nothing outside `children[0]`
-other than the loop's own condition read consumes a slot written there, since
-replay skips `children[0]` entirely. `group()` also merges any run of
-consecutive memoizable children (not just KernelCall/Alias) into one memo
-node; ctsem's `&&` guards lower to chains of data-only `If`s that otherwise
-each restore a live-out for the next.
+Reads of `n.condition` (or the For bounds) by a traced node are not outside
+reads in `number()`, so a guard or bound cone whose only consumer is a traced
+node has no live-outs. `group()` merges any run of consecutive memoizable
+children, not just KernelCall/Alias, into one memo node: ctsem's `&&` guards
+lower to chains of data-only `If`s that would otherwise each restore a
+live-out for the next. `trace_count` on the payload counts traced nodes.
 
 ### Executor
 
-`LoopState` gets one trace per traced node (`std::vector<uint8_t>` for If
-arms, `std::vector<int64_t>` for While iteration counts), an ordinal per
-traced node reset every forward, filled while `!memo_ready` and read
-afterwards; a mismatch throws `logic_error("structured control trace
-mismatch")`.
+`LoopState` holds one sequential control trace, `std::vector<int64_t> trace`
+with a read position reset every forward, filled while `!memo_ready` and read
+afterwards. Replay order equals recording order because every traced decision
+sits under data-only control. A mismatch throws
+`logic_error("structured control trace mismatch")`.
 
-- Traced `If`, replaying: read the arm from the trace and run that child
-  without evaluating `value(condition)`.
-- Traced `While`, replaying: read the count `c` and run `children[1]` `c`
-  times without running `children[0]`; Break inside the body still exits.
-- Memo node with no live-outs, replaying: return `Normal` immediately without
-  touching its ordinal (each tape is indexed independently).
+An effects counter `effects` is incremented by everything observable: a kernel
+call that actually runs (Transient, Retained or InPlace), an Alias, a Target,
+Break, Continue, and a memo node with live-outs whether recording or
+restoring. Work inside a memo node without live-outs is not observable: its
+run during recording leaves the counter unchanged, and replay skips it.
 
-Recording: the traced If appends the arm it takes; the traced While appends
-the number of body executions.
+Recording:
 
-### Expected effect
+- Traced `If`: append the arm taken.
+- Traced `While`: append a placeholder at entry, run as usual counting body
+  executions, patch the count in at exit.
+- Traced `For`: append a placeholder; for every iteration remember the trace
+  length and the effects counter, append the iterator value, run the body,
+  and if the effects counter did not move truncate the trace back to the
+  remembered length (dropping the iteration's own inner decisions), else count
+  it effective. Patch the effective count in at exit. Break is an effect, so
+  the breaking iteration is kept.
 
-The ms-scan iteration becomes an iterator write, a skipped guard cone and one
-trace byte. Memo restores should fall from 8M to well under 1M per gradient
-and the tape from 66 MB to a few MB.
+Replay:
+
+- Traced `If`: read the arm and run that child without reading the condition.
+- Traced `While`: read the count `c` and run `children[1]` `c` times without
+  running `children[0]`; Break inside the body still exits.
+- Traced `For`: read the effective count, then for each read the iterator
+  value, bind the iterator (cell or fresh version as today) and run the body;
+  the bounds are not read.
+- Memo node with no live-outs: return `Normal` immediately without touching
+  its ordinal.
+
+### Measured effect (ctsem N=33)
+
+Before: `memo_restores=8051046 memo_tape=8198097`, 88 ms per gradient, 298 MB.
+After: `memo_restores=95841 memo_tape=176387 traces=495 trace=648813
+visits=1988500`, 27 ms per gradient, 188 MB. Parity with main is bitwise at
+two points and across six replayed points in one process.
