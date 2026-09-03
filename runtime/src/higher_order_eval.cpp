@@ -37,20 +37,24 @@ int scalar_int(const Entry& value, const std::string& role) {
   return value.i[0];
 }
 
+std::vector<double> promoted_reals(const Entry& value) {
+  if (!value.is_int) return value.r;
+  return std::vector<double>(value.i.begin(), value.i.end());
+}
+
 std::vector<double> storage_order(const mir::Expr& expr, const Entry& value) {
-  if (value.is_int) throw CompileError("real callback argument is integer");
+  std::vector<double> values = promoted_reals(value);
   const bool matrix = expr.type_ == "UMatrix";
   const bool nested_matrix =
       expr.unsized.depth != 0 && expr.unsized.leaf == mir::UnsizedLeaf::Matrix;
-  if (matrix || value.dims.size() <= 1) return value.r;
+  if (matrix || value.dims.size() <= 1) return values;
   const size_t outer_rank =
       value.dims.size() - (nested_matrix ? size_t{2} : size_t{0});
-  return graph_container_order(value.r, value.dims, outer_rank);
+  return graph_container_order(values, value.dims, outer_rank);
 }
 
-std::vector<double> real_values(const Entry& value, const std::string& role) {
-  if (value.is_int) throw CompileError(role + " must be real-valued");
-  return value.r;
+std::vector<double> real_values(const Entry& value, const std::string&) {
+  return promoted_reals(value);
 }
 
 std::vector<int> int_values(const Entry& value, const std::string& role) {

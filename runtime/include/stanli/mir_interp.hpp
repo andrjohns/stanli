@@ -322,18 +322,19 @@ class MirInterp {
         }
         if (st.lhs_idx.empty()) {
           Value v = eval(st.rhs);
-          // A plain `int` name stays int for its whole lifetime; the RHS's
-          // own arithmetic (e.g. `sumnt2 += nts[i] * nts[i]`) does not, since
-          // MirInterp's binary ops answer in real registers. Re-declaring an
-          // int with an int-valued init already coerces (above); a later
-          // whole-variable reassignment needs the same coercion, or the next
-          // eval_int on this name (a parameter or array size, say) sees a
-          // real entry and fails as unknown.
+          // A declared numeric type stays fixed for its whole lifetime. The
+          // RHS's own representation can differ: MirInterp's binary ops use
+          // real registers, while an all-integer array literal is tagged int.
+          // Preserve int destinations as before, and apply Stan's implicit
+          // int-to-real promotion when assigning into a real destination.
           const Value* existing = find(st.lhs);
           if (existing && existing->is_int && !v.is_int) {
             v.is_int = true;
             v.i.clear();
             for (const T& x : v.r) v.i.push_back((int)val(x));
+          } else if (existing && !existing->is_int && v.is_int) {
+            v.is_int = false;
+            v.i.clear();
           }
           env_[st.lhs] = std::move(v);
           return;
