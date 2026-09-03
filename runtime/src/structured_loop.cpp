@@ -596,6 +596,13 @@ void classify(StructuredLoop& p) {
   walk(p.root, loops, split_memo_outs);
 
   auto classify_transient = [&](Node& n, const std::vector<int>&) {
+    if (n.kind == Node::For) {
+      if (retained(n.iterator)) return;
+      n.storage = Node::Transient;
+      n.workspace = p.workspace_size;
+      p.workspace_size = add(p.workspace_size, 1);
+      return;
+    }
     if (n.kind != Node::KernelCall || n.active || n.storage == Node::InPlace)
       return;
     const Op& op = p.body.ops[n.op];
@@ -1086,10 +1093,11 @@ struct LoopState : KernelState {
   std::vector<int64_t> target_refs;
   std::vector<int32_t> owner;
   std::vector<int64_t> node_generation, node_version, node_version2;
-  std::vector<int64_t> loop_generation;
+  std::vector<int64_t> loop_generation, loop_version;
   std::vector<KernelCtx> ctx;
   std::vector<const Node*> sites;
   std::vector<uint32_t> transient_sites;
+  std::vector<const Node*> transient_loops;
   std::vector<double> adjoints;
   std::vector<double> target_work;
   std::vector<std::vector<double>> memo_tape;
@@ -1110,6 +1118,7 @@ struct LoopState : KernelState {
         node_version(plan.site_count, -1),
         node_version2(plan.site_count, -1),
         loop_generation(plan.loop_count, 0),
+        loop_version(plan.loop_count, -1),
         ctx(plan.site_count),
         sites(plan.site_count, nullptr),
         memo_tape(plan.memo_count),
@@ -1164,6 +1173,8 @@ struct LoopState : KernelState {
       int64_t& stride = memo_stride[static_cast<size_t>(n.memo_index)];
       for (int slot : n.memo_outs) stride = add(stride, p.body.slots[slot].len);
     }
+    if (n.kind == Node::For && n.storage == Node::Transient)
+      transient_loops.push_back(&n);
     for (const auto& c : n.children) collect(c);
   }
 
@@ -1384,6 +1395,16 @@ struct Execution {
             hi > std::numeric_limits<int32_t>::max())
           throw std::logic_error("structured loop invalid integer bounds");
         const int64_t count = hi >= lo ? static_cast<int64_t>(hi - lo) + 1 : 0;
+        if (n.storage == Node::Transient) {
+          const int64_t version = s.loop_version[n.loop_index];
+          double* iterator = s.versions[static_cast<size_t>(version)].value;
+          for (int64_t i = 0; i < count; ++i) {
+            *iterator = lo + static_cast<double>(i);
+            s.bindings[n.iterator] = version;
+            if (forward(n.children[0]) == Break) break;
+          }
+          return Normal;
+        }
         for (int64_t i = 0; i < count; ++i) {
           double* iterator = s.arena.allocate(1);
           *iterator = lo + static_cast<double>(i);
@@ -1536,6 +1557,9 @@ void structured_loop_forward(KernelCtx& ctx) {
     if (op.out2 >= 0)
       s.node_version2[site] = e.make_version(w + p.body.slots[op.out].len, -1);
   }
+  for (const Node* n : s.transient_loops)
+    s.loop_version[n->loop_index] =
+        e.make_version(s.workspace.data() + n->workspace, -1);
   std::fill(s.node_generation.begin(), s.node_generation.end(), -1);
   std::fill(s.loop_generation.begin(), s.loop_generation.end(), 0);
   std::fill(s.memo_ordinal.begin(), s.memo_ordinal.end(), 0);

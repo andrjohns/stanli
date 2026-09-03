@@ -2659,6 +2659,78 @@ static void control_tests() {
         "retry after a transient failure rebuilds clean state");
 }
 
+static std::vector<double*> iterator_inputs;
+static void record_iterator_add(KernelCtx& context) {
+  iterator_inputs.push_back(context.in[0].data);
+  find_kernel(OP_ADD)->forward(context);
+}
+static void record_iterator_mul(KernelCtx& context) {
+  iterator_inputs.push_back(context.in[1].data);
+  find_kernel(OP_MUL)->forward(context);
+}
+
+static void iterator_cell_tests() {
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int theta = plan->body.add_slot(1, false);
+    const int lower = scalar(*plan, 1);
+    const int upper = scalar(*plan, 3);
+    const int iterator = plan->body.add_slot(1, false);
+    const int zero = scalar(*plan, 0);
+    const int first = plan->body.add_slot(1, false);
+    const int result = plan->body.add_slot(1, false);
+    plan->imports = {{theta, 0, 0, true}};
+    Node read = call(*plan, OP_ADD, {iterator, zero}, first);
+    const int read_op = read.op;
+    plan->root = counted(lower, upper, iterator,
+                         sequence({std::move(read), alias(result, first)}));
+    plan->outputs = {result};
+    plan->prepare();
+    check(plan->root.storage == Node::Transient,
+          "iterator read only in place keeps one cell");
+    check(set_forward(plan->root, read_op, record_iterator_add),
+          "find iterator cell callback");
+    iterator_inputs.clear();
+    Executor executor(outer(plan));
+    close(evaluate(executor, 0, 0).value, 3, "iterator cell final value");
+    check(iterator_inputs.size() == 3 && one_address(iterator_inputs),
+          "iterator cell is reused across iterations");
+  }
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int theta = plan->body.add_slot(1, false);
+    const int lower = scalar(*plan, 1);
+    const int upper = scalar(*plan, 3);
+    const int iterator = plan->body.add_slot(1, false);
+    const int zero = scalar(*plan, 0);
+    const int term = plan->body.add_slot(1, false);
+    const int result = plan->body.add_slot(1, false);
+    const int next = plan->body.add_slot(1, false);
+    plan->imports = {{theta, 0, 0, true}};
+    Node scale = call(*plan, OP_MUL, {theta, iterator}, term);
+    const int scale_op = scale.op;
+    plan->root =
+        sequence({alias(result, zero),
+                  counted(lower, upper, iterator,
+                          sequence({std::move(scale),
+                                    call(*plan, OP_ADD, {result, term}, next),
+                                    alias(result, next)}))});
+    plan->outputs = {result};
+    plan->prepare();
+    check(plan->root.children[1].storage == Node::Retained,
+          "iterator read by active work keeps every version");
+    check(set_forward(plan->root, scale_op, record_iterator_mul),
+          "find retained iterator callback");
+    iterator_inputs.clear();
+    Executor executor(outer(plan));
+    const Evaluation traced = evaluate(executor, .25, 0);
+    close(traced.value, 1.5, "retained iterator value");
+    close(traced.gradient[0], 6, "retained iterator gradient");
+    check(iterator_inputs.size() == 3 && distinct_addresses(iterator_inputs),
+          "retained iterator has one version per iteration");
+  }
+}
+
 static void concurrency_tests() {
   auto reference_plan = recurrence(64);
   Executor reference(outer(reference_plan));
@@ -3294,6 +3366,7 @@ int main() {
   integer_result_tests();
   loop_invariant_reuse_tests();
   control_tests();
+  iterator_cell_tests();
   concurrency_tests();
   failure_tests();
   refusal_tests();
