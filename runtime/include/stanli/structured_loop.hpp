@@ -58,8 +58,11 @@ struct StructuredLoop {
     enum Storage { Retained, Transient, InPlace } storage = Retained;
     bool active = false;
     bool memo = false;
+    // If/While whose data-only decision is recorded once and replayed.
+    bool trace = false;
     int invariant_loop = -1;
     int memo_index = -1;
+    int trace_index = -1;
     uint32_t site = ~uint32_t{0};
     int64_t workspace = -1;
     int64_t kernel_scratch = 0;
@@ -92,7 +95,8 @@ struct StructuredLoop {
   Node root;
   int64_t initial_size = 0;
   int64_t workspace_size = 0;
-  size_t node_count = 0, site_count = 0, loop_count = 0, memo_count = 0;
+  size_t node_count = 0, site_count = 0, loop_count = 0, memo_count = 0,
+         trace_count = 0;
 
   // Validate, number sites and loops, and decide every KernelCall's storage
   // class. Throws on malformed trees; builders publish only after success.

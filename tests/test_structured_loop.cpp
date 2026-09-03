@@ -3349,6 +3349,232 @@ static void memo_tests() {
   }
 }
 
+static std::vector<double> traced_arm_iterators;
+static void record_arm_mul(KernelCtx& context) {
+  traced_arm_iterators.push_back(context.in[1].data[0]);
+  find_kernel(OP_MUL)->forward(context);
+}
+
+static const Node* find_memo(const Node& node) {
+  if (node.memo) return &node;
+  for (const auto& child : node.children)
+    if (const Node* found = find_memo(child)) return found;
+  return nullptr;
+}
+
+// theta * sum of the iterators whose table entry is positive; `reuse_guard`
+// also adds theta * guard after the branch so the guard value stays live.
+static std::shared_ptr<StructuredLoop> traced_branch_plan(bool reuse_guard) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int table = plan->body.add_slot(3, false);
+  const int one = scalar(*plan, 1);
+  const int three = scalar(*plan, 3);
+  const int zero = scalar(*plan, 0);
+  const int iterator = plan->body.add_slot(1, false);
+  const int picked = plan->body.add_slot(1, false);
+  const int guard = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int acc = plan->body.add_slot(1, false);
+  plan->fills.push_back({acc, {0}});
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false}, {table, 2, 0, false, true}};
+  Node index = call(*plan, OP_INDEX_DYNAMIC, {table, iterator}, picked);
+  attach(*plan, index.op, single_spec(3));
+  const int index_op = index.op;
+  Node compare = call(*plan, OP_COMPARE, {picked, zero}, guard);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+  const int compare_op = compare.op;
+  Node scale = call(*plan, OP_MUL, {theta, iterator}, term);
+  const int scale_op = scale.op;
+  std::vector<Node> body;
+  body.push_back(std::move(index));
+  body.push_back(std::move(compare));
+  body.push_back(branch(guard,
+                        sequence({std::move(scale),
+                                  call(*plan, OP_ADD, {acc, term}, next),
+                                  alias(acc, next)}),
+                        sequence({})));
+  if (reuse_guard) {
+    const int bonus = plan->body.add_slot(1, false);
+    const int bumped = plan->body.add_slot(1, false);
+    body.push_back(call(*plan, OP_MUL, {theta, guard}, bonus));
+    body.push_back(call(*plan, OP_ADD, {acc, bonus}, bumped));
+    body.push_back(alias(acc, bumped));
+  }
+  plan->root = counted(one, three, iterator, sequence(std::move(body)));
+  plan->outputs = {acc};
+  plan->prepare();
+  check(set_forward(plan->root, index_op, count_memo_index) &&
+            set_forward(plan->root, compare_op, count_memo_compare) &&
+            set_forward(plan->root, scale_op, record_arm_mul),
+        "find traced branch callbacks");
+  return plan;
+}
+
+static Evaluation evaluate_traced(Executor& executor, double theta,
+                                  std::array<double, 3> table) {
+  std::copy(table.begin(), table.end(), executor.value_ptr(2));
+  traced_arm_iterators.clear();
+  return evaluate(executor, theta, 0);
+}
+
+// theta^(k+1): x starts at theta and is multiplied by theta while j < k.
+// `param_break` leaves the loop early once x exceeds 10.
+static std::shared_ptr<StructuredLoop> traced_while_plan(bool param_break) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int k = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int ten = scalar(*plan, 10);
+  const int j = plan->body.add_slot(1, false);
+  plan->fills.push_back({j, {0}});
+  const int more = plan->body.add_slot(1, false);
+  const int x = plan->body.add_slot(1, false);
+  const int grown = plan->body.add_slot(1, false);
+  const int bumped = plan->body.add_slot(1, false);
+  const int large = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false}, {k, 2, 0, false, true}};
+  Node compare = call(*plan, OP_COMPARE, {j, k}, more);
+  const int compare_op = compare.op;
+  Node grow = call(*plan, OP_MUL, {x, theta}, grown);
+  const int grow_op = grow.op;
+  std::vector<Node> body;
+  body.push_back(std::move(grow));
+  body.push_back(alias(x, grown));
+  if (param_break) {
+    Node limit = call(*plan, OP_COMPARE, {x, ten}, large);
+    plan->body.ops[static_cast<size_t>(limit.op)].variant = 2;
+    Node exit;
+    exit.kind = Node::Break;
+    body.push_back(std::move(limit));
+    body.push_back(branch(large, std::move(exit), sequence({})));
+  }
+  body.push_back(call(*plan, OP_INT_ARITH, {j, one}, bumped));
+  body.push_back(alias(j, bumped));
+  plan->root =
+      sequence({alias(x, theta),
+                while_loop(more, sequence({std::move(compare)}),
+                           sequence(std::move(body)))});
+  plan->outputs = {x};
+  plan->prepare();
+  check(set_forward(plan->root, compare_op, count_memo_compare) &&
+            set_forward(plan->root, grow_op, count_mul_forward),
+        "find traced while callbacks");
+  return plan;
+}
+
+static void trace_tests() {
+  {
+    auto plan = traced_branch_plan(false);
+    const Node* guard = find_memo(plan->root);
+    const Node* branch_node = find_kind(plan->root, Node::If);
+    check(guard && guard->children.size() == 2 && guard->memo_outs.empty(),
+          "guard cone feeding only a traced branch has no live-outs");
+    check(branch_node && branch_node->trace && plan->trace_count == 1,
+          "data-only branch with an active arm is traced");
+    memo_index_calls = memo_compare_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {3}));
+    const Evaluation first = evaluate_traced(executor, .25, {1, 0, 2});
+    close(first.value, 1, "traced branch first value");
+    close(first.gradient[0], 4, "traced branch first gradient");
+    check(traced_arm_iterators == std::vector<double>{1, 3},
+          "traced branch records the data-selected arms");
+    check(memo_index_calls == 3 && memo_compare_calls == 3,
+          "traced branch evaluates its guard once per trip when recording");
+    const Evaluation second = evaluate_traced(executor, .5, {1, 0, 2});
+    close(second.value, 2, "traced branch replayed value");
+    close(second.gradient[0], 4, "traced branch replayed gradient");
+    check(traced_arm_iterators == std::vector<double>{1, 3},
+          "traced branch replays the recorded arms");
+    check(memo_index_calls == 3 && memo_compare_calls == 3,
+          "traced branch replays without guard kernel calls");
+  }
+  {
+    auto plan = traced_while_plan(false);
+    const Node* loop = find_kind(plan->root, Node::While);
+    check(loop && loop->trace && plan->trace_count == 1 &&
+              loop->children[0].memo && loop->children[0].memo_outs.empty(),
+          "data-only while condition with an active body is traced");
+    memo_compare_calls = 0;
+    counted_forward_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {1}));
+    const Evaluation first = evaluate_memo(executor, .5, 3);
+    close(first.value, .0625, "traced while first value");
+    close(first.gradient[0], .5, "traced while first gradient");
+    check(memo_compare_calls == 4 && counted_forward_calls == 3,
+          "traced while records the condition per test");
+    const Evaluation second = evaluate_memo(executor, .25, 3);
+    close(second.value, .00390625, "traced while replayed value");
+    close(second.gradient[0], .0625, "traced while replayed gradient");
+    check(memo_compare_calls == 4 && counted_forward_calls == 6,
+          "traced while replays the body count without condition calls");
+  }
+  {
+    auto plan = memo_branch_plan(true);
+    const Node* branch_node = find_kind(plan->root, Node::If);
+    check(branch_node && !branch_node->trace && plan->trace_count == 0,
+          "parameter-dependent branch is not traced");
+    auto escaping = traced_while_plan(true);
+    const Node* loop = find_kind(escaping->root, Node::While);
+    const Node* exit = find_kind(escaping->root, Node::If);
+    check(loop && !loop->trace && exit && !exit->trace &&
+              escaping->trace_count == 0,
+          "while with a parameter-dependent break is not traced");
+    Executor executor(outer(escaping, {1, 1}, {1}));
+    const Evaluation full = evaluate_memo(executor, .5, 3);
+    close(full.value, .0625, "untraced while full value");
+    close(full.gradient[0], .5, "untraced while full gradient");
+    const Evaluation early = evaluate_memo(executor, 3, 3);
+    close(early.value, 27, "untraced while breaks on the second evaluation");
+    close(early.gradient[0], 27, "untraced while early gradient");
+  }
+  {
+    auto plan = traced_branch_plan(true);
+    const Node* guard = find_memo(plan->root);
+    const Node* branch_node = find_kind(plan->root, Node::If);
+    check(guard && guard->memo_outs.size() == 1 && branch_node &&
+              branch_node->trace && guard->memo_outs[0] == branch_node->condition,
+          "guard read by an active kernel stays a live-out");
+    memo_index_calls = memo_compare_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {3}));
+    const Evaluation first = evaluate_traced(executor, .25, {1, 0, 2});
+    close(first.value, 1.5, "live guard first value");
+    close(first.gradient[0], 6, "live guard first gradient");
+    const Evaluation second = evaluate_traced(executor, .5, {1, 0, 2});
+    close(second.value, 3, "live guard replayed value");
+    close(second.gradient[0], 6, "live guard replayed gradient");
+    check(traced_arm_iterators == std::vector<double>{1, 3},
+          "live guard replays the recorded arms");
+    check(memo_index_calls == 3 && memo_compare_calls == 3,
+          "live guard replays without guard kernel calls");
+  }
+  {
+    const Graph graph = outer(traced_branch_plan(false), {1, 1}, {3});
+    Executor first(graph), second(graph);
+    memo_index_calls = memo_compare_calls = 0;
+    const Evaluation a = evaluate_traced(first, .25, {1, 0, 2});
+    close(a.value, 1, "first executor traced value");
+    const Evaluation b = evaluate_traced(second, .25, {0, 1, 0});
+    close(b.value, .5, "second executor traced value");
+    close(b.gradient[0], 2, "second executor traced gradient");
+    check(traced_arm_iterators == std::vector<double>{2},
+          "second executor records its own arms");
+    check(memo_index_calls == 6 && memo_compare_calls == 6,
+          "each executor records its own trace");
+    const Evaluation a2 = evaluate_traced(first, .5, {1, 0, 2});
+    close(a2.value, 2, "first executor replayed value");
+    check(traced_arm_iterators == std::vector<double>{1, 3},
+          "first executor replays its own arms");
+    const Evaluation b2 = evaluate_traced(second, .5, {0, 1, 0});
+    close(b2.value, 1, "second executor replayed value");
+    check(traced_arm_iterators == std::vector<double>{2},
+          "second executor replays its own arms");
+    check(memo_index_calls == 6 && memo_compare_calls == 6,
+          "executors replay independently");
+  }
+}
+
 int main() {
   test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
   transient_classification_tests();
@@ -3373,6 +3599,7 @@ int main() {
   automatic_policy_tests();
   direct_index_lowering_tests();
   memo_tests();
+  trace_tests();
   test_unsetenv("STANLI_STRUCTURED_LOOPS");
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
   if (failures == 0) std::printf("test_structured_loop OK\n");
