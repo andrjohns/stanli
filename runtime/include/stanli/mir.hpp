@@ -613,6 +613,7 @@ inline std::optional<AlgebraCall> algebra_call(std::string_view name) {
 }
 
 inline std::optional<OdeCall> ode_call(std::string_view name) {
+  if (name == "integrate_ode") return OdeCall{OdeMethod::Rk45, true, false, 4};
   if (name == "integrate_ode_rk45")
     return OdeCall{OdeMethod::Rk45, true, false, 4};
   if (name == "integrate_ode_bdf")

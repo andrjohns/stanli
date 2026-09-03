@@ -143,6 +143,10 @@ def render():
             "integrate_1d_gauss_kronrod_tol",
         )
     }
+    focused["integrate_ode"] = (
+        "tests/fixtures/higher_order_all_contexts.stan exercises transformed-data, "
+        "graph, runtime-control, and interpreted write_array execution"
+    )
     missing = candidates - covered - set(refusals) - set(focused)
     if missing:
         raise ValueError("Runtime functions need coverage recipes: " + ", ".join(sorted(missing)))

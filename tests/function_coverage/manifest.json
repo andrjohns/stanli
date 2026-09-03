@@ -422,7 +422,8 @@
     "integrate_1d_double_exponential": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
     "integrate_1d_double_exponential_tol": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
     "integrate_1d_gauss_kronrod": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
-    "integrate_1d_gauss_kronrod_tol": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering"
+    "integrate_1d_gauss_kronrod_tol": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_ode": "tests/fixtures/higher_order_all_contexts.stan exercises transformed-data, graph, runtime-control, and interpreted write_array execution"
   },
   "models": {
     "containers": {

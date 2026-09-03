@@ -5399,6 +5399,69 @@ int main() {
     }
   }
 
+  // The complete stanc higher-order inventory, plus every compiler-special
+  // solver variant, must cross all four runtime paths in one model.  Generic
+  // integrate_ode is the deprecated RK45 spelling; keeping it in this census
+  // prevents the flat --dump-stan-math-signatures inventory from drifting
+  // away from the shared family classifier.  write_array deliberately uses
+  // its interpreter when transformed parameters make data-level callback
+  // arguments available only at draw time.
+  {
+    CompiledModel hm = compile_model(
+        slurp("tests/fixtures/higher_order_all_contexts.tmir.sexp"), DataMap());
+    check(hm.n_unconstrained == 7, "all-context HOF parameter width");
+    check(count_opcode(hm, OP_ISLAND) > 0, "all-context HOF runtime island");
+    Executor hex(std::move(hm.graph));
+    hm.bind(hex);
+    double gradient[7] = {};
+    const auto set_point = [&](double gate) {
+      hex.params_data()[0] = gate;
+      hex.params_data()[1] = 0.2;
+      hex.params_data()[2] = 0.4;
+      hex.params_data()[3] = 0.0;
+      hex.params_data()[4] = std::log(0.1);
+      hex.params_data()[5] = 0.4;
+      hex.params_data()[6] = 0.4;
+    };
+    const double graph_total = 9.782;
+    const double data_total = 9.882;
+    const double prior = -0.5 * (1.0 + std::pow(std::log(0.1) + 2.0, 2)) -
+                         3.5 * std::log(2.0 * std::acos(-1.0));
+
+    set_point(-1.0);
+    const double untaken = hex.gradient(gradient);
+    check(std::fabs(untaken - (prior + data_total + graph_total)) < 1e-6,
+          "all-context HOF untaken lp");
+    for (double value : gradient)
+      check(std::isfinite(value), "all-context HOF untaken gradient");
+
+    set_point(1.0);
+    const double taken = hex.gradient(gradient);
+    check(std::fabs(taken - (untaken + graph_total)) < 1e-6,
+          "all-context HOF taken lp");
+    for (double value : gradient)
+      check(std::isfinite(value), "all-context HOF taken gradient");
+
+    check(hm.write_array && hm.write_array->interp,
+          "all-context HOF write_array interpreter selected");
+    if (hm.write_array && hm.write_array->interp) {
+      WaRng rng(123);
+      const auto row =
+          hm.write_array->interp->eval(hm.constrained_env(hex), rng);
+      check(row.size() == 10, "all-context HOF write_array row width");
+      for (double value : row)
+        check(std::isfinite(value), "all-context HOF write_array value");
+      if (row.size() == 10) {
+        check(std::fabs(row[7] - graph_total) < 1e-6,
+              "all-context HOF transformed-parameter total");
+        check(std::fabs(row[8] - graph_total) < 1e-6,
+              "all-context HOF generated-quantity total");
+        check(std::fabs(row[9] - data_total) < 1e-6,
+              "all-context HOF transformed-data total");
+      }
+    }
+  }
+
   // Serial map_rect has statically-shaped jobs, so a runtime-control program
   // expands them into ordinary callback invocations and concatenates their
   // vector results. Shared and per-job parameters retain their adjoints;
