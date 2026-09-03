@@ -6,6 +6,7 @@ model {
     int row = 1 + i % 2;
     state[row, 2] = sin(state[row, 2] + beta);
     state = state * 0.8;
+    target += sum(state[{1, 2}, 2]);
   }
   target += sum(state);
 }

@@ -876,13 +876,17 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
     si = array_view(output_dims, leaf_kind(result_view.leaf));
   }
   Val result;
-  // Keep the packed ABI for variable-width selectors, active selectors, and
-  // indexed updates. Direct scalar data operands avoid recording CONCAT2
-  // intermediates without changing their adjoint or aliasing semantics.
+  if (rhs && g.slots[rhs->slot].len != selected)
+    fail("structured indexed assignment width mismatch");
+  // Direct fixed-capacity data operands avoid recording CONCAT2
+  // intermediates. Updates keep the RHS last, leaving room for at most four
+  // selector/count/extent operands in the six-input kernel ABI.
+  const size_t max_direct_selectors = rhs ? 4 : 5;
   const bool direct_inputs =
-      !rhs && indices.size() >= 2 && indices.size() <= 5 &&
-      std::all_of(indices.begin(), indices.end(), [&](const Val& input) {
-        return g.slots[input.slot].len == 1 && !input.autodiff &&
+      indices.size() >= 2 && indices.size() <= max_direct_selectors &&
+      std::all_of(indices.begin(), indices.end(),
+                  [&](const Val& input) {
+        return g.slots[input.slot].len > 0 && !input.autodiff &&
                input.si.param_free;
       }) &&
       std::getenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS") == nullptr;
@@ -907,19 +911,28 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
       if (axis.extent_input_offset >= 0)
         remap(&axis.extent_input_offset, &axis.extent_input);
     }
-    spec->input_count = static_cast<int>(indices.size() + 1);
+    spec->input_count = static_cast<int>(indices.size() + 1 + (rhs ? 1 : 0));
     std::vector<int> inputs;
-    inputs.reserve(indices.size() + 1);
+    inputs.reserve(static_cast<size_t>(spec->input_count));
     inputs.push_back(base.slot);
-    si.param_free = base.si.param_free;
+    SlotInfo output_info = rhs ? base.si : si;
+    output_info.param_free = base.si.param_free;
     bool autodiff = base.autodiff;
     for (const Val& input : indices) {
       inputs.push_back(input.slot);
-      si.param_free = si.param_free && input.si.param_free;
+      output_info.param_free = output_info.param_free && input.si.param_free;
       autodiff = autodiff || input.autodiff;
     }
-    result = emit_raw(OP_INDEX_DYNAMIC, std::move(inputs), selected, si, {}, -1,
-                      autodiff);
+    if (rhs) {
+      inputs.push_back(rhs->slot);
+      spec->rhs_input = static_cast<int>(inputs.size() - 1);
+      output_info.param_free = output_info.param_free && rhs->si.param_free;
+      autodiff = autodiff || rhs->autodiff;
+    }
+    result = emit_raw(
+        rhs ? OP_SET_INDEX_DYNAMIC : OP_INDEX_DYNAMIC, std::move(inputs),
+        rhs ? g.slots[base.slot].len : selected, output_info, {}, -1, autodiff);
+    if (rhs) result.runtime_dims = base.runtime_dims;
   } else {
     Val packed = indices.empty() ? constant(0) : indices[0];
     for (size_t i = 1; i < indices.size(); ++i)
@@ -927,8 +940,6 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
           OP_CONCAT2, {packed, indices[i]},
           g.slots[packed.slot].len + g.slots[indices[i].slot].len);
     if (rhs) {
-      if (g.slots[rhs->slot].len != selected)
-        fail("structured indexed assignment width mismatch");
       result = emit_value(OP_SET_INDEX_DYNAMIC, {base, packed, *rhs},
                           g.slots[base.slot].len, base.si);
       // An element update changes values, not the declaration-time logical
