@@ -363,6 +363,13 @@ If/While/For is data-only controlled) and is not memoizable as a whole:
 outside reads in `number()` (subtract them from `uses.control`), so a guard
 cone whose only consumer is a traced node has no live-outs.
 
+As implemented: a `While` is traced only when nothing outside `children[0]`
+other than the loop's own condition read consumes a slot written there, since
+replay skips `children[0]` entirely. `group()` also merges any run of
+consecutive memoizable children (not just KernelCall/Alias) into one memo
+node; ctsem's `&&` guards lower to chains of data-only `If`s that otherwise
+each restore a live-out for the next.
+
 ### Executor
 
 `LoopState` gets one trace per traced node (`std::vector<uint8_t>` for If
