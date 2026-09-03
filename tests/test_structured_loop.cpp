@@ -174,9 +174,6 @@ static Evaluation evaluate(Executor& executor, double theta, double beta) {
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Programmatic plans: storage classes.
-
 static std::atomic<int> counted_forward_calls{0};
 static std::atomic<int> counted_backward_calls{0};
 static void count_mul_forward(KernelCtx& context) {
@@ -205,14 +202,14 @@ static void transient_classification_tests() {
     const int compare_op = compare.op;
     Node update = call(*plan, OP_ADD, {result, theta}, updated);
     const int update_op = update.op;
-    plan->root = sequence(
-        {alias(result, zero),
-         counted(lower, upper, iterator,
-                 sequence({std::move(compare),
-                           branch(condition,
-                                  sequence({std::move(update),
-                                            alias(result, updated)}),
-                                  sequence({}))}))});
+    plan->root =
+        sequence({alias(result, zero),
+                  counted(lower, upper, iterator,
+                          sequence({std::move(compare),
+                                    branch(condition,
+                                           sequence({std::move(update),
+                                                     alias(result, updated)}),
+                                           sequence({}))}))});
     plan->outputs = {result};
     plan->prepare();
     const Node* compare_node = find_call(plan->root, compare_op);
@@ -238,8 +235,9 @@ static void transient_classification_tests() {
     const int flag = plan->body.add_slot(1, false);
     Node compare = call(*plan, OP_COMPARE, {iterator, two}, condition);
     const int compare_op = compare.op;
-    plan->root = counted(lower, upper, iterator,
-                         sequence({std::move(compare), alias(flag, condition)}));
+    plan->root =
+        counted(lower, upper, iterator,
+                sequence({std::move(compare), alias(flag, condition)}));
     plan->outputs = {flag};
     plan->prepare();
     const Node* compare_node = find_call(plan->root, compare_op);
@@ -324,9 +322,9 @@ static void inplace_import_base_tests() {
     double gradient[4] = {};
     const double value = executor.gradient(gradient);
     close(value, trips == 2 ? 31.5 : 3, "in-place import base value");
-    check(std::equal(std::begin(point), std::end(point),
-                     executor.params_data()),
-          "in-place update leaves the parent value untouched");
+    check(
+        std::equal(std::begin(point), std::end(point), executor.params_data()),
+        "in-place update leaves the parent value untouched");
     const double expected[] = {0, 0, trips == 2 ? 1.0 : 0.0,
                                trips == 2 ? 3.0 : 6.0};
     for (size_t i = 0; i < std::size(expected); ++i)
@@ -433,30 +431,28 @@ static void inplace_lifo_undo_tests() {
   Node update =
       call(*plan, OP_SET_INDEX_DYNAMIC, {base, iterator, rhs}, updated);
   attach(*plan, update.op, single_spec(3));
-  plan->root = sequence(
-      {alias(total, zero),
-       counted(lower, upper, iterator,
-               sequence({call(*plan, OP_SQUARE, {base}, squares),
-                         call(*plan, OP_SUM_VEC, {squares}, sum),
-                         call(*plan, OP_ADD, {total, sum}, next),
-                         alias(total, next),
-                         call(*plan, OP_MUL, {theta, iterator}, rhs),
-                         std::move(update), alias(base, updated)}))});
+  plan->root =
+      sequence({alias(total, zero),
+                counted(lower, upper, iterator,
+                        sequence({call(*plan, OP_SQUARE, {base}, squares),
+                                  call(*plan, OP_SUM_VEC, {squares}, sum),
+                                  call(*plan, OP_ADD, {total, sum}, next),
+                                  alias(total, next),
+                                  call(*plan, OP_MUL, {theta, iterator}, rhs),
+                                  std::move(update), alias(base, updated)}))});
   plan->outputs = {total};
   plan->prepare();
   Executor executor(outer(plan, {3, 1}));
   const double point[] = {1, 2, 3, .5};
   std::copy(std::begin(point), std::end(point), executor.params_data());
   double gradient[4] = {};
-  close(executor.gradient(gradient), 37.5, "reads before in-place writes value");
+  close(executor.gradient(gradient), 37.5,
+        "reads before in-place writes value");
   const double expected[] = {2, 8, 18, 6};
   for (size_t i = 0; i < std::size(expected); ++i)
     close(gradient[i], expected[i],
           "LIFO undo restores the values each backward saw");
 }
-
-// ---------------------------------------------------------------------------
-// Ported semantic tests.
 
 static std::shared_ptr<StructuredLoop> recurrence(int trips) {
   auto plan = std::make_shared<StructuredLoop>();
@@ -465,10 +461,11 @@ static std::shared_ptr<StructuredLoop> recurrence(int trips) {
   const int lower = scalar(*plan, 1);
   const int upper = scalar(*plan, trips);
   plan->root = sequence(
-      {alias(2, 0), counted(lower, upper, 3,
-                            sequence({call(*plan, OP_MUL, {2, 1}, 4),
-                                      call(*plan, OP_ADD, {4, 0}, 5),
-                                      call(*plan, OP_TANHV, {5}, 6), alias(2, 6)}))});
+      {alias(2, 0),
+       counted(lower, upper, 3,
+               sequence({call(*plan, OP_MUL, {2, 1}, 4),
+                         call(*plan, OP_ADD, {4, 0}, 5),
+                         call(*plan, OP_TANHV, {5}, 6), alias(2, 6)}))});
   plan->outputs = {2};
   plan->prepare();
   return plan;
@@ -507,11 +504,8 @@ static void import_reference_tests() {
   const int repeated = plan->body.add_slot(1, false);
   const int product = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  // Import ordinals deliberately differ from slot order. Two imports also
-  // name the same nonzero outer offset, so reverse must accumulate through
-  // distinct versions into one graph adjoint cell.
-  plan->imports = {{repeated, 0, 1, true}, {left, 1, 2, true},
-                   {right, 0, 1, true}};
+  plan->imports = {
+      {repeated, 0, 1, true}, {left, 1, 2, true}, {right, 0, 1, true}};
   plan->root = sequence({call(*plan, OP_MUL, {left, right}, product),
                          call(*plan, OP_ADD, {product, repeated}, result)});
   plan->outputs = {result};
@@ -944,8 +938,6 @@ static void forced_control_tests() {
   compare_gradients(exits, exits_legacy, {{.1, .7}, {-.2, .3}},
                     "exit target parity", "exit gradient parity");
 
-  // This fixture feeds the counted iterator directly to an active multiply,
-  // so reverse must recover every historical iterator value.
   const auto counted = compile_fixture("structured_counted", 4, Mode::Force);
   const auto counted_legacy =
       compile_fixture("structured_counted", 4, Mode::Off);
@@ -1022,8 +1014,9 @@ static std::shared_ptr<StructuredLoop> iterator_escape_plan(
   const int iterator = plan->body.add_slot(1, false);
   const int initial = scalar(*plan, 7);
   const int result = plan->body.add_slot(1, false);
-  plan->root = sequence({alias(result, initial),
-                         counted(lower, upper, iterator, alias(result, iterator))});
+  plan->root =
+      sequence({alias(result, initial),
+                counted(lower, upper, iterator, alias(result, iterator))});
   plan->outputs = {result};
   plan->prepare();
   return plan;
@@ -1290,12 +1283,13 @@ static std::shared_ptr<StructuredLoop> loop_aliased_update_plan() {
   plan->body.ops[static_cast<size_t>(is_first.op)].variant = 4;
   plan->root = sequence(
       {alias(current, base),
-       counted(lower, upper, iterator,
-               sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
-                         std::move(update), alias(current, updated),
-                         call(*plan, OP_SUM_VEC, {current}, observed),
-                         std::move(is_first),
-                         branch(first, alias(snapshot, current), sequence({}))})),
+       counted(
+           lower, upper, iterator,
+           sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                     std::move(update), alias(current, updated),
+                     call(*plan, OP_SUM_VEC, {current}, observed),
+                     std::move(is_first),
+                     branch(first, alias(snapshot, current), sequence({}))})),
        call(*plan, OP_SUM_VEC, {snapshot}, snapshot_sum),
        call(*plan, OP_SUM_VEC, {current}, current_sum),
        call(*plan, OP_ADD, {snapshot_sum, current_sum}, result)});
@@ -1323,8 +1317,8 @@ static std::shared_ptr<StructuredLoop> duplicate_node_plan() {
   check(rejected, "duplicate output slots are rejected");
   const int second_product = plan->body.add_slot(1, false);
   Node replacement = call(*plan, OP_MUL, {theta, beta}, second_product);
-  plan->root = sequence({call(*plan, OP_MUL, {theta, beta}, product),
-                         std::move(replacement)});
+  plan->root = sequence(
+      {call(*plan, OP_MUL, {theta, beta}, product), std::move(replacement)});
   plan->outputs = {second_product};
   plan->prepare();
   plan->root.children[1].backward = duplicate_site_backward;
@@ -1741,9 +1735,8 @@ static std::shared_ptr<StructuredLoop> computed_nested_bound_plan() {
   plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = 0;
   plan->root = counted(
       one, two, outer_iterator,
-      sequence({std::move(arithmetic),
-                counted(one, inner_upper, inner_iterator,
-                        target(inner_iterator))}));
+      sequence({std::move(arithmetic), counted(one, inner_upper, inner_iterator,
+                                               target(inner_iterator))}));
   plan->has_target = true;
   plan->prepare();
   return plan;
@@ -1909,8 +1902,8 @@ static std::shared_ptr<StructuredLoop> computed_bound_plan() {
   const int result = plan->body.add_slot(1, false);
   Node bound = call(*plan, OP_ADD, {one, two}, upper);
   const int bound_op = bound.op;
-  plan->root = sequence(
-      {std::move(bound), counted(one, upper, iterator, alias(result, iterator))});
+  plan->root = sequence({std::move(bound), counted(one, upper, iterator,
+                                                   alias(result, iterator))});
   plan->outputs = {result};
   plan->prepare();
   const Node* node = find_call(plan->root, bound_op);
@@ -2182,8 +2175,7 @@ static void integer_result_tests() {
     try {
       (void)evaluate(retry_producer, 0, 0);
     } catch (const std::runtime_error& error) {
-      producer_threw =
-          std::string(error.what()) == "injected producer failure";
+      producer_threw = std::string(error.what()) == "injected producer failure";
     }
     check(producer_threw, "producer preserves its forward exception");
     close(evaluate(retry_producer, 0, 0).value, 5,
@@ -2377,8 +2369,6 @@ static void loop_invariant_reuse_tests() {
         "zero-trip loop does not pre-execute invariants");
   close(zero_result.value, .25, "zero-trip invariant value");
 
-  // A conditional definition first reached in a later iteration: the
-  // definition is invariant, its consumer reads a loop-written slot and is not.
   auto late = std::make_shared<StructuredLoop>();
   const int late_theta = late->body.add_slot(1, false);
   const int late_lower = scalar(*late, 1);

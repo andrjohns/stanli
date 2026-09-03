@@ -206,8 +206,7 @@ std::optional<RealRange> region_enumerated_data_range(const mir::Expr& e) {
       any = true;
     } catch (const std::exception&) {
       // A path-invalid selector may be excluded by an enclosing branch.
-      // Other reachable failures remain runtime failures; they cannot make
-      // the finite values require more retained history.
+      // Other reachable failures remain runtime failures.
     }
   };
   enumerate(0);

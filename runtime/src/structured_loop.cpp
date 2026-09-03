@@ -79,8 +79,6 @@ int64_t length(const StructuredLoop& p, int s) {
   return s < 0 ? 0 : p.body.slots[static_cast<size_t>(s)].len;
 }
 
-// The right-hand-side input of a fused update, or -1 when the descriptor
-// cannot describe an in-place write.
 int update_rhs(const Op& op) {
   const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
   IndexInputLayout layout;
@@ -277,7 +275,8 @@ void classify(StructuredLoop& p) {
     const Op& op = p.body.ops[n.op];
     if (n.storage == Node::InPlace) {
       const int base = op.in[0];
-      if (active[update_rhs(op)] && !active[base]) active[base] = changed = true;
+      if (active[update_rhs(op)] && !active[base])
+        active[base] = changed = true;
       return;
     }
     bool any = false;
@@ -361,9 +360,9 @@ void classify(StructuredLoop& p) {
     if (retained(op.out) || (op.out2 >= 0 && retained(op.out2))) return;
     n.storage = Node::Transient;
     n.workspace = p.workspace_size;
-    p.workspace_size = add(p.workspace_size,
-                           add(add(length(p, op.out), length(p, op.out2)),
-                               n.kernel_scratch));
+    p.workspace_size =
+        add(p.workspace_size,
+            add(add(length(p, op.out), length(p, op.out2)), n.kernel_scratch));
   };
   walk(p.root, loops, classify_transient);
 }
@@ -826,10 +825,10 @@ struct Version {
 struct Record {
   enum Kind : uint8_t { Kernel, InPlace, Copy } kind;
   uint32_t site;
-  int64_t handles;  // Kernel: first saved input version. InPlace: undo offset.
-  int64_t out;      // Kernel: out version. InPlace: base. Copy: from.
-  int64_t out2;     // Kernel: out2 version or -1. InPlace: rhs. Copy: to.
-  int64_t count;    // InPlace: written positions. Copy: length.
+  int64_t handles;  // Kernel: first saved input version; InPlace: undo offset
+  int64_t out;      // Kernel: out version; InPlace: base; Copy: from
+  int64_t out2;     // Kernel: out2 version or -1; InPlace: rhs; Copy: to
+  int64_t count;    // InPlace: written positions; Copy: length
   double* scratch;
 };
 
@@ -967,7 +966,8 @@ struct Execution {
     int64_t handles = -1;
     if (n.active) {
       handles = static_cast<int64_t>(s.handles.size());
-      for (int k = 0; k < op.n_in; ++k) s.handles.push_back(s.bindings[op.in[k]]);
+      for (int k = 0; k < op.n_in; ++k)
+        s.handles.push_back(s.bindings[op.in[k]]);
     }
     bind_inputs(op, c);
     const int64_t out_len = c.out.len, out2_len = op.out2 >= 0 ? c.out2.len : 0;
@@ -977,7 +977,8 @@ struct Execution {
     if (op.out2 >= 0) c.out2.data = block + out_len;
     c.scratch = block + out_len + out2_len;
     n.forward(c);
-    const int64_t out = make_version(block, n.active ? reserve_adjoint(out_len) : -1);
+    const int64_t out =
+        make_version(block, n.active ? reserve_adjoint(out_len) : -1);
     s.bindings[op.out] = out;
     int64_t out2 = -1;
     if (op.out2 >= 0) {
