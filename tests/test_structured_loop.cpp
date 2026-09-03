@@ -839,15 +839,29 @@ static std::string fixture_mir(const std::string& name) {
 
 enum class Mode { Auto, Off, Force };
 
-static CompiledModel compile_fixture(const std::string& name, int trips,
+static CompiledModel compile_fixture(const std::string& name, DataMap data,
                                      Mode mode) {
   if (mode == Mode::Auto)
     test_unsetenv("STANLI_STRUCTURED_LOOPS");
   else
     test_setenv("STANLI_STRUCTURED_LOOPS", mode == Mode::Off ? "0" : "force");
+  return compile_model(fixture_mir(name), data);
+}
+
+static CompiledModel compile_fixture(const std::string& name, int trips,
+                                     Mode mode) {
   DataMap data;
   data.set_int("N", trips);
-  return compile_model(fixture_mir(name), data);
+  return compile_fixture(name, std::move(data), mode);
+}
+
+static DataMap observed_data(int trips) {
+  DataMap data;
+  data.set_int("N", trips);
+  std::vector<double> y(static_cast<size_t>(trips));
+  for (int n = 0; n < trips; ++n) y[static_cast<size_t>(n)] = 2 * std::sin(n);
+  data.set_real_array("y", std::move(y));
+  return data;
 }
 
 static const StructuredLoop* retained(const CompiledModel& model) {
@@ -2936,6 +2950,52 @@ static void automatic_policy_tests() {
         "refused candidate leaves no partial graph state");
   compare_gradients(refused_auto, refused_off, {{.25}, {-1.5}},
                     "refusal target parity", "refusal gradient parity");
+
+  const auto recurrence_auto =
+      compile_fixture("structured_counted", 64, Mode::Auto);
+  const auto recurrence_off =
+      compile_fixture("structured_counted", 64, Mode::Off);
+  check(retained(recurrence_auto) == nullptr,
+        "control-free recurrence stays on the legacy path");
+  check(same_graph_shape(recurrence_auto.graph, recurrence_off.graph),
+        "control-free automatic graph matches the legacy graph");
+
+  const auto param_if_auto =
+      compile_fixture("structured_param_if", observed_data(64), Mode::Auto);
+  const auto param_if_off =
+      compile_fixture("structured_param_if", observed_data(64), Mode::Off);
+  const StructuredLoop* param_if_plan = retained(param_if_auto);
+  check(param_if_plan != nullptr,
+        "parameter-dependent branch in a data loop selects OP_LOOP");
+  if (param_if_plan) {
+    check(has_kind(param_if_plan->root, Node::If), "retained parameter branch");
+    check_native_only(*param_if_plan, "parameter branch body is native-only");
+  }
+  compare_gradients(
+      param_if_auto, param_if_off, {{.4, .2}, {-.3, -.1}, {1.5, .7}},
+      "parameter branch target parity", "parameter branch gradient parity");
+
+  const auto data_if_auto =
+      compile_fixture("structured_data_if", observed_data(64), Mode::Auto);
+  const auto data_if_off =
+      compile_fixture("structured_data_if", observed_data(64), Mode::Off);
+  check(retained(data_if_auto) == nullptr,
+        "data-only branch in a data loop stays on the legacy path");
+  check(same_graph_shape(data_if_auto.graph, data_if_off.graph),
+        "data-only branch automatic graph matches the legacy graph");
+
+  const auto while_auto =
+      compile_fixture("structured_while_top", 40, Mode::Auto);
+  const auto while_off = compile_fixture("structured_while_top", 40, Mode::Off);
+  const StructuredLoop* while_plan = retained(while_auto);
+  check(while_plan != nullptr, "top-level while selects OP_LOOP");
+  if (while_plan) {
+    check(has_kind(while_plan->root, Node::While), "retained top-level while");
+    check_native_only(*while_plan, "top-level while body is native-only");
+  }
+  compare_gradients(while_auto, while_off, {{.3}, {-.8}},
+                    "top-level while target parity",
+                    "top-level while gradient parity");
 }
 
 static void direct_index_lowering_tests() {

@@ -903,17 +903,20 @@ int main() {
     expect_eq("ndlit lp", lp, wt * q[1] + s3 * q[2]);
   }
 
-  // A while loop whose condition is data unrolls the way a for loop does.
+  // A while loop keeps its loop form: a retained loop by default, a
+  // control island on the legacy path.
   {
+    const auto count_whiles = [](const CompiledModel& model) {
+      size_t whiles = 0;
+      for (const Op& op : model.graph.ops)
+        if (op.opcode == OP_ISLAND || op.opcode == OP_LOOP) ++whiles;
+      return whiles;
+    };
     const DataMap d =
         DataMap::from_json(slurp("tests/fixtures/whileloop.json"));
     CompiledModel lm =
         compile_model(slurp("tests/fixtures/whileloop.tmir.sexp"), d);
-    size_t structured_whiles = 0;
-    for (const Op& op : lm.graph.ops)
-      if (op.opcode == OP_ISLAND) ++structured_whiles;
-    check(structured_whiles == 3,
-          "while loops lower as three structured control islands");
+    check(count_whiles(lm) == 3, "while loops lower as three retained loops");
     Executor lex(std::move(lm.graph));
     lm.bind(lex);
     lex.params_data()[0] = 0.1;
@@ -936,11 +939,14 @@ int main() {
     long_d.set_int("N", 1000001);
     CompiledModel long_loop =
         compile_model(slurp("tests/fixtures/whileloop.tmir.sexp"), long_d);
-    size_t long_structured_whiles = 0;
-    for (const Op& op : long_loop.graph.ops)
-      if (op.opcode == OP_ISLAND) ++long_structured_whiles;
-    check(long_structured_whiles == 3,
+    check(count_whiles(long_loop) == 3,
           "long while lowers without a compile-time iteration cap");
+    test_setenv("STANLI_STRUCTURED_LOOPS", "0", 1);
+    CompiledModel islands =
+        compile_model(slurp("tests/fixtures/whileloop.tmir.sexp"), d);
+    test_unsetenv("STANLI_STRUCTURED_LOOPS");
+    check(count_opcode(islands, OP_ISLAND) == 3,
+          "while loops lower as three control islands on the legacy path");
   }
 
   // An integer local can be assigned a comparison of data-only real locals.
@@ -3355,8 +3361,10 @@ int main() {
   // not just reproduce a data-only lp.
   {
     DataMap d = DataMap::from_json(slurp("tests/fixtures/densityvecgrad.json"));
+    test_setenv("STANLI_STRUCTURED_LOOPS", "0", 1);
     CompiledModel lm =
         compile_model(slurp("tests/fixtures/densityvecgrad.tmir.sexp"), d);
+    test_unsetenv("STANLI_STRUCTURED_LOOPS");
     check(count_opcode(lm, OP_ISLAND) >= 1, "densityvecgrad has an island");
     check(lm.n_unconstrained == 1, "densityvecgrad 1 unconstrained");
     Executor lex(std::move(lm.graph));
@@ -3425,8 +3433,10 @@ int main() {
   // the input adjoints in tape order rather than through the pullback.
   {
     DataMap d = DataMap::from_json(slurp("tests/fixtures/mltgrad.json"));
+    test_setenv("STANLI_STRUCTURED_LOOPS", "0", 1);
     CompiledModel lm =
         compile_model(slurp("tests/fixtures/mltgrad.tmir.sexp"), d);
+    test_unsetenv("STANLI_STRUCTURED_LOOPS");
     check(count_opcode(lm, OP_ISLAND) >= 1, "mltgrad has an island");
     check(lm.n_unconstrained == 9, "mltgrad 9 unconstrained");
     Executor lex(std::move(lm.graph));

@@ -1739,25 +1739,24 @@ bool structured_enabled() const {
          structured_policy == StructuredMode::Force;
 }
 
-static constexpr uint64_t region_auto_operation_threshold = 1000000;
-bool region_contains_while(const mir::Stmt& root) const {
-  std::set<std::string> active_functions;
+bool region_runtime_control(const mir::Stmt& root) const {
+  std::set<std::string> visited;
   std::function<bool(const mir::Stmt&, unsigned)> statement;
   std::function<bool(const mir::Expr&, unsigned)> expression =
       [&](const mir::Expr& e, unsigned depth) {
         if (depth > 32) return false;
+        if (e.kind == mir::Expr::TernaryIf && !e.args.empty() &&
+            !e.args[0].data_only)
+          return true;
+        if ((e.kind == mir::Expr::EAnd || e.kind == mir::Expr::EOr) &&
+            !e.data_only)
+          return true;
         if (e.kind == mir::Expr::FunApp &&
             e.fn_lib == mir::Expr::Lib::UserDefined) {
           const auto found = fun_defs.find(e.name);
-          if (found != fun_defs.end() &&
-              active_functions.insert(e.name).second) {
+          if (found != fun_defs.end() && visited.insert(e.name).second)
             for (const auto& body : found->second->body)
-              if (statement(body, depth + 1)) {
-                active_functions.erase(e.name);
-                return true;
-              }
-            active_functions.erase(e.name);
-          }
+              if (statement(body, depth + 1)) return true;
         }
         for (const auto& argument : e.args)
           if (expression(argument, depth + 1)) return true;
@@ -1766,6 +1765,7 @@ bool region_contains_while(const mir::Stmt& root) const {
   statement = [&](const mir::Stmt& s, unsigned depth) {
     if (depth > 32) return false;
     if (s.kind == mir::Stmt::While) return true;
+    if (s.kind == mir::Stmt::IfElse && !s.cond.data_only) return true;
     for (const mir::Expr* value :
          {&s.init, &s.rhs, &s.target, &s.lower, &s.upper, &s.cond})
       if (expression(*value, depth + 1)) return true;
@@ -1784,39 +1784,15 @@ bool region_contains_while(const mir::Stmt& root) const {
 
 bool region_auto_profitable(
     const mir::Stmt& s,
-    std::optional<std::pair<int64_t, int64_t>> exact_bounds) {
-  if (s.kind != mir::Stmt::For || structured_outer_depth != 1) return false;
-
-  int64_t lo = 0;
-  int64_t hi = -1;
-  if (exact_bounds) {
-    lo = exact_bounds->first;
-    hi = exact_bounds->second;
-  } else {
-    try {
-      lo = eval_int(s.lower);
-      hi = eval_int(s.upper);
-    } catch (const CompileError&) {
-      return false;
-    }
+    std::optional<std::pair<int64_t, int64_t>> exact_bounds) const {
+  if (structured_outer_depth != 1) return false;
+  if (s.kind == mir::Stmt::For) {
+    if (!exact_bounds) return false;
+    if (exact_bounds->second - exact_bounds->first + 1 < 32) return false;
+  } else if (s.kind != mir::Stmt::While) {
+    return false;
   }
-  const uint64_t count =
-      static_cast<uint64_t>(std::max<int64_t>(0, hi - lo + 1));
-  if (count < 32) return false;
-
-  // The first production selector covers the shape that ordinary unrolling
-  // handles especially poorly and ctsem actually exercises: a repeated
-  // counted loop whose transitive body contains runtime iteration. Large
-  // counted-only loops stay legacy until a cost model can prove that the
-  // retained evaluator is also cheaper at execution time.
-  if (!region_contains_while(s)) return false;
-
-  // This saturating source walk is paid once for a materially repeated
-  // outer loop and follows UDF bodies without constructing a graph. It is a
-  // representation hazard gate; the isolated native candidate remains the
-  // semantic proof and may still decline.
-  return region_cost(s, region_auto_operation_threshold) >=
-         region_auto_operation_threshold;
+  return region_runtime_control(s);
 }
 // Positive, deliberately narrow profitability evidence. Tiny scalar runs
 // avoid region dispatch/version bookkeeping and expose the existing scalar
@@ -2097,15 +2073,16 @@ bool try_lower_region(
                       [](const Op& op) { return op.opcode == OP_ISLAND; }))
         fail("structured body requires register-program fallback");
       if (mode == StructuredMode::Auto) {
-        const auto contains_while = [&](const auto& self,
-                                        const RegionNode& node) -> bool {
-          if (node.kind == RegionNode::While) return true;
+        const auto retains_control = [&](const auto& self,
+                                         const RegionNode& node) -> bool {
+          if (node.kind == RegionNode::If || node.kind == RegionNode::While)
+            return true;
           for (const auto& child : node.children)
             if (self(self, child)) return true;
           return false;
         };
-        if (!contains_while(contains_while, p->root))
-          fail("automatic candidate has no retained runtime loop");
+        if (!retains_control(retains_control, p->root))
+          fail("automatic candidate has no retained runtime control");
       }
       const auto has_target = [&](const auto& self,
                                   const RegionNode& node) -> bool {
