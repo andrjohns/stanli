@@ -764,3 +764,24 @@ Fixture-based retained-vs-unrolled comparisons stay at 1e-12.
 
 m1 (N=10k, `=1`): 462 µs toward ~250 µs; m4 gains from the KernelCall-
 resident path; ctsem unchanged (its loops nest and are not flat).
+
+### Outcome (2026-09-03): implemented, measured, not kept
+
+The frame path was built as specified (about 900 lines with tests, bitwise
+A/B against the record path on every case). It did not move the numbers:
+m1 462 -> 456 us, m4 1220 -> 1140, arK 87 -> 80, the rest unchanged. The
+profile with frames on shows the step interpreter (`iterate`, `run_steps`,
+`reverse_steps`) at 56% of the gradient where the record path had shown
+records and versions at 41%: interpreting a static step list per iteration
+costs what the records cost. The per-iteration floor is about 12 ns each
+way in both designs and only compiled code removes it. The implementation
+was dropped from the branch; this section stays as the frame layout a
+loop-compiling JIT would consume.
+
+What a JIT of the whole iteration could reach, from the same profile: m1
+spends roughly 10 ns per iteration in libm, 13 ns in the Program
+interpreter and 20 ns in bookkeeping; compiled, the last two shrink to a
+few ns, so about 15 ns per iteration against the flat executor's 40. That
+gain applies to loops that are flat, which today excludes ctsem (nested
+loops), the corpus recurrences with in-place element updates (hmm, garch,
+arma) and any body with an active loop-invariant kernel.
