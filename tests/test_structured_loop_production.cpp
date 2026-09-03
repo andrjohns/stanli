@@ -1878,6 +1878,8 @@ static double* inactive_workspace_address = nullptr;
 static bool inactive_workspace_stable = true;
 static bool inactive_workspace_disjoint = true;
 static bool inactive_workspace_throw_once = false;
+static int registered_redirect_calls = 0;
+static bool workspace_producer_throw_once = false;
 
 static int64_t inactive_workspace_size(const Op&, const Slot*) { return 3; }
 
@@ -1958,22 +1960,22 @@ static std::shared_ptr<StructuredLoop> inactive_zero_output_plan() {
 }
 
 static void redirect_inactive_output(KernelCtx& context) {
+  ++registered_redirect_calls;
   context.out.data = context.in[0].data;
 }
 
 static std::shared_ptr<StructuredLoop> redirected_inactive_output_plan() {
   auto plan = std::make_shared<StructuredLoop>();
-  const int source = scalar(*plan, 42);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 2);
+  const int iterator = plan->body.add_slot(1, false);
   const int zero = scalar(*plan, 0);
   const int result = plan->body.add_slot(1, false);
-  Node redirected = call(*plan, OP_ADD, {source, zero}, result);
-  const int redirected_op = redirected.op;
-  plan->root = std::move(redirected);
+  plan->root = counted(lower, upper, iterator, 2,
+                       call(*plan, OP_ADD, {iterator, zero}, result));
   plan->outputs = {result};
   plan->prepare(1 << 20);
   plan->dynamic_history = true;
-  check(set_forward(plan->root, redirected_op, redirect_inactive_output),
-        "find redirected inactive callback");
   return plan;
 }
 
@@ -2006,6 +2008,101 @@ static std::shared_ptr<StructuredLoop> inactive_location_bound_plan() {
   plan->outputs = {result};
   plan->prepare(1 << 20);
   plan->dynamic_history = true;
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> repeated_forward_only_output_plan(
+    int upper_value = 4) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, upper_value);
+  const int iterator = plan->body.add_slot(1, false);
+  const int two = scalar(*plan, 2);
+  const int result = plan->body.add_slot(1, false);
+  plan->fills.push_back({result, {99}});
+  plan->root = counted(lower, upper, iterator, std::max(0, upper_value),
+                       call(*plan, OP_ADD, {iterator, two}, result));
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  return plan;
+}
+
+static std::vector<const double*> forward_only_output_addresses;
+
+static void trace_forward_only_output(KernelCtx& context) {
+  forward_only_output_addresses.push_back(context.out.data);
+  context.out.data[0] = context.in[0].data[0] + context.in[1].data[0];
+}
+
+static void throwing_workspace_producer(KernelCtx& context) {
+  if (workspace_producer_throw_once && context.in[0].data[0] == 2) {
+    workspace_producer_throw_once = false;
+    throw std::runtime_error("injected workspace producer failure");
+  }
+  context.out.data[0] = context.in[0].data[0] + context.in[1].data[0];
+}
+
+static std::shared_ptr<StructuredLoop> workspace_skipped_escape_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 2);
+  const int iterator = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int ten = scalar(*plan, 10);
+  const int initial = scalar(*plan, 99);
+  const int produced = plan->body.add_slot(1, false);
+  const int condition = plan->body.add_slot(1, false);
+  const int redirected = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  Node compare = call(*plan, OP_COMPARE, {iterator, one}, condition);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 4;
+  Node redirect = call(*plan, OP_COMPARE, {produced}, redirected);
+  const int redirect_op = redirect.op;
+  plan->root = sequence(
+      {alias(result, initial),
+       counted(lower, upper, iterator, 2,
+               sequence({call(*plan, OP_ADD, {iterator, ten}, produced),
+                         std::move(compare),
+                         branch(condition,
+                                sequence({std::move(redirect),
+                                          alias(result, redirected)}),
+                                sequence({}))}))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(set_forward(plan->root, redirect_op, redirect_first_input),
+        "find skipped workspace redirect callback");
+  return plan;
+}
+
+static std::shared_ptr<StructuredLoop> workspace_redirect_chain_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int produced = plan->body.add_slot(1, false);
+  const int redirected = plan->body.add_slot(1, false);
+  const int active = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+  Node redirect = call(*plan, OP_COMPARE, {produced}, redirected);
+  const int redirect_op = redirect.op;
+  Node target;
+  target.kind = Node::Target;
+  target.src = active;
+  plan->root =
+      counted(lower, upper, iterator, 3,
+              sequence({call(*plan, OP_ADD, {iterator, one}, produced),
+                        std::move(redirect),
+                        call(*plan, OP_MUL, {theta, redirected}, active),
+                        std::move(target)}));
+  plan->has_target = true;
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(set_forward(plan->root, redirect_op, redirect_first_input),
+        "find forward-only redirected consumer");
   return plan;
 }
 
@@ -2251,10 +2348,27 @@ static void compact_integer_result_tests() {
   check(inactive_workspace_stable && inactive_workspace_disjoint,
         "inactive zero-output workspace remains stable and disjoint");
 
-  Executor redirected(outer(redirected_inactive_output_plan()));
-  const Evaluation redirected_result = evaluate(redirected, 0, 0);
-  close(redirected_result.value, 42,
-        "redirected inactive output keeps ordinary reference fallback");
+  Evaluation redirected_result, retained_redirected_result;
+  registered_redirect_calls = 0;
+  {
+    Kernel replacement = *find_kernel(OP_ADD);
+    replacement.forward = redirect_inactive_output;
+    ScopedKernelOverride overridden(OP_ADD, replacement);
+    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+    Executor redirected(outer(redirected_inactive_output_plan()));
+    redirected_result = evaluate(redirected, 0, 0);
+    test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
+    Executor retained_redirected(outer(redirected_inactive_output_plan()));
+    retained_redirected_result = evaluate(retained_redirected, 0, 0);
+    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+  }
+  close(redirected_result.value, 2,
+        "registered redirected producer keeps its final value");
+  check(registered_redirect_calls == 4,
+        "registered redirected producer executes every reached call");
+  check(std::memcmp(&redirected_result, &retained_redirected_result,
+                    sizeof(Evaluation)) == 0,
+        "registered redirected producer has bitwise ablation parity");
 
   Executor inactive_target(outer(inactive_location_target_plan()));
   const Evaluation targeted = evaluate(inactive_target, 0, 0);
@@ -2263,6 +2377,101 @@ static void compact_integer_result_tests() {
   Executor inactive_bound(outer(inactive_location_bound_plan()));
   const Evaluation bounded = evaluate(inactive_bound, 0, 0);
   close(bounded.value, 3, "inactive arena handle supplies counted-loop bound");
+
+  Evaluation reused, retained;
+  {
+    Kernel replacement = *find_kernel(OP_ADD);
+    replacement.forward = trace_forward_only_output;
+    ScopedKernelOverride overridden(OP_ADD, replacement);
+    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+    forward_only_output_addresses.clear();
+    Executor reused_output(outer(repeated_forward_only_output_plan()));
+    reused = evaluate(reused_output, 0, 0);
+    check(forward_only_output_addresses.size() == 4 &&
+              std::adjacent_find(forward_only_output_addresses.begin(),
+                                 forward_only_output_addresses.end(),
+                                 std::not_equal_to<const double*>()) ==
+                  forward_only_output_addresses.end(),
+          "forward-only loop calls reuse one output address");
+    test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
+    forward_only_output_addresses.clear();
+    Executor retained_output(outer(repeated_forward_only_output_plan()));
+    retained = evaluate(retained_output, 0, 0);
+    check(forward_only_output_addresses.size() == 4 &&
+              std::adjacent_find(forward_only_output_addresses.begin(),
+                                 forward_only_output_addresses.end(),
+                                 std::equal_to<const double*>()) ==
+                  forward_only_output_addresses.end(),
+          "forward-only workspace ablation retains distinct outputs");
+    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+
+    forward_only_output_addresses.clear();
+    Executor zero_trip(outer(repeated_forward_only_output_plan(0)));
+    const Evaluation zero_trip_result = evaluate(zero_trip, 0, 0);
+    close(zero_trip_result.value, 99,
+          "zero-trip workspace loop preserves its initial output");
+    check(forward_only_output_addresses.empty(),
+          "zero-trip workspace loop allocates no reached call storage");
+  }
+  close(reused.value, 6, "forward-only loop output keeps final value");
+  check(std::memcmp(&reused, &retained, sizeof(Evaluation)) == 0,
+        "forward-only workspace has bitwise same-binary parity");
+
+  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+  Executor skipped_escape(outer(workspace_skipped_escape_plan()));
+  const Evaluation escaped = evaluate(skipped_escape, 0, 0);
+  test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
+  Executor retained_escape(outer(workspace_skipped_escape_plan()));
+  const Evaluation retained_escaped = evaluate(retained_escape, 0, 0);
+  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+  close(escaped.value, 11,
+        "skipped redirect keeps the earlier workspace producer value");
+  check(std::memcmp(&escaped, &retained_escaped, sizeof(Evaluation)) == 0,
+        "skipped workspace escape has bitwise ablation parity");
+
+  Evaluation retried_workspace, retained_retry;
+  {
+    Kernel replacement = *find_kernel(OP_ADD);
+    replacement.forward = throwing_workspace_producer;
+    ScopedKernelOverride overridden(OP_ADD, replacement);
+    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+    Executor retry_workspace(outer(repeated_forward_only_output_plan(3)));
+    workspace_producer_throw_once = true;
+    bool workspace_producer_threw = false;
+    try {
+      (void)evaluate(retry_workspace, 0, 0);
+    } catch (const std::runtime_error& error) {
+      workspace_producer_threw =
+          std::string(error.what()) == "injected workspace producer failure";
+    }
+    check(workspace_producer_threw,
+          "workspace producer preserves its forward exception");
+    retried_workspace = evaluate(retry_workspace, 0, 0);
+    test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
+    Executor retained_workspace(outer(repeated_forward_only_output_plan(3)));
+    retained_retry = evaluate(retained_workspace, 0, 0);
+    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+  }
+  close(retried_workspace.value, 5,
+        "workspace producer retry rebuilds its canonical output");
+  check(
+      std::memcmp(&retried_workspace, &retained_retry, sizeof(Evaluation)) == 0,
+      "workspace producer retry has bitwise ablation parity");
+
+  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+  Executor redirect_chain(outer(workspace_redirect_chain_plan()));
+  const Evaluation redirected_chain = evaluate(redirect_chain, 2, 0);
+  test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
+  Executor retained_chain(outer(workspace_redirect_chain_plan()));
+  const Evaluation retained_redirect_chain = evaluate(retained_chain, 2, 0);
+  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+  close(redirected_chain.value, 18,
+        "redirected workspace input preserves target values");
+  close(redirected_chain.gradient[0], 9,
+        "redirected workspace input preserves reverse primals");
+  check(std::memcmp(&redirected_chain, &retained_redirect_chain,
+                    sizeof(Evaluation)) == 0,
+        "redirected workspace input has bitwise ablation parity");
 
   Executor inactive_reverse(outer(inactive_location_reverse_plan()));
   const Evaluation reversed = evaluate(inactive_reverse, 4, 0);
@@ -3061,6 +3270,7 @@ int main() {
   test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
   test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
   test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
+  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
   test_unsetenv("STANLI_NO_STRUCTURED_RECORD_SCALARS");
   if (failures == 0) std::printf("test_structured_loop_production OK\n");

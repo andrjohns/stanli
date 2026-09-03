@@ -949,6 +949,136 @@ struct InactiveControlPlan {
   }
 };
 
+// Reuse one body-sized output buffer for an inactive call when its result is
+// provably forward-only.  A consumer with a reverse callback may need an
+// inactive input's primal during the reverse sweep, so such inputs stay on the
+// ordinary persistent arena path.  Aliases and targets also let a particular
+// reached value escape its producing binding.  The remaining results have no
+// lifetime beyond their current binding and synchronous forward consumers;
+// reexecuting the same unique call site may therefore overwrite its buffer.
+//
+// Keep these sites disjoint from loop-invariant and inactive-control plans.
+// Both plans use canonical handles as cached identity, while this plan
+// deliberately gives every dynamic version from one site the same handle.
+struct InactiveWorkspacePlan {
+  struct Uses {
+    uint64_t producers = 0;
+    uint64_t aliases = 0;
+    uint64_t targets = 0;
+    std::vector<const Node*> kernel_consumers;
+  };
+  struct Site {
+    const Node* node = nullptr;
+    int op = -1;
+    int64_t value_count = 0;
+    std::unique_ptr<double[]> values;
+    double canonical_handle = -1;
+    bool canonical_ready = false;
+    bool disabled = false;
+  };
+
+  std::vector<int32_t> site_by_op;
+  std::vector<Site> sites;
+  uint64_t value_count = 0;
+
+  InactiveWorkspacePlan(const StructuredLoop& p,
+                        const LoopInvariantPlan* invariants,
+                        const InactiveControlPlan* controls)
+      : site_by_op(p.body.ops.size(), int32_t{-1}) {
+    const size_t op_count = p.body.ops.size();
+    std::vector<Uses> uses(p.body.slots.size());
+    std::vector<uint32_t> op_nodes(op_count, 0);
+    std::vector<const Node*> node_by_op(op_count, nullptr);
+    std::vector<uint8_t> inside_loop(op_count, 0);
+    const auto inventory = [&](const auto& self, const Node& n,
+                               uint32_t loop_depth) -> void {
+      switch (n.kind) {
+        case Node::KernelCall: {
+          if (n.op < 0 || static_cast<size_t>(n.op) >= op_count)
+            throw std::logic_error(
+                "inactive-workspace operation is out of range");
+          const Op& op = p.body.ops[static_cast<size_t>(n.op)];
+          ++op_nodes[static_cast<size_t>(n.op)];
+          node_by_op[static_cast<size_t>(n.op)] = &n;
+          if (loop_depth) inside_loop[static_cast<size_t>(n.op)] = 1;
+          ++uses.at(static_cast<size_t>(op.out)).producers;
+          if (op.out2 >= 0) ++uses.at(static_cast<size_t>(op.out2)).producers;
+          for (int k = 0; k < op.n_in; ++k)
+            uses.at(static_cast<size_t>(op.in[k]))
+                .kernel_consumers.push_back(&n);
+          break;
+        }
+        case Node::Alias:
+          ++uses.at(static_cast<size_t>(n.src)).aliases;
+          ++uses.at(static_cast<size_t>(n.dst)).aliases;
+          break;
+        case Node::Target:
+          ++uses.at(static_cast<size_t>(n.src)).targets;
+          break;
+        default:
+          break;
+      }
+      const uint32_t child_depth =
+          loop_depth + (n.kind == Node::For || n.kind == Node::While);
+      for (const auto& child : n.children) self(self, child, child_depth);
+    };
+    inventory(inventory, p.root, 0);
+
+    const auto planned_elsewhere = [&](size_t op_id) {
+      return (invariants && op_id < invariants->site_by_op.size() &&
+              invariants->site_by_op[op_id] >= 0) ||
+             (controls && op_id < controls->site_by_op.size() &&
+              controls->site_by_op[op_id] >= 0);
+    };
+    for (size_t op_id = 0; op_id < op_count; ++op_id) {
+      if (!inside_loop[op_id] || op_nodes[op_id] != 1 ||
+          planned_elsewhere(op_id))
+        continue;
+      const Node& node = *node_by_op[op_id];
+      const Op& op = p.body.ops[op_id];
+      const Kernel* kernel = find_kernel(op.opcode);
+      if (!kernel || !node.forward || node.forward != kernel->forward ||
+          node.backward != kernel->backward || is_effectful_op(op.opcode) ||
+          op.out2 >= 0 || node.compact_update_cell >= 0)
+        continue;
+      const Uses& output = uses.at(static_cast<size_t>(op.out));
+      if (output.producers != 1 || output.aliases != 0 || output.targets != 0)
+        continue;
+      bool safe_consumers = true;
+      for (const Node* consumer : output.kernel_consumers) {
+        if (!consumer || consumer->backward || consumer->op < 0 ||
+            static_cast<size_t>(consumer->op) >= op_count ||
+            planned_elsewhere(static_cast<size_t>(consumer->op))) {
+          safe_consumers = false;
+          break;
+        }
+      }
+      if (!safe_consumers) continue;
+      bool self_input = false;
+      for (int k = 0; k < op.n_in; ++k) self_input |= op.in[k] == op.out;
+      if (self_input) continue;
+      const int64_t len = p.body.slots.at(static_cast<size_t>(op.out)).len;
+      if (len <= 0 || static_cast<uint64_t>(len) >
+                          static_cast<uint64_t>(exact_limit) - value_count)
+        continue;
+      if (sites.size() >=
+          static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+        throw std::length_error("inactive-workspace plan is too large");
+      site_by_op[op_id] = static_cast<int32_t>(sites.size());
+      sites.push_back(
+          {&node, static_cast<int>(op_id), len, nullptr, double{-1}});
+      value_count += static_cast<uint64_t>(len);
+    }
+  }
+
+  void reset_runtime() noexcept {
+    for (auto& site : sites) {
+      site.canonical_handle = -1;
+      site.canonical_ready = false;
+    }
+  }
+};
+
 int64_t offset(double handle) {
   return static_cast<int64_t>(handle >= 0 ? handle : -handle - 1);
 }
@@ -1327,6 +1457,7 @@ struct DynamicAllocationProfile {
     uint64_t frame_free_compact_visits = 0;
     uint64_t invariant_reuses = 0;
     uint64_t inactive_control_calls = 0;
+    uint64_t inactive_workspace_calls = 0;
     uint64_t direct_control_calls = 0;
     uint64_t inline_integer_calls = 0;
     uint64_t elided_arena_values = 0;
@@ -1469,6 +1600,34 @@ struct DynamicAllocationProfile {
     add(b->inactive_transient_values, transient);
     add(b->inactive_output_values, outputs);
     add(b->inactive_output_refs, refs);
+  }
+
+  void note_inactive_workspace(const Op& op, const Node& node) noexcept {
+    Bucket* b = bucket(op);
+    if (!b) return;
+    const uint64_t inputs = count(op.n_in);
+    const uint64_t outputs = count(node.frame_size - 6 - node.kernel_scratch);
+    const uint64_t scratch = count(node.kernel_scratch);
+    const uint64_t old_frame = count(std::max<int64_t>(
+        1, node.frame_size - (6 - static_cast<int64_t>(op.n_in))));
+    uint64_t old_components = inputs;
+    add(old_components, outputs);
+    add(old_components, scratch);
+    const uint64_t old_padding =
+        old_frame >= old_components ? old_frame - old_components : 0;
+    if (old_frame < old_components) overflow = true;
+    uint64_t transient = inputs;
+    add(transient, scratch);
+    add(transient, old_padding);
+    const uint64_t refs = op.out2 >= 0 ? 2 : 1;
+    add(b->ordinary_visits, 1);
+    add(b->inactive_workspace_calls, 1);
+    add(b->elided_arena_values, outputs);
+    add(b->elided_refs, refs);
+    add(b->inactive_output_values, outputs);
+    add(b->inactive_output_refs, refs);
+    add(b->inactive_transient_values, transient);
+    add(b->referenced_values, outputs);
   }
 
   void note_compact(const Op& op, int64_t retained, int64_t output_len,
@@ -1619,13 +1778,16 @@ struct DynamicLoopState final : KernelState {
   std::unique_ptr<DirectControlPlan> direct_control_plan;
   std::unique_ptr<LoopInvariantPlan> loop_invariant_plan;
   std::unique_ptr<InactiveControlPlan> inactive_control_plan;
+  std::unique_ptr<InactiveWorkspacePlan> inactive_workspace_plan;
   std::unique_ptr<DynamicAllocationProfile> allocation_profile;
   std::vector<double> inactive_control_values;
+  uint64_t inactive_workspace_allocated_values = 0;
   int64_t conceptual_adjoint_size = 0;
   int64_t adjoint_size = 0;
   uint64_t iterator_values = 0;
   bool loop_invariant_reuse = false;
   bool inactive_control_reuse = false;
+  bool inactive_workspace_reuse = false;
   bool record_scalar_reuse = false;
   bool memory_profile = false;
   bool cached_context_in_use = false;
@@ -1757,6 +1919,16 @@ struct DynamicLoopState final : KernelState {
       inactive_control_plan.reset();
       std::vector<double>{}.swap(inactive_control_values);
     }
+    try {
+      inactive_workspace_plan = std::make_unique<InactiveWorkspacePlan>(
+          p, loop_invariant_plan.get(), inactive_control_plan.get());
+      if (inactive_workspace_plan->sites.empty())
+        inactive_workspace_plan.reset();
+    } catch (...) {
+      // Forward-only workspace reuse is optional.  Allocation or proof
+      // failure leaves every call on the persistent dynamic arena path.
+      inactive_workspace_plan.reset();
+    }
   }
 
   void release_tape() noexcept {
@@ -1822,6 +1994,8 @@ void report_memory_profile(const StructuredLoop& p,
   const uint64_t inactive_scratch =
       profile_bytes(static_cast<uint64_t>(state.inactive_scratch_size),
                     sizeof(double), overflow);
+  const uint64_t inactive_workspace = profile_bytes(
+      state.inactive_workspace_allocated_values, sizeof(double), overflow);
   const uint64_t iterator_value_bytes =
       profile_bytes(state.iterator_values, sizeof(double), overflow);
   const uint64_t iterator_ref_bytes = profile_bytes(
@@ -1840,7 +2014,8 @@ void report_memory_profile(const StructuredLoop& p,
       "ref_count=%zu ref_used_bytes=%llu ref_capacity_bytes=%llu "
       "record_count=%zu record_used_bytes=%llu record_capacity_bytes=%llu "
       "undo_count=0 undo_used_bytes=0 undo_capacity_bytes=0 "
-      "planned_adjoint_bytes=%llu inactive_scratch_bytes=%llu\n",
+      "planned_adjoint_bytes=%llu inactive_scratch_bytes=%llu "
+      "inactive_workspace_bytes=%llu\n",
       static_cast<const void*>(&p), p.node_count, p.body.ops.size(),
       overflow ? 1 : 0, static_cast<unsigned long long>(state.iterator_values),
       static_cast<unsigned long long>(iterator_value_bytes),
@@ -1853,7 +2028,8 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(record_used),
       static_cast<unsigned long long>(record_capacity),
       static_cast<unsigned long long>(planned_adjoint),
-      static_cast<unsigned long long>(inactive_scratch));
+      static_cast<unsigned long long>(inactive_scratch),
+      static_cast<unsigned long long>(inactive_workspace));
 
   const auto* allocation = state.allocation_profile.get();
   if (!allocation) {
@@ -1888,6 +2064,11 @@ void report_memory_profile(const StructuredLoop& p,
   uint64_t inactive_output_values = 0;
   uint64_t inactive_output_refs = 0;
   uint64_t arena_location_refs = 0;
+  uint64_t inactive_workspace_calls = 0;
+  uint64_t inactive_workspace_refs = 0;
+  if (state.inactive_workspace_plan)
+    for (const auto& site : state.inactive_workspace_plan->sites)
+      if (site.canonical_ready) ++inactive_workspace_refs;
   for (const auto& bucket : allocation->buckets) {
     kernel_arena_values = profile_add(kernel_arena_values, bucket.arena_values,
                                       allocation_overflow);
@@ -1955,6 +2136,9 @@ void report_memory_profile(const StructuredLoop& p,
                     allocation_overflow);
     arena_location_refs = profile_add(
         arena_location_refs, bucket.arena_location_refs, allocation_overflow);
+    inactive_workspace_calls =
+        profile_add(inactive_workspace_calls, bucket.inactive_workspace_calls,
+                    allocation_overflow);
   }
   uint64_t profiled_arena_values =
       profile_add(allocation->initial_arena_values, kernel_arena_values,
@@ -1964,6 +2148,8 @@ void report_memory_profile(const StructuredLoop& p,
                   allocation_overflow);
   setup_refs =
       profile_add(setup_refs, allocation->import_refs, allocation_overflow);
+  setup_refs =
+      profile_add(setup_refs, inactive_workspace_refs, allocation_overflow);
   const uint64_t profiled_refs =
       profile_add(setup_refs, kernel_refs, allocation_overflow);
   std::fprintf(
@@ -1976,7 +2162,8 @@ void report_memory_profile(const StructuredLoop& p,
       "compact_rhs_handle_values=%llu "
       "output_values=%llu scratch_values=%llu "
       "padding_values=%llu initial_slot_refs=%llu canonical_refs=%llu "
-      "import_refs=%llu kernel_refs=%llu profiled_refs=%llu "
+      "import_refs=%llu inactive_workspace_refs=%llu kernel_refs=%llu "
+      "profiled_refs=%llu "
       "actual_refs=%zu refs_match=%d active_refs=%llu "
       "referenced_values=%llu conceptual_adjoint_values=%llu "
       "physical_adjoint_values=%llu "
@@ -1988,7 +2175,8 @@ void report_memory_profile(const StructuredLoop& p,
       "frame_free_compact_visits=%llu "
       "elided_arena_values=%llu elided_refs=%llu "
       "inactive_transient_values=%llu inactive_output_values=%llu "
-      "inactive_output_refs=%llu arena_location_refs=%llu\n",
+      "inactive_output_refs=%llu arena_location_refs=%llu "
+      "inactive_workspace_calls=%llu inactive_workspace_values=%llu\n",
       static_cast<const void*>(&p), allocation_overflow ? 1 : 0,
       static_cast<unsigned long long>(allocation->initial_arena_values),
       static_cast<unsigned long long>(kernel_arena_values),
@@ -2006,6 +2194,7 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(allocation->initial_slot_refs),
       static_cast<unsigned long long>(allocation->canonical_refs),
       static_cast<unsigned long long>(allocation->import_refs),
+      static_cast<unsigned long long>(inactive_workspace_refs),
       static_cast<unsigned long long>(kernel_refs),
       static_cast<unsigned long long>(profiled_refs), state.refs.size(),
       profiled_refs == state.refs.size() ? 1 : 0,
@@ -2026,12 +2215,16 @@ void report_memory_profile(const StructuredLoop& p,
       static_cast<unsigned long long>(inactive_transient_values),
       static_cast<unsigned long long>(inactive_output_values),
       static_cast<unsigned long long>(inactive_output_refs),
-      static_cast<unsigned long long>(arena_location_refs));
+      static_cast<unsigned long long>(arena_location_refs),
+      static_cast<unsigned long long>(inactive_workspace_calls),
+      static_cast<unsigned long long>(
+          state.inactive_workspace_allocated_values));
 
   for (uint16_t opcode = 0; opcode < OP_COUNT_; ++opcode) {
     const auto& bucket = allocation->buckets[opcode];
     if (bucket.ordinary_visits == 0 && bucket.compact_visits == 0 &&
         bucket.invariant_reuses == 0 && bucket.inactive_control_calls == 0 &&
+        bucket.inactive_workspace_calls == 0 &&
         bucket.direct_control_calls == 0 && bucket.inline_integer_calls == 0)
       continue;
     std::fprintf(
@@ -2040,6 +2233,7 @@ void report_memory_profile(const StructuredLoop& p,
         "ordinary_visits=%llu active_visits=%llu compact_visits=%llu "
         "frame_free_compact_visits=%llu "
         "invariant_reuses=%llu inactive_control_calls=%llu "
+        "inactive_workspace_calls=%llu "
         "direct_control_calls=%llu inline_integer_calls=%llu "
         "elided_arena_values=%llu elided_refs=%llu arena_values=%llu "
         "inactive_transient_values=%llu inactive_output_values=%llu "
@@ -2064,6 +2258,7 @@ void report_memory_profile(const StructuredLoop& p,
         static_cast<unsigned long long>(bucket.frame_free_compact_visits),
         static_cast<unsigned long long>(bucket.invariant_reuses),
         static_cast<unsigned long long>(bucket.inactive_control_calls),
+        static_cast<unsigned long long>(bucket.inactive_workspace_calls),
         static_cast<unsigned long long>(bucket.direct_control_calls),
         static_cast<unsigned long long>(bucket.inline_integer_calls),
         static_cast<unsigned long long>(bucket.elided_arena_values),
@@ -2481,6 +2676,22 @@ struct DynamicExecution {
     }
   }
 
+  InactiveWorkspacePlan::Site* inactive_workspace_site(const Node& n) noexcept {
+    auto* plan = state.inactive_workspace_plan.get();
+    if (!plan || !state.inactive_workspace_reuse || n.op < 0 ||
+        static_cast<size_t>(n.op) >= plan->site_by_op.size())
+      return nullptr;
+    const int32_t id = plan->site_by_op[static_cast<size_t>(n.op)];
+    if (id < 0 || static_cast<size_t>(id) >= plan->sites.size()) return nullptr;
+    auto& site = plan->sites[static_cast<size_t>(id)];
+    if (site.disabled) return nullptr;
+    if (site.node != &n || site.op != n.op) {
+      state.inactive_workspace_reuse = false;
+      return nullptr;
+    }
+    return &site;
+  }
+
   bool inactive_control(const Node& n, InactiveControlPlan::Site* site) {
     if (!site) return false;
     auto* plan = state.inactive_control_plan.get();
@@ -2783,6 +2994,83 @@ struct DynamicExecution {
     KernelCtx& get() { return *call; }
   };
 
+  bool inactive_workspace_call(const Node& n, double* handles) {
+    InactiveWorkspacePlan::Site* site = inactive_workspace_site(n);
+    if (!site) return false;
+    const Op& op = p.body.ops.at(static_cast<size_t>(n.op));
+    const int64_t output_len = p.body.slots.at(static_cast<size_t>(op.out)).len;
+    if (op.out2 >= 0 || output_len <= 0 || output_len != site->value_count) {
+      state.inactive_workspace_reuse = false;
+      return false;
+    }
+    DynamicLoopState::Ref* canonical = nullptr;
+    try {
+      if (!site->values) {
+        site->values.reset(new double[static_cast<size_t>(output_len)]);
+        state.inactive_workspace_allocated_values +=
+            static_cast<uint64_t>(output_len);
+      }
+      if (!site->canonical_ready) {
+        site->canonical_handle =
+            make_ref(site->values.get(), output_len, false);
+        site->canonical_ready = true;
+      }
+      canonical = &ref(site->canonical_handle);
+      if (!canonical->value || canonical->adjoint_or_import != -1 ||
+          canonical->value != site->values.get())
+        throw std::logic_error("inactive-workspace output is invalid");
+      const Desc output{canonical->value, output_len};
+      for (int k = 0; k < op.n_in; ++k)
+        if (value_overlaps(handles[k],
+                           p.body.slots.at(static_cast<size_t>(op.in[k])).len,
+                           output))
+          return false;
+    } catch (...) {
+      // A failed proof guard disables this optional path before the callback
+      // is invoked, so the ordinary executor remains authoritative.
+      site->disabled = true;
+      return false;
+    }
+
+    ContextLease context(*this, n, handles, false, -1, -1, canonical->value,
+                         nullptr, state.inactive_scratch.get());
+    KernelCtx& c = context.get();
+    n.forward(c);
+    // The plan admits only the registered resolved callback. Still fail
+    // closed if its descriptor contract is ever changed: the callback has
+    // already run, so materialize the produced value once instead of running
+    // it a second time.
+    double out = site->canonical_handle;
+    bool used_workspace = true;
+    uint64_t arena_locations = 0;
+    if (c.out.data != canonical->value ||
+        c.out.len != p.body.slots[static_cast<size_t>(op.out)].len) {
+      if (!c.out.data ||
+          c.out.len != p.body.slots[static_cast<size_t>(op.out)].len)
+        throw std::logic_error(
+            "inactive-workspace callback changed output shape");
+      const DynamicArena::Allocation allocation =
+          state.arena.allocate_located(c.out.len);
+      std::copy_n(c.out.data, c.out.len, allocation.data);
+      if (state.arena.location_handle(allocation, 0, c.out.len, out)) {
+        arena_locations = 1;
+      } else {
+        out = make_ref(allocation.data, c.out.len, false);
+      }
+      used_workspace = false;
+    }
+    state.bindings[static_cast<size_t>(op.out)] = out;
+    if (state.allocation_profile) {
+      if (used_workspace) {
+        state.allocation_profile->note_inactive_workspace(op, n);
+      } else {
+        state.allocation_profile->note_inactive_split(op, n, c.out.len,
+                                                      arena_locations);
+      }
+    }
+    return true;
+  }
+
   bool inline_integer_result(const Node& n) {
     const Op& op = p.body.ops[static_cast<size_t>(n.op)];
     if (op.opcode != OP_COMPARE && op.opcode != OP_INT_ARITH) return false;
@@ -3059,6 +3347,10 @@ struct DynamicExecution {
     if (n.kernel_scratch > state.inactive_scratch_size ||
         (n.kernel_scratch > 0 && !state.inactive_scratch))
       return false;
+    if (inactive_workspace_call(n, handles)) {
+      publish_loop_invariant(n);
+      return true;
+    }
 
     const int64_t output_values =
         add(p.body.slots[static_cast<size_t>(op.out)].len,
@@ -3077,9 +3369,11 @@ struct DynamicExecution {
     // and scratch stop entering persistent history; output storage remains in
     // the stable arena and is published after successful completion.
     n.forward(c);
-    stabilize_ephemeral_aliased_output(c.out, outputs, handles, c);
+    stabilize_ephemeral_aliased_output(c.out, outputs, primary_len, handles, c);
     if (op.out2 >= 0)
-      stabilize_ephemeral_aliased_output(c.out2, output2, handles, c);
+      stabilize_ephemeral_aliased_output(
+          c.out2, output2, p.body.slots[static_cast<size_t>(op.out2)].len,
+          handles, c);
     uint64_t arena_locations = 0;
     const auto output_handle = [&](double* actual, double* expected,
                                    int64_t actual_len, int64_t expected_len,
@@ -3113,14 +3407,25 @@ struct DynamicExecution {
     return true;
   }
 
+  bool is_inactive_workspace_handle(double handle) const noexcept {
+    const auto* plan = state.inactive_workspace_plan.get();
+    if (!plan || handle >= 0) return false;
+    for (const auto& site : plan->sites)
+      if (site.canonical_ready && site.canonical_handle == handle) return true;
+    return false;
+  }
+
   void stabilize_ephemeral_aliased_output(Desc& output, double* stable,
+                                          int64_t stable_len,
                                           const double* handles,
                                           const KernelCtx& context) {
     if (!output.data) return;
     for (int k = 0; k < context.n_in; ++k) {
-      if (!is_record_scalar(handles[k]) && !is_inline_int(handles[k])) continue;
-      if (output.data != context.in[k].data) continue;
-      if (output.len != context.in[k].len)
+      if (!overlaps(output, context.in[k])) continue;
+      if (!is_record_scalar(handles[k]) && !is_inline_int(handles[k]) &&
+          !is_inactive_workspace_handle(handles[k]))
+        continue;
+      if (output.len != stable_len)
         throw std::logic_error(
             "dynamic structured ephemeral input aliases mismatched output");
       std::copy_n(output.data, output.len, stable);
@@ -3187,10 +3492,14 @@ struct DynamicExecution {
         // Callback output redirection may alias an input. Record storage can
         // move at the next push, so materialize that special case into the
         // stable frame before publishing a persistent Ref.
-        stabilize_ephemeral_aliased_output(c.out, frame + op.n_in, handles, c);
+        const int64_t primary_len =
+            p.body.slots[static_cast<size_t>(op.out)].len;
+        stabilize_ephemeral_aliased_output(c.out, frame + op.n_in, primary_len,
+                                           handles, c);
         if (op.out2 >= 0)
           stabilize_ephemeral_aliased_output(
-              c.out2, frame + op.n_in + c.out.len, handles, c);
+              c.out2, frame + op.n_in + primary_len,
+              p.body.slots[static_cast<size_t>(op.out2)].len, handles, c);
         const double out = make_ref(c.out.data, c.out.len, active);
         state.bindings[static_cast<size_t>(op.out)] = out;
         double out2 = -1;
@@ -3563,6 +3872,10 @@ void dynamic_loop_forward(KernelCtx& ctx) {
   s.inactive_control_reuse =
       s.inactive_control_plan &&
       std::getenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL") == nullptr;
+  if (s.inactive_workspace_plan) s.inactive_workspace_plan->reset_runtime();
+  s.inactive_workspace_reuse =
+      s.inactive_workspace_plan &&
+      std::getenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE") == nullptr;
   s.record_scalar_reuse =
       std::getenv("STANLI_NO_STRUCTURED_RECORD_SCALARS") == nullptr;
   struct ReleaseOnFailure {
