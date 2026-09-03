@@ -110,6 +110,13 @@ def render():
     higher_names = sorted(set(re.findall(
         r"\b((?:ode_\w+|integrate_ode_\w+|integrate_1d|algebra_solver|map_rect|reduce_sum(?:_static)?))\s*\(",
         higher.read_text())))
+    # These entry points share the same callback signature and lowering/kernel
+    # family.  The family probe covers the common ABI; focused lowering tests
+    # exercise the solver selection independently.
+    higher_aliases = {"algebra_solver": {"algebra_solver_newton"}}
+    higher_names = sorted(set(higher_names).union(*(
+        aliases for base, aliases in higher_aliases.items()
+        if base in higher_names)))
     manifest["models"]["higher_order"] = {"names": higher_names, "parameters": 2}
     covered = {n for m in manifest["models"].values() for n in m["names"]}
     # Literal dispatch names and X-macro registrations must acquire a probe
@@ -125,16 +132,34 @@ def render():
     candidates = inventory_names & (literals | macros)
     refusals = {
         "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout.",
-        "integrate_1d": "Mentioned only in effect analysis; no runtime implementation exists.",
     }
-    missing = candidates - covered - set(refusals)
+    focused = {
+        name: "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering"
+        for name in (
+            "integrate_1d",
+            "integrate_1d_double_exponential",
+            "integrate_1d_double_exponential_tol",
+            "integrate_1d_gauss_kronrod",
+            "integrate_1d_gauss_kronrod_tol",
+        )
+    }
+    focused["integrate_ode"] = (
+        "tests/fixtures/higher_order_all_contexts.stan exercises transformed-data, "
+        "graph, runtime-control, and interpreted write_array execution"
+    )
+    missing = candidates - covered - set(refusals) - set(focused)
     if missing:
         raise ValueError("Runtime functions need coverage recipes: " + ", ".join(sorted(missing)))
     manifest["recognized_but_unsupported"] = refusals
+    manifest["focused_coverage"] = focused
     manifest["scope"] = {
         "overloads": "At least one supported signature per name, not every overload.",
         "gp_exp_quad_cov": "Coordinates are data; scale and length-scale are active.",
-        "map_rect": "Only the implemented empty-job case; nonempty jobs are unsupported.",
+        "map_rect": (
+            "The integrated probe covers empty jobs; "
+            "tests/fixtures/map_rect_region.stan covers nonempty serial "
+            "graph and runtime-control lowering."
+        ),
         "predicates": "logical_negation also exercises a parameter-dependent region.",
     }
     manifest["covered_names"] = sorted(covered)

@@ -322,18 +322,19 @@ class MirInterp {
         }
         if (st.lhs_idx.empty()) {
           Value v = eval(st.rhs);
-          // A plain `int` name stays int for its whole lifetime; the RHS's
-          // own arithmetic (e.g. `sumnt2 += nts[i] * nts[i]`) does not, since
-          // MirInterp's binary ops answer in real registers. Re-declaring an
-          // int with an int-valued init already coerces (above); a later
-          // whole-variable reassignment needs the same coercion, or the next
-          // eval_int on this name (a parameter or array size, say) sees a
-          // real entry and fails as unknown.
+          // A declared numeric type stays fixed for its whole lifetime. The
+          // RHS's own representation can differ: MirInterp's binary ops use
+          // real registers, while an all-integer array literal is tagged int.
+          // Preserve int destinations as before, and apply Stan's implicit
+          // int-to-real promotion when assigning into a real destination.
           const Value* existing = find(st.lhs);
           if (existing && existing->is_int && !v.is_int) {
             v.is_int = true;
             v.i.clear();
             for (const T& x : v.r) v.i.push_back((int)val(x));
+          } else if (existing && !existing->is_int && v.is_int) {
+            v.is_int = false;
+            v.i.clear();
           }
           env_[st.lhs] = std::move(v);
           return;
@@ -973,7 +974,7 @@ class MirInterp {
         mir::reduce_sum_partial_name(e.args[0].name, &propto);
     const std::vector<mir::UnsizedView> views =
         mir::reduce_sum_partial_views(e);
-    const mir::FunDef* f = mir::resolve_reduce_sum_partial(funs_, base, views);
+    const mir::FunDef* f = mir::resolve_callback(funs_, base, views);
     if (f == nullptr)
       fail("reduce_sum: unknown partial-sum function " + base, e.raw);
     if (f->arg_names.size() != views.size())
@@ -1006,6 +1007,55 @@ class MirInterp {
       return std::move(r.v);
     }
     fail("reduce_sum: " + base + " returned no value", e.raw);
+  }
+
+  // Serial map_rect is structural, just like reduce_sum: each job is one
+  // ordinary callback invocation and the vector results are concatenated.
+  // Keeping it here gives transformed data, callback fallback, and
+  // interpreted write_array the same definition.
+  Value call_map_rect(const mir::Expr& e) {
+    if (e.args.size() != 5 || e.args[0].kind != mir::Expr::Var)
+      fail("map_rect: malformed call", e.raw);
+    Value shared = eval(e.args[1]);
+    Value jobs = eval(e.args[2]);
+    Value real_data = eval(e.args[3]);
+    Value int_data = eval(e.args[4]);
+    if (jobs.dims.empty()) fail("map_rect: jobs are not an array", e.raw);
+    const int64_t n = jobs.dims[0];
+    if (n < 0 || (n && jobs.r.size() % (size_t)n != 0) ||
+        (n && real_data.r.size() % (size_t)n != 0) ||
+        (n && int_data.i.size() % (size_t)n != 0))
+      fail("map_rect: job shapes disagree", e.raw);
+    const int64_t job_width = n ? (int64_t)jobs.r.size() / n : 0;
+    const int64_t real_width = n ? (int64_t)real_data.r.size() / n : 0;
+    const int64_t int_width = n ? (int64_t)int_data.i.size() / n : 0;
+    const std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Vector},
+                                              {0, mir::UnsizedLeaf::Vector},
+                                              {1, mir::UnsizedLeaf::Real},
+                                              {1, mir::UnsizedLeaf::Int}};
+    const mir::FunDef* f = mir::resolve_callback(funs_, e.args[0].name, views);
+    if (!f) fail("map_rect: unknown callback " + e.args[0].name, e.raw);
+    Value result;
+    for (int64_t job = 0; job < n; ++job) {
+      Value job_arg, xr_arg, xi_arg;
+      job_arg.dims = {job_width};
+      xr_arg.dims = {real_width};
+      xi_arg.dims = {int_width};
+      xi_arg.is_int = true;
+      for (int64_t k = 0; k < job_width; ++k)
+        job_arg.r.push_back(jobs.r[(size_t)(job + k * n)]);
+      for (int64_t k = 0; k < real_width; ++k)
+        xr_arg.r.push_back(real_data.r[(size_t)(job + k * n)]);
+      for (int64_t k = 0; k < int_width; ++k) {
+        const int value = int_data.i[(size_t)(job + k * n)];
+        xi_arg.i.push_back(value);
+        xi_arg.r.push_back(T(value));
+      }
+      Value one = call(*f, {shared, job_arg, xr_arg, xi_arg});
+      result.r.insert(result.r.end(), one.r.begin(), one.r.end());
+    }
+    result.dims = {(int64_t)result.r.size()};
+    return result;
   }
 
   Value call_udf(const mir::Expr& e) {
@@ -1297,12 +1347,15 @@ class MirInterp {
 
   Value eval_fun(const mir::Expr& e) {
     Value r;
+    if (mir::stateful_intrinsic_kind(e))
+      fail("target() is unavailable in this context", e.raw);
     if (const auto value = mir::nullary_constant(e)) {
       r.r = {T(*value)};
       return r;
     }
     if (e.fn_lib == mir::Expr::Lib::UserDefined) return call_udf(e);
     if (mir::is_reduce_sum(e)) return call_reduce_sum(e);
+    if (e.name == "map_rect") return call_map_rect(e);
     const auto is_scalar = [](const Value& v) {
       return v.dims.empty() && v.r.size() == 1;
     };

@@ -208,6 +208,8 @@ endif()
 # into a static library and linked into both stanli targets.
 file(GLOB SUNDIALS_SRC
   ${_sundials}/src/cvodes/*.c
+  ${_sundials}/src/idas/*.c
+  ${_sundials}/src/kinsol/*.c
   ${_sundials}/src/sundials/*.c
   ${_sundials}/src/nvector/serial/*.c
   ${_sundials}/src/sunmatrix/band/*.c
@@ -276,8 +278,12 @@ set(STANLI_RUNTIME_SOURCES
   runtime/kernels/scalar_binary.cpp
   runtime/kernels/scalar_unary_ad.cpp
   runtime/kernels/algebra.cpp
+  runtime/kernels/quadrature.cpp
   runtime/kernels/ode.cpp
+  runtime/kernels/dae.cpp
+  runtime/kernels/ode_adjoint.cpp
   runtime/src/ode_prog.cpp
+  runtime/src/higher_order_eval.cpp
   runtime/src/program.cpp
   runtime/src/program_transform.cpp
   runtime/kernels/constrain.cpp

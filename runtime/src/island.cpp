@@ -102,6 +102,8 @@ bool callable(const Graph& g, const Op& op) {
   switch (op.opcode) {
     case OP_ISLAND:
     case OP_ODE:
+    case OP_DAE:
+    case OP_ODE_ADJOINT:
     case OP_RNG:
     case OP_PROD_VEC:
     case OP_EXTREMA_VEC:

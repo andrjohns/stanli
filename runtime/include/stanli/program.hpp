@@ -30,6 +30,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -206,6 +207,9 @@ struct Program {
     int32_t scratch = 0;
     int32_t scratch_len = 0;
     std::vector<int> idata;
+    // Optional graph-kernel metadata. The shared owner lets a CALL retain the
+    // same solver/callback specification an ordinary graph Op points at.
+    std::shared_ptr<void> udata_owner;
     // Generated reverse binding. gen_adjoint normalizes CALL instructions to
     // one payload each, then caches their checkpointed value ranges and
     // compact adjoint ranges here. Forward-only Programs leave these zero.

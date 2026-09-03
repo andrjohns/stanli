@@ -8,6 +8,7 @@
     "add",
     "add_diag",
     "algebra_solver",
+    "algebra_solver_newton",
     "append_array",
     "append_col",
     "append_row",
@@ -416,6 +417,14 @@
     "zeros_row_vector",
     "zeros_vector"
   ],
+  "focused_coverage": {
+    "integrate_1d": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_1d_double_exponential": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_1d_double_exponential_tol": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_1d_gauss_kronrod": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_1d_gauss_kronrod_tol": "tests/fixtures/quadrature_region.stan exercises graph and runtime-control lowering",
+    "integrate_ode": "tests/fixtures/higher_order_all_contexts.stan exercises transformed-data, graph, runtime-control, and interpreted write_array execution"
+  },
   "models": {
     "containers": {
       "names": [
@@ -532,6 +541,7 @@
     "higher_order": {
       "names": [
         "algebra_solver",
+        "algebra_solver_newton",
         "integrate_ode_adams",
         "integrate_ode_bdf",
         "integrate_ode_rk45",
@@ -1136,15 +1146,14 @@
       ]
     }
   },
-  "name_count": 415,
+  "name_count": 416,
   "recognized_but_unsupported": {
-    "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout.",
-    "integrate_1d": "Mentioned only in effect analysis; no runtime implementation exists."
+    "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout."
   },
   "schema": 1,
   "scope": {
     "gp_exp_quad_cov": "Coordinates are data; scale and length-scale are active.",
-    "map_rect": "Only the implemented empty-job case; nonempty jobs are unsupported.",
+    "map_rect": "The integrated probe covers empty jobs; tests/fixtures/map_rect_region.stan covers nonempty serial graph and runtime-control lowering.",
     "overloads": "At least one supported signature per name, not every overload.",
     "predicates": "logical_negation also exercises a parameter-dependent region."
   }

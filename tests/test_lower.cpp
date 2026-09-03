@@ -5,7 +5,10 @@
 #include "categorical_check_mir.hpp"
 #include "stdout_capture.hpp"
 #include <stanli/compile.hpp>
+#include <stanli/dae.hpp>
 #include <stanli/graph.hpp>
+#include <stanli/island.hpp>
+#include <stanli/ode_adjoint.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/packet.hpp>
 #include <stanli/wa_interp.hpp>
@@ -5316,6 +5319,514 @@ int main() {
     const double lp = kex.gradient(gradient);
     expect_eq("deep known-real UDF lp", lp, -0.5 * 0.25 * 0.25);
     expect_eq("deep known-real UDF gradient", gradient[0], -0.25);
+  }
+
+  // target() is a stateful read of the density accumulated at that source
+  // point. The first read lowers directly into the graph; the reads in the
+  // parameter-dependent branch (including one in an inlined _lp UDF) receive
+  // the graph prefix as an island live-in while publishing only their local
+  // delta back to the model target.
+  {
+    CompiledModel tm =
+        compile_model(slurp("tests/fixtures/target_read.tmir.sexp"), DataMap());
+    check(tm.n_unconstrained == 1, "target-read parameter width");
+    check(count_opcode(tm, OP_ISLAND) > 0, "target-read runtime island");
+    Executor tex(std::move(tm.graph));
+    tm.bind(tex);
+    double gradient[1] = {};
+
+    tex.params_data()[0] = -2.0;
+    expect_eq("target-read untaken lp", tex.gradient(gradient), -2.5);
+    expect_eq("target-read untaken gradient", gradient[0], 2.5);
+
+    tex.params_data()[0] = 2.0;
+    expect_eq("target-read taken lp", tex.gradient(gradient), 2.0);
+    expect_eq("target-read taken gradient", gradient[0], -5.0);
+  }
+
+  // A higher-order callback inside parameter-dependent control flow uses the
+  // same argument binder and UDF inliner as an ordinary call. Serial
+  // reduce_sum supplies the complete slice and synthesized bounds while its
+  // shared real argument remains differentiable.
+  {
+    CompiledModel rm = compile_model(
+        slurp("tests/fixtures/reduce_sum_region.tmir.sexp"), DataMap());
+    check(rm.n_unconstrained == 1, "reduce_sum region parameter width");
+    check(count_opcode(rm, OP_ISLAND) > 0, "reduce_sum runtime island");
+    Executor rex(std::move(rm.graph));
+    rm.bind(rex);
+    double gradient[1] = {};
+
+    rex.params_data()[0] = -2.0;
+    expect_eq("reduce_sum untaken lp", rex.gradient(gradient), -2.0);
+    expect_eq("reduce_sum untaken gradient", gradient[0], 2.0);
+
+    rex.params_data()[0] = 2.0;
+    expect_eq("reduce_sum taken lp", rex.gradient(gradient), 10.0);
+    expect_eq("reduce_sum taken gradient", gradient[0], 10.0);
+  }
+
+  // The preparation interpreter routes retained higher-order calls through
+  // the same registered kernels as graph and runtime-control execution.
+  // map_rect and reduce_sum remain shared structural interpreter operations.
+  {
+    CompiledModel hm = compile_model(
+        slurp("tests/fixtures/higher_order_transformed_data.tmir.sexp"),
+        DataMap());
+    check(hm.n_unconstrained == 1, "transformed-data HOF parameter width");
+    Executor hex(std::move(hm.graph));
+    hm.bind(hex);
+    hex.params_data()[0] = 0.0;
+    double gradient[1] = {};
+    const double lp = hex.gradient(gradient);
+    const double expected = 3.0 + 10.0 + 2.0 + 0.5 + 0.2 + 0.2 + 0.2;
+    check(std::fabs(lp + 0.5 * expected * expected) < 1e-7,
+          "transformed-data HOF lp");
+    check(std::fabs(gradient[0] - expected) < 1e-7,
+          "transformed-data HOF gradient");
+    check(hm.write_array && hm.write_array->interp,
+          "higher-order write_array interpreter selected");
+    if (hm.write_array && hm.write_array->interp) {
+      WaRng rng(123);
+      const auto row =
+          hm.write_array->interp->eval(hm.constrained_env(hex), rng);
+      const std::vector<double> want{0.0, 10.0, 2.0, 0.5, 0.2, 0.2, 1e-10, 0.2};
+      check(row.size() == want.size(), "higher-order write_array row width");
+      if (row.size() == want.size())
+        for (size_t i = 0; i < row.size(); ++i)
+          check(std::fabs(row[i] - want[i]) < 1e-7,
+                "higher-order write_array value " + std::to_string(i));
+    }
+  }
+
+  // The complete stanc higher-order inventory, plus every compiler-special
+  // solver variant, must cross all four runtime paths in one model.  Generic
+  // integrate_ode is the deprecated RK45 spelling; keeping it in this census
+  // prevents the flat --dump-stan-math-signatures inventory from drifting
+  // away from the shared family classifier.  write_array deliberately uses
+  // its interpreter when transformed parameters make data-level callback
+  // arguments available only at draw time.
+  {
+    CompiledModel hm = compile_model(
+        slurp("tests/fixtures/higher_order_all_contexts.tmir.sexp"), DataMap());
+    check(hm.n_unconstrained == 7, "all-context HOF parameter width");
+    check(count_opcode(hm, OP_ISLAND) > 0, "all-context HOF runtime island");
+    Executor hex(std::move(hm.graph));
+    hm.bind(hex);
+    double gradient[7] = {};
+    const auto set_point = [&](double gate) {
+      hex.params_data()[0] = gate;
+      hex.params_data()[1] = 0.2;
+      hex.params_data()[2] = 0.4;
+      hex.params_data()[3] = 0.0;
+      hex.params_data()[4] = std::log(0.1);
+      hex.params_data()[5] = 0.4;
+      hex.params_data()[6] = 0.4;
+    };
+    const double graph_total = 9.782;
+    const double data_total = 9.882;
+    const double prior = -0.5 * (1.0 + std::pow(std::log(0.1) + 2.0, 2)) -
+                         3.5 * std::log(2.0 * std::acos(-1.0));
+
+    set_point(-1.0);
+    const double untaken = hex.gradient(gradient);
+    check(std::fabs(untaken - (prior + data_total + graph_total)) < 1e-6,
+          "all-context HOF untaken lp");
+    for (double value : gradient)
+      check(std::isfinite(value), "all-context HOF untaken gradient");
+
+    set_point(1.0);
+    const double taken = hex.gradient(gradient);
+    check(std::fabs(taken - (untaken + graph_total)) < 1e-6,
+          "all-context HOF taken lp");
+    for (double value : gradient)
+      check(std::isfinite(value), "all-context HOF taken gradient");
+
+    check(hm.write_array && hm.write_array->interp,
+          "all-context HOF write_array interpreter selected");
+    if (hm.write_array && hm.write_array->interp) {
+      WaRng rng(123);
+      const auto row =
+          hm.write_array->interp->eval(hm.constrained_env(hex), rng);
+      check(row.size() == 10, "all-context HOF write_array row width");
+      for (double value : row)
+        check(std::isfinite(value), "all-context HOF write_array value");
+      if (row.size() == 10) {
+        check(std::fabs(row[7] - graph_total) < 1e-6,
+              "all-context HOF transformed-parameter total");
+        check(std::fabs(row[8] - graph_total) < 1e-6,
+              "all-context HOF generated-quantity total");
+        check(std::fabs(row[9] - data_total) < 1e-6,
+              "all-context HOF transformed-data total");
+      }
+    }
+  }
+
+  // Serial map_rect has statically-shaped jobs, so a runtime-control program
+  // expands them into ordinary callback invocations and concatenates their
+  // vector results. Shared and per-job parameters retain their adjoints;
+  // each real/integer data row is bound to the matching callback call.
+  {
+    CompiledModel mm = compile_model(
+        slurp("tests/fixtures/map_rect_region.tmir.sexp"), DataMap());
+    check(mm.n_unconstrained == 2, "map_rect region parameter width");
+    check(count_opcode(mm, OP_ISLAND) > 0, "map_rect runtime island");
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    double gradient[2] = {};
+
+    mex.params_data()[0] = -1.0;
+    mex.params_data()[1] = 2.0;
+    expect_eq("map_rect untaken lp", mex.gradient(gradient), 265.5);
+    expect_eq("map_rect untaken gate gradient", gradient[0], 1.0);
+    expect_eq("map_rect untaken x gradient", gradient[1], 102.0);
+
+    mex.params_data()[0] = 1.0;
+    mex.params_data()[1] = 2.0;
+    expect_eq("map_rect taken lp", mex.gradient(gradient), 533.5);
+    expect_eq("map_rect taken gate gradient", gradient[0], -1.0);
+    expect_eq("map_rect taken x gradient", gradient[1], 206.0);
+  }
+
+  // Retained higher-order algorithms use the same graph-kernel CALL adapter
+  // as regular functions. Its owned callback specification remains attached
+  // to the runtime region and its input activity mask preserves the solver's
+  // contract that only theta, not the initial guess, is differentiated.
+  {
+    CompiledModel am = compile_model(
+        slurp("tests/fixtures/algebra_region.tmir.sexp"), DataMap());
+    check(am.n_unconstrained == 2, "algebra region parameter width");
+    check(count_opcode(am, OP_ISLAND) > 0, "algebra runtime island");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    double gradient[2] = {};
+
+    aex.params_data()[0] = -1.0;
+    aex.params_data()[1] = 2.0;
+    expect_eq("algebra untaken lp", aex.gradient(gradient), -2.5);
+    expect_eq("algebra untaken gate gradient", gradient[0], 1.0);
+    expect_eq("algebra untaken theta gradient", gradient[1], -2.0);
+
+    aex.params_data()[0] = 1.0;
+    expect_eq("algebra taken lp", aex.gradient(gradient), 5.5);
+    expect_eq("algebra taken gate gradient", gradient[0], -1.0);
+    expect_eq("algebra taken theta gradient", gradient[1], 2.0);
+  }
+
+  // Modern algebra solvers, including explicit-control variants, use their
+  // runtime-control implementation both as a direct graph producer and under
+  // a parameter-dependent branch.
+  {
+    CompiledModel am = compile_model(
+        slurp("tests/fixtures/algebra_shared.tmir.sexp"), DataMap());
+    check(am.n_unconstrained == 2, "shared algebra parameter width");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    double gradient[2] = {};
+
+    aex.params_data()[0] = -1.0;
+    aex.params_data()[1] = 2.0;
+    expect_eq("shared algebra untaken lp", aex.gradient(gradient), 5.5);
+    expect_eq("shared algebra untaken gate gradient", gradient[0], 1.0);
+    expect_eq("shared algebra untaken wanted gradient", gradient[1], 2.0);
+
+    aex.params_data()[0] = 1.0;
+    expect_eq("shared algebra taken lp", aex.gradient(gradient), 13.5);
+    expect_eq("shared algebra taken gate gradient", gradient[0], -1.0);
+    expect_eq("shared algebra taken wanted gradient", gradient[1], 6.0);
+  }
+
+  // Every one-dimensional integration frontend shares one retained callback
+  // ABI and one quadrature kernel. The legacy call exercises ordinary graph
+  // lowering; the four modern method/tolerance forms exercise Program CALL
+  // lowering inside runtime control. Bounds and packed callback reals remain
+  // independently differentiable in both backends.
+  {
+    CompiledModel qm = compile_model(
+        slurp("tests/fixtures/quadrature_region.tmir.sexp"), DataMap());
+    check(qm.n_unconstrained == 3, "quadrature region parameter width");
+    check(count_opcode(qm, OP_QUADRATURE) > 0, "quadrature graph kernel");
+    check(count_opcode(qm, OP_ISLAND) > 0, "quadrature runtime island");
+    Executor qex(std::move(qm.graph));
+    qm.bind(qex);
+    double gradient[3] = {};
+
+    qex.params_data()[0] = -1.0;
+    qex.params_data()[1] = 2.0;
+    qex.params_data()[2] = 3.0;
+    double quadrature_lp = qex.gradient(gradient);
+    check(std::fabs(quadrature_lp - 6.0) < 1e-10,
+          "quadrature untaken lp " + std::to_string(quadrature_lp));
+    check(std::fabs(gradient[0]) < 1e-12, "quadrature untaken gate gradient");
+    check(std::fabs(gradient[1] - 6.0) < 1e-10,
+          "quadrature untaken bound gradient");
+    check(std::fabs(gradient[2] - 2.0) < 1e-10,
+          "quadrature untaken callback gradient");
+
+    qex.params_data()[0] = 1.0;
+    qex.params_data()[1] = 2.0;
+    qex.params_data()[2] = 3.0;
+    quadrature_lp = qex.gradient(gradient);
+    check(std::fabs(quadrature_lp - 30.0) < 1e-9,
+          "quadrature taken lp " + std::to_string(quadrature_lp));
+    check(std::fabs(gradient[0]) < 1e-12, "quadrature taken gate gradient");
+    check(std::fabs(gradient[1] - 30.0) < 1e-8,
+          "quadrature taken bound gradient");
+    check(std::fabs(gradient[2] - 10.0) < 1e-8,
+          "quadrature taken callback gradient");
+  }
+
+  // Every ODE frontend uses the existing OP_ODE kernel from runtime control.
+  // A zero RHS makes all solver answers exact and exposes whether initial
+  // state and callback-parameter activity are wired correctly.
+  {
+    CompiledModel om =
+        compile_model(slurp("tests/fixtures/ode_region.tmir.sexp"), DataMap());
+    check(om.n_unconstrained == 3, "ODE region parameter width");
+    check(count_opcode(om, OP_ISLAND) > 0, "ODE runtime island");
+    Executor oex(std::move(om.graph));
+    om.bind(oex);
+    double gradient[3] = {};
+
+    oex.params_data()[0] = -1.0;
+    oex.params_data()[1] = 2.0;
+    oex.params_data()[2] = 3.0;
+    expect_eq("ODE untaken lp", oex.gradient(gradient), -7.0);
+    expect_eq("ODE untaken gate gradient", gradient[0], 1.0);
+    expect_eq("ODE untaken initial gradient", gradient[1], -2.0);
+    expect_eq("ODE untaken rate gradient", gradient[2], -3.0);
+
+    oex.params_data()[0] = 1.0;
+    expect_eq("ODE taken lp", oex.gradient(gradient), 15.0);
+    expect_eq("ODE taken gate gradient", gradient[0], -1.0);
+    expect_eq("ODE taken initial gradient", gradient[1], 9.0);
+    expect_eq("ODE taken rate gradient", gradient[2], -3.0);
+  }
+
+  // DAE and DAE_tol share the retained callback ABI and OP_DAE kernel. The
+  // unconditional call enters through ordinary expression lowering; the
+  // tolerance call is compiled inside a parameter-dependent Program region.
+  {
+    CompiledModel dm =
+        compile_model(slurp("tests/fixtures/dae_region.tmir.sexp"), DataMap());
+    check(dm.n_unconstrained == 3, "DAE region parameter width");
+    check(count_opcode(dm, OP_ISLAND) > 0, "DAE shared runtime island");
+    int dae_calls = 0;
+    for (const Op& op : dm.graph.ops) {
+      if (op.opcode != OP_ISLAND) continue;
+      const auto* program = static_cast<const IslandProg*>(op.udata);
+      for (const Program::Call& call : program->calls) {
+        if (call.opcode != OP_DAE) continue;
+        ++dae_calls;
+        const auto* spec = static_cast<const DaeSpec*>(call.udata_owner.get());
+        check(spec != nullptr && spec->prog.ok,
+              "DAE retained callback register program");
+      }
+    }
+    check(dae_calls == 2, "DAE and DAE_tol use shared kernel calls");
+    Executor dex(std::move(dm.graph));
+    dm.bind(dex);
+    double gradient[3] = {};
+
+    dex.params_data()[0] = -1.0;
+    dex.params_data()[1] = 2.0;
+    dex.params_data()[2] = 3.0;
+    const double dae_value_only = dex.forward_value_only();
+    check(std::fabs(dae_value_only + 4.4) < 1e-8,
+          "DAE value-only lp " + std::to_string(dae_value_only));
+    double dae_lp = dex.gradient(gradient);
+    check(std::fabs(dae_lp + 4.4) < 1e-8,
+          "DAE untaken lp " + std::to_string(dae_lp));
+    check(std::fabs(gradient[0] - 1.0) < 1e-8, "DAE untaken gate gradient");
+    check(std::fabs(gradient[1] + 1.0) < 1e-7, "DAE untaken initial gradient");
+    check(std::fabs(gradient[2] + 2.8) < 1e-7, "DAE untaken rate gradient");
+
+    dex.params_data()[0] = 1.0;
+    dae_lp = dex.gradient(gradient);
+    check(std::fabs(dae_lp + 1.8) < 1e-8,
+          "DAE taken lp " + std::to_string(dae_lp));
+    check(std::fabs(gradient[0] + 1.0) < 1e-8, "DAE taken gate gradient");
+    check(std::fabs(gradient[1]) < 1e-7, "DAE taken initial gradient");
+    check(std::fabs(gradient[2] + 2.6) < 1e-7, "DAE taken rate gradient");
+  }
+
+  // Modern forward ODE times are AutoDiffable in Stan. Runtime-valued t0 and
+  // ts therefore travel as kernel operands, sharing the same graph/Program
+  // call in ordinary expressions and parameter-dependent control flow.
+  {
+    CompiledModel om = compile_model(
+        slurp("tests/fixtures/ode_active_times.tmir.sexp"), DataMap());
+    check(om.n_unconstrained == 5, "active-time ODE parameter width");
+    check(count_opcode(om, OP_ISLAND) > 0, "active-time ODE runtime island");
+    Executor oex(std::move(om.graph));
+    om.bind(oex);
+    double gradient[5] = {};
+    const double duration = std::log(0.3);
+
+    oex.params_data()[0] = -1.0;
+    oex.params_data()[1] = 2.0;
+    oex.params_data()[2] = 0.1;
+    oex.params_data()[3] = duration;
+    oex.params_data()[4] = 3.0;
+    double lp = oex.gradient(gradient);
+    const double prior = -0.5 * (1.0 + 4.0 + 0.01 + duration * duration + 9.0);
+    check(std::fabs(lp - (prior + 2.9)) < 1e-8, "active-time ODE untaken lp");
+    check(std::fabs(gradient[0] - 1.0) < 1e-7,
+          "active-time ODE untaken gate gradient");
+    check(std::fabs(gradient[1] + 1.0) < 1e-7,
+          "active-time ODE untaken initial gradient");
+    check(std::fabs(gradient[2] + 0.1) < 1e-7,
+          "active-time ODE untaken translated-time gradient");
+    check(std::fabs(gradient[3] - (-duration + 0.9)) < 1e-6,
+          "active-time ODE untaken duration gradient");
+    check(std::fabs(gradient[4] + 2.7) < 1e-6,
+          "active-time ODE untaken rate gradient");
+
+    oex.params_data()[0] = 1.0;
+    lp = oex.gradient(gradient);
+    check(std::fabs(lp - (prior + 5.8)) < 1e-8, "active-time ODE taken lp");
+    check(std::fabs(gradient[0] + 1.0) < 1e-7,
+          "active-time ODE taken gate gradient");
+    check(std::fabs(gradient[1]) < 1e-7,
+          "active-time ODE taken initial gradient");
+    check(std::fabs(gradient[2] + 0.1) < 1e-7,
+          "active-time ODE taken translated-time gradient");
+    check(std::fabs(gradient[3] - (-duration + 1.8)) < 1e-6,
+          "active-time ODE taken duration gradient");
+    check(std::fabs(gradient[4] + 2.4) < 1e-6,
+          "active-time ODE taken rate gradient");
+  }
+
+  // Preserve Stan's mixed scalar instantiations too: making an inactive time
+  // a var changes the coupled adaptive system, so t0-only and ts-only calls
+  // have distinct activity bits rather than one combined "time" bit.
+  {
+    CompiledModel om = compile_model(
+        slurp("tests/fixtures/ode_time_activity.tmir.sexp"), DataMap());
+    Executor oex(std::move(om.graph));
+    om.bind(oex);
+    const double start_log = std::log(0.3);
+    const double finish_log = std::log(0.4);
+    oex.params_data()[0] = start_log;
+    oex.params_data()[1] = finish_log;
+    double gradient[2] = {};
+    const double lp = oex.gradient(gradient);
+    const double want_lp =
+        -0.5 * (start_log * start_log + finish_log * finish_log) + 0.7;
+    check(std::fabs(lp - want_lp) < 1e-8, "mixed-time ODE lp");
+    check(std::fabs(gradient[0] - (-start_log + 0.3)) < 1e-6,
+          "t0-only ODE gradient");
+    check(std::fabs(gradient[1] - (-finish_log + 0.4)) < 1e-6,
+          "ts-only ODE gradient");
+  }
+
+  // The CVODES adjoint frontend uses the same retained callback packing in an
+  // ordinary expression and inside runtime control. Its reverse kernel runs
+  // one weighted adjoint solve and propagates y0, t0, ts, and callback args.
+  {
+    CompiledModel am = compile_model(
+        slurp("tests/fixtures/ode_adjoint_region.tmir.sexp"), DataMap());
+    check(am.n_unconstrained == 5, "adjoint ODE parameter width");
+    int adjoint_calls = 0;
+    for (const Op& op : am.graph.ops) {
+      if (op.opcode != OP_ISLAND) continue;
+      const auto* program = static_cast<const IslandProg*>(op.udata);
+      for (const Program::Call& call : program->calls) {
+        if (call.opcode != OP_ODE_ADJOINT) continue;
+        ++adjoint_calls;
+        const auto* spec =
+            static_cast<const OdeAdjointSpec*>(call.udata_owner.get());
+        check(spec != nullptr && spec->prog.ok,
+              "adjoint ODE retained callback register program");
+      }
+    }
+    check(adjoint_calls == 2, "adjoint ODE shared kernel calls");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    double gradient[5] = {};
+    aex.params_data()[0] = -1.0;
+    aex.params_data()[1] = 2.0;
+    aex.params_data()[2] = 0.1;
+    aex.params_data()[3] = 0.4;
+    aex.params_data()[4] = 3.0;
+
+    const double value_only = aex.forward_value_only();
+    check(std::fabs(value_only + 4.185) < 1e-8,
+          "adjoint ODE value-only lp " + std::to_string(value_only));
+    double lp = aex.gradient(gradient);
+    check(std::fabs(lp + 4.185) < 1e-8,
+          "adjoint ODE untaken lp " + std::to_string(lp));
+    check(std::fabs(gradient[0] - 1.0) < 1e-7,
+          "adjoint ODE untaken gate gradient");
+    check(std::fabs(gradient[1] + 1.0) < 1e-7,
+          "adjoint ODE untaken y0 gradient");
+    check(std::fabs(gradient[2] + 3.1) < 1e-6,
+          "adjoint ODE untaken t0 gradient");
+    check(std::fabs(gradient[3] - 2.6) < 1e-6,
+          "adjoint ODE untaken ts gradient");
+    check(std::fabs(gradient[4] + 2.7) < 1e-6,
+          "adjoint ODE untaken callback gradient");
+
+    aex.params_data()[0] = 1.0;
+    lp = aex.gradient(gradient);
+    check(std::fabs(lp + 1.285) < 1e-8,
+          "adjoint ODE taken lp " + std::to_string(lp));
+    check(std::fabs(gradient[0] + 1.0) < 1e-7,
+          "adjoint ODE taken gate gradient");
+    check(std::fabs(gradient[1]) < 1e-7, "adjoint ODE taken y0 gradient");
+    check(std::fabs(gradient[2] + 6.1) < 1e-6, "adjoint ODE taken t0 gradient");
+    check(std::fabs(gradient[3] - 5.6) < 1e-6, "adjoint ODE taken ts gradient");
+    check(std::fabs(gradient[4] + 2.4) < 1e-6,
+          "adjoint ODE taken callback gradient");
+  }
+
+  // solve_*_tol controls reach Stan Math. One Powell evaluation cannot reach
+  // the root of x^2 - 4 from x = 1, so max_num_steps = 1 raises the solver's
+  // iteration-limit error in both the value and the gradient pass.
+  {
+    CompiledModel tm = compile_model(
+        slurp("tests/fixtures/algebra_tol_controls.tmir.sexp"), DataMap());
+    Executor tex(std::move(tm.graph));
+    tm.bind(tex);
+    tex.params_data()[0] = 4.0;
+    double gradient[1] = {};
+    bool value_threw = false;
+    try {
+      (void)tex.forward_value_only();
+    } catch (const std::domain_error&) {
+      value_threw = true;
+    }
+    check(value_threw, "solve_powell_tol max_num_steps in the value pass");
+    bool gradient_threw = false;
+    try {
+      (void)tex.gradient(gradient);
+    } catch (const std::domain_error&) {
+      gradient_threw = true;
+    }
+    check(gradient_threw,
+          "solve_powell_tol max_num_steps in the gradient pass");
+  }
+
+  // A one-element vector produced by a kernel call inside runtime control
+  // receives its adjoint the same way the graph delivers every one-element
+  // output.
+  {
+    CompiledModel vm = compile_model(
+        slurp("tests/fixtures/region_vector1_binary.tmir.sexp"), DataMap());
+    check(count_opcode(vm, OP_ISLAND) > 0, "vector[1] region island");
+    Executor vex(std::move(vm.graph));
+    vm.bind(vex);
+    double gradient[1] = {};
+
+    vex.params_data()[0] = -1.0;
+    expect_eq("vector[1] region untaken lp", vex.gradient(gradient), -0.5);
+    expect_eq("vector[1] region untaken gradient", gradient[0], 1.0);
+
+    vex.params_data()[0] = 4.0;
+    const double lp = vex.gradient(gradient);
+    check(std::fabs(lp + 3.0) < 1e-12, "vector[1] region taken lp");
+    check(std::fabs(gradient[0] + 3.2) < 1e-12,
+          "vector[1] region taken gradient " + std::to_string(gradient[0]));
   }
 
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations

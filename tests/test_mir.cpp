@@ -586,6 +586,43 @@ int main(int argc, char** argv) {
     read_interp.run({scale_decl, scale_read});
     check(read_interp.env().at("scale_data").dims.empty(),
           "flat data read preserves declared scalar geometry");
+
+    // An integer-valued literal is legal on the right-hand side of a real
+    // declaration. Keep the destination's declared type so consumers such
+    // as higher-order solvers see a real vector, as in mother.stan's
+    // `vector[2] x; x = [0, 0]';`.
+    MirInterp<double> promotion_interp(functions, "assignment promotion");
+    mir::Expr two;
+    two.kind = mir::Expr::LitInt;
+    two.lit_i = 2;
+    two.type_ = "UInt";
+    two.unsized.leaf = mir::UnsizedLeaf::Int;
+    two.data_only = true;
+    mir::Stmt vector_decl;
+    vector_decl.kind = mir::Stmt::Decl;
+    vector_decl.decl_id = "x";
+    vector_decl.decl_type.base = "SVector";
+    vector_decl.decl_type.dims = {two};
+    mir::Expr zero = two;
+    zero.lit_i = 0;
+    mir::Expr literal;
+    literal.kind = mir::Expr::FunApp;
+    literal.name = "FnMakeRowVec";
+    literal.fn_lib = mir::Expr::Lib::Internal;
+    literal.type_ = "URowVector";
+    literal.unsized.leaf = mir::UnsizedLeaf::RowVector;
+    literal.data_only = true;
+    literal.args = {zero, zero};
+    mir::Stmt vector_assign;
+    vector_assign.kind = mir::Stmt::Assignment;
+    vector_assign.lhs = "x";
+    vector_assign.rhs = std::move(literal);
+    promotion_interp.run({vector_decl, vector_assign});
+    const DataMap::Entry& promoted = promotion_interp.env().at("x");
+    check(!promoted.is_int && promoted.i.empty() &&
+              promoted.r == std::vector<double>({0.0, 0.0}) &&
+              promoted.dims == std::vector<int64_t>({2}),
+          "integer literal assignment retains declared real vector type");
   }
 
   // A partial list of leading scalar indices removes exactly those array

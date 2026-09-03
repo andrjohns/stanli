@@ -87,6 +87,7 @@ static void bind_call_fwd_ctx(const Program::Call& call, double* reg,
   ctx.scratch = reg + call.scratch;
   ctx.idata = call.idata.data();
   ctx.n_idata = (int64_t)call.idata.size();
+  ctx.udata = call.udata_owner.get();
   // Not a call-site fact: the draw stream belongs to the evaluation, so it
   // is rebound with the pointer fields rather than resolved once.
   ctx.eval_state = state;
@@ -148,6 +149,7 @@ void run_call_var(const Program::Call& call, stan::math::var* reg) {
   ctx.scratch = value_base ? value_base + scratch_offset : nullptr;
   ctx.idata = call.idata.data();
   ctx.n_idata = (int64_t)call.idata.size();
+  ctx.udata = call.udata_owner.get();
   call.forward(ctx);
 
   ArenaVaris output_varis((size_t)call.out_len);
@@ -183,14 +185,12 @@ void run_call_var(const Program::Call& call, stan::math::var* reg) {
     reverse.scratch = value_base ? value_base + scratch_offset : nullptr;
     reverse.idata = site->idata.data();
     reverse.n_idata = (int64_t)site->idata.size();
-    if (site->out_len == 1) {
-      reverse.out_adj = output_varis[0]->adj_;
-    } else {
-      for (int i = 0; i < site->out_len; ++i)
-        adjoints[(size_t)(out_offset + i)] = output_varis[(size_t)i]->adj_;
-      reverse.out_adj_vec = Desc{
-          adjoint_base ? adjoint_base + out_offset : nullptr, site->out_len};
-    }
+    reverse.udata = site->udata_owner.get();
+    for (int i = 0; i < site->out_len; ++i)
+      adjoints[(size_t)(out_offset + i)] = output_varis[(size_t)i]->adj_;
+    reverse.out_adj_vec =
+        Desc{adjoint_base ? adjoint_base + out_offset : nullptr, site->out_len};
+    reverse.out_adj = site->out_len == 1 ? output_varis[0]->adj_ : 0.0;
     site->backward(reverse);
 
     size_t vari_at = input_varis.size();
@@ -222,7 +222,10 @@ void register_density_kernels();
 void register_legacy_kernels();
 void register_matrix_kernels();
 void register_algebra_kernels();
+void register_quadrature_kernels();
 void register_ode_kernels();
+void register_dae_kernels();
+void register_ode_adjoint_kernels();
 void register_constrain_kernels();
 void register_eltwise_kernels();
 void register_scalar_binary_kernels();
@@ -240,7 +243,10 @@ static void ensure_registered() {
     register_legacy_kernels();
     register_matrix_kernels();
     register_algebra_kernels();
+    register_quadrature_kernels();
     register_ode_kernels();
+    register_dae_kernels();
+    register_ode_adjoint_kernels();
     register_constrain_kernels();
     register_message_kernels();
     register_rng_kernel();

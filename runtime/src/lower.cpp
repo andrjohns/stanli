@@ -4,6 +4,8 @@
 #include <stanli/unconstrain.hpp>
 #include <stanli/constfold.hpp>
 #include <stanli/cse.hpp>
+#include <stanli/dae.hpp>
+#include <stanli/higher_order_eval.hpp>
 #include <stanli/expression_layout.hpp>
 #include <stanli/inplace.hpp>
 #include <stanli/mir_message.hpp>
@@ -12,10 +14,12 @@
 #include <stanli/mir_decode.hpp>
 #include <stanli/mir_interp.hpp>
 #include <stanli/ode.hpp>
+#include <stanli/ode_adjoint.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/island.hpp>
 #include <stanli/structured_loop.hpp>
 #include <stanli/partition.hpp>
+#include <stanli/quadrature.hpp>
 #include <stanli/reroll.hpp>
 #include <stanli/regular_builtin.hpp>
 #include <stanli/structured_check.hpp>
@@ -635,7 +639,9 @@ struct Lowering {
     AppendArray,
     Matrix,
     Algebra,
+    Quadrature,
     Ode,
+    Dae,
     ShapeQuery,
   };
 
@@ -661,29 +667,31 @@ struct Lowering {
   }
 
   static BuiltinDispatch resolve_builtin(const mir::Expr& e) {
-    if (mir::is_reduce_sum(e)) return {BuiltinFamily::ReduceSum};
+    if (const auto higher_order = mir::higher_order_call(e)) {
+      switch (higher_order->family) {
+        case mir::HigherOrderFamily::ReduceSum:
+          return {BuiltinFamily::ReduceSum};
+        case mir::HigherOrderFamily::MapRect:
+          return {BuiltinFamily::MapRect};
+        case mir::HigherOrderFamily::Algebra:
+          return {BuiltinFamily::Algebra};
+        case mir::HigherOrderFamily::Ode:
+          return {BuiltinFamily::Ode};
+        case mir::HigherOrderFamily::Integrate1D:
+          return {BuiltinFamily::Quadrature};
+        case mir::HigherOrderFamily::Dae:
+          return {BuiltinFamily::Dae};
+      }
+    }
     // Bespoke functions still own their semantic checks. This registry only
     // selects the handler, replacing the old sequence in which every family
     // was probed and declined in turn.
     static const std::unordered_map<std::string_view, BuiltinDispatch>
         kBuiltins = {
-            {"map_rect", BuiltinFamily::MapRect},
             {"multi_normal_rng", BuiltinFamily::MultiNormalRng},
             {"dirichlet_rng", BuiltinFamily::DirichletRng},
             {"categorical_rng", BuiltinFamily::CategoricalRng},
             {"append_array", BuiltinFamily::AppendArray},
-            {"algebra_solver", BuiltinFamily::Algebra},
-            {"ode_bdf", BuiltinFamily::Ode},
-            {"ode_bdf_tol", BuiltinFamily::Ode},
-            {"ode_adams", BuiltinFamily::Ode},
-            {"ode_adams_tol", BuiltinFamily::Ode},
-            {"ode_rk45", BuiltinFamily::Ode},
-            {"ode_rk45_tol", BuiltinFamily::Ode},
-            {"ode_ckrk", BuiltinFamily::Ode},
-            {"ode_ckrk_tol", BuiltinFamily::Ode},
-            {"integrate_ode_rk45", BuiltinFamily::Ode},
-            {"integrate_ode_bdf", BuiltinFamily::Ode},
-            {"integrate_ode_adams", BuiltinFamily::Ode},
             {"Transpose__", BuiltinFamily::Matrix},
             {"transpose", BuiltinFamily::Matrix},
             {"tcrossprod", BuiltinFamily::Matrix},
@@ -774,6 +782,12 @@ struct Lowering {
                  if (it == int_env.end()) return false;
                  *out = it->second;
                  return true;
+               },
+               [this](const mir::Expr& e, DataMap::Entry* out) {
+                 return evaluate_retained_higher_order(
+                     fun_defs, e,
+                     [this](const mir::Expr& arg) { return td.eval(arg); },
+                     out);
                }}};
   Graph g;
   CompiledModel out;
@@ -2813,6 +2827,531 @@ struct Lowering {
     return false;
   }
 
+  // Data-only operands of a retained call are folded while the Program is
+  // compiled, as their graph counterparts are.
+  DataMap::Entry program_constant(ProgramCompiler& c, const mir::Expr& arg,
+                                  const std::string& role) {
+    auto value = try_eval_pure(arg);
+    if (!value) c.bail(role + " must be data-only and known at compile time");
+    return std::move(*value);
+  }
+
+  double program_scalar_real(ProgramCompiler& c, const mir::Expr& arg,
+                             const std::string& role) {
+    const DataMap::Entry value = program_constant(c, arg, role);
+    if (value.is_int) {
+      if (value.i.size() != 1) c.bail(role + " must be one real");
+      return static_cast<double>(value.i[0]);
+    }
+    if (value.r.size() != 1) c.bail(role + " must be one real");
+    return value.r[0];
+  }
+
+  long program_scalar_int(ProgramCompiler& c, const mir::Expr& arg,
+                          const std::string& role) {
+    const DataMap::Entry value = program_constant(c, arg, role);
+    if (!value.is_int || value.i.size() != 1)
+      c.bail(role + " must be one integer");
+    return value.i[0];
+  }
+
+  std::vector<double> program_vector_real(ProgramCompiler& c,
+                                          const mir::Expr& arg,
+                                          const std::string& role) {
+    DataMap::Entry value = program_constant(c, arg, role);
+    if (value.is_int) c.bail(role + " must be a real vector");
+    return std::move(value.r);
+  }
+
+  // Bind callback arguments [begin, end) of a retained call compiled in a
+  // Program. Data arguments fold into the spec; active ones are copied into
+  // one register run, which the kernel receives as theta.
+  Range program_callback_theta(ProgramCompiler& c, const mir::Expr& e,
+                               size_t begin, size_t end, RetainedCallback& spec,
+                               int* parameter_count) {
+    std::vector<Range> active = pack_callback_arguments<Range>(
+        spec, e.args, begin, end,
+        [&](size_t i) {
+          Range value = c.expr(e.args[i]);
+          return std::make_pair(value, value.len);
+        },
+        [&](size_t i) {
+          DataMap::Entry value =
+              program_constant(c, e.args[i], e.name + " data argument");
+          if (value.is_int)
+            c.bail(e.name + ": real data argument is integer-valued");
+          const bool matrix = e.args[i].type_ == "UMatrix";
+          const bool nested_matrix =
+              e.args[i].unsized.depth != 0 &&
+              e.args[i].unsized.leaf == mir::UnsizedLeaf::Matrix;
+          return graph_order(value, matrix, nested_matrix);
+        },
+        [&](size_t i) {
+          DataMap::Entry value =
+              program_constant(c, e.args[i], e.name + " integer argument");
+          if (!value.is_int)
+            c.bail(e.name + ": integer argument is real-valued");
+          return value.i;
+        },
+        [&](const std::string& message) { c.bail(e.name + ": " + message); });
+    int total = 0;
+    for (const Range& value : active) {
+      if (value.len > ProgramCompiler::kMaxRegs - total)
+        c.bail(e.name + ": active callback arguments are too large");
+      total += value.len;
+    }
+    *parameter_count = total;
+    Range theta{total == 0 ? c.konst(0.0) : c.alloc(total),
+                total == 0 ? 1 : total};
+    theta.kind = ViewKind::Vector;
+    int at = 0;
+    for (const Range& value : active)
+      for (int k = 0; k < value.len; ++k)
+        c.emit(Program::MOV, theta.reg + at++, value.reg + k);
+    return theta;
+  }
+
+  static OdeSpec::Solver ode_solver(mir::OdeMethod method) {
+    switch (method) {
+      case mir::OdeMethod::Bdf:
+        return OdeSpec::BDF;
+      case mir::OdeMethod::Adams:
+        return OdeSpec::ADAMS;
+      case mir::OdeMethod::Ckrk:
+        return OdeSpec::CKRK;
+      default:
+        return OdeSpec::RK45;
+    }
+  }
+
+  // Retained higher-order algorithms use the graph kernel ABI even when
+  // their call site sits in a runtime-control Program. The Program owns the
+  // same specification object a graph Op would own, while kernel_call owns
+  // all register binding, scratch sizing, and reverse-mode wiring.
+  bool lower_program_variadic_algebra(ProgramCompiler& c, const mir::Expr& e,
+                                      Range* out_range) {
+    const auto call = mir::algebra_call(e.name);
+    if (!call || call->legacy) return false;
+    if (e.args.size() < call->callback_args_begin ||
+        e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": expected a callback and an initial guess");
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Vector)
+      c.bail(e.name + ": result must be a vector");
+
+    std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Vector}};
+    for (size_t i = call->callback_args_begin; i < e.args.size(); ++i)
+      views.push_back(e.args[i].unsized);
+    const mir::FunDef* system =
+        mir::resolve_callback(fun_defs, e.args[0].name, views);
+    if (system == nullptr)
+      c.bail(e.name + ": unknown algebraic system " + e.args[0].name);
+
+    auto spec = std::make_shared<AlgebraSpec>();
+    spec->adopt(fun_defs);
+    spec->system_name = system->name;
+    spec->select(*call);
+    if (call->with_tolerance) {
+      spec->relative_tolerance =
+          program_scalar_real(c, e.args[2], e.name + " relative tolerance");
+      spec->function_tolerance =
+          program_scalar_real(c, e.args[3], e.name + " function tolerance");
+      spec->max_num_steps =
+          program_scalar_int(c, e.args[4], e.name + " maximum steps");
+    }
+
+    int parameter_count = 0;
+    const Range theta =
+        program_callback_theta(c, e, call->callback_args_begin, e.args.size(),
+                               *spec, &parameter_count);
+    const Range x = c.expr(e.args[1]);
+    if (x.kind != ViewKind::Vector)
+      c.bail(e.name + ": initial guess must be a vector");
+    spec->prog = compile_rhs_args(with_leading_time(*spec->system()),
+                                  *spec->funs(), x.len, spec->args);
+
+    Range result{0, x.len};
+    result.kind = ViewKind::Vector;
+    *out_range =
+        c.kernel_call(OP_ALGEBRA_SOLVER, {x, theta}, result,
+                      parameter_count == 0 ? 0u : 0x1u, 0x2u, {}, spec, e.name);
+    return true;
+  }
+
+  bool lower_program_quadrature(ProgramCompiler& c, const mir::Expr& e,
+                                Range* out_range) {
+    const auto call = mir::quadrature_call(e.name);
+    if (!call) return false;
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Real)
+      c.bail(e.name + ": result must be a real");
+
+    size_t callback_end = e.args.size();
+    if (call->legacy) {
+      if (e.args.size() != 6 && e.args.size() != 7)
+        c.bail(e.name + ": expected 6 or 7 arguments");
+      callback_end = 6;
+    } else if (call->with_tolerance) {
+      if (e.args.size() < 6)
+        c.bail(e.name + ": expected controls followed by callback arguments");
+    } else if (e.args.size() < 3) {
+      c.bail(e.name + ": expected callback and integration bounds");
+    }
+    if (e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": integrand is not a function name");
+
+    std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Real},
+                                        {0, mir::UnsizedLeaf::Real}};
+    for (size_t i = call->callback_args_begin; i < callback_end; ++i)
+      views.push_back(e.args[i].unsized);
+    const mir::FunDef* integrand =
+        mir::resolve_callback(fun_defs, e.args[0].name, views);
+    if (!integrand) c.bail(e.name + ": unknown integrand " + e.args[0].name);
+
+    auto spec = std::make_shared<QuadratureSpec>();
+    spec->adopt(fun_defs);
+    spec->callback_name = integrand->name;
+    spec->method = call->method;
+    if (call->legacy && e.args.size() == 7) {
+      spec->relative_tolerance =
+          program_scalar_real(c, e.args[6], "quadrature tolerance");
+    } else if (call->with_tolerance) {
+      spec->relative_tolerance =
+          program_scalar_real(c, e.args[3], "quadrature relative tolerance");
+      spec->absolute_tolerance =
+          program_scalar_real(c, e.args[4], "quadrature absolute tolerance");
+      spec->max_steps = static_cast<int>(
+          program_scalar_int(c, e.args[5], "quadrature maximum steps"));
+    }
+
+    const Range theta =
+        program_callback_theta(c, e, call->callback_args_begin, callback_end,
+                               *spec, &spec->parameter_count);
+    spec->prog =
+        compile_rhs_args(*spec->callback(), *spec->funs(), 1, spec->args);
+
+    const Range a = c.expr(e.args[1]);
+    const Range b = c.expr(e.args[2]);
+    if (!c.is_scalar(a) || !c.is_scalar(b))
+      c.bail(e.name + ": integration bounds must be scalar");
+    const uint8_t variant =
+        static_cast<uint8_t>((!e.args[1].data_only ? 0x1u : 0u) |
+                             (!e.args[2].data_only ? 0x2u : 0u) |
+                             (spec->parameter_count != 0 ? 0x4u : 0u));
+    Range result{0, 1};
+    *out_range = c.kernel_call(OP_QUADRATURE, {a, b, theta}, result, variant,
+                               variant, {}, spec, e.name);
+    return true;
+  }
+
+  bool lower_program_ode(ProgramCompiler& c, const mir::Expr& e,
+                         Range* out_range) {
+    const auto call = mir::ode_call(e.name);
+    if (!call || call->method == mir::OdeMethod::Adjoint) return false;
+    if (e.args.size() < call->callback_args_begin ||
+        e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": expected a right-hand side, state, and times");
+
+    auto spec = std::make_shared<OdeSpec>();
+    spec->adopt(fun_defs);
+    spec->rhs_name = e.args[0].name;
+    if (!spec->rhs())
+      c.bail(e.name + ": unknown right-hand side " + spec->rhs_name);
+    spec->solver = ode_solver(call->method);
+    spec->legacy = call->legacy;
+    spec->stiff =
+        spec->solver == OdeSpec::BDF || spec->solver == OdeSpec::ADAMS;
+    stamp_ode_defaults(*spec);
+    const Range z0 = c.expr(e.args[1]);
+    if ((!call->legacy && z0.kind != ViewKind::Vector) ||
+        (call->legacy && z0.kind != ViewKind::Array))
+      c.bail(e.name + ": initial state has the wrong logical type");
+    const int S = z0.len;
+    Range t0{0, 1}, ts;
+    if (call->legacy) {
+      spec->t0 = program_scalar_real(c, e.args[2], "ODE initial time");
+      spec->ts = program_vector_real(c, e.args[3], "ODE output times");
+    } else {
+      t0 = c.expr(e.args[2]);
+      ts = c.expr(e.args[3]);
+      if (!c.is_scalar(t0)) c.bail("ODE initial time must be scalar");
+      if (ts.kind != ViewKind::Array)
+        c.bail("ODE output times must be an array");
+      spec->ts.resize((size_t)ts.len);
+    }
+    const int64_t N = call->legacy ? (int64_t)spec->ts.size() : ts.len;
+    if (S < 0 || N < 0 || (N && S > ProgramCompiler::kMaxRegs / N))
+      c.bail(e.name + ": result is too large");
+
+    Range theta;
+    bool theta_active = false;
+    if (call->legacy) {
+      if (e.args.size() != 7 && e.args.size() != 10)
+        c.bail(e.name + ": expected 7 or 10 arguments");
+      theta = c.expr(e.args[4]);
+      if (theta.kind != ViewKind::Array)
+        c.bail(e.name + ": parameters are not an array");
+      theta_active = !e.args[4].data_only;
+      spec->x_r = program_vector_real(c, e.args[5], "ODE real data");
+      DataMap::Entry xi = program_constant(c, e.args[6], "ODE integer data");
+      if (!xi.is_int) c.bail(e.name + ": integer data is real-valued");
+      spec->x_i.assign(xi.i.begin(), xi.i.end());
+      if (e.args.size() == 10) {
+        spec->rtol =
+            program_scalar_real(c, e.args[7], "ODE relative tolerance");
+        spec->atol =
+            program_scalar_real(c, e.args[8], "ODE absolute tolerance");
+        spec->max_steps = program_scalar_int(c, e.args[9], "ODE maximum steps");
+      }
+      spec->args.resize(3);
+      spec->args[0].is_param = true;
+      spec->args[0].len = theta.len;
+      spec->args[1].len = (int)spec->x_r.size();
+      spec->args[2].is_int = true;
+      spec->args[2].ints = spec->x_i;
+      spec->prog = compile_rhs(*spec->rhs(), *spec->funs(), S, theta.len,
+                               (int)spec->x_r.size(), spec->x_i);
+    } else {
+      if (call->with_tolerance) {
+        spec->rtol =
+            program_scalar_real(c, e.args[4], "ODE relative tolerance");
+        spec->atol =
+            program_scalar_real(c, e.args[5], "ODE absolute tolerance");
+        spec->max_steps = program_scalar_int(c, e.args[6], "ODE maximum steps");
+      }
+      int parameter_count = 0;
+      theta = program_callback_theta(c, e, call->callback_args_begin,
+                                     e.args.size(), *spec, &parameter_count);
+      theta_active = parameter_count != 0;
+      spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), S, spec->args);
+    }
+
+    Range result{0, (int)(N * S)};
+    result.kind = ViewKind::Array;
+    result.dims = {N, S};
+    result.leaf = call->legacy ? ViewKind::Flat : ViewKind::Vector;
+    const uint8_t activity = static_cast<uint8_t>(
+        (e.args[1].data_only ? 0u : 0x1u) | (theta_active ? 0x2u : 0u) |
+        (!call->legacy && !e.args[2].data_only ? 0x4u : 0u) |
+        (!call->legacy && !e.args[3].data_only ? 0x8u : 0u));
+    if (call->legacy) {
+      *out_range = c.kernel_call(OP_ODE, {z0, theta}, result,
+                                 static_cast<uint8_t>(0x4u | activity),
+                                 activity, {(int)N, S}, spec, e.name);
+    } else {
+      *out_range = c.kernel_call(OP_ODE, {z0, theta, t0, ts}, result,
+                                 static_cast<uint8_t>(0x10u | activity),
+                                 activity, {(int)N, S}, spec, e.name);
+    }
+    return true;
+  }
+
+  bool lower_program_ode_adjoint(ProgramCompiler& c, const mir::Expr& e,
+                                 Range* out_range) {
+    const auto call = mir::ode_call(e.name);
+    if (!call || call->method != mir::OdeMethod::Adjoint) return false;
+    if (e.args.size() < call->callback_args_begin ||
+        e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": expected a right-hand side and solver controls");
+
+    auto spec = std::make_shared<OdeAdjointSpec>();
+    spec->adopt(fun_defs);
+    spec->rhs_name = e.args[0].name;
+    spec->callback_name = spec->rhs_name;
+    if (!spec->rhs())
+      c.bail(e.name + ": unknown right-hand side " + spec->rhs_name);
+    const auto real = [&](size_t i, const char* role) {
+      return program_scalar_real(c, e.args[i],
+                                 std::string("adjoint ODE ") + role);
+    };
+    const auto reals = [&](size_t i, const char* role) {
+      return program_vector_real(c, e.args[i],
+                                 std::string("adjoint ODE ") + role);
+    };
+    const auto integer = [&](size_t i, const char* role) {
+      return program_scalar_int(c, e.args[i],
+                                std::string("adjoint ODE ") + role);
+    };
+    spec->relative_tolerance_forward = real(4, "forward relative tolerance");
+    spec->absolute_tolerance_forward = reals(5, "forward absolute tolerance");
+    spec->relative_tolerance_backward = real(6, "backward relative tolerance");
+    spec->absolute_tolerance_backward = reals(7, "backward absolute tolerance");
+    spec->relative_tolerance_quadrature =
+        real(8, "quadrature relative tolerance");
+    spec->absolute_tolerance_quadrature =
+        real(9, "quadrature absolute tolerance");
+    spec->max_num_steps = integer(10, "maximum steps");
+    spec->num_steps_between_checkpoints = integer(11, "checkpoint interval");
+    spec->interpolation_polynomial =
+        (int)integer(12, "interpolation polynomial");
+    spec->solver_forward = (int)integer(13, "forward solver");
+    spec->solver_backward = (int)integer(14, "backward solver");
+
+    const Range y0 = c.expr(e.args[1]);
+    const Range t0 = c.expr(e.args[2]);
+    const Range ts = c.expr(e.args[3]);
+    if (y0.kind != ViewKind::Vector)
+      c.bail(e.name + ": initial state must be a vector");
+    if (!c.is_scalar(t0)) c.bail(e.name + ": initial time must be scalar");
+    if (ts.kind != ViewKind::Array)
+      c.bail(e.name + ": output times must be an array");
+    const int S = y0.len;
+    const int N = ts.len;
+    if ((int)spec->absolute_tolerance_forward.size() != S ||
+        (int)spec->absolute_tolerance_backward.size() != S)
+      c.bail(e.name + ": absolute tolerance vectors must match state size");
+    if (S < 0 || N < 0 || (N && S > ProgramCompiler::kMaxRegs / N))
+      c.bail(e.name + ": result is too large");
+
+    int parameter_count = 0;
+    const Range theta =
+        program_callback_theta(c, e, call->callback_args_begin, e.args.size(),
+                               *spec, &parameter_count);
+    spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), S, spec->args);
+
+    Range result{0, N * S};
+    result.kind = ViewKind::Array;
+    result.dims = {N, S};
+    result.leaf = ViewKind::Vector;
+    const uint8_t activity =
+        static_cast<uint8_t>((!e.args[1].data_only ? 0x1u : 0u) |
+                             (!e.args[2].data_only ? 0x2u : 0u) |
+                             (!e.args[3].data_only ? 0x4u : 0u) |
+                             (parameter_count != 0 ? 0x8u : 0u));
+    *out_range = c.kernel_call(OP_ODE_ADJOINT, {y0, t0, ts, theta}, result,
+                               static_cast<uint8_t>(0x10u | activity), activity,
+                               {N, S}, spec, e.name);
+    return true;
+  }
+
+  bool lower_program_dae(ProgramCompiler& c, const mir::Expr& e,
+                         Range* out_range) {
+    const auto call = mir::dae_call(e.name);
+    if (!call) return false;
+    if (e.args.size() < call->callback_args_begin ||
+        e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": expected a residual, initial conditions, and times");
+
+    auto spec = std::make_shared<DaeSpec>();
+    spec->adopt(fun_defs);
+    spec->residual_name = e.args[0].name;
+    spec->callback_name = spec->residual_name;
+    if (!spec->residual())
+      c.bail(e.name + ": unknown residual " + spec->residual_name);
+    spec->t0 = program_scalar_real(c, e.args[3], "DAE initial time");
+    spec->ts = program_vector_real(c, e.args[4], "DAE output times");
+    if (call->with_tolerance) {
+      spec->rtol = program_scalar_real(c, e.args[5], "DAE relative tolerance");
+      spec->atol = program_scalar_real(c, e.args[6], "DAE absolute tolerance");
+      spec->max_steps = program_scalar_int(c, e.args[7], "DAE maximum steps");
+    }
+
+    const Range y0 = c.expr(e.args[1]);
+    const Range yp0 = c.expr(e.args[2]);
+    if (y0.kind != ViewKind::Vector || yp0.kind != ViewKind::Vector)
+      c.bail(e.name + ": initial state and derivative must be vectors");
+    if (y0.len != yp0.len)
+      c.bail(e.name + ": initial state and derivative sizes differ");
+    const int S = y0.len;
+    const int64_t N = (int64_t)spec->ts.size();
+    if (S < 0 || N < 0 || (N && S > ProgramCompiler::kMaxRegs / N))
+      c.bail(e.name + ": result is too large");
+
+    int parameter_count = 0;
+    const Range theta =
+        program_callback_theta(c, e, call->callback_args_begin, e.args.size(),
+                               *spec, &parameter_count);
+    spec->prog =
+        compile_dae_args(*spec->residual(), *spec->funs(), S, spec->args);
+
+    Range result{0, (int)(N * S)};
+    result.kind = ViewKind::Array;
+    result.dims = {N, S};
+    result.leaf = ViewKind::Vector;
+    const uint8_t activity =
+        static_cast<uint8_t>((!e.args[1].data_only ? 0x1u : 0u) |
+                             (!e.args[2].data_only ? 0x2u : 0u) |
+                             (parameter_count != 0 ? 0x4u : 0u));
+    *out_range = c.kernel_call(OP_DAE, {y0, yp0, theta}, result,
+                               static_cast<uint8_t>(0x8u | activity), activity,
+                               {(int)N, S}, spec, e.name);
+    return true;
+  }
+
+  bool lower_program_higher_order(ProgramCompiler& c, const mir::Expr& e,
+                                  Range* out_range) {
+    const auto higher_order = mir::higher_order_call(e);
+    if (!higher_order) return false;
+    if (higher_order->family == mir::HigherOrderFamily::Integrate1D)
+      return lower_program_quadrature(c, e, out_range);
+    if (higher_order->family == mir::HigherOrderFamily::Ode)
+      return lower_program_ode_adjoint(c, e, out_range) ||
+             lower_program_ode(c, e, out_range);
+    if (higher_order->family == mir::HigherOrderFamily::Dae)
+      return lower_program_dae(c, e, out_range);
+    if (higher_order->family != mir::HigherOrderFamily::Algebra) return false;
+    if (lower_program_variadic_algebra(c, e, out_range)) return true;
+    if ((e.name != "algebra_solver" && e.name != "algebra_solver_newton"))
+      return false;
+    if (e.args.size() != 5 && e.args.size() != 8)
+      c.bail("algebra_solver: expected 5 or 8 arguments");
+    if (e.args[0].kind != mir::Expr::Var)
+      c.bail("algebra_solver: system is not a function name");
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Vector)
+      c.bail("algebra_solver: result must be a vector");
+
+    const std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Vector},
+                                              {0, mir::UnsizedLeaf::Vector},
+                                              {1, mir::UnsizedLeaf::Real},
+                                              {1, mir::UnsizedLeaf::Int}};
+    const mir::FunDef* system =
+        mir::resolve_callback(fun_defs, e.args[0].name, views);
+    if (system == nullptr)
+      c.bail("algebra_solver: unknown algebraic system " + e.args[0].name);
+    if (system->arg_names.size() != views.size())
+      c.bail("algebra_solver: system argument metadata is incomplete");
+
+    auto spec = std::make_shared<AlgebraSpec>();
+    spec->adopt(fun_defs);
+    spec->system_name = system->name;
+    spec->select(*mir::algebra_call(e.name));
+    spec->x_r = program_vector_real(c, e.args[3], "algebra_solver x_r");
+    DataMap::Entry xi = program_constant(c, e.args[4], "algebra_solver x_i");
+    if (!xi.is_int || xi.i.size() != xi.r.size())
+      c.bail("algebra_solver: malformed integer data argument");
+    spec->x_i.assign(xi.i.begin(), xi.i.end());
+    if (e.args.size() == 8) {
+      spec->relative_tolerance = program_scalar_real(
+          c, e.args[5], "algebra_solver relative tolerance");
+      spec->function_tolerance = program_scalar_real(
+          c, e.args[6], "algebra_solver function tolerance");
+      spec->max_num_steps =
+          program_scalar_int(c, e.args[7], "algebra_solver maximum steps");
+    }
+
+    const Range x = c.expr(e.args[1]);
+    const Range y = c.expr(e.args[2]);
+    if (x.kind != ViewKind::Vector || y.kind != ViewKind::Vector)
+      c.bail("algebra_solver: initial guess and parameters must be vectors");
+    if (x.len < 0 || y.len < 0 ||
+        spec->x_r.size() > (size_t)std::numeric_limits<int>::max())
+      c.bail("algebra_solver: argument is too large");
+
+    std::vector<RhsArg> args(3);
+    args[0].is_param = true;
+    args[0].len = y.len;
+    args[1].len = (int)spec->x_r.size();
+    args[2].is_int = true;
+    args[2].ints = spec->x_i;
+    spec->prog = compile_rhs_args(with_leading_time(*spec->system()),
+                                  *spec->funs(), x.len, args);
+
+    Range result{0, x.len};
+    result.kind = ViewKind::Vector;
+    const uint8_t active = e.args[2].data_only ? 0u : 0x1u;
+    *out_range = c.kernel_call(OP_ALGEBRA_SOLVER, {x, y}, result, active, 0x2u,
+                               {}, spec, e.name);
+    return true;
+  }
+
   // Compile `s` (a statement region) or `e` (a ternary) into a program.
   void lower_island(const mir::Stmt* s, const mir::Expr* e, IslandRegion* reg,
                     Range* expr_out, std::shared_ptr<IslandProg>* prog_out) {
@@ -2856,6 +3395,19 @@ struct Lowering {
       *value = evaluated->r[0];
       return true;
     };
+    c.lower_higher_order = [&](const mir::Expr& x, Range* result) {
+      return lower_program_higher_order(c, x, result);
+    };
+    if (!in_write_array) {
+      c.bind_target = [&](Range* r) {
+        const int slot = current_target_slot();
+        r->reg = c.alloc(1);
+        r->len = 1;
+        prog->ins.push_back(IslandProg::LiveIn{r->reg, 1});
+        reg->in_slots.push_back(slot);
+        return true;
+      };
+    }
     std::set<std::string> outer_names;
     for (const auto& [name, value] : scope) outer_names.insert(name);
     for (const auto& [name, value] : decls) outer_names.insert(name);
@@ -3069,6 +3621,16 @@ struct Lowering {
     target_terms.push_back(slot);
   }
 
+  // Materialize the target visible at the current source position. The
+  // reduction consumes a copy, leaving the individual terms available for
+  // the final model target. This is shared by direct graph target() reads and
+  // the lazy live-in used by runtime-control programs.
+  int current_target_slot() {
+    std::vector<int> prefix = target_terms;
+    prefix.insert(prefix.end(), jac_slots.begin(), jac_slots.end());
+    return reduce_terms(std::move(prefix));
+  }
+
   // `if (<not known while building the graph>) ... else ...`
   void lower_runtime_ifelse(const mir::Stmt& s) {
     IslandRegion reg;
@@ -3163,6 +3725,30 @@ struct Lowering {
     return {out_slots[0], scalar_autodiff(), si};
   }
 
+  // Use the runtime-control compiler as a graph producer for higher-order
+  // families whose shared implementation already lives there. This keeps a
+  // straight-line graph call and a call under dynamic control on one callback
+  // binder and one kernel path instead of growing a second graph-only parser.
+  Val lower_program_expression(const mir::Expr& e) {
+    IslandRegion reg;
+    std::shared_ptr<IslandProg> prog;
+    Range value;
+    lower_island(nullptr, &e, &reg, &value, &prog);
+    std::vector<int> out_slots;
+    emit_island(prog, reg, {value.len}, &out_slots);
+    SlotInfo si;
+    if (value.kind == ViewKind::Array)
+      si = array_view(value.dims, value.leaf, e.data_only);
+    else {
+      si = view_of(e.type_);
+      si.rows = value.rows;
+      si.cols = value.cols;
+      si.kind = value.kind;
+      si.param_free = e.data_only;
+    }
+    return {out_slots[0], expression_autodiff(e), si};
+  }
+
   Val finish_emit(Op op, int64_t out_len, SlotInfo out_si,
                   std::vector<int> idata, bool autodiff) {
     const int o = add_slot(out_len, false);
@@ -3225,6 +3811,7 @@ struct Lowering {
   // at model evaluation rather than move to construction. Propto densities
   // never fold because their value is instantiation-dependent.
   bool expr_effectful(const mir::Expr& e) {
+    if (mir::stateful_intrinsic_kind(e)) return true;
     if (e.kind == mir::Expr::FunApp && e.name.size() >= 4 &&
         e.name.compare(e.name.size() - 4, 4, "_rng") == 0)
       return true;
@@ -3242,7 +3829,7 @@ struct Lowering {
   bool reduce_sum_effectful(const mir::Expr& e) {
     if (e.args.empty() || e.args[0].kind != mir::Expr::Var) return true;
     bool propto = false;
-    const mir::FunDef* f = mir::resolve_reduce_sum_partial(
+    const mir::FunDef* f = mir::resolve_callback(
         fun_defs, mir::reduce_sum_partial_name(e.args[0].name, &propto),
         mir::reduce_sum_partial_views(e));
     // A functor this cannot resolve is refused at lowering. Until it gets
@@ -3288,15 +3875,8 @@ struct Lowering {
       const std::string& name = e.name;
       const bool rng =
           name.size() >= 4 && name.compare(name.size() - 4, 4, "_rng") == 0;
-      const bool ode = name.compare(0, 4, "ode_") == 0 ||
-                       name.compare(0, 14, "integrate_ode_") == 0 ||
-                       name.compare(0, 13, "integrate_dae") == 0;
-      const bool callback = name == "map_rect" || name == "reduce_sum" ||
-                            name == "integrate_1d" ||
-                            name == "algebra_solver" ||
-                            name.compare(0, 13, "solve_newton") == 0 ||
-                            name.compare(0, 13, "solve_powell") == 0;
-      if (rng || ode || callback || name == "target") return false;
+      if (rng || mir::higher_order_call(e) || mir::stateful_intrinsic_kind(e))
+        return false;
     }
     for (const auto& a : e.args)
       if (!repeatable_target_expr(a, loopvar)) return false;
@@ -3411,7 +3991,7 @@ struct Lowering {
       if (mir::is_reduce_sum(e)) {
         if (e.args.empty() || e.args[0].kind != mir::Expr::Var) return true;
         bool propto = false;
-        const mir::FunDef* partial = mir::resolve_reduce_sum_partial(
+        const mir::FunDef* partial = mir::resolve_callback(
             fun_defs, mir::reduce_sum_partial_name(e.args[0].name, &propto),
             mir::reduce_sum_partial_views(e));
         if (partial == nullptr || visit_fun(partial->name)) return true;
@@ -4604,8 +5184,7 @@ struct Lowering {
         mir::reduce_sum_partial_name(partial_expr.name, &propto);
     const std::vector<mir::UnsizedView> views =
         mir::reduce_sum_partial_views(e);
-    const mir::FunDef* f =
-        mir::resolve_reduce_sum_partial(fun_defs, base, views);
+    const mir::FunDef* f = mir::resolve_callback(fun_defs, base, views);
     if (f == nullptr)
       fail("reduce_sum: unknown partial-sum function " + base, e.raw);
     if (f->arg_views.size() != views.size())
@@ -4747,6 +5326,17 @@ struct Lowering {
   }
 
   Val lower_funapp(const mir::Expr& e) {
+    if (const auto intrinsic = mir::stateful_intrinsic_kind(e)) {
+      switch (*intrinsic) {
+        case mir::StatefulIntrinsicKind::Target: {
+          if (in_write_array)
+            fail("target() is unavailable in write_array", e.raw);
+          SlotInfo si;
+          si.param_free = target_terms.empty() && jac_slots.empty();
+          return {current_target_slot(), scalar_autodiff(), si};
+        }
+      }
+    }
     if (const auto value = mir::nullary_constant(e)) return constant(*value);
     if (e.fn_lib == mir::Expr::Lib::UserDefined) {
       if (!region_current)
@@ -4856,7 +5446,7 @@ struct Lowering {
     switch (dispatch.family) {
       case BuiltinFamily::MapRect:
         if (auto v = lower_empty_map_rect(e, actuals)) return *v;
-        break;
+        return lower_program_expression(e);
       case BuiltinFamily::ReduceSum:
         return lower_reduce_sum(e, actuals);
       case BuiltinFamily::MultiNormalRng:
@@ -4883,10 +5473,19 @@ struct Lowering {
         if (auto v = lower_matrix_fn(e, actuals)) return *v;
         break;
       case BuiltinFamily::Algebra:
+        if (const auto call = mir::algebra_call(e.name); call && !call->legacy)
+          return lower_program_expression(e);
         return lower_algebra_fn(e, actuals);
+      case BuiltinFamily::Quadrature:
+        return lower_quadrature_fn(e, actuals);
       case BuiltinFamily::Ode:
+        if (const auto call = mir::ode_call(e.name);
+            call && call->method == mir::OdeMethod::Adjoint)
+          return lower_program_expression(e);
         if (auto v = lower_ode_fn(e, actuals)) return *v;
         break;
+      case BuiltinFamily::Dae:
+        return lower_program_expression(e);
       case BuiltinFamily::AppendArray:
         if (e.args.size() == 2) return lower_append_array(e, actuals);
         break;
@@ -6435,7 +7034,7 @@ struct Lowering {
     return std::nullopt;
   }
 
-  // The deprecated Powell algebra_solver interface:
+  // The deprecated algebra_solver interfaces (Powell and Newton):
   //
   //   algebra_solver(f, x, y, x_r, x_i[, rel_tol, f_tol, max_steps])
   //
@@ -6443,20 +7042,132 @@ struct Lowering {
   // Stan Math intentionally returns value_type_t<y>, so only y participates
   // in autodiff.  Keep x as a graph input for values while stamping the op's
   // activity and result scalar type from y alone.
+  Val lower_quadrature_fn(const mir::Expr& e, CallArguments& actuals) {
+    const auto call = mir::quadrature_call(e.name);
+    if (!call) fail(e.name + ": missing quadrature metadata", e.raw);
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Real)
+      fail(e.name + ": result must be a real", e.raw);
+
+    size_t callback_end = actuals.size();
+    if (call->legacy) {
+      if (actuals.size() != 6 && actuals.size() != 7)
+        fail(e.name + ": expected 6 or 7 arguments", e.raw);
+      callback_end = 6;
+    } else if (call->with_tolerance) {
+      if (actuals.size() < 6)
+        fail(e.name + ": expected controls followed by callback arguments",
+             e.raw);
+    } else if (actuals.size() < 3) {
+      fail(e.name + ": expected callback and integration bounds", e.raw);
+    }
+    if (e.args[0].kind != mir::Expr::Var)
+      fail(e.name + ": integrand is not a function name", e.raw);
+
+    std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Real},
+                                        {0, mir::UnsizedLeaf::Real}};
+    for (size_t i = call->callback_args_begin; i < callback_end; ++i)
+      views.push_back(e.args[i].unsized);
+    const mir::FunDef* integrand =
+        mir::resolve_callback(fun_defs, e.args[0].name, views);
+    if (!integrand)
+      fail(e.name + ": unknown integrand " + e.args[0].name, e.raw);
+
+    auto spec = std::make_shared<QuadratureSpec>();
+    spec->adopt(fun_defs);
+    spec->callback_name = integrand->name;
+    spec->method = call->method;
+    if (call->legacy && actuals.size() == 7) {
+      spec->relative_tolerance =
+          actuals.at(6).require_constant_reals("quadrature tolerance").at(0);
+    } else if (call->with_tolerance) {
+      spec->relative_tolerance =
+          actuals.at(3)
+              .require_constant_reals("quadrature relative tolerance")
+              .at(0);
+      spec->absolute_tolerance =
+          actuals.at(4)
+              .require_constant_reals("quadrature absolute tolerance")
+              .at(0);
+      spec->max_steps = static_cast<int>(
+          actuals.at(5).require_constant_int("quadrature maximum steps"));
+    }
+
+    std::vector<Val> active = pack_callback_arguments<Val>(
+        *spec, e.args, call->callback_args_begin, callback_end,
+        [&](size_t i) {
+          Val value = actuals.at(i).value();
+          if (g.slots[value.slot].len > std::numeric_limits<int>::max())
+            fail(e.name + ": callback argument is too large", e.raw);
+          return std::make_pair(value,
+                                static_cast<int>(g.slots[value.slot].len));
+        },
+        [&](size_t i) {
+          const auto& values =
+              actuals.at(i).require_constant_reals("quadrature data argument");
+          return std::vector<double>(values.begin(), values.end());
+        },
+        [&](size_t i) {
+          const auto& values = actuals.at(i).require_constant_ints(
+              "quadrature integer argument");
+          return std::vector<int>(values.begin(), values.end());
+        },
+        [&](const std::string& message) {
+          fail(e.name + ": " + message, e.raw);
+        });
+
+    Val theta = constant(0.0);  // unread placeholder when there are no params
+    spec->parameter_count = 0;
+    if (!active.empty()) {
+      theta = active.front();
+      spec->parameter_count = static_cast<int>(g.slots[theta.slot].len);
+      for (size_t i = 1; i < active.size(); ++i) {
+        const int64_t add = g.slots[active[i].slot].len;
+        if (add > std::numeric_limits<int>::max() - spec->parameter_count)
+          fail(e.name + ": active callback arguments are too large", e.raw);
+        theta = emit_value(OP_CONCAT2, {theta, active[i]},
+                           spec->parameter_count + add);
+        spec->parameter_count += static_cast<int>(add);
+      }
+    }
+    spec->prog =
+        compile_rhs_args(*spec->callback(), *spec->funs(), 1, spec->args);
+
+    Val a = actuals.at(1).value();
+    Val b = actuals.at(2).value();
+    if (!is_scalar(a) || !is_scalar(b))
+      fail(e.name + ": integration bounds must be scalar", e.raw);
+    const uint8_t variant = static_cast<uint8_t>(
+        (a.autodiff ? 0x1u : 0u) | (b.autodiff ? 0x2u : 0u) |
+        (spec->parameter_count != 0 ? 0x4u : 0u));
+    SlotInfo si = view_of(e.type_);
+    si.param_free = variant == 0;
+    Val result = emit_raw(OP_QUADRATURE, {a.slot, b.slot, theta.slot}, 1, si,
+                          {}, -1, variant != 0);
+    g.ops.back().variant = variant;
+    g.ops.back().udata = spec.get();
+    g.udata_pool.push_back(std::move(spec));
+    return result;
+  }
+
   Val lower_algebra_fn(const mir::Expr& e, CallArguments& actuals) {
     if (actuals.size() != 5 && actuals.size() != 8)
-      fail("algebra_solver: expected 5 or 8 arguments", e.raw);
+      fail(e.name + ": expected 5 or 8 arguments", e.raw);
     if (e.unsized.leaf != mir::UnsizedLeaf::Vector || e.unsized.depth != 0)
       fail("algebra_solver: result must be a vector", e.raw);
 
     // Argument zero is a callback name, not a value acquisition. It must stay
     // source-level so the callback can be retained in AlgebraSpec.
     const mir::Expr& system_expr = actuals.at(0).expr();
-    auto fit = fun_defs.find(system_expr.name);
-    if (fit == fun_defs.end())
+    const std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Vector},
+                                              {0, mir::UnsizedLeaf::Vector},
+                                              {1, mir::UnsizedLeaf::Real},
+                                              {1, mir::UnsizedLeaf::Int}};
+    const mir::FunDef* resolved =
+        mir::resolve_callback(fun_defs, system_expr.name, views);
+    if (resolved == nullptr)
       fail("algebra_solver: unknown algebraic system " + system_expr.name,
            e.raw);
-    const mir::FunDef& f = *fit->second;
+    const mir::FunDef& f = *resolved;
     if (f.arg_views.size() != 4 || f.arg_names.size() != 4 ||
         f.arg_types.size() != 4 || f.arg_views[0].depth != 0 ||
         f.arg_views[0].leaf != mir::UnsizedLeaf::Vector ||
@@ -6473,7 +7184,8 @@ struct Lowering {
 
     auto spec = std::make_shared<AlgebraSpec>();
     spec->adopt(fun_defs);
-    spec->system_name = system_expr.name;
+    spec->system_name = f.name;
+    spec->select(*mir::algebra_call(e.name));
     spec->x_r = actuals.at(3).require_constant_reals("algebra_solver x_r");
     spec->x_i = actuals.at(4).require_constant_ints("algebra_solver x_i");
     if (actuals.size() == 8) {
@@ -6503,24 +7215,14 @@ struct Lowering {
           "program",
           e.raw);
 
-    // compile_rhs_args already provides precisely the register convention
-    // the system needs after an unused leading scalar.  Add that formal to a
-    // temporary copy; the retained source definition remains the real
-    // four-argument function used by the interpreter fallback.
-    mir::FunDef adapted = *spec->system();
-    adapted.arg_names.insert(adapted.arg_names.begin(),
-                             "__stanli_algebra_unused_time");
-    adapted.arg_types.insert(adapted.arg_types.begin(), "UReal");
-    adapted.arg_views.insert(adapted.arg_views.begin(),
-                             mir::UnsizedView{0, mir::UnsizedLeaf::Real});
-    adapted.arg_data_only.insert(adapted.arg_data_only.begin(), true);
     std::vector<RhsArg> args(3);
     args[0].is_param = true;
     args[0].len = (int)g.slots[y.slot].len;
     args[1].len = (int)spec->x_r.size();
     args[2].is_int = true;
     args[2].ints = spec->x_i;
-    spec->prog = compile_rhs_args(adapted, *spec->funs(), (int)n, args);
+    spec->prog = compile_rhs_args(with_leading_time(*spec->system()),
+                                  *spec->funs(), (int)n, args);
     if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ALGEBRA"))
       std::fprintf(stderr,
                    "stanli: algebraic system %s falls back to the "
@@ -6551,7 +7253,9 @@ struct Lowering {
   // The op tail both ODE families share: report an interpreter fallback,
   // emit OP_ODE and hand the spec to the graph.
   Val emit_ode(std::shared_ptr<OdeSpec> spec, const Val& z0, const Val& theta,
-               int64_t N, int64_t S, SlotInfo result_si) {
+               int64_t N, int64_t S, SlotInfo result_si,
+               std::optional<Val> t0 = std::nullopt,
+               std::optional<Val> ts = std::nullopt) {
     // Falling back to the interpreter is correct but ~30x slower, so make
     // it findable rather than silent.
     if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ODE"))
@@ -6579,13 +7283,20 @@ struct Lowering {
                      "stanli: ODE right-hand side %s keeps the RK oracle: %s\n",
                      spec->rhs_name.c_str(), spec->direct_rk_why.c_str());
     }
-    Val v = emit_value(OP_ODE, {z0, theta}, N * S, result_si, {(int)N, (int)S});
-    // Bit 2 says the low bits explicitly describe the C++ scalar types
-    // selected by stanc's adlevels: bit 0 for y0, bit 1 for theta. Runtime
-    // adjoint storage is deliberately not used for this decision -- a
-    // write_array value can depend on q while still instantiating on double.
-    g.ops.back().variant = (uint8_t)(0x4u | (z0.autodiff ? 0x1u : 0u) |
-                                     (theta.autodiff ? 0x2u : 0u));
+    Val v = t0 && ts ? emit_value(OP_ODE, {z0, theta, *t0, *ts}, N * S,
+                                  result_si, {(int)N, (int)S})
+                     : emit_value(OP_ODE, {z0, theta}, N * S, result_si,
+                                  {(int)N, (int)S});
+    // The new four-input form uses bit 4 as its marker and includes initial
+    // and output-time scalar types in bits 2 and 3. The old two-input form
+    // retains its bit-2 compatibility encoding.
+    g.ops.back().variant =
+        t0 && ts
+            ? (uint8_t)(0x10u | (z0.autodiff ? 0x1u : 0u) |
+                        (theta.autodiff ? 0x2u : 0u) |
+                        (t0->autodiff ? 0x4u : 0u) | (ts->autodiff ? 0x8u : 0u))
+            : (uint8_t)(0x4u | (z0.autodiff ? 0x1u : 0u) |
+                        (theta.autodiff ? 0x2u : 0u));
     g.ops.back().udata = spec.get();
     g.udata_pool.push_back(std::move(spec));
     return v;
@@ -6614,23 +7325,10 @@ struct Lowering {
   // only the packing at this end is new.
   std::optional<Val> lower_ode_variadic(const mir::Expr& e,
                                         CallArguments& actuals) {
-    static const std::vector<std::pair<const char*, OdeSpec::Solver>> kSolvers =
-        {{"ode_bdf", OdeSpec::BDF},
-         {"ode_adams", OdeSpec::ADAMS},
-         {"ode_rk45", OdeSpec::RK45},
-         {"ode_ckrk", OdeSpec::CKRK}};
-    std::string base = e.name;
-    bool with_tol = false;
-    if (base.size() > 4 && base.compare(base.size() - 4, 4, "_tol") == 0) {
-      with_tol = true;
-      base = base.substr(0, base.size() - 4);
-    }
-    const auto sit =
-        std::find_if(kSolvers.begin(), kSolvers.end(),
-                     [&](const auto& s) { return base == s.first; });
-    if (sit == kSolvers.end()) return std::nullopt;
-
-    const size_t fixed = with_tol ? 7 : 4;
+    const auto call = mir::ode_call(e.name);
+    if (!call || call->legacy || call->method == mir::OdeMethod::Adjoint)
+      return std::nullopt;
+    const size_t fixed = call->callback_args_begin;
     if (actuals.size() < fixed) fail(e.name + ": unexpected arity", e.raw);
     auto spec = std::make_shared<OdeSpec>();
     // Argument zero is the callback name retained in OdeSpec, not a lowered
@@ -6641,13 +7339,23 @@ struct Lowering {
       fail(e.name + ": unknown right-hand side " + rhs_expr.name, e.raw);
     spec->adopt(fun_defs);
     spec->rhs_name = rhs_expr.name;
-    spec->solver = sit->second;
+    spec->solver = ode_solver(call->method);
     spec->stiff =
         spec->solver == OdeSpec::BDF || spec->solver == OdeSpec::ADAMS;
     stamp_ode_defaults(*spec);
-    spec->t0 = actuals.at(2).require_constant_reals("ODE initial time").at(0);
-    spec->ts = actuals.at(3).require_constant_reals("ODE output times");
-    if (with_tol) {
+    const bool runtime_times = !e.args[2].data_only || !e.args[3].data_only;
+    Val t0, ts;
+    if (runtime_times) {
+      t0 = actuals.at(2).value();
+      ts = actuals.at(3).value();
+      if (!is_scalar(t0) || !is_array(ts.si))
+        fail(e.name + ": initial time or output times has the wrong type",
+             e.raw);
+    } else {
+      spec->t0 = actuals.at(2).require_constant_reals("ODE initial time").at(0);
+      spec->ts = actuals.at(3).require_constant_reals("ODE output times");
+    }
+    if (call->with_tolerance) {
       spec->rtol =
           actuals.at(4).require_constant_reals("ODE relative tolerance").at(0);
       spec->atol =
@@ -6695,7 +7403,9 @@ struct Lowering {
 
     Val z0 = actuals.at(1).value();
     const int64_t S = g.slots[z0.slot].len;
-    const int64_t N = (int64_t)spec->ts.size();
+    const int64_t N =
+        runtime_times ? g.slots[ts.slot].len : (int64_t)spec->ts.size();
+    if (runtime_times) spec->ts.resize((size_t)N);
 
     // One contiguous theta. A model with a single parameter argument --
     // which is most of them -- gets its slot used directly and pays for
@@ -6717,20 +7427,21 @@ struct Lowering {
 
     spec->args = rargs;
     spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), (int)S, rargs);
+    if (runtime_times)
+      return emit_ode(std::move(spec), z0, theta, N, S,
+                      ode_result_view(e, N, S), t0, ts);
     return emit_ode(std::move(spec), z0, theta, N, S, ode_result_view(e, N, S));
   }
 
   // The integrate_ode_* family.
   std::optional<Val> lower_ode_fn(const mir::Expr& e, CallArguments& actuals) {
     if (auto v = lower_ode_variadic(e, actuals)) return v;
-    std::optional<OdeSpec::Solver> legacy_solver;
-    if (e.name == "integrate_ode_rk45")
-      legacy_solver = OdeSpec::RK45;
-    else if (e.name == "integrate_ode_bdf")
-      legacy_solver = OdeSpec::BDF;
-    else if (e.name == "integrate_ode_adams")
-      legacy_solver = OdeSpec::ADAMS;
-    if (legacy_solver) {
+    const auto call = mir::ode_call(e.name);
+    if (call && call->legacy) {
+      const OdeSpec::Solver legacy_solver =
+          call->method == mir::OdeMethod::Rk45  ? OdeSpec::RK45
+          : call->method == mir::OdeMethod::Bdf ? OdeSpec::BDF
+                                                : OdeSpec::ADAMS;
       // integrate_ode_*(f, z_init, t0, ts, theta, x_r, x_i[, rtol, atol,
       // max_steps]). Everything but z_init and theta is data, and is
       // captured in the spec the kernel reads through the op payload.
@@ -6745,7 +7456,7 @@ struct Lowering {
       spec->adopt(fun_defs);
       spec->rhs_name = rhs_expr.name;
       spec->legacy = true;
-      spec->solver = *legacy_solver;
+      spec->solver = legacy_solver;
       spec->stiff =
           spec->solver == OdeSpec::BDF || spec->solver == OdeSpec::ADAMS;
       stamp_ode_defaults(*spec);
