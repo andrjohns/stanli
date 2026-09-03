@@ -2168,14 +2168,13 @@ void report_memory_profile(const StructuredLoop& p,
     elided_refs =
         profile_add(elided_refs, bucket.elided_refs, allocation_overflow);
     inactive_transient_values =
-        profile_add(inactive_transient_values,
-                    bucket.inactive_transient_values, allocation_overflow);
+        profile_add(inactive_transient_values, bucket.inactive_transient_values,
+                    allocation_overflow);
     inactive_output_values =
         profile_add(inactive_output_values, bucket.inactive_output_values,
                     allocation_overflow);
-    inactive_output_refs =
-        profile_add(inactive_output_refs, bucket.inactive_output_refs,
-                    allocation_overflow);
+    inactive_output_refs = profile_add(
+        inactive_output_refs, bucket.inactive_output_refs, allocation_overflow);
     arena_location_refs = profile_add(
         arena_location_refs, bucket.arena_location_refs, allocation_overflow);
     inactive_workspace_calls =
@@ -2474,9 +2473,8 @@ struct DynamicExecution {
     return append_ref(r, active);
   }
 
-  double make_compact_update_ref(double base_handle, double* value,
-                                 int64_t len, bool active,
-                                 int64_t shared_adjoint_offset,
+  double make_compact_update_ref(double base_handle, double* value, int64_t len,
+                                 bool active, int64_t shared_adjoint_offset,
                                  bool frame_free, bool& reused) {
     reused = false;
     if (!state.shared_update_ref_reuse || !active || !frame_free ||
@@ -2932,7 +2930,7 @@ struct DynamicExecution {
       for (int j = k + 1; j < c.n_in; ++j)
         if (adjoint_ranges_overlap(handles[k], c.in[k].len, handles[j],
                                    c.in[j].len))
-      return -1;
+          return -1;
     }
     return base.adjoint_or_import;
   }
@@ -3152,8 +3150,8 @@ struct DynamicExecution {
     // exact-int32 result contract used by the compact handle encoding.  A
     // custom callback, second output, reverse callback, or different layout
     // keeps the ordinary retained-frame behavior.
-    if (n.forward != builtin || n.backward != nullptr ||
-        op.out2 >= 0 || p.body.slots[static_cast<size_t>(op.out)].len != 1 ||
+    if (n.forward != builtin || n.backward != nullptr || op.out2 >= 0 ||
+        p.body.slots[static_cast<size_t>(op.out)].len != 1 ||
         n.kernel_scratch != 0)
       return false;
 
@@ -3371,9 +3369,8 @@ struct DynamicExecution {
 
     bool frame_free =
         !active || (shared_adjoint >= 0 && n.backward == set_index_backward);
-    if (frame_free &&
-        static_cast<uint64_t>(position) >
-            DynamicLoopState::max_frame_free_position)
+    if (frame_free && static_cast<uint64_t>(position) >
+                          DynamicLoopState::max_frame_free_position)
       frame_free = false;
 
     // Every allocation that can throw precedes the destructive write. A later
@@ -3387,9 +3384,9 @@ struct DynamicExecution {
       frame[retained_inputs] = static_cast<double>(position);
     }
     bool reused_output_ref = false;
-    const double out = make_compact_update_ref(
-        base_handle, c.out.data, c.out.len, active, shared_adjoint, frame_free,
-        reused_output_ref);
+    const double out =
+        make_compact_update_ref(base_handle, c.out.data, c.out.len, active,
+                                shared_adjoint, frame_free, reused_output_ref);
     if (shared_adjoint >= 0 && c.out.len > state.compact_adjoint_work_size)
       throw std::logic_error(
           "compact structured adjoint exceeds preallocated work");
@@ -3686,8 +3683,8 @@ struct DynamicExecution {
             "shared compact structured adjoints are not disjoint");
       for (int j = k + 1; j < c.n_in; ++j)
         if (overlaps(c.in_adj[k], c.in_adj[j]))
-      throw std::logic_error(
-          "shared compact structured adjoints are not disjoint");
+          throw std::logic_error(
+              "shared compact structured adjoints are not disjoint");
     }
 
     // The ordinary callback sees a distinct zero-initialized conceptual base
@@ -3701,8 +3698,7 @@ struct DynamicExecution {
     return true;
   }
 
-  void backward_compact_scalar_index(
-      const DynamicLoopState::Record& record) {
+  void backward_compact_scalar_index(const DynamicLoopState::Record& record) {
     const Node& node = record_node(record);
     if (node.op < 0 || static_cast<size_t>(node.op) >= p.body.ops.size())
       throw std::logic_error("compact scalar index node is invalid");
@@ -3714,8 +3710,8 @@ struct DynamicExecution {
       throw std::logic_error("compact scalar index record is invalid");
     const int64_t base_len = p.body.slots[static_cast<size_t>(op.in[0])].len;
     if (node.forward != index_forward || node.backward != index_backward ||
-        op.opcode != OP_INDEX_DYNAMIC ||
-        op.out2 >= 0 || spec->selected_size != 1 ||
+        op.opcode != OP_INDEX_DYNAMIC || op.out2 >= 0 ||
+        spec->selected_size != 1 ||
         p.body.slots[static_cast<size_t>(op.out)].len != 1 ||
         node.kernel_scratch != 0 || record.out < 0 || base_len < 0 ||
         !std::isfinite(record.out2) || std::trunc(record.out2) != record.out2 ||
@@ -3723,14 +3719,13 @@ struct DynamicExecution {
       throw std::logic_error("compact scalar index record is invalid");
 
     const auto& output = ref(record.out);
-    if (is_import_ref(output) || output.adjoint_or_import < 0 ||
-        !output.value)
+    if (is_import_ref(output) || output.adjoint_or_import < 0 || !output.value)
       throw std::logic_error("compact scalar index output is invalid");
     double* const base_adjoint = adj(record.base_handle, base_len);
     if (!base_adjoint || record.out2 < 0) return;
     double* const output_adjoint = adj(record.out, 1);
-    if (!output_adjoint || overlaps({base_adjoint, base_len},
-                                    {output_adjoint, 1}))
+    if (!output_adjoint ||
+        overlaps({base_adjoint, base_len}, {output_adjoint, 1}))
       throw std::logic_error("compact scalar index adjoints overlap");
     base_adjoint[static_cast<int64_t>(record.out2)] += output_adjoint[0];
   }
@@ -3901,8 +3896,7 @@ struct DynamicExecution {
         if (!std::isfinite(raw_position) ||
             std::trunc(raw_position) != raw_position || raw_position < 0 ||
             raw_position > static_cast<double>(exact_limit))
-          throw std::logic_error(
-              "compact structured undo position is invalid");
+          throw std::logic_error("compact structured undo position is invalid");
         const int64_t position = static_cast<int64_t>(raw_position);
         auto& output = ref(record.out);
         const int64_t output_len = p.body.slots[p.body.ops[node.op].out].len;
@@ -4505,7 +4499,7 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
       runtime.selected > p.selected_size ||
       (update
            ? (c.out.len != capacity || c.in[layout.rhs].len != p.selected_size)
-              : c.out.len != p.selected_size))
+           : c.out.len != p.selected_size))
     throw std::logic_error("invalid structured index storage");
   return runtime;
 }

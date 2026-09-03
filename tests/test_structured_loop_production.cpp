@@ -1112,13 +1112,21 @@ static std::shared_ptr<StructuredLoop> aliased_update_plan(
   Node observe3 = call(*plan, OP_SUM_VEC, {current}, observed3);
   const int observer_ops[] = {observe1.op, observe2.op, observe3.op};
   plan->root = sequence(
-      {alias(current, base), call(*plan, OP_MUL, {theta, one}, rhs1),
-       std::move(update1), alias(current, updated1_slot), std::move(observe1),
-       alias(snapshot1, current), alias(snapshot2, current),
-       call(*plan, OP_MUL, {theta, two}, rhs2), std::move(update2),
-       alias(current, updated2_slot), std::move(observe2),
-       call(*plan, OP_MUL, {theta, three}, rhs3), std::move(update3),
-       alias(current, updated3_slot), std::move(observe3),
+      {alias(current, base),
+       call(*plan, OP_MUL, {theta, one}, rhs1),
+       std::move(update1),
+       alias(current, updated1_slot),
+       std::move(observe1),
+       alias(snapshot1, current),
+       alias(snapshot2, current),
+       call(*plan, OP_MUL, {theta, two}, rhs2),
+       std::move(update2),
+       alias(current, updated2_slot),
+       std::move(observe2),
+       call(*plan, OP_MUL, {theta, three}, rhs3),
+       std::move(update3),
+       alias(current, updated3_slot),
+       std::move(observe3),
        call(*plan, OP_SUM_VEC, {snapshot1}, snapshot_sum1),
        call(*plan, OP_SUM_VEC, {snapshot2}, snapshot_sum2),
        call(*plan, OP_SUM_VEC, {current}, current_sum),
@@ -1177,11 +1185,12 @@ static std::shared_ptr<StructuredLoop> loop_aliased_update_plan(
   plan->body.ops[static_cast<size_t>(is_first.op)].variant = 4;
   plan->root = sequence(
       {alias(current, base),
-       counted(lower, upper, iterator, 3,
-               sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
-                         std::move(update), alias(current, updated),
-                         std::move(observe), std::move(is_first),
-                         branch(first, alias(snapshot, current), sequence({}))})),
+       counted(
+           lower, upper, iterator, 3,
+           sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                     std::move(update), alias(current, updated),
+                     std::move(observe), std::move(is_first),
+                     branch(first, alias(snapshot, current), sequence({}))})),
        call(*plan, OP_SUM_VEC, {snapshot}, snapshot_sum),
        call(*plan, OP_SUM_VEC, {current}, current_sum),
        call(*plan, OP_ADD, {snapshot_sum, current_sum}, result)});
@@ -1221,8 +1230,8 @@ static std::shared_ptr<StructuredLoop> retained_scalar_update_plan(
   auto spec = std::make_shared<DynamicIndexSpec>();
   spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
   spec->selected_size = 1;
-  Node update1 = call(*plan, OP_SET_INDEX_DYNAMIC,
-                      {current, one, inactive_rhs}, updated1_slot);
+  Node update1 = call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, inactive_rhs},
+                      updated1_slot);
   Node update2 =
       call(*plan, OP_SET_INDEX_DYNAMIC, {current, two, theta}, updated2_slot);
   const int update_ops[] = {update1.op, update2.op};
@@ -1233,10 +1242,9 @@ static std::shared_ptr<StructuredLoop> retained_scalar_update_plan(
   Node observe2 = call(*plan, OP_SUM_VEC, {current}, observed2);
   const int observer_ops[] = {observe1.op, observe2.op};
   plan->root = sequence(
-      {alias(current, base), std::move(update1),
-       alias(current, updated1_slot), std::move(observe1), std::move(update2),
-       alias(current, updated2_slot), std::move(observe2),
-       call(*plan, OP_SUM_VEC, {current}, result)});
+      {alias(current, base), std::move(update1), alias(current, updated1_slot),
+       std::move(observe1), std::move(update2), alias(current, updated2_slot),
+       std::move(observe2), call(*plan, OP_SUM_VEC, {current}, result)});
   plan->outputs = {result};
   plan->prepare(1 << 20);
   plan->dynamic_history = true;
@@ -1268,9 +1276,8 @@ static std::shared_ptr<StructuredLoop> duplicate_record_site_plan() {
   plan->outputs = {product};
   plan->prepare(1 << 20);
   plan->dynamic_history = true;
-  check(plan->record_node_count == 2 &&
-            plan->root.children[0].record_site !=
-                plan->root.children[1].record_site,
+  check(plan->record_node_count == 2 && plan->root.children[0].record_site !=
+                                            plan->root.children[1].record_site,
         "duplicate operation nodes receive distinct record sites");
   plan->root.children[1].backward = duplicate_site_backward;
   return plan;
@@ -1299,13 +1306,13 @@ static std::shared_ptr<StructuredLoop> scalar_index_loop_plan(
   const int index_op = index.op;
   plan->body.ops[static_cast<size_t>(index_op)].udata = spec.get();
   plan->body.udata_pool.push_back(spec);
-  plan->root = sequence(
-      {alias(total, zero),
-       counted(one, three, iterator, 3,
-               sequence({std::move(index),
-                         call(*plan, OP_MUL, {selected, theta}, term),
-                         call(*plan, OP_ADD, {total, term}, next),
-                         alias(total, next)}))});
+  plan->root =
+      sequence({alias(total, zero),
+                counted(one, three, iterator, 3,
+                        sequence({std::move(index),
+                                  call(*plan, OP_MUL, {selected, theta}, term),
+                                  call(*plan, OP_ADD, {total, term}, next),
+                                  alias(total, next)}))});
   plan->outputs = {total};
   plan->prepare(1 << 20);
   plan->dynamic_history = true;
@@ -1412,12 +1419,12 @@ static std::shared_ptr<StructuredLoop> scalar_index_after_updates_plan() {
   Node index = call(*plan, OP_INDEX_DYNAMIC, {current, two}, selected);
   plan->body.ops[static_cast<size_t>(index.op)].udata = index_spec.get();
   plan->body.udata_pool.push_back(index_spec);
-  plan->root = sequence(
-      {alias(current, base),
-       counted(one, two, iterator, 2,
-               sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
-                         std::move(update), alias(current, updated)})),
-       std::move(index)});
+  plan->root =
+      sequence({alias(current, base),
+                counted(one, two, iterator, 2,
+                        sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                                  std::move(update), alias(current, updated)})),
+                std::move(index)});
   plan->outputs = {selected};
   plan->prepare(1 << 20);
   plan->dynamic_history = true;
@@ -1582,10 +1589,10 @@ static void compact_scalar_index_tests() {
   const double expected_gradient[] = {0, .25, .25, .25, 0, 0};
   for (bool direct : {false, true}) {
     ordinary_index_forward_calls = ordinary_index_backward_calls = 0;
-    Executor compact(scalar_index_loop_outer(
-        scalar_index_loop_plan(direct, false)));
-    Executor ordinary(scalar_index_loop_outer(
-        scalar_index_loop_plan(direct, true)));
+    Executor compact(
+        scalar_index_loop_outer(scalar_index_loop_plan(direct, false)));
+    Executor ordinary(
+        scalar_index_loop_outer(scalar_index_loop_plan(direct, true)));
     std::copy(std::begin(point), std::end(point), compact.params_data());
     std::copy(std::begin(point), std::end(point), ordinary.params_data());
     double compact_gradient[6] = {};
@@ -1596,9 +1603,9 @@ static void compact_scalar_index_tests() {
               std::memcmp(compact_gradient, ordinary_gradient,
                           sizeof(compact_gradient)) == 0,
           "compact scalar index has bitwise ordinary-path parity");
-    check(ordinary_index_forward_calls == 3 &&
-              ordinary_index_backward_calls == 3,
-          "custom scalar index callbacks force ordinary history");
+    check(
+        ordinary_index_forward_calls == 3 && ordinary_index_backward_calls == 3,
+        "custom scalar index callbacks force ordinary history");
     close(compact_value, .25, "compact scalar index value");
     for (size_t i = 0; i < std::size(expected_gradient); ++i)
       close(compact_gradient[i], expected_gradient[i],
@@ -1626,15 +1633,14 @@ static void compact_scalar_index_tests() {
 
   Executor selector_only(outer(selector_only_scalar_index_plan()));
   const Evaluation selector_result = evaluate(selector_only, 2, 0);
-  close(selector_result.value, 20,
-        "selector-only active scalar index value");
+  close(selector_result.value, 20, "selector-only active scalar index value");
   close(selector_result.gradient[0], 0,
         "scalar index does not differentiate its selector");
   close(selector_result.gradient[1], 0,
         "unused scalar index input has zero gradient");
 
-  Executor updated(scalar_index_after_updates_outer(
-      scalar_index_after_updates_plan()));
+  Executor updated(
+      scalar_index_after_updates_outer(scalar_index_after_updates_plan()));
   const double updated_point[] = {10, 20, 30, .25};
   std::copy(std::begin(updated_point), std::end(updated_point),
             updated.params_data());
@@ -1908,8 +1914,7 @@ static void compact_iterator_history_tests() {
             aliased_ordinary_addresses[1] != aliased_ordinary_addresses[2],
         "compact mutation resumes after one copy-on-write update");
   close(aliased.value, 102, "outgoing aliases preserve snapshot values");
-  close(aliased.gradient[0], 8,
-        "outgoing aliases preserve snapshot gradients");
+  close(aliased.gradient[0], 8, "outgoing aliases preserve snapshot gradients");
 
   ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
   Executor loop_aliased_compact(outer(loop_aliased_update_plan(false)));
@@ -1962,8 +1967,7 @@ static void compact_iterator_history_tests() {
             retained_ordinary_addresses[0] != retained_ordinary_addresses[1],
         "unshared active scalar update uses retained compact history");
   close(retained_result.value, 37.25, "retained scalar record value");
-  close(retained_result.gradient[0], 1,
-        "retained scalar record gradient");
+  close(retained_result.gradient[0], 1, "retained scalar record gradient");
 
   duplicate_site_backward_calls = 0;
   Executor duplicate_sites(outer(duplicate_record_site_plan()));
@@ -2502,10 +2506,8 @@ static void compact_integer_result_tests() {
   check(threw, "inline integer preserves division exception");
   const Evaluation divided = evaluate(division_retry, 4, 2);
   close(divided.value, 2, "inline integer division retry value");
-  close(divided.gradient[0], 0,
-        "inline integer division retry theta gradient");
-  close(divided.gradient[1], 0,
-        "inline integer division retry beta gradient");
+  close(divided.gradient[0], 0, "inline integer division retry theta gradient");
+  close(divided.gradient[1], 0, "inline integer division retry beta gradient");
 
   custom_integer_calls = 0;
   Executor custom(outer(custom_integer_plan()));
@@ -2840,29 +2842,27 @@ static std::shared_ptr<StructuredLoop> compact_invariant_guard_plan() {
   auto spec = std::make_shared<DynamicIndexSpec>();
   spec->axes = {{DynamicIndexSpec::Axis::Single, 1, 1, 1, 0}};
   spec->selected_size = 1;
-  Node update =
-      call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, rhs}, updated);
+  Node update = call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, rhs}, updated);
   plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
   plan->body.udata_pool.push_back(spec);
   Node comparison = call(*plan, OP_COMPARE, {current, threshold}, compared);
   const int comparison_op = comparison.op;
   plan->body.ops[static_cast<size_t>(comparison_op)].variant = 2;
-  plan->root = sequence(
-      {alias(current, base), alias(result, zero),
-       counted(one, three, iterator, 3,
-               sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
-                         std::move(update), alias(current, updated),
-                         std::move(comparison),
-                         call(*plan, OP_MUL, {theta, compared}, term),
-                         call(*plan, OP_ADD, {result, term}, next),
-                         alias(result, next)}))});
+  plan->root =
+      sequence({alias(current, base), alias(result, zero),
+                counted(one, three, iterator, 3,
+                        sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                                  std::move(update), alias(current, updated),
+                                  std::move(comparison),
+                                  call(*plan, OP_MUL, {theta, compared}, term),
+                                  call(*plan, OP_ADD, {result, term}, next),
+                                  alias(result, next)}))});
   plan->outputs = {result};
   plan->prepare(1 << 20);
   plan->dynamic_history = true;
   check(plan->compact_update_sites == 1,
         "compact invariant guard selects compact history");
-  check(set_forward(plan->root, comparison_op,
-                    count_compact_dependent_compare),
+  check(set_forward(plan->root, comparison_op, count_compact_dependent_compare),
         "find compact-dependent comparison callback");
   return plan;
 }
@@ -3537,11 +3537,11 @@ static void direct_index_lowering_tests() {
     for (const auto& op : packed_plan->body.ops) {
       packed_concats += op.opcode == OP_CONCAT2;
       if (op.opcode == OP_INDEX_DYNAMIC) {
-      ++packed_reads;
-      const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
+        ++packed_reads;
+        const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
         check(spec && spec->input_count == 0 && spec->rhs_input == -1 &&
                   op.n_in == 2,
-            "direct-index ablation preserves packed read ABI");
+              "direct-index ablation preserves packed read ABI");
       } else if (op.opcode == OP_SET_INDEX_DYNAMIC) {
         ++packed_updates;
         const auto* spec = static_cast<const DynamicIndexSpec*>(op.udata);
