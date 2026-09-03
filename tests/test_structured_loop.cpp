@@ -3747,15 +3747,15 @@ static std::shared_ptr<StructuredLoop> nested_scan_plan() {
   plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
   Node scale = call(*plan, OP_MUL, {theta, k}, term);
   const int scale_op = scale.op;
-  Node inner = counted(
-      one, hundred, i,
-      sequence({std::move(decrement), std::move(stride), std::move(offset),
-                std::move(index), std::move(compare),
-                branch(guard,
-                       sequence({std::move(scale),
-                                 call(*plan, OP_ADD, {acc, term}, next),
-                                 alias(acc, next)}),
-                       sequence({}))}));
+  Node inner =
+      counted(one, hundred, i,
+              sequence({std::move(decrement), std::move(stride),
+                        std::move(offset), std::move(index), std::move(compare),
+                        branch(guard,
+                               sequence({std::move(scale),
+                                         call(*plan, OP_ADD, {acc, term}, next),
+                                         alias(acc, next)}),
+                               sequence({}))}));
   plan->root = counted(one, three, k, sequence({std::move(inner)}));
   plan->outputs = {acc};
   plan->prepare();
