@@ -1790,6 +1790,16 @@ static void compact_iterator_history_tests() {
   const Evaluation repeated = evaluate(frame_free, .25, 0);
   check(std::memcmp(&compact, &repeated, sizeof(Evaluation)) == 0,
         "frame-free compact reverse resets between evaluations");
+  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
+  Executor shared_ref(outer(iterator_update_plan(nullptr)));
+  const Evaluation reused_ref = evaluate(shared_ref, .25, 0);
+  test_setenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS", "1");
+  const Evaluation distinct_ref = evaluate(shared_ref, .25, 0);
+  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
+  const Evaluation reused_again = evaluate(shared_ref, .25, 0);
+  check(std::memcmp(&reused_ref, &distinct_ref, sizeof(Evaluation)) == 0 &&
+            std::memcmp(&reused_ref, &reused_again, sizeof(Evaluation)) == 0,
+        "shared compact-update Ref reuse has bitwise ablation parity");
   Executor direct_frame_free(
       outer(iterator_update_plan(nullptr, nullptr, true)));
   const Evaluation direct_compact = evaluate(direct_frame_free, .25, 0);
@@ -2738,6 +2748,7 @@ static std::atomic<int> invariant_first_calls{0};
 static std::atomic<int> invariant_second_calls{0};
 static std::atomic<int> invariant_active_calls{0};
 static std::atomic<int> invariant_variant_calls{0};
+static std::atomic<int> compact_dependent_compare_calls{0};
 
 static void count_invariant_first(KernelCtx& context) {
   ++invariant_first_calls;
@@ -2758,6 +2769,11 @@ static void count_invariant_active(KernelCtx& context) {
 static void count_invariant_variant(KernelCtx& context) {
   ++invariant_variant_calls;
   find_kernel(OP_ADD)->forward(context);
+}
+
+static void count_compact_dependent_compare(KernelCtx& context) {
+  ++compact_dependent_compare_calls;
+  find_kernel(OP_COMPARE)->forward(context);
 }
 
 static std::shared_ptr<StructuredLoop> invariant_plan(int trips) {
@@ -2802,6 +2818,55 @@ static std::shared_ptr<StructuredLoop> invariant_plan(int trips) {
   return plan;
 }
 
+static std::shared_ptr<StructuredLoop> compact_invariant_guard_plan() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int three = scalar(*plan, 3);
+  const int threshold = scalar(*plan, .3);
+  const int zero = scalar(*plan, 0);
+  const int iterator = plan->body.add_slot(1, false);
+  const int base = plan->body.add_slot(1, false);
+  plan->fills.push_back({base, {0}});
+  const int current = plan->body.add_slot(1, false);
+  const int rhs = plan->body.add_slot(1, false);
+  const int updated = plan->body.add_slot(1, false);
+  const int compared = plan->body.add_slot(1, false);
+  const int term = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0}};
+
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Single, 1, 1, 1, 0}};
+  spec->selected_size = 1;
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, rhs}, updated);
+  plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
+  plan->body.udata_pool.push_back(spec);
+  Node comparison = call(*plan, OP_COMPARE, {current, threshold}, compared);
+  const int comparison_op = comparison.op;
+  plan->body.ops[static_cast<size_t>(comparison_op)].variant = 2;
+  plan->root = sequence(
+      {alias(current, base), alias(result, zero),
+       counted(one, three, iterator, 3,
+               sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                         std::move(update), alias(current, updated),
+                         std::move(comparison),
+                         call(*plan, OP_MUL, {theta, compared}, term),
+                         call(*plan, OP_ADD, {result, term}, next),
+                         alias(result, next)}))});
+  plan->outputs = {result};
+  plan->prepare(1 << 20);
+  plan->dynamic_history = true;
+  check(plan->compact_update_sites == 1,
+        "compact invariant guard selects compact history");
+  check(set_forward(plan->root, comparison_op,
+                    count_compact_dependent_compare),
+        "find compact-dependent comparison callback");
+  return plan;
+}
+
 static Evaluation evaluate_invariant(Executor& executor, double theta) {
   executor.params_data()[0] = theta;
   executor.params_data()[1] = 0;
@@ -2838,6 +2903,30 @@ static void loop_invariant_reuse_tests() {
         "invariant ablation executes every reached callback");
   check(std::memcmp(&first, &baseline, sizeof(Evaluation)) == 0,
         "invariant reuse has bitwise same-binary parity");
+
+  // Compact versions can deliberately reuse one physical handle. Their
+  // entire alias root must remain outside the handle-keyed invariant cache,
+  // including data-only consumers whose output is used by active work.
+  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
+  compact_dependent_compare_calls = 0;
+  Executor compact_guard(outer(compact_invariant_guard_plan()));
+  const Evaluation compact_guard_reused =
+      evaluate_invariant(compact_guard, .25);
+  check(compact_dependent_compare_calls == 3,
+        "compact-dependent data work recomputes with shared handles");
+  close(compact_guard_reused.value, .5,
+        "compact-dependent data work preserves changing values");
+  close(compact_guard_reused.gradient[0], 2,
+        "compact-dependent data work preserves active gradients");
+  test_setenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS", "1");
+  compact_dependent_compare_calls = 0;
+  const Evaluation compact_guard_distinct =
+      evaluate_invariant(compact_guard, .25);
+  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
+  check(compact_dependent_compare_calls == 3 &&
+            std::memcmp(&compact_guard_reused, &compact_guard_distinct,
+                        sizeof(Evaluation)) == 0,
+        "compact-dependent data work has bitwise Ref-ablation parity");
 
   auto zero = invariant_plan(0);
   Executor zero_executor(outer(zero));
@@ -3495,6 +3584,7 @@ static void direct_index_lowering_tests() {
 
 int main() {
   test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
+  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
   runtime_trip_tests();
   compact_import_reference_tests();
   direct_index_kernel_tests();
@@ -3516,6 +3606,7 @@ int main() {
   test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
   test_unsetenv("STANLI_NO_STRUCTURED_RECORD_SCALARS");
+  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
   if (failures == 0) std::printf("test_structured_loop_production OK\n");
   return failures != 0;
 }

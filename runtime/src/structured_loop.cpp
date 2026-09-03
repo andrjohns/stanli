@@ -1671,8 +1671,8 @@ struct DynamicAllocationProfile {
   }
 
   void note_compact(const Op& op, int64_t retained, int64_t output_len,
-                    bool active, bool shared_adjoint,
-                    bool frame_free) noexcept {
+                    bool active, bool shared_adjoint, bool frame_free,
+                    bool reused_output_ref) noexcept {
     Bucket* b = bucket(op);
     if (!b) return;
     const uint64_t frame = count(retained);
@@ -1683,8 +1683,9 @@ struct DynamicAllocationProfile {
     add(b->arena_values, frame);
     add(b->input_handle_values, frame);
     add(b->record_handle_values, frame_free && active ? 1 : 0);
-    add(b->refs, 1);
-    add(b->active_refs, active ? 1 : 0);
+    add(b->refs, reused_output_ref ? 0 : 1);
+    add(b->active_refs, active && !reused_output_ref ? 1 : 0);
+    add(b->elided_refs, reused_output_ref ? 1 : 0);
     add(b->referenced_values, extent);
     add(b->conceptual_adjoint_values, active ? extent : 0);
     add(b->physical_adjoint_values, active && !shared_adjoint ? extent : 0);
@@ -1829,6 +1830,7 @@ struct DynamicLoopState final : KernelState {
   bool inactive_control_reuse = false;
   bool inactive_workspace_reuse = false;
   bool record_scalar_reuse = false;
+  bool shared_update_ref_reuse = false;
   bool memory_profile = false;
   bool cached_context_in_use = false;
   // A dynamic tape belongs to exactly one completed forward sweep.  Forward
@@ -2470,6 +2472,33 @@ struct DynamicExecution {
           "inactive structured reference cannot share an adjoint");
     }
     return append_ref(r, active);
+  }
+
+  double make_compact_update_ref(double base_handle, double* value,
+                                 int64_t len, bool active,
+                                 int64_t shared_adjoint_offset,
+                                 bool frame_free, bool& reused) {
+    reused = false;
+    if (!state.shared_update_ref_reuse || !active || !frame_free ||
+        shared_adjoint_offset < 0 || base_handle < 0 ||
+        is_record_scalar(base_handle))
+      return make_ref(value, len, active, shared_adjoint_offset);
+
+    const auto& base = ordinary_ref(base_handle);
+    if (is_import_ref(base) || base.value != value ||
+        base.adjoint_or_import != shared_adjoint_offset)
+      return make_ref(value, len, active, shared_adjoint_offset);
+    if (len < 0 || shared_adjoint_offset > state.adjoint_size ||
+        len > state.adjoint_size - shared_adjoint_offset)
+      return make_ref(value, len, active, shared_adjoint_offset);
+
+    // This output is a new conceptual autodiff value, but the compact
+    // update's ownership and shared-adjoint proofs make its physical Ref
+    // identical to the base Ref. The reverse record still preserves every
+    // reached update and observes the shared handle in the original order.
+    state.conceptual_adjoint_size = add(state.conceptual_adjoint_size, len);
+    reused = true;
+    return base_handle;
   }
 
   double make_import_ref(double* value, int64_t len, bool active,
@@ -3357,7 +3386,10 @@ struct DynamicExecution {
       std::copy_n(handles, retained_inputs, frame);
       frame[retained_inputs] = static_cast<double>(position);
     }
-    const double out = make_ref(c.out.data, c.out.len, active, shared_adjoint);
+    bool reused_output_ref = false;
+    const double out = make_compact_update_ref(
+        base_handle, c.out.data, c.out.len, active, shared_adjoint, frame_free,
+        reused_output_ref);
     if (shared_adjoint >= 0 && c.out.len > state.compact_adjoint_work_size)
       throw std::logic_error(
           "compact structured adjoint exceeds preallocated work");
@@ -3378,7 +3410,7 @@ struct DynamicExecution {
     if (state.allocation_profile)
       state.allocation_profile->note_compact(
           op, frame_free ? 0 : std::max(1, retained_inputs + 1), c.out.len,
-          active, shared_adjoint >= 0, frame_free);
+          active, shared_adjoint >= 0, frame_free, reused_output_ref);
     return true;
   }
 
@@ -3942,6 +3974,8 @@ void dynamic_loop_forward(KernelCtx& ctx) {
       std::getenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE") == nullptr;
   s.record_scalar_reuse =
       std::getenv("STANLI_NO_STRUCTURED_RECORD_SCALARS") == nullptr;
+  s.shared_update_ref_reuse =
+      std::getenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS") == nullptr;
   struct ReleaseOnFailure {
     DynamicLoopState& state;
     bool published = false;
