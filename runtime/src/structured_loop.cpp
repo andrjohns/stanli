@@ -1093,16 +1093,36 @@ struct BlockArena {
     block.used += n;
     return result;
   }
+  size_t used() const {
+    size_t n = 0;
+    for (const auto& block : blocks) n += block.used;
+    return n;
+  }
+  // One block sized for the evaluation just finished, so a steady-state
+  // evaluation never pays block growth and never keeps the first
+  // evaluation's larger recording footprint.
   void clear() {
-    if (blocks.size() > 1) {
-      const size_t capacity = total;
+    const size_t want = std::max(min_block, used() + used() / 8);
+    if (blocks.size() != 1 || blocks.back().capacity > 2 * want ||
+        blocks.back().capacity < want) {
       blocks.clear();
-      blocks.push_back(make(capacity));
-    } else if (!blocks.empty()) {
-      blocks.back().used = 0;
+      blocks.push_back(make(want));
+      total = want;
     }
+    blocks.back().used = 0;
   }
 };
+
+template <class T>
+void right_size(std::vector<T>& v) {
+  const size_t want = v.size() + v.size() / 8;
+  if (v.capacity() > 2 * want || v.capacity() < want) {
+    std::vector<T> fresh;
+    fresh.reserve(want);
+    v.swap(fresh);
+  }
+  v.clear();
+}
 
 struct Version {
   double* value;
@@ -1110,14 +1130,14 @@ struct Version {
 };
 
 struct Record {
-  enum Kind : uint8_t { Kernel, InPlace, Copy } kind;
+  enum Kind : uint8_t { Kernel, InPlace, Copy };
+  uint8_t kind;
   uint32_t site;
   int64_t handles;  // Kernel: first saved input version; InPlace: undo offset
   int64_t out;      // Kernel: out version; InPlace: base; Copy: from
-  int64_t out2;     // Kernel: out2 version or -1; InPlace: rhs; Copy: to
-  int64_t count;    // InPlace: written positions; Copy: length
-  double* scratch;
+  int64_t other;    // InPlace: rhs version; Copy: to version
 };
+static_assert(sizeof(Record) == 32, "records are the largest tape entry");
 
 struct LoopState : KernelState {
   const StructuredLoop& p;
@@ -1221,12 +1241,12 @@ struct LoopState : KernelState {
 
   void release() {
     arena.clear();
-    versions.clear();
-    owner.clear();
-    handles.clear();
-    undo.clear();
-    records.clear();
-    target_refs.clear();
+    right_size(versions);
+    right_size(owner);
+    right_size(handles);
+    right_size(undo);
+    right_size(records);
+    right_size(target_refs);
     adjoint_size = 0;
     reverse_ready = false;
   }
@@ -1311,8 +1331,7 @@ struct Execution {
       s.bindings[op.out2] = out2;
     }
     if (n.active)
-      s.records.push_back(
-          Record{Record::Kernel, n.site, handles, out, out2, 0, c.scratch});
+      s.records.push_back(Record{Record::Kernel, n.site, handles, out, -1});
   }
 
   void run_in_place(const Node& n, const Op& op, KernelCtx& c) {
@@ -1330,8 +1349,7 @@ struct Execution {
       const int64_t fresh =
           make_version(copy, needs_adjoint ? reserve_adjoint(len) : -1);
       s.owner[static_cast<size_t>(fresh)] = base_slot;
-      s.records.push_back(
-          Record{Record::Copy, n.site, 0, base, fresh, len, nullptr});
+      s.records.push_back(Record{Record::Copy, n.site, 0, base, fresh});
       s.bindings[base_slot] = base = fresh;
     } else if (rhs_active &&
                s.versions[static_cast<size_t>(base)].adjoint == -1) {
@@ -1348,8 +1366,7 @@ struct Execution {
       s.undo.push_back(values[at]);
       values[at] = source[i];
     });
-    s.records.push_back(Record{Record::InPlace, n.site, undo, base, rhs,
-                               runtime.selected, nullptr});
+    s.records.push_back(Record{Record::InPlace, n.site, undo, base, rhs});
   }
 
   int64_t read_trace() {
@@ -1540,6 +1557,7 @@ struct Execution {
   }
 
   void backward() {
+    int64_t undo_end = static_cast<int64_t>(s.undo.size());
     for (size_t i = s.records.size(); i-- > 0;) {
       const Record& r = s.records[i];
       switch (r.kind) {
@@ -1552,22 +1570,26 @@ struct Execution {
             c.in[k].data = s.versions[static_cast<size_t>(v)].value;
             c.in_adj[k].data = adj(v);
           }
-          c.out.data = s.versions[static_cast<size_t>(r.out)].value;
+          double* block = s.versions[static_cast<size_t>(r.out)].value;
+          c.out.data = block;
           c.out_adj_vec.data = adj(r.out);
           if (c.out.len == 1) c.out_adj = c.out_adj_vec.data[0];
-          if (r.out2 >= 0) {
-            c.out2.data = s.versions[static_cast<size_t>(r.out2)].value;
-            c.out2_adj = *adj(r.out2);
+          block += c.out.len;
+          if (op.out2 >= 0) {
+            c.out2.data = block;
+            c.out2_adj = *adj(r.out + 1);
+            block += c.out2.len;
           }
-          c.scratch = r.scratch;
+          c.scratch = block;
           n.backward(c);
           break;
         }
         case Record::InPlace: {
           double* values = s.versions[static_cast<size_t>(r.out)].value;
           double* adj_base = adj(r.out);
-          double* adj_rhs = adj(r.out2);
-          for (int64_t k = r.count; k-- > 0;) {
+          double* adj_rhs = adj(r.other);
+          const int64_t count = (undo_end - r.handles) / 2;
+          for (int64_t k = count; k-- > 0;) {
             const size_t entry = static_cast<size_t>(r.handles + 2 * k);
             const int64_t at = static_cast<int64_t>(s.undo[entry]);
             if (adj_base) {
@@ -1576,13 +1598,16 @@ struct Execution {
             }
             values[at] = s.undo[entry + 1];
           }
+          undo_end = r.handles;
           break;
         }
         case Record::Copy: {
           double* from = adj(r.out);
-          double* to = adj(r.out2);
+          double* to = adj(r.other);
+          const Op& op = p.body.ops[s.sites[r.site]->op];
+          const int64_t len = p.body.slots[op.in[0]].len;
           if (from && to)
-            for (int64_t k = 0; k < r.count; ++k) from[k] += to[k];
+            for (int64_t k = 0; k < len; ++k) from[k] += to[k];
           break;
         }
       }
