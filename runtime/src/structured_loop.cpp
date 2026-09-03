@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -852,6 +854,8 @@ struct LoopState : KernelState {
   std::vector<double> target_work;
   int64_t adjoint_size = 0;
   bool reverse_ready = false;
+  bool report_tape =
+      std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS") != nullptr;
 
   explicit LoopState(const StructuredLoop& plan)
       : p(plan),
@@ -1262,6 +1266,25 @@ void structured_loop_forward(KernelCtx& ctx) {
       count = next;
     }
     ctx.out.data[pos++] = count ? s.target_work[0] : 0.0;
+  }
+  if (s.report_tape) {
+    s.report_tape = false;
+    size_t arena_used = 0;
+    for (const auto& block : s.arena.blocks) arena_used += block.used;
+    size_t kernel_records = 0, copies = 0, updates = 0;
+    for (const auto& r : s.records) {
+      kernel_records += r.kind == Record::Kernel;
+      copies += r.kind == Record::Copy;
+      updates += r.kind == Record::InPlace;
+    }
+    std::fprintf(stderr,
+                 "stanli_structured tape: arena=%zu adjoints=%lld versions=%zu "
+                 "handles=%zu kernel_records=%zu updates=%zu undo=%zu "
+                 "copies=%zu targets=%zu workspace=%zu\n",
+                 arena_used, static_cast<long long>(s.adjoint_size),
+                 s.versions.size(), s.handles.size(), kernel_records, updates,
+                 s.undo.size() / 2, copies, s.target_refs.size(),
+                 s.workspace.size());
   }
   s.reverse_ready = true;
 }
