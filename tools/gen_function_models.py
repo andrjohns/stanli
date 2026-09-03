@@ -151,7 +151,11 @@ def render():
     manifest["scope"] = {
         "overloads": "At least one supported signature per name, not every overload.",
         "gp_exp_quad_cov": "Coordinates are data; scale and length-scale are active.",
-        "map_rect": "Only the implemented empty-job case; nonempty jobs are unsupported.",
+        "map_rect": (
+            "The integrated probe covers empty jobs; "
+            "tests/fixtures/map_rect_region.stan covers nonempty serial "
+            "graph and runtime-control lowering."
+        ),
         "predicates": "logical_negation also exercises a parameter-dependent region.",
     }
     manifest["covered_names"] = sorted(covered)

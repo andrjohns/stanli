@@ -339,15 +339,12 @@ struct InterpAlgebraSystem {
 bool WaInterp::ode_fun(MirInterp<double>& in, const mir::Expr& e,
                        DataMap::Entry* out) {
   enum class LegacySolver { RK45, BDF, ADAMS };
-  LegacySolver solver;
-  if (e.name == "integrate_ode_rk45")
-    solver = LegacySolver::RK45;
-  else if (e.name == "integrate_ode_bdf")
-    solver = LegacySolver::BDF;
-  else if (e.name == "integrate_ode_adams")
-    solver = LegacySolver::ADAMS;
-  else
-    return false;
+  const auto call = mir::ode_call(e.name);
+  if (!call || !call->legacy) return false;
+  const LegacySolver solver =
+      call->method == mir::OdeMethod::Rk45  ? LegacySolver::RK45
+      : call->method == mir::OdeMethod::Bdf ? LegacySolver::BDF
+                                            : LegacySolver::ADAMS;
   if (e.args.size() < 7)
     throw CompileError("stanli write_array: " + e.name + " arity");
   auto fit = funs_.find(e.args[0].name);

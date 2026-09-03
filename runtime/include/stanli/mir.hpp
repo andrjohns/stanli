@@ -568,12 +568,63 @@ struct QuadratureCall {
   size_t callback_args_begin = 3;
 };
 
+enum class OdeMethod : uint8_t { Rk45, Bdf, Adams, Ckrk, Adjoint };
+
+struct OdeCall {
+  OdeMethod method;
+  bool legacy = false;
+  bool with_tolerance = false;
+  // First callback argument after (f, y0, t0, ts) and optional controls.
+  size_t callback_args_begin = 4;
+};
+
+enum class AlgebraMethod : uint8_t { Powell, Newton };
+
+struct AlgebraCall {
+  AlgebraMethod method;
+  bool legacy = false;
+  bool with_tolerance = false;
+  size_t callback_args_begin = 2;
+};
+
+inline std::optional<AlgebraCall> algebra_call(std::string_view name) {
+  if (name == "algebra_solver") return AlgebraCall{AlgebraMethod::Powell, true};
+  if (name == "algebra_solver_newton")
+    return AlgebraCall{AlgebraMethod::Newton, true};
+  if (name == "solve_newton") return AlgebraCall{AlgebraMethod::Newton};
+  if (name == "solve_powell") return AlgebraCall{AlgebraMethod::Powell};
+  if (name == "solve_newton_tol")
+    return AlgebraCall{AlgebraMethod::Newton, false, true, 5};
+  if (name == "solve_powell_tol")
+    return AlgebraCall{AlgebraMethod::Powell, false, true, 5};
+  return {};
+}
+
+inline std::optional<OdeCall> ode_call(std::string_view name) {
+  if (name == "integrate_ode_rk45")
+    return OdeCall{OdeMethod::Rk45, true, false, 4};
+  if (name == "integrate_ode_bdf")
+    return OdeCall{OdeMethod::Bdf, true, false, 4};
+  if (name == "integrate_ode_adams")
+    return OdeCall{OdeMethod::Adams, true, false, 4};
+  if (name == "ode_rk45") return OdeCall{OdeMethod::Rk45};
+  if (name == "ode_bdf") return OdeCall{OdeMethod::Bdf};
+  if (name == "ode_adams") return OdeCall{OdeMethod::Adams};
+  if (name == "ode_ckrk") return OdeCall{OdeMethod::Ckrk};
+  if (name == "ode_rk45_tol") return OdeCall{OdeMethod::Rk45, false, true, 7};
+  if (name == "ode_bdf_tol") return OdeCall{OdeMethod::Bdf, false, true, 7};
+  if (name == "ode_adams_tol") return OdeCall{OdeMethod::Adams, false, true, 7};
+  if (name == "ode_ckrk_tol") return OdeCall{OdeMethod::Ckrk, false, true, 7};
+  if (name == "ode_adjoint_tol_ctl")
+    return OdeCall{OdeMethod::Adjoint, false, true, 0};
+  return {};
+}
+
 inline std::optional<QuadratureCall> quadrature_call(std::string_view name) {
   if (name == "integrate_1d")
     return QuadratureCall{QuadratureMethod::Integrate1D, true, false, 3};
   if (name == "integrate_1d_double_exponential")
-    return QuadratureCall{QuadratureMethod::DoubleExponential, false, false,
-                          3};
+    return QuadratureCall{QuadratureMethod::DoubleExponential, false, false, 3};
   if (name == "integrate_1d_double_exponential_tol")
     return QuadratureCall{QuadratureMethod::DoubleExponential, false, true, 6};
   if (name == "integrate_1d_gauss_kronrod")
@@ -589,14 +640,11 @@ inline std::optional<HigherOrderCall> higher_order_call(const Expr& e) {
   if (name == "reduce_sum" || name == "reduce_sum_static")
     return HigherOrderCall{HigherOrderFamily::ReduceSum};
   if (name == "map_rect") return HigherOrderCall{HigherOrderFamily::MapRect};
-  if (name == "algebra_solver" || name == "algebra_solver_newton" ||
-      name.rfind("solve_newton", 0) == 0 || name.rfind("solve_powell", 0) == 0)
-    return HigherOrderCall{HigherOrderFamily::Algebra};
+  if (algebra_call(name)) return HigherOrderCall{HigherOrderFamily::Algebra};
   if (quadrature_call(name))
     return HigherOrderCall{HigherOrderFamily::Integrate1D};
-  if (name.rfind("ode_", 0) == 0 || name.rfind("integrate_ode_", 0) == 0)
-    return HigherOrderCall{HigherOrderFamily::Ode};
-  if (name == "dae" || name.rfind("integrate_dae", 0) == 0)
+  if (ode_call(name)) return HigherOrderCall{HigherOrderFamily::Ode};
+  if (name == "dae" || name == "dae_tol")
     return HigherOrderCall{HigherOrderFamily::Dae};
   return {};
 }

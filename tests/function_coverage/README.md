@@ -8,9 +8,13 @@ multivariate densities/GLMs, RNGs, and higher-order calls.
 
 This is **function-name coverage, not complete overload or input coverage**.
 `manifest.json` records each case and the supported boundaries. In particular,
-GP coordinates are data, GLMs use supported design/outcome shapes, and
-`map_rect` covers only the implemented empty-job case. The quadrature family
-has focused graph/runtime-control coverage in `quadrature_region.stan`;
+GP coordinates are data, GLMs use supported design/outcome shapes, and the
+integrated `map_rect` probe covers its empty-job case; `map_rect_region.stan`
+covers nonempty serial calls through both graph and runtime-control lowering.
+`ode_region.stan` similarly covers every legacy and modern forward ODE solver
+through runtime control. The
+quadrature family has focused graph/runtime-control coverage in
+`quadrature_region.stan`;
 `gaussian_dlm_obs_lpdf` is explicitly unsupported, not silently skipped.
 Parameter declaration transforms remain in their dedicated tests; a transform
 being supported in a declaration does not imply its named function is callable.

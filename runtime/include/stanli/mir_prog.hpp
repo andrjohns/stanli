@@ -1591,6 +1591,112 @@ struct ProgramCompiler {
     return inline_call(*f, args);
   }
 
+  // map_rect's job count and every input shape are fixed when the model is
+  // lowered, so the serial implementation needs no retained runtime
+  // algorithm: compile one ordinary callback invocation per job and
+  // concatenate their vector results. This is also the exact execution
+  // order of Stan Math's non-threaded map_rect path.
+  Range map_rect_call(const mir::Expr& e) {
+    if (e.args.size() != 5)
+      bail(
+          "map_rect: expected function, shared parameters, job parameters, "
+          "real data, and integer data");
+    if (e.args[0].kind != mir::Expr::Var)
+      bail("map_rect: callback argument is not a function name");
+    if (e.unsized.depth != 0 || e.unsized.leaf != mir::UnsizedLeaf::Vector)
+      bail("map_rect: result is not a vector");
+
+    const Range shared = expr(e.args[1]);
+    const Range jobs = expr(e.args[2]);
+    const Range real_data = expr(e.args[3]);
+    if (shared.kind != ViewKind::Vector)
+      bail("map_rect: shared parameters are not a vector");
+    if (jobs.kind != ViewKind::Array || jobs.leaf != ViewKind::Vector ||
+        jobs.dims.size() != 2)
+      bail("map_rect: job parameters are not an array of vectors");
+    if (real_data.kind != ViewKind::Array || real_data.leaf != ViewKind::Flat ||
+        real_data.dims.size() != 2)
+      bail("map_rect: real data are not a two-dimensional array");
+
+    std::vector<long> ints;
+    if (!try_cints(e.args[4], &ints))
+      bail("map_rect: integer data are not known at compile time");
+    Range int_view;
+    if (!static_view(e.args[4], &int_view) ||
+        int_view.kind != ViewKind::Array || e.args[4].unsized.depth != 2 ||
+        e.args[4].unsized.leaf != mir::UnsizedLeaf::Int ||
+        int_view.dims.empty() || int_view.dims.size() > 2)
+      bail("map_rect: integer data are not a two-dimensional array");
+
+    const int64_t n = jobs.dims[0];
+    if (n != real_data.dims[0] || n != int_view.dims[0])
+      bail("map_rect: job parameters and job data sizes do not match");
+    const int64_t job_width = jobs.dims[1];
+    const int64_t real_width = real_data.dims[1];
+    // DataMap omits a trailing singleton dimension from an integer array's
+    // stored shape. The MIR type retains its rank, and the value count then
+    // recovers that one-element inner row unambiguously.
+    const int64_t int_width = int_view.dims.size() == 2
+                                  ? int_view.dims[1]
+                                  : (n == 0 ? 0 : (int64_t)ints.size() / n);
+    if (n < 0 || job_width < 0 || real_width < 0 || int_width < 0 ||
+        n > kMaxRegs || (n && job_width > kMaxRegs / n) ||
+        (n && real_width > kMaxRegs / n) || (n && int_width > kMaxRegs / n))
+      bail("map_rect: input shape is invalid or too large");
+    if ((int64_t)ints.size() != n * int_width)
+      bail("map_rect: integer data storage and shape disagree");
+
+    const std::vector<mir::UnsizedView> views{{0, mir::UnsizedLeaf::Vector},
+                                              {0, mir::UnsizedLeaf::Vector},
+                                              {1, mir::UnsizedLeaf::Real},
+                                              {1, mir::UnsizedLeaf::Int}};
+    const mir::FunDef* f = mir::resolve_callback(funs, e.args[0].name, views);
+    if (f == nullptr)
+      bail("map_rect: unknown callback function " + e.args[0].name);
+    if (f->arg_names.size() != views.size())
+      bail("map_rect: callback arity does not match the call");
+
+    std::vector<Range> results;
+    int total = 0;
+    results.reserve((size_t)n);
+    for (int64_t job = 0; job < n; ++job) {
+      std::vector<InlineArg> args(4);
+      args[0].real = shared;
+      args[1].real = Range{jobs.reg + (int)(job * job_width), (int)job_width};
+      args[1].real.kind = ViewKind::Vector;
+      args[2].real =
+          Range{real_data.reg + (int)(job * real_width), (int)real_width};
+      args[2].real.kind = ViewKind::Array;
+      args[2].real.dims = {real_width};
+      args[2].real.leaf = ViewKind::Flat;
+      args[3].is_const_int = true;
+      args[3].int_dims = {int_width};
+      args[3].ints.reserve((size_t)int_width);
+      // DataMap's flat integer storage has the first array dimension varying
+      // fastest. A map_rect job fixes that dimension and ranges over the
+      // second, so its row is strided rather than contiguous.
+      for (int64_t k = 0; k < int_width; ++k)
+        args[3].ints.push_back(ints[(size_t)(job + k * n)]);
+
+      Range result = inline_call(*f, args);
+      if (result.kind != ViewKind::Vector)
+        bail("map_rect: callback result is not a vector");
+      if (result.len > kMaxRegs - total)
+        bail("map_rect: result needs too many registers");
+      total += result.len;
+      results.push_back(result);
+    }
+
+    const int out_reg = alloc(total);
+    int at = 0;
+    for (const Range& result : results)
+      for (int k = 0; k < result.len; ++k)
+        emit(Program::MOV, out_reg + at++, result.reg + k);
+    Range out{out_reg, total};
+    out.kind = ViewKind::Vector;
+    return out;
+  }
+
   // One adapter from register ranges to the graph kernel ABI. Regular
   // builtins, RNGs, and retained higher-order algorithms all use the same
   // binding, scratch sizing, ownership, and reverse-mode contract.
@@ -1981,6 +2087,8 @@ struct ProgramCompiler {
       switch (higher_order->family) {
         case mir::HigherOrderFamily::ReduceSum:
           return reduce_sum_call(e);
+        case mir::HigherOrderFamily::MapRect:
+          return map_rect_call(e);
         default:
           Range result;
           if (lower_higher_order && lower_higher_order(e, &result))

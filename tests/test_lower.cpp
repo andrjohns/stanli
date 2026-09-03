@@ -5363,6 +5363,32 @@ int main() {
     expect_eq("reduce_sum taken gradient", gradient[0], 10.0);
   }
 
+  // Serial map_rect has statically-shaped jobs, so a runtime-control program
+  // expands them into ordinary callback invocations and concatenates their
+  // vector results. Shared and per-job parameters retain their adjoints;
+  // each real/integer data row is bound to the matching callback call.
+  {
+    CompiledModel mm = compile_model(
+        slurp("tests/fixtures/map_rect_region.tmir.sexp"), DataMap());
+    check(mm.n_unconstrained == 2, "map_rect region parameter width");
+    check(count_opcode(mm, OP_ISLAND) > 0, "map_rect runtime island");
+    Executor mex(std::move(mm.graph));
+    mm.bind(mex);
+    double gradient[2] = {};
+
+    mex.params_data()[0] = -1.0;
+    mex.params_data()[1] = 2.0;
+    expect_eq("map_rect untaken lp", mex.gradient(gradient), 265.5);
+    expect_eq("map_rect untaken gate gradient", gradient[0], 1.0);
+    expect_eq("map_rect untaken x gradient", gradient[1], 102.0);
+
+    mex.params_data()[0] = 1.0;
+    mex.params_data()[1] = 2.0;
+    expect_eq("map_rect taken lp", mex.gradient(gradient), 533.5);
+    expect_eq("map_rect taken gate gradient", gradient[0], -1.0);
+    expect_eq("map_rect taken x gradient", gradient[1], 206.0);
+  }
+
   // Retained higher-order algorithms use the same graph-kernel CALL adapter
   // as regular functions. Its owned callback specification remains attached
   // to the runtime region and its input activity mask preserves the solver's
@@ -5388,6 +5414,29 @@ int main() {
     expect_eq("algebra taken theta gradient", gradient[1], 2.0);
   }
 
+  // Modern algebra solvers, including explicit-control variants, use their
+  // runtime-control implementation both as a direct graph producer and under
+  // a parameter-dependent branch.
+  {
+    CompiledModel am = compile_model(
+        slurp("tests/fixtures/algebra_shared.tmir.sexp"), DataMap());
+    check(am.n_unconstrained == 2, "shared algebra parameter width");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    double gradient[2] = {};
+
+    aex.params_data()[0] = -1.0;
+    aex.params_data()[1] = 2.0;
+    expect_eq("shared algebra untaken lp", aex.gradient(gradient), 5.5);
+    expect_eq("shared algebra untaken gate gradient", gradient[0], 1.0);
+    expect_eq("shared algebra untaken wanted gradient", gradient[1], 2.0);
+
+    aex.params_data()[0] = 1.0;
+    expect_eq("shared algebra taken lp", aex.gradient(gradient), 13.5);
+    expect_eq("shared algebra taken gate gradient", gradient[0], -1.0);
+    expect_eq("shared algebra taken wanted gradient", gradient[1], 6.0);
+  }
+
   // Every one-dimensional integration frontend shares one retained callback
   // ABI and one quadrature kernel. The legacy call exercises ordinary graph
   // lowering; the four modern method/tolerance forms exercise Program CALL
@@ -5409,8 +5458,7 @@ int main() {
     double quadrature_lp = qex.gradient(gradient);
     check(std::fabs(quadrature_lp - 6.0) < 1e-10,
           "quadrature untaken lp " + std::to_string(quadrature_lp));
-    check(std::fabs(gradient[0]) < 1e-12,
-          "quadrature untaken gate gradient");
+    check(std::fabs(gradient[0]) < 1e-12, "quadrature untaken gate gradient");
     check(std::fabs(gradient[1] - 6.0) < 1e-10,
           "quadrature untaken bound gradient");
     check(std::fabs(gradient[2] - 2.0) < 1e-10,
@@ -5422,12 +5470,38 @@ int main() {
     quadrature_lp = qex.gradient(gradient);
     check(std::fabs(quadrature_lp - 30.0) < 1e-9,
           "quadrature taken lp " + std::to_string(quadrature_lp));
-    check(std::fabs(gradient[0]) < 1e-12,
-          "quadrature taken gate gradient");
+    check(std::fabs(gradient[0]) < 1e-12, "quadrature taken gate gradient");
     check(std::fabs(gradient[1] - 30.0) < 1e-8,
           "quadrature taken bound gradient");
     check(std::fabs(gradient[2] - 10.0) < 1e-8,
           "quadrature taken callback gradient");
+  }
+
+  // Every ODE frontend uses the existing OP_ODE kernel from runtime control.
+  // A zero RHS makes all solver answers exact and exposes whether initial
+  // state and callback-parameter activity are wired correctly.
+  {
+    CompiledModel om =
+        compile_model(slurp("tests/fixtures/ode_region.tmir.sexp"), DataMap());
+    check(om.n_unconstrained == 3, "ODE region parameter width");
+    check(count_opcode(om, OP_ISLAND) > 0, "ODE runtime island");
+    Executor oex(std::move(om.graph));
+    om.bind(oex);
+    double gradient[3] = {};
+
+    oex.params_data()[0] = -1.0;
+    oex.params_data()[1] = 2.0;
+    oex.params_data()[2] = 3.0;
+    expect_eq("ODE untaken lp", oex.gradient(gradient), -7.0);
+    expect_eq("ODE untaken gate gradient", gradient[0], 1.0);
+    expect_eq("ODE untaken initial gradient", gradient[1], -2.0);
+    expect_eq("ODE untaken rate gradient", gradient[2], -3.0);
+
+    oex.params_data()[0] = 1.0;
+    expect_eq("ODE taken lp", oex.gradient(gradient), 15.0);
+    expect_eq("ODE taken gate gradient", gradient[0], -1.0);
+    expect_eq("ODE taken initial gradient", gradient[1], 9.0);
+    expect_eq("ODE taken rate gradient", gradient[2], -3.0);
   }
 
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations

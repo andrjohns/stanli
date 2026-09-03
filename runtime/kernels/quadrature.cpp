@@ -114,14 +114,30 @@ void quadrature_fwd(KernelCtx& ctx) {
     throw std::runtime_error("quadrature: malformed kernel arguments");
   const auto& spec = *static_cast<const QuadratureSpec*>(ctx.udata);
   switch (ctx.variant & 0x7u) {
-    case 0: quadrature_eval<false, false, false>(ctx, spec); break;
-    case 1: quadrature_eval<true, false, false>(ctx, spec); break;
-    case 2: quadrature_eval<false, true, false>(ctx, spec); break;
-    case 3: quadrature_eval<true, true, false>(ctx, spec); break;
-    case 4: quadrature_eval<false, false, true>(ctx, spec); break;
-    case 5: quadrature_eval<true, false, true>(ctx, spec); break;
-    case 6: quadrature_eval<false, true, true>(ctx, spec); break;
-    case 7: quadrature_eval<true, true, true>(ctx, spec); break;
+    case 0:
+      quadrature_eval<false, false, false>(ctx, spec);
+      break;
+    case 1:
+      quadrature_eval<true, false, false>(ctx, spec);
+      break;
+    case 2:
+      quadrature_eval<false, true, false>(ctx, spec);
+      break;
+    case 3:
+      quadrature_eval<true, true, false>(ctx, spec);
+      break;
+    case 4:
+      quadrature_eval<false, false, true>(ctx, spec);
+      break;
+    case 5:
+      quadrature_eval<true, false, true>(ctx, spec);
+      break;
+    case 6:
+      quadrature_eval<false, true, true>(ctx, spec);
+      break;
+    case 7:
+      quadrature_eval<true, true, true>(ctx, spec);
+      break;
   }
 }
 

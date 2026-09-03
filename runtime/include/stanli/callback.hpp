@@ -51,10 +51,12 @@ struct RetainedCallback {
 // RhsArg/x_r ordering and validation.
 template <typename Active, typename GetActive, typename GetReals,
           typename GetInts, typename Fail>
-std::vector<Active> pack_callback_arguments(
-    RetainedCallback& retained, const std::vector<mir::Expr>& exprs,
-    size_t begin, size_t end, GetActive&& get_active, GetReals&& get_reals,
-    GetInts&& get_ints, Fail&& fail) {
+std::vector<Active> pack_callback_arguments(RetainedCallback& retained,
+                                            const std::vector<mir::Expr>& exprs,
+                                            size_t begin, size_t end,
+                                            GetActive&& get_active,
+                                            GetReals&& get_reals,
+                                            GetInts&& get_ints, Fail&& fail) {
   std::vector<Active> active;
   for (size_t i = begin; i < end; ++i) {
     const mir::Expr& arg = exprs[i];
@@ -69,7 +71,8 @@ std::vector<Active> pack_callback_arguments(
       binding.ints = get_ints(i);
     } else if (arg.data_only) {
       std::vector<double> values = get_reals(i);
-      if (values.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+      if (values.size() >
+          static_cast<size_t>(std::numeric_limits<int>::max())) {
         fail("callback argument " + std::to_string(i - begin + 1) +
              " is too large");
         continue;
