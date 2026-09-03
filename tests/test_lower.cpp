@@ -5,7 +5,9 @@
 #include "categorical_check_mir.hpp"
 #include "stdout_capture.hpp"
 #include <stanli/compile.hpp>
+#include <stanli/dae.hpp>
 #include <stanli/graph.hpp>
+#include <stanli/island.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/packet.hpp>
 #include <stanli/wa_interp.hpp>
@@ -5502,6 +5504,58 @@ int main() {
     expect_eq("ODE taken gate gradient", gradient[0], -1.0);
     expect_eq("ODE taken initial gradient", gradient[1], 9.0);
     expect_eq("ODE taken rate gradient", gradient[2], -3.0);
+  }
+
+  // DAE and DAE_tol share the retained callback ABI and OP_DAE kernel. The
+  // unconditional call enters through ordinary expression lowering; the
+  // tolerance call is compiled inside a parameter-dependent Program region.
+  {
+    CompiledModel dm =
+        compile_model(slurp("tests/fixtures/dae_region.tmir.sexp"), DataMap());
+    check(dm.n_unconstrained == 3, "DAE region parameter width");
+    check(count_opcode(dm, OP_ISLAND) > 0, "DAE shared runtime island");
+    int dae_calls = 0;
+    for (const Op& op : dm.graph.ops) {
+      if (op.opcode != OP_ISLAND) continue;
+      const auto* program = static_cast<const IslandProg*>(op.udata);
+      for (const Program::Call& call : program->calls) {
+        if (call.opcode != OP_DAE) continue;
+        ++dae_calls;
+        const auto* spec = static_cast<const DaeSpec*>(call.udata_owner.get());
+        check(spec != nullptr && spec->prog.ok,
+              "DAE retained callback register program");
+      }
+    }
+    check(dae_calls == 2, "DAE and DAE_tol use shared kernel calls");
+    Executor dex(std::move(dm.graph));
+    dm.bind(dex);
+    double gradient[3] = {};
+
+    dex.params_data()[0] = -1.0;
+    dex.params_data()[1] = 2.0;
+    dex.params_data()[2] = 3.0;
+    const double dae_value_only = dex.forward_value_only();
+    check(std::fabs(dae_value_only + 4.4) < 1e-8,
+          "DAE value-only lp " + std::to_string(dae_value_only));
+    double dae_lp = dex.gradient(gradient);
+    check(std::fabs(dae_lp + 4.4) < 1e-8,
+          "DAE untaken lp " + std::to_string(dae_lp));
+    check(std::fabs(gradient[0] - 1.0) < 1e-8,
+          "DAE untaken gate gradient");
+    check(std::fabs(gradient[1] + 1.0) < 1e-7,
+          "DAE untaken initial gradient");
+    check(std::fabs(gradient[2] + 2.8) < 1e-7,
+          "DAE untaken rate gradient");
+
+    dex.params_data()[0] = 1.0;
+    dae_lp = dex.gradient(gradient);
+    check(std::fabs(dae_lp + 1.8) < 1e-8,
+          "DAE taken lp " + std::to_string(dae_lp));
+    check(std::fabs(gradient[0] + 1.0) < 1e-8,
+          "DAE taken gate gradient");
+    check(std::fabs(gradient[1]) < 1e-7, "DAE taken initial gradient");
+    check(std::fabs(gradient[2] + 2.6) < 1e-7,
+          "DAE taken rate gradient");
   }
 
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations

@@ -4,6 +4,7 @@
 #include <stanli/unconstrain.hpp>
 #include <stanli/constfold.hpp>
 #include <stanli/cse.hpp>
+#include <stanli/dae.hpp>
 #include <stanli/expression_layout.hpp>
 #include <stanli/inplace.hpp>
 #include <stanli/mir_message.hpp>
@@ -638,6 +639,7 @@ struct Lowering {
     Algebra,
     Quadrature,
     Ode,
+    Dae,
     ShapeQuery,
   };
 
@@ -676,7 +678,7 @@ struct Lowering {
         case mir::HigherOrderFamily::Integrate1D:
           return {BuiltinFamily::Quadrature};
         case mir::HigherOrderFamily::Dae:
-          break;
+          return {BuiltinFamily::Dae};
       }
     }
     // Bespoke functions still own their semantic checks. This registry only
@@ -3203,6 +3205,119 @@ struct Lowering {
     return true;
   }
 
+  bool lower_program_dae(ProgramCompiler& c, const mir::Expr& e,
+                         Range* out_range) {
+    const auto call = mir::dae_call(e.name);
+    if (!call) return false;
+    if (e.args.size() < call->callback_args_begin ||
+        e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": expected a residual, initial conditions, and times");
+
+    const auto constant = [&](size_t i, const std::string& role) {
+      auto value = try_eval_pure(e.args[i]);
+      if (!value) c.bail(role + " must be data-only and known at compile time");
+      return *value;
+    };
+    const auto scalar_real = [&](size_t i, const std::string& role) {
+      DataMap::Entry value = constant(i, role);
+      if (value.is_int) {
+        if (value.i.size() != 1) c.bail(role + " must be one real");
+        return static_cast<double>(value.i[0]);
+      }
+      if (value.r.size() != 1) c.bail(role + " must be one real");
+      return value.r[0];
+    };
+    const auto scalar_int = [&](size_t i, const std::string& role) {
+      DataMap::Entry value = constant(i, role);
+      if (!value.is_int || value.i.size() != 1)
+        c.bail(role + " must be one integer");
+      return value.i[0];
+    };
+
+    auto spec = std::make_shared<DaeSpec>();
+    spec->adopt(fun_defs);
+    spec->residual_name = e.args[0].name;
+    spec->callback_name = spec->residual_name;
+    if (!spec->residual())
+      c.bail(e.name + ": unknown residual " + spec->residual_name);
+    spec->t0 = scalar_real(3, "DAE initial time");
+    DataMap::Entry times = constant(4, "DAE output times");
+    if (times.is_int) c.bail("DAE output times must be real");
+    spec->ts = std::move(times.r);
+    if (call->with_tolerance) {
+      spec->rtol = scalar_real(5, "DAE relative tolerance");
+      spec->atol = scalar_real(6, "DAE absolute tolerance");
+      spec->max_steps = scalar_int(7, "DAE maximum steps");
+    }
+
+    const Range y0 = c.expr(e.args[1]);
+    const Range yp0 = c.expr(e.args[2]);
+    if (y0.kind != ViewKind::Vector || yp0.kind != ViewKind::Vector)
+      c.bail(e.name + ": initial state and derivative must be vectors");
+    if (y0.len != yp0.len)
+      c.bail(e.name + ": initial state and derivative sizes differ");
+    const int S = y0.len;
+    const int64_t N = (int64_t)spec->ts.size();
+    if (S < 0 || N < 0 || (N && S > ProgramCompiler::kMaxRegs / N))
+      c.bail(e.name + ": result is too large");
+
+    std::vector<Range> active = pack_callback_arguments<Range>(
+        *spec, e.args, call->callback_args_begin, e.args.size(),
+        [&](size_t i) {
+          Range value = c.expr(e.args[i]);
+          return std::make_pair(value, value.len);
+        },
+        [&](size_t i) {
+          DataMap::Entry value = constant(i, "DAE data argument");
+          if (value.is_int)
+            c.bail("DAE real data argument is integer-valued");
+          const bool matrix = e.args[i].type_ == "UMatrix";
+          const bool nested_matrix =
+              e.args[i].unsized.depth != 0 &&
+              e.args[i].unsized.leaf == mir::UnsizedLeaf::Matrix;
+          return graph_order(value, matrix, nested_matrix);
+        },
+        [&](size_t i) {
+          DataMap::Entry value = constant(i, "DAE integer argument");
+          if (!value.is_int)
+            c.bail("DAE integer argument is real-valued");
+          return value.i;
+        },
+        [&](const std::string& message) { c.bail(e.name + ": " + message); });
+
+    int parameter_count = 0;
+    for (const Range& value : active) {
+      if (value.len > ProgramCompiler::kMaxRegs - parameter_count)
+        c.bail(e.name + ": active callback arguments are too large");
+      parameter_count += value.len;
+    }
+    Range theta{c.konst(0.0), 1};
+    theta.kind = ViewKind::Vector;
+    if (parameter_count != 0) {
+      theta = Range{c.alloc(parameter_count), parameter_count};
+      theta.kind = ViewKind::Vector;
+      int at = 0;
+      for (const Range& value : active)
+        for (int k = 0; k < value.len; ++k)
+          c.emit(Program::MOV, theta.reg + at++, value.reg + k);
+    }
+    spec->prog =
+        compile_dae_args(*spec->residual(), *spec->funs(), S, spec->args);
+
+    Range result{0, (int)(N * S)};
+    result.kind = ViewKind::Array;
+    result.dims = {N, S};
+    result.leaf = ViewKind::Vector;
+    const uint8_t activity = static_cast<uint8_t>(
+        (!e.args[1].data_only ? 0x1u : 0u) |
+        (!e.args[2].data_only ? 0x2u : 0u) |
+        (parameter_count != 0 ? 0x4u : 0u));
+    *out_range = c.kernel_call(OP_DAE, {y0, yp0, theta}, result,
+                               static_cast<uint8_t>(0x8u | activity), activity,
+                               {(int)N, S}, spec, e.name);
+    return true;
+  }
+
   bool lower_program_higher_order(ProgramCompiler& c, const mir::Expr& e,
                                   Range* out_range) {
     const auto higher_order = mir::higher_order_call(e);
@@ -3211,6 +3326,8 @@ struct Lowering {
       return lower_program_quadrature(c, e, out_range);
     if (higher_order->family == mir::HigherOrderFamily::Ode)
       return lower_program_ode(c, e, out_range);
+    if (higher_order->family == mir::HigherOrderFamily::Dae)
+      return lower_program_dae(c, e, out_range);
     if (higher_order->family != mir::HigherOrderFamily::Algebra) return false;
     if (lower_program_variadic_algebra(c, e, out_range)) return true;
     if ((e.name != "algebra_solver" && e.name != "algebra_solver_newton"))
@@ -5430,6 +5547,8 @@ struct Lowering {
       case BuiltinFamily::Ode:
         if (auto v = lower_ode_fn(e, actuals)) return *v;
         break;
+      case BuiltinFamily::Dae:
+        return lower_program_expression(e);
       case BuiltinFamily::AppendArray:
         if (e.args.size() == 2) return lower_append_array(e, actuals);
         break;

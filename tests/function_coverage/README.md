@@ -12,7 +12,8 @@ GP coordinates are data, GLMs use supported design/outcome shapes, and the
 integrated `map_rect` probe covers its empty-job case; `map_rect_region.stan`
 covers nonempty serial calls through both graph and runtime-control lowering.
 `ode_region.stan` similarly covers every legacy and modern forward ODE solver
-through runtime control. The
+through runtime control. `dae_region.stan` covers `dae` and `dae_tol` through
+the same retained-callback and graph/Program kernel-call infrastructure. The
 quadrature family has focused graph/runtime-control coverage in
 `quadrature_region.stan`;
 `gaussian_dlm_obs_lpdf` is explicitly unsupported, not silently skipped.

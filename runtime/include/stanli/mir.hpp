@@ -578,6 +578,18 @@ struct OdeCall {
   size_t callback_args_begin = 4;
 };
 
+struct DaeCall {
+  bool with_tolerance = false;
+  // First callback argument after (f, y0, yp0, t0, ts) and optional controls.
+  size_t callback_args_begin = 5;
+};
+
+inline std::optional<DaeCall> dae_call(std::string_view name) {
+  if (name == "dae") return DaeCall{};
+  if (name == "dae_tol") return DaeCall{true, 8};
+  return {};
+}
+
 enum class AlgebraMethod : uint8_t { Powell, Newton };
 
 struct AlgebraCall {
@@ -644,8 +656,7 @@ inline std::optional<HigherOrderCall> higher_order_call(const Expr& e) {
   if (quadrature_call(name))
     return HigherOrderCall{HigherOrderFamily::Integrate1D};
   if (ode_call(name)) return HigherOrderCall{HigherOrderFamily::Ode};
-  if (name == "dae" || name == "dae_tol")
-    return HigherOrderCall{HigherOrderFamily::Dae};
+  if (dae_call(name)) return HigherOrderCall{HigherOrderFamily::Dae};
   return {};
 }
 
