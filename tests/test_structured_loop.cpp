@@ -7,10 +7,11 @@
 #include <stan/math.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
-#include <cstring>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -70,20 +71,25 @@ static Node alias(int destination, int source) {
   return node;
 }
 
+static Node target(int source) {
+  Node node;
+  node.kind = Node::Target;
+  node.src = source;
+  return node;
+}
+
 static int scalar(StructuredLoop& plan, double value) {
   const int slot = plan.body.add_slot(1, false);
   plan.fills.push_back({slot, {value}});
   return slot;
 }
 
-static Node counted(int lower, int upper, int iterator, int64_t capacity,
-                    Node body) {
+static Node counted(int lower, int upper, int iterator, Node body) {
   Node node;
   node.kind = Node::For;
   node.lower = lower;
   node.upper = upper;
   node.iterator = iterator;
-  node.capacity = capacity;
   node.children.push_back(std::move(body));
   return node;
 }
@@ -96,63 +102,376 @@ static Node branch(int condition, Node yes, Node no) {
   return node;
 }
 
-static Node while_loop(int condition, int64_t capacity, Node condition_body,
-                       Node body) {
+static Node while_loop(int condition, Node condition_body, Node body) {
   Node node;
   node.kind = Node::While;
   node.condition = condition;
-  node.capacity = capacity;
   node.children = {std::move(condition_body), std::move(body)};
   return node;
 }
 
-static bool set_forward(Node& node, int op, void (*forward)(KernelCtx&)) {
-  if (node.kind == Node::KernelCall && node.op == op) {
-    node.forward = forward;
-    return true;
-  }
+static Node* find_call(Node& node, int op) {
+  if (node.kind == Node::KernelCall && node.op == op) return &node;
   for (auto& child : node.children)
-    if (set_forward(child, op, forward)) return true;
-  return false;
+    if (Node* found = find_call(child, op)) return found;
+  return nullptr;
+}
+
+static bool set_forward(Node& node, int op, void (*forward)(KernelCtx&)) {
+  Node* found = find_call(node, op);
+  if (found) found->forward = forward;
+  return found != nullptr;
 }
 
 static bool set_backward(Node& node, int op, void (*backward)(KernelCtx&)) {
-  if (node.kind == Node::KernelCall && node.op == op) {
-    node.backward = backward;
-    return true;
-  }
-  for (auto& child : node.children)
-    if (set_backward(child, op, backward)) return true;
-  return false;
+  Node* found = find_call(node, op);
+  if (found) found->backward = backward;
+  return found != nullptr;
 }
+
+static void attach(StructuredLoop& plan, int op,
+                   std::shared_ptr<DynamicIndexSpec> spec) {
+  plan.body.ops[static_cast<size_t>(op)].udata = spec.get();
+  plan.body.udata_pool.push_back(std::move(spec));
+}
+
+static std::shared_ptr<DynamicIndexSpec> single_spec(int64_t extent) {
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Single, extent, 1, 1, 0}};
+  spec->selected_size = 1;
+  return spec;
+}
+
+static Graph outer(std::shared_ptr<StructuredLoop> plan,
+                   std::vector<int64_t> param_lens = {1, 1}) {
+  Graph graph;
+  std::vector<int> inputs;
+  for (int64_t len : param_lens) inputs.push_back(graph.add_slot(len, true));
+  int64_t output_len = plan->has_target ? 1 : 0;
+  for (int slot : plan->outputs) output_len += plan->body.slots[slot].len;
+  const int output = graph.add_slot(output_len, false);
+  Op op;
+  op.opcode = OP_LOOP;
+  op.out = output;
+  for (int input : inputs) op.in[op.n_in++] = input;
+  op.udata = plan.get();
+  graph.ops.push_back(op);
+  graph.udata_pool.push_back(std::move(plan));
+  graph.result_slot = output;
+  return graph;
+}
+
+struct Evaluation {
+  double value = 0;
+  double gradient[2] = {0, 0};
+};
+
+static Evaluation evaluate(Executor& executor, double theta, double beta) {
+  executor.params_data()[0] = theta;
+  executor.params_data()[1] = beta;
+  Evaluation result;
+  result.value = executor.gradient(result.gradient);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Programmatic plans: storage classes.
+
+static std::atomic<int> counted_forward_calls{0};
+static std::atomic<int> counted_backward_calls{0};
+static void count_mul_forward(KernelCtx& context) {
+  ++counted_forward_calls;
+  find_kernel(OP_MUL)->forward(context);
+}
+static void count_mul_backward(KernelCtx& context) {
+  ++counted_backward_calls;
+  find_kernel(OP_MUL)->backward(context);
+}
+
+static void transient_classification_tests() {
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int theta = plan->body.add_slot(1, false);
+    const int lower = scalar(*plan, 1);
+    const int upper = scalar(*plan, 3);
+    const int iterator = plan->body.add_slot(1, false);
+    const int zero = scalar(*plan, 0);
+    const int two = scalar(*plan, 2);
+    const int condition = plan->body.add_slot(1, false);
+    const int result = plan->body.add_slot(1, false);
+    const int updated = plan->body.add_slot(1, false);
+    plan->imports = {{theta, 0, 0, true}};
+    Node compare = call(*plan, OP_COMPARE, {iterator, two}, condition);
+    const int compare_op = compare.op;
+    Node update = call(*plan, OP_ADD, {result, theta}, updated);
+    const int update_op = update.op;
+    plan->root = sequence(
+        {alias(result, zero),
+         counted(lower, upper, iterator,
+                 sequence({std::move(compare),
+                           branch(condition,
+                                  sequence({std::move(update),
+                                            alias(result, updated)}),
+                                  sequence({}))}))});
+    plan->outputs = {result};
+    plan->prepare();
+    const Node* compare_node = find_call(plan->root, compare_op);
+    const Node* update_node = find_call(plan->root, update_op);
+    check(compare_node && compare_node->storage == Node::Transient &&
+              !compare_node->active,
+          "compare feeding a branch is transient");
+    check(update_node && update_node->storage == Node::Retained &&
+              update_node->active,
+          "active add feeding an alias is retained");
+    Executor executor(outer(plan));
+    const Evaluation result_value = evaluate(executor, .25, 0);
+    close(result_value.value, .25, "transient compare branch value");
+    close(result_value.gradient[0], 1, "transient compare branch gradient");
+  }
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int lower = scalar(*plan, 1);
+    const int upper = scalar(*plan, 3);
+    const int iterator = plan->body.add_slot(1, false);
+    const int two = scalar(*plan, 2);
+    const int condition = plan->body.add_slot(1, false);
+    const int flag = plan->body.add_slot(1, false);
+    Node compare = call(*plan, OP_COMPARE, {iterator, two}, condition);
+    const int compare_op = compare.op;
+    plan->root = counted(lower, upper, iterator,
+                         sequence({std::move(compare), alias(flag, condition)}));
+    plan->outputs = {flag};
+    plan->prepare();
+    const Node* compare_node = find_call(plan->root, compare_op);
+    check(compare_node && compare_node->storage == Node::Retained,
+          "compare feeding an alias is retained");
+    Executor executor(outer(plan));
+    close(evaluate(executor, 0, 0).value, 0, "aliased compare final value");
+  }
+}
+
+static void invariant_active_reuse_tests() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int two = scalar(*plan, 2);
+  const int scaled = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true}};
+  Node scale = call(*plan, OP_MUL, {theta, two}, scaled);
+  const int scale_op = scale.op;
+  plan->root =
+      sequence({alias(result, zero),
+                counted(lower, upper, iterator,
+                        sequence({std::move(scale),
+                                  call(*plan, OP_ADD, {result, scaled}, next),
+                                  alias(result, next)}))});
+  plan->outputs = {result};
+  plan->prepare();
+  const Node* scale_node = find_call(plan->root, scale_op);
+  check(scale_node && scale_node->active && scale_node->invariant_loop == 0,
+        "active loop-invariant kernel is cached against its loop");
+  check(set_forward(plan->root, scale_op, count_mul_forward) &&
+            set_backward(plan->root, scale_op, count_mul_backward),
+        "find invariant callbacks");
+  counted_forward_calls = counted_backward_calls = 0;
+  Executor executor(outer(plan));
+  const Evaluation result_value = evaluate(executor, .25, 0);
+  close(result_value.value, 1.5, "active invariant value");
+  close(result_value.gradient[0], 6, "active invariant gradient");
+  check(counted_forward_calls == 1 && counted_backward_calls == 1,
+        "active invariant runs forward and backward once");
+  const Evaluation again = evaluate(executor, .25, 0);
+  check(counted_forward_calls == 2 && counted_backward_calls == 2,
+        "invariant cache resets for a new forward evaluation");
+  check(std::memcmp(&result_value, &again, sizeof(Evaluation)) == 0,
+        "repeated invariant evaluation is bitwise stable");
+}
+
+static void inplace_import_base_tests() {
+  for (int trips : {2, 3}) {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int base = plan->body.add_slot(3, false);
+    const int theta = plan->body.add_slot(1, false);
+    const int lower = scalar(*plan, 1);
+    const int upper = scalar(*plan, trips);
+    const int iterator = plan->body.add_slot(1, false);
+    const int rhs = plan->body.add_slot(1, false);
+    const int updated = plan->body.add_slot(3, false);
+    const int result = plan->body.add_slot(1, false);
+    plan->imports = {{base, 0, 0, true}, {theta, 1, 0, true}};
+    Node update =
+        call(*plan, OP_SET_INDEX_DYNAMIC, {base, iterator, rhs}, updated);
+    const int update_op = update.op;
+    attach(*plan, update_op, single_spec(3));
+    plan->root =
+        sequence({counted(lower, upper, iterator,
+                          sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                                    std::move(update), alias(base, updated)})),
+                  call(*plan, OP_SUM_VEC, {base}, result)});
+    plan->outputs = {result};
+    plan->prepare();
+    const Node* update_node = find_call(plan->root, update_op);
+    check(update_node && update_node->storage == Node::InPlace,
+          "indexed update followed by its alias is in place");
+    Executor executor(outer(plan, {3, 1}));
+    const double point[] = {10, 20, 30, .5};
+    std::copy(std::begin(point), std::end(point), executor.params_data());
+    double gradient[4] = {};
+    const double value = executor.gradient(gradient);
+    close(value, trips == 2 ? 31.5 : 3, "in-place import base value");
+    check(std::equal(std::begin(point), std::end(point),
+                     executor.params_data()),
+          "in-place update leaves the parent value untouched");
+    const double expected[] = {0, 0, trips == 2 ? 1.0 : 0.0,
+                               trips == 2 ? 3.0 : 6.0};
+    for (size_t i = 0; i < std::size(expected); ++i)
+      close(gradient[i], expected[i], "in-place import base gradient");
+  }
+}
+
+static void inplace_promotion_tests() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int two = scalar(*plan, 2);
+  const int inactive_rhs = scalar(*plan, 7);
+  const int base = plan->body.add_slot(3, false);
+  plan->fills.push_back({base, {10, 20, 30}});
+  const int current = plan->body.add_slot(3, false);
+  const int updated1 = plan->body.add_slot(3, false);
+  const int updated2 = plan->body.add_slot(3, false);
+  const int observed1 = plan->body.add_slot(1, false);
+  const int observed2 = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true}};
+  Node update1 =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, inactive_rhs}, updated1);
+  Node update2 =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, two, theta}, updated2);
+  const int update_ops[] = {update1.op, update2.op};
+  attach(*plan, update1.op, single_spec(3));
+  attach(*plan, update2.op, single_spec(3));
+  plan->root = sequence(
+      {alias(current, base), std::move(update1), alias(current, updated1),
+       call(*plan, OP_SUM_VEC, {current}, observed1), std::move(update2),
+       alias(current, updated2), call(*plan, OP_SUM_VEC, {current}, observed2),
+       call(*plan, OP_SUM_VEC, {current}, result)});
+  plan->outputs = {result};
+  plan->prepare();
+  for (int op : update_ops) {
+    const Node* node = find_call(plan->root, op);
+    check(node && node->storage == Node::InPlace,
+          "promotion plan updates are in place");
+  }
+  const Node* first = find_call(plan->root, update_ops[0]);
+  const Node* second = find_call(plan->root, update_ops[1]);
+  check(first && !first->active && second && second->active,
+        "static activity follows the update right-hand side");
+  Executor executor(outer(plan));
+  const Evaluation result_value = evaluate(executor, .25, 0);
+  close(result_value.value, 37.25, "promoted in-place value");
+  close(result_value.gradient[0], 1, "promoted in-place gradient");
+}
+
+static void inplace_duplicate_position_tests() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int beta = plan->body.add_slot(1, false);
+  const int base = plan->body.add_slot(4, false);
+  plan->fills.push_back({base, {1, 2, 3, 4}});
+  const int current = plan->body.add_slot(4, false);
+  const int selectors = plan->body.add_slot(2, false);
+  plan->fills.push_back({selectors, {2, 2}});
+  const int rhs = plan->body.add_slot(2, false);
+  const int updated = plan->body.add_slot(4, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true}, {beta, 1, 0, true}};
+  auto spec = std::make_shared<DynamicIndexSpec>();
+  spec->axes = {{DynamicIndexSpec::Axis::Multi, 4, 1, 2, 0}};
+  spec->selected_size = 2;
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, selectors, rhs}, updated);
+  const int update_op = update.op;
+  attach(*plan, update_op, spec);
+  plan->root = sequence({alias(current, base),
+                         call(*plan, OP_CONCAT2, {theta, beta}, rhs),
+                         std::move(update), alias(current, updated),
+                         call(*plan, OP_SUM_VEC, {current}, result)});
+  plan->outputs = {result};
+  plan->prepare();
+  const Node* node = find_call(plan->root, update_op);
+  check(node && node->storage == Node::InPlace,
+        "duplicate-position update is in place");
+  Executor executor(outer(plan));
+  const Evaluation result_value = evaluate(executor, .25, .75);
+  close(result_value.value, 8.75, "duplicate positions keep the last write");
+  close(result_value.gradient[0], 0,
+        "earlier duplicate write receives no adjoint");
+  close(result_value.gradient[1], 1, "last duplicate write receives adjoint");
+}
+
+static void inplace_lifo_undo_tests() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int base = plan->body.add_slot(3, false);
+  const int theta = plan->body.add_slot(1, false);
+  const int lower = scalar(*plan, 1);
+  const int upper = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int squares = plan->body.add_slot(3, false);
+  const int sum = plan->body.add_slot(1, false);
+  const int total = plan->body.add_slot(1, false);
+  const int next = plan->body.add_slot(1, false);
+  const int rhs = plan->body.add_slot(1, false);
+  const int updated = plan->body.add_slot(3, false);
+  plan->imports = {{base, 0, 0, true}, {theta, 1, 0, true}};
+  Node update =
+      call(*plan, OP_SET_INDEX_DYNAMIC, {base, iterator, rhs}, updated);
+  attach(*plan, update.op, single_spec(3));
+  plan->root = sequence(
+      {alias(total, zero),
+       counted(lower, upper, iterator,
+               sequence({call(*plan, OP_SQUARE, {base}, squares),
+                         call(*plan, OP_SUM_VEC, {squares}, sum),
+                         call(*plan, OP_ADD, {total, sum}, next),
+                         alias(total, next),
+                         call(*plan, OP_MUL, {theta, iterator}, rhs),
+                         std::move(update), alias(base, updated)}))});
+  plan->outputs = {total};
+  plan->prepare();
+  Executor executor(outer(plan, {3, 1}));
+  const double point[] = {1, 2, 3, .5};
+  std::copy(std::begin(point), std::end(point), executor.params_data());
+  double gradient[4] = {};
+  close(executor.gradient(gradient), 37.5, "reads before in-place writes value");
+  const double expected[] = {2, 8, 18, 6};
+  for (size_t i = 0; i < std::size(expected); ++i)
+    close(gradient[i], expected[i],
+          "LIFO undo restores the values each backward saw");
+}
+
+// ---------------------------------------------------------------------------
+// Ported semantic tests.
 
 static std::shared_ptr<StructuredLoop> recurrence(int trips) {
   auto plan = std::make_shared<StructuredLoop>();
   for (int i = 0; i < 7; ++i) plan->body.add_slot(1, false);
-  plan->imports = {{0, 0, 0}, {1, 1, 0}};
+  plan->imports = {{0, 0, 0, true}, {1, 1, 0, true}};
   const int lower = scalar(*plan, 1);
   const int upper = scalar(*plan, trips);
   plan->root = sequence(
-      {alias(2, 0),
-       counted(lower, upper, 3, trips,
-               sequence({call(*plan, OP_MUL, {2, 1}, 4),
-                         call(*plan, OP_ADD, {4, 0}, 5),
-                         call(*plan, OP_TANHV, {5}, 6), alias(2, 6)}))});
+      {alias(2, 0), counted(lower, upper, 3,
+                            sequence({call(*plan, OP_MUL, {2, 1}, 4),
+                                      call(*plan, OP_ADD, {4, 0}, 5),
+                                      call(*plan, OP_TANHV, {5}, 6), alias(2, 6)}))});
   plan->outputs = {2};
-  plan->prepare(256LL << 20);
+  plan->prepare();
   return plan;
-}
-
-static Graph outer(std::shared_ptr<StructuredLoop> plan) {
-  Graph graph;
-  graph.add_slot(1, true);
-  graph.add_slot(1, true);
-  const int output = graph.add_slot(1, false);
-  const int op = graph.add_op(OP_LOOP, {0, 1}, output);
-  graph.ops[op].udata = plan.get();
-  graph.udata_pool.push_back(std::move(plan));
-  graph.result_slot = output;
-  return graph;
 }
 
 static void runtime_trip_tests() {
@@ -181,7 +500,7 @@ static void runtime_trip_tests() {
   }
 }
 
-static void compact_import_reference_tests() {
+static void import_reference_tests() {
   auto plan = std::make_shared<StructuredLoop>();
   const int left = plan->body.add_slot(1, false);
   const int right = plan->body.add_slot(1, false);
@@ -190,33 +509,21 @@ static void compact_import_reference_tests() {
   const int result = plan->body.add_slot(1, false);
   // Import ordinals deliberately differ from slot order. Two imports also
   // name the same nonzero outer offset, so reverse must accumulate through
-  // distinct compact Ref entries into one graph adjoint cell.
-  plan->imports = {{repeated, 0, 1}, {left, 1, 2}, {right, 0, 1}};
+  // distinct versions into one graph adjoint cell.
+  plan->imports = {{repeated, 0, 1, true}, {left, 1, 2, true},
+                   {right, 0, 1, true}};
   plan->root = sequence({call(*plan, OP_MUL, {left, right}, product),
                          call(*plan, OP_ADD, {product, repeated}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-
-  Graph graph;
-  graph.add_slot(3, true);
-  graph.add_slot(3, true);
-  const int output = graph.add_slot(1, false);
-  const int op = graph.add_op(OP_LOOP, {0, 1}, output);
-  graph.ops[op].udata = plan.get();
-  graph.udata_pool.push_back(std::move(plan));
-  graph.result_slot = output;
-
-  Executor executor(graph);
+  plan->prepare();
+  Executor executor(outer(plan, {3, 3}));
   const double point[] = {1, 2, 3, 4, 5, 6};
   std::copy(std::begin(point), std::end(point), executor.params_data());
   double gradient[6] = {};
-  close(executor.gradient(gradient), 14,
-        "compact import ordinals preserve value");
+  close(executor.gradient(gradient), 14, "import ordinals preserve value");
   const double expected[] = {0, 7, 0, 0, 0, 2};
   for (size_t i = 0; i < std::size(expected); ++i)
-    close(gradient[i], expected[i],
-          "compact import ordinals preserve outer gradient");
+    close(gradient[i], expected[i], "import ordinals preserve outer gradient");
 }
 
 static void direct_index_kernel_tests() {
@@ -636,73 +943,22 @@ static void forced_control_tests() {
   }
   compare_gradients(exits, exits_legacy, {{.1, .7}, {-.2, .3}},
                     "exit target parity", "exit gradient parity");
-}
 
-static void dynamic_history_tests() {
-  // Force even this small retained body onto the reached-frame tape used by
-  // large loops. Multiple points exercise both reuse after reverse and the
-  // target-fragment path without requiring a multi-gigabyte test fixture.
-  test_setenv("STANLI_STRUCTURED_HISTORY_BYTES", "1");
-  const auto dynamic = compile_fixture("structured_nested", 5, Mode::Force);
-  test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
-  const StructuredLoop* plan = retained(dynamic);
-  check(plan != nullptr, "dynamic-history fixture retains OP_LOOP");
-  if (plan) {
-    check(plan->dynamic_history, "tiny history budget selects reached tape");
-    check_native_only(*plan, "dynamic-history body is native-only");
-  }
-  const auto legacy = compile_fixture("structured_nested", 5, Mode::Off);
-  compare_gradients(dynamic, legacy, {{.1, .7}, {-.2, .3}, {0, .5}},
-                    "dynamic-history target parity",
-                    "dynamic-history gradient parity");
-
-  // This fixture feeds the counted iterator directly to an active multiply.
-  // Reverse must therefore recover every historical iterator value from the
-  // retained input handles rather than from one mutable loop cell.
-  test_setenv("STANLI_STRUCTURED_HISTORY_BYTES", "1");
-  const auto counted_dynamic =
-      compile_fixture("structured_counted", 4, Mode::Force);
-  test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
+  // This fixture feeds the counted iterator directly to an active multiply,
+  // so reverse must recover every historical iterator value.
+  const auto counted = compile_fixture("structured_counted", 4, Mode::Force);
   const auto counted_legacy =
       compile_fixture("structured_counted", 4, Mode::Off);
-  check(retained(counted_dynamic) && retained(counted_dynamic)->dynamic_history,
-        "counted iterator test exercises dynamic history");
-  compare_gradients(counted_dynamic, counted_legacy,
-                    {{.1, .7}, {-.2, .3}, {0, .5}},
-                    "dynamic counted-iterator target parity",
-                    "dynamic counted-iterator gradient parity");
-
-  // Exercise iterator-driven nested branches, break, and continue on the
-  // reached-frame tape as well as on the ordinary small fixed-history path.
-  test_setenv("STANLI_STRUCTURED_HISTORY_BYTES", "1");
-  const auto exits_dynamic =
-      compile_fixture("structured_exits", 6, Mode::Force);
-  test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
-  const auto exits_legacy = compile_fixture("structured_exits", 6, Mode::Off);
-  check(retained(exits_dynamic) && retained(exits_dynamic)->dynamic_history,
-        "iterator exit test exercises dynamic history");
-  compare_gradients(exits_dynamic, exits_legacy, {{.1, .7}, {-.2, .3}},
-                    "dynamic iterator-exit target parity",
-                    "dynamic iterator-exit gradient parity");
+  check(retained(counted) != nullptr, "forced counted loop retains OP_LOOP");
+  compare_gradients(counted, counted_legacy, {{.1, .7}, {-.2, .3}, {0, .5}},
+                    "counted-iterator target parity",
+                    "counted-iterator gradient parity");
 }
-
-struct Evaluation {
-  double value = 0;
-  double gradient[2] = {0, 0};
-};
-
-static Evaluation evaluate(Executor& executor, double theta, double beta);
 
 static std::vector<double> iterator_forward_values;
 static std::vector<double> iterator_reverse_values;
-static std::vector<std::array<double, 3>> update_reverse_values;
 static std::vector<std::array<double, 6>> range_update_reverse_values;
-static std::vector<const double*> range_update_forward_addresses;
 static bool iterator_throw_once = false;
-static int ordinary_update_forward_calls = 0;
-static int ordinary_update_backward_calls = 0;
-static int ordinary_index_forward_calls = 0;
-static int ordinary_index_backward_calls = 0;
 static int duplicate_site_backward_calls = 0;
 
 static void trace_iterator_forward(KernelCtx& context) {
@@ -719,40 +975,6 @@ static void trace_iterator_backward(KernelCtx& context) {
   find_kernel(OP_MUL)->backward(context);
 }
 
-static void trace_update_backward(KernelCtx& context) {
-  update_reverse_values.push_back(
-      {context.in[0].data[0], context.in[0].data[1], context.in[0].data[2]});
-  find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
-}
-
-static void retained_update_backward(KernelCtx& context) {
-  find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
-}
-
-static void ordinary_update_forward(KernelCtx& context) {
-  ++ordinary_update_forward_calls;
-  find_kernel(OP_SET_INDEX_DYNAMIC)->forward(context);
-}
-
-static void ordinary_update_backward(KernelCtx& context) {
-  ++ordinary_update_backward_calls;
-  find_kernel(OP_SET_INDEX_DYNAMIC)->backward(context);
-}
-
-static void ordinary_index_forward(KernelCtx& context) {
-  ++ordinary_index_forward_calls;
-  find_kernel(OP_INDEX_DYNAMIC)->forward(context);
-}
-
-static void ordinary_index_backward(KernelCtx& context) {
-  ++ordinary_index_backward_calls;
-  find_kernel(OP_INDEX_DYNAMIC)->backward(context);
-}
-
-static void redirect_first_input(KernelCtx& context) {
-  context.out.data = context.in[0].data;
-}
-
 static void duplicate_site_backward(KernelCtx& context) {
   ++duplicate_site_backward_calls;
   find_kernel(OP_MUL)->backward(context);
@@ -765,11 +987,6 @@ static void trace_range_sum_backward(KernelCtx& context) {
   find_kernel(OP_SUM_VEC)->backward(context);
 }
 
-static void trace_range_sum_forward(KernelCtx& context) {
-  range_update_forward_addresses.push_back(context.in[0].data);
-  find_kernel(OP_SUM_VEC)->forward(context);
-}
-
 static std::shared_ptr<StructuredLoop> iterator_history_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
@@ -780,22 +997,20 @@ static std::shared_ptr<StructuredLoop> iterator_history_plan() {
   const int result = plan->body.add_slot(1, false);
   const int term = plan->body.add_slot(1, false);
   const int next = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
+  plan->imports = {{theta, 0, 0, true}};
   Node multiply = call(*plan, OP_MUL, {theta, iterator}, term);
   const int multiply_op = multiply.op;
   plan->root =
       sequence({alias(result, zero),
-                counted(lower, upper, iterator, 3,
+                counted(lower, upper, iterator,
                         sequence({std::move(multiply),
                                   call(*plan, OP_ADD, {result, term}, next),
                                   alias(result, next)}))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(set_forward(plan->root, multiply_op, trace_iterator_forward),
-        "find iterator trace forward callback");
-  check(set_backward(plan->root, multiply_op, trace_iterator_backward),
-        "find iterator trace backward callback");
+  plan->prepare();
+  check(set_forward(plan->root, multiply_op, trace_iterator_forward) &&
+            set_backward(plan->root, multiply_op, trace_iterator_backward),
+        "find iterator trace callbacks");
   return plan;
 }
 
@@ -807,16 +1022,10 @@ static std::shared_ptr<StructuredLoop> iterator_escape_plan(
   const int iterator = plan->body.add_slot(1, false);
   const int initial = scalar(*plan, 7);
   const int result = plan->body.add_slot(1, false);
-  const int64_t capacity =
-      upper_value >= lower_value
-          ? static_cast<int64_t>(upper_value) - lower_value + 1
-          : 0;
-  plan->root = sequence(
-      {alias(result, initial),
-       counted(lower, upper, iterator, capacity, alias(result, iterator))});
+  plan->root = sequence({alias(result, initial),
+                         counted(lower, upper, iterator, alias(result, iterator))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
@@ -825,13 +1034,9 @@ static std::shared_ptr<StructuredLoop> iterator_target_plan() {
   const int lower = scalar(*plan, 1);
   const int upper = scalar(*plan, 3);
   const int iterator = plan->body.add_slot(1, false);
-  Node target;
-  target.kind = Node::Target;
-  target.src = iterator;
-  plan->root = counted(lower, upper, iterator, 3, std::move(target));
+  plan->root = counted(lower, upper, iterator, target(iterator));
   plan->has_target = true;
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
@@ -846,26 +1051,23 @@ static std::shared_ptr<StructuredLoop> nested_iterator_plan() {
   const int term = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
   const int next = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
+  plan->imports = {{theta, 0, 0, true}};
   plan->root = sequence(
       {alias(result, zero),
-       counted(zero, two, outer_iterator, 3,
-               counted(zero, outer_iterator, inner_iterator, 3,
+       counted(zero, two, outer_iterator,
+               counted(zero, outer_iterator, inner_iterator,
                        sequence({call(*plan, OP_ADD,
                                       {outer_iterator, inner_iterator}, sum),
                                  call(*plan, OP_MUL, {theta, sum}, term),
                                  call(*plan, OP_ADD, {result, term}, next),
                                  alias(result, next)})))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
 static std::shared_ptr<StructuredLoop> iterator_update_plan(
-    void (*backward)(KernelCtx&) = trace_update_backward,
-    void (*forward)(KernelCtx&) = nullptr, bool direct = false,
-    bool separate_extent = false) {
+    bool direct = false, bool separate_extent = false) {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int lower = scalar(*plan, 1);
@@ -878,15 +1080,11 @@ static std::shared_ptr<StructuredLoop> iterator_update_plan(
   const int rhs = plan->body.add_slot(1, false);
   const int updated = plan->body.add_slot(3, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
-
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  spec->selected_size = 1;
+  plan->imports = {{theta, 0, 0, true}};
+  auto spec = single_spec(3);
   spec->input_count = direct ? (separate_extent ? 4 : 3) : 0;
   spec->rhs_input = direct ? spec->input_count - 1 : -1;
   if (separate_extent) {
-    check(direct, "separate update extent requires direct inputs");
     spec->axes[0].extent_input = 2;
     spec->axes[0].extent_input_offset = 0;
   }
@@ -895,31 +1093,20 @@ static std::shared_ptr<StructuredLoop> iterator_update_plan(
                            {current, iterator, extent, rhs}, updated)
                     : call(*plan, OP_SET_INDEX_DYNAMIC,
                            {current, iterator, rhs}, updated);
-  const int update_op = update.op;
-  plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
+  attach(*plan, update.op, spec);
   plan->root =
       sequence({alias(current, base),
-                counted(lower, upper, iterator, 3,
+                counted(lower, upper, iterator,
                         sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
                                   std::move(update), alias(current, updated)})),
                 call(*plan, OP_SUM_VEC, {current}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 1,
-        "iterator update plan selects compact history");
-  if (backward)
-    check(set_backward(plan->root, update_op, backward),
-          "find compact-update replacement backward callback");
-  if (forward)
-    check(set_forward(plan->root, update_op, forward),
-          "find compact-update replacement forward callback");
+  plan->prepare();
   return plan;
 }
 
 static std::shared_ptr<StructuredLoop> range_update_plan(
-    bool force_ordinary, bool direct = false, bool separate_extent = false) {
+    bool direct = false, bool separate_extent = false) {
   auto plan = std::make_shared<StructuredLoop>();
   const int base = plan->body.add_slot(6, false);
   const int theta = plan->body.add_slot(1, false);
@@ -941,7 +1128,7 @@ static std::shared_ptr<StructuredLoop> range_update_plan(
   const int zero_updated = plan->body.add_slot(6, false);
   const int observed = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{base, 0, 0}, {theta, 1, 0}, {beta, 2, 0}};
+  plan->imports = {{base, 0, 0, true}, {theta, 1, 0, true}, {beta, 2, 0, true}};
 
   auto spec = std::make_shared<DynamicIndexSpec>();
   spec->axes = {{DynamicIndexSpec::Axis::Range, 6, 1, 2, 0}};
@@ -949,7 +1136,6 @@ static std::shared_ptr<StructuredLoop> range_update_plan(
   spec->input_count = direct ? (separate_extent ? 4 : 3) : 0;
   spec->rhs_input = direct ? spec->input_count - 1 : -1;
   if (separate_extent) {
-    check(direct, "separate range extent requires direct inputs");
     spec->axes[0].extent_input = 2;
     spec->axes[0].extent_input_offset = 0;
   }
@@ -958,25 +1144,19 @@ static std::shared_ptr<StructuredLoop> range_update_plan(
                            {current, selector, extent, rhs}, updated)
                     : call(*plan, OP_SET_INDEX_DYNAMIC,
                            {current, selector, rhs}, updated);
-  const int update_op = update.op;
-  plan->body.ops[static_cast<size_t>(update_op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
+  attach(*plan, update.op, spec);
   auto zero_spec = std::make_shared<DynamicIndexSpec>();
   zero_spec->axes = {{DynamicIndexSpec::Axis::Range, 6, 1, 2, 0}};
   zero_spec->axes[0].count_input_offset = 1;
   zero_spec->selected_size = 2;
-  zero_spec->input_count = direct ? 3 : 0;
-  zero_spec->rhs_input = direct ? 2 : -1;
   Node zero_update = call(*plan, OP_SET_INDEX_DYNAMIC,
                           {current, zero_selector, rhs}, zero_updated);
-  const int zero_update_op = zero_update.op;
-  plan->body.ops[static_cast<size_t>(zero_update_op)].udata = zero_spec.get();
-  plan->body.udata_pool.push_back(zero_spec);
+  attach(*plan, zero_update.op, zero_spec);
   Node observe = call(*plan, OP_SUM_VEC, {current}, observed);
   const int observe_op = observe.op;
   plan->root = sequence(
       {alias(current, base),
-       counted(lower, upper, iterator, 3,
+       counted(lower, upper, iterator,
                sequence({call(*plan, OP_MUL, {theta, iterator}, theta_term),
                          call(*plan, OP_MUL, {beta, iterator}, beta_term),
                          call(*plan, OP_CONCAT2, {theta_term, beta_term}, rhs),
@@ -985,42 +1165,13 @@ static std::shared_ptr<StructuredLoop> range_update_plan(
        std::move(zero_update), alias(current, zero_updated),
        call(*plan, OP_DOT, {current, weights}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 2,
-        "ordered range update selects compact history");
+  plan->prepare();
   check(set_backward(plan->root, observe_op, trace_range_sum_backward),
         "find ordered range observer");
-  check(set_forward(plan->root, observe_op, trace_range_sum_forward),
-        "find ordered range forward observer");
-  if (force_ordinary) {
-    check(set_forward(plan->root, update_op, ordinary_update_forward),
-          "find ordered range update forward callback");
-    check(set_backward(plan->root, update_op, ordinary_update_backward),
-          "find ordered range update backward callback");
-    check(set_forward(plan->root, zero_update_op, ordinary_update_forward),
-          "find zero range update forward callback");
-    check(set_backward(plan->root, zero_update_op, ordinary_update_backward),
-          "find zero range update backward callback");
-  }
   return plan;
 }
 
-static Graph range_update_outer(std::shared_ptr<StructuredLoop> plan) {
-  Graph graph;
-  graph.add_slot(6, true);
-  graph.add_slot(1, true);
-  graph.add_slot(1, true);
-  const int output = graph.add_slot(1, false);
-  const int op = graph.add_op(OP_LOOP, {0, 1, 2}, output);
-  graph.ops[op].udata = plan.get();
-  graph.udata_pool.push_back(std::move(plan));
-  graph.result_slot = output;
-  return graph;
-}
-
-static std::shared_ptr<StructuredLoop> inactive_range_update_plan(
-    bool force_ordinary) {
+static std::shared_ptr<StructuredLoop> inactive_range_update_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int lower = scalar(*plan, 1);
@@ -1036,38 +1187,25 @@ static std::shared_ptr<StructuredLoop> inactive_range_update_plan(
   const int updated = plan->body.add_slot(16, false);
   const int total = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
-
+  plan->imports = {{theta, 0, 0, true}};
   auto spec = std::make_shared<DynamicIndexSpec>();
   spec->axes = {{DynamicIndexSpec::Axis::Range, 16, 1, 2, 0}};
   spec->selected_size = 2;
   Node update =
       call(*plan, OP_SET_INDEX_DYNAMIC, {current, selector, rhs}, updated);
-  const int update_op = update.op;
-  plan->body.ops[static_cast<size_t>(update_op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
+  attach(*plan, update.op, spec);
   plan->root =
       sequence({alias(current, base),
-                counted(lower, upper, iterator, 3,
+                counted(lower, upper, iterator,
                         sequence({std::move(update), alias(current, updated)})),
                 call(*plan, OP_SUM_VEC, {current}, total),
                 call(*plan, OP_MUL, {theta, total}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 1,
-        "inactive ordered range selects compact history");
-  if (force_ordinary) {
-    check(set_forward(plan->root, update_op, ordinary_update_forward),
-          "find inactive range update forward callback");
-    check(set_backward(plan->root, update_op, ordinary_update_backward),
-          "find inactive range update backward callback");
-  }
+  plan->prepare();
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> aliased_update_plan(
-    bool force_ordinary) {
+static std::shared_ptr<StructuredLoop> aliased_update_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int one = scalar(*plan, 1);
@@ -1081,9 +1219,9 @@ static std::shared_ptr<StructuredLoop> aliased_update_plan(
   const int rhs1 = plan->body.add_slot(1, false);
   const int rhs2 = plan->body.add_slot(1, false);
   const int rhs3 = plan->body.add_slot(1, false);
-  const int updated1_slot = plan->body.add_slot(3, false);
-  const int updated2_slot = plan->body.add_slot(3, false);
-  const int updated3_slot = plan->body.add_slot(3, false);
+  const int updated1 = plan->body.add_slot(3, false);
+  const int updated2 = plan->body.add_slot(3, false);
+  const int updated3 = plan->body.add_slot(3, false);
   const int observed1 = plan->body.add_slot(1, false);
   const int observed2 = plan->body.add_slot(1, false);
   const int observed3 = plan->body.add_slot(1, false);
@@ -1092,67 +1230,42 @@ static std::shared_ptr<StructuredLoop> aliased_update_plan(
   const int current_sum = plan->body.add_slot(1, false);
   const int snapshot_total = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
-
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  spec->selected_size = 1;
+  plan->imports = {{theta, 0, 0, true}};
   Node update1 =
-      call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, rhs1}, updated1_slot);
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, rhs1}, updated1);
   Node update2 =
-      call(*plan, OP_SET_INDEX_DYNAMIC, {current, two, rhs2}, updated2_slot);
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, two, rhs2}, updated2);
   Node update3 =
-      call(*plan, OP_SET_INDEX_DYNAMIC, {current, three, rhs3}, updated3_slot);
-  const int update_ops[] = {update1.op, update2.op, update3.op};
-  for (int op : update_ops)
-    plan->body.ops[static_cast<size_t>(op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
-  Node observe1 = call(*plan, OP_SUM_VEC, {current}, observed1);
-  Node observe2 = call(*plan, OP_SUM_VEC, {current}, observed2);
-  Node observe3 = call(*plan, OP_SUM_VEC, {current}, observed3);
-  const int observer_ops[] = {observe1.op, observe2.op, observe3.op};
+      call(*plan, OP_SET_INDEX_DYNAMIC, {current, three, rhs3}, updated3);
+  for (int op : {update1.op, update2.op, update3.op})
+    attach(*plan, op, single_spec(3));
   plan->root = sequence(
       {alias(current, base),
        call(*plan, OP_MUL, {theta, one}, rhs1),
        std::move(update1),
-       alias(current, updated1_slot),
-       std::move(observe1),
+       alias(current, updated1),
+       call(*plan, OP_SUM_VEC, {current}, observed1),
        alias(snapshot1, current),
        alias(snapshot2, current),
        call(*plan, OP_MUL, {theta, two}, rhs2),
        std::move(update2),
-       alias(current, updated2_slot),
-       std::move(observe2),
+       alias(current, updated2),
+       call(*plan, OP_SUM_VEC, {current}, observed2),
        call(*plan, OP_MUL, {theta, three}, rhs3),
        std::move(update3),
-       alias(current, updated3_slot),
-       std::move(observe3),
+       alias(current, updated3),
+       call(*plan, OP_SUM_VEC, {current}, observed3),
        call(*plan, OP_SUM_VEC, {snapshot1}, snapshot_sum1),
        call(*plan, OP_SUM_VEC, {snapshot2}, snapshot_sum2),
        call(*plan, OP_SUM_VEC, {current}, current_sum),
        call(*plan, OP_ADD, {snapshot_sum1, snapshot_sum2}, snapshot_total),
        call(*plan, OP_ADD, {snapshot_total, current_sum}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 3,
-        "outgoing alias keeps compact update sites eligible");
-  for (int op : observer_ops)
-    check(set_forward(plan->root, op, trace_range_sum_forward),
-          "find aliased update address observer");
-  if (force_ordinary) {
-    for (int op : update_ops) {
-      check(set_forward(plan->root, op, ordinary_update_forward),
-            "find aliased update forward callback");
-      check(set_backward(plan->root, op, ordinary_update_backward),
-            "find aliased update backward callback");
-    }
-  }
+  plan->prepare();
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> loop_aliased_update_plan(
-    bool force_ordinary) {
+static std::shared_ptr<StructuredLoop> loop_aliased_update_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int lower = scalar(*plan, 1);
@@ -1169,122 +1282,191 @@ static std::shared_ptr<StructuredLoop> loop_aliased_update_plan(
   const int snapshot_sum = plan->body.add_slot(1, false);
   const int current_sum = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
-
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  spec->selected_size = 1;
+  plan->imports = {{theta, 0, 0, true}};
   Node update =
       call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, rhs}, updated);
-  const int update_op = update.op;
-  plan->body.ops[static_cast<size_t>(update_op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
-  Node observe = call(*plan, OP_SUM_VEC, {current}, observed);
-  const int observe_op = observe.op;
+  attach(*plan, update.op, single_spec(3));
   Node is_first = call(*plan, OP_COMPARE, {iterator, lower}, first);
   plan->body.ops[static_cast<size_t>(is_first.op)].variant = 4;
   plan->root = sequence(
       {alias(current, base),
-       counted(
-           lower, upper, iterator, 3,
-           sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
-                     std::move(update), alias(current, updated),
-                     std::move(observe), std::move(is_first),
-                     branch(first, alias(snapshot, current), sequence({}))})),
+       counted(lower, upper, iterator,
+               sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
+                         std::move(update), alias(current, updated),
+                         call(*plan, OP_SUM_VEC, {current}, observed),
+                         std::move(is_first),
+                         branch(first, alias(snapshot, current), sequence({}))})),
        call(*plan, OP_SUM_VEC, {snapshot}, snapshot_sum),
        call(*plan, OP_SUM_VEC, {current}, current_sum),
        call(*plan, OP_ADD, {snapshot_sum, current_sum}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 1,
-        "loop-backedge alias keeps compact update site eligible");
-  check(set_forward(plan->root, observe_op, trace_range_sum_forward),
-        "find loop-backedge update address observer");
-  if (force_ordinary) {
-    check(set_forward(plan->root, update_op, ordinary_update_forward),
-          "find loop-backedge update forward callback");
-    check(set_backward(plan->root, update_op, ordinary_update_backward),
-          "find loop-backedge update backward callback");
-  }
+  plan->prepare();
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> retained_scalar_update_plan(
-    bool force_ordinary) {
-  auto plan = std::make_shared<StructuredLoop>();
-  const int theta = plan->body.add_slot(1, false);
-  const int one = scalar(*plan, 1);
-  const int two = scalar(*plan, 2);
-  const int inactive_rhs = scalar(*plan, 7);
-  const int base = plan->body.add_slot(3, false);
-  plan->fills.push_back({base, {10, 20, 30}});
-  const int current = plan->body.add_slot(3, false);
-  const int updated1_slot = plan->body.add_slot(3, false);
-  const int updated2_slot = plan->body.add_slot(3, false);
-  const int observed1 = plan->body.add_slot(1, false);
-  const int observed2 = plan->body.add_slot(1, false);
-  const int result = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
-
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  spec->selected_size = 1;
-  Node update1 = call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, inactive_rhs},
-                      updated1_slot);
-  Node update2 =
-      call(*plan, OP_SET_INDEX_DYNAMIC, {current, two, theta}, updated2_slot);
-  const int update_ops[] = {update1.op, update2.op};
-  for (int op : update_ops)
-    plan->body.ops[static_cast<size_t>(op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
-  Node observe1 = call(*plan, OP_SUM_VEC, {current}, observed1);
-  Node observe2 = call(*plan, OP_SUM_VEC, {current}, observed2);
-  const int observer_ops[] = {observe1.op, observe2.op};
-  plan->root = sequence(
-      {alias(current, base), std::move(update1), alias(current, updated1_slot),
-       std::move(observe1), std::move(update2), alias(current, updated2_slot),
-       std::move(observe2), call(*plan, OP_SUM_VEC, {current}, result)});
-  plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 2,
-        "retained scalar plan selects compact update sites");
-  for (int op : observer_ops)
-    check(set_forward(plan->root, op, trace_range_sum_forward),
-          "find retained scalar address observer");
-  if (force_ordinary) {
-    for (int op : update_ops) {
-      check(set_forward(plan->root, op, ordinary_update_forward),
-            "find retained scalar forward callback");
-      check(set_backward(plan->root, op, ordinary_update_backward),
-            "find retained scalar backward callback");
-    }
-  }
-  return plan;
-}
-
-static std::shared_ptr<StructuredLoop> duplicate_record_site_plan() {
+static std::shared_ptr<StructuredLoop> duplicate_node_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int beta = plan->body.add_slot(1, false);
   const int product = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}, {beta, 1, 0}};
+  plan->imports = {{theta, 0, 0, true}, {beta, 1, 0, true}};
   Node first = call(*plan, OP_MUL, {theta, beta}, product);
   Node second = first;
   plan->root = sequence({std::move(first), std::move(second)});
   plan->outputs = {product};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->record_node_count == 2 && plan->root.children[0].record_site !=
-                                            plan->root.children[1].record_site,
-        "duplicate operation nodes receive distinct record sites");
+  bool rejected = false;
+  try {
+    plan->prepare();
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  check(rejected, "duplicate output slots are rejected");
+  const int second_product = plan->body.add_slot(1, false);
+  Node replacement = call(*plan, OP_MUL, {theta, beta}, second_product);
+  plan->root = sequence({call(*plan, OP_MUL, {theta, beta}, product),
+                         std::move(replacement)});
+  plan->outputs = {second_product};
+  plan->prepare();
   plan->root.children[1].backward = duplicate_site_backward;
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> scalar_index_loop_plan(
-    bool direct, bool force_ordinary) {
+static void iterator_history_tests() {
+  iterator_forward_values.clear();
+  iterator_reverse_values.clear();
+  Executor history(outer(iterator_history_plan()));
+  const Evaluation traced = evaluate(history, .25, 0);
+  close(traced.value, 0, "iterator history value");
+  close(traced.gradient[0], 0, "iterator history theta gradient");
+  check(iterator_forward_values == std::vector<double>({-1, 0, 1}),
+        "iterator forward values are exact");
+  check(iterator_reverse_values == std::vector<double>({1, 0, -1}),
+        "iterator reverse values preserve history");
+
+  Executor retry(outer(iterator_history_plan()));
+  iterator_throw_once = true;
+  bool threw = false;
+  try {
+    (void)evaluate(retry, .25, 0);
+  } catch (const std::runtime_error& error) {
+    threw = std::string(error.what()) == "injected iterator callback failure";
+  }
+  check(threw, "forward preserves a callback exception");
+  iterator_forward_values.clear();
+  iterator_reverse_values.clear();
+  const Evaluation retried = evaluate(retry, .25, 0);
+  close(retried.value, traced.value, "retry after failure value");
+  close(retried.gradient[0], traced.gradient[0],
+        "retry after failure theta gradient");
+  check(iterator_forward_values == std::vector<double>({-1, 0, 1}) &&
+            iterator_reverse_values == std::vector<double>({1, 0, -1}),
+        "retry rebuilds historical values");
+
+  for (const auto& bounds : std::vector<std::pair<int32_t, int32_t>>{
+           {std::numeric_limits<int32_t>::min(),
+            std::numeric_limits<int32_t>::min() + 1},
+           {std::numeric_limits<int32_t>::max() - 1,
+            std::numeric_limits<int32_t>::max()},
+           {1, 0}}) {
+    Executor escaped(outer(iterator_escape_plan(bounds.first, bounds.second)));
+    const Evaluation result = evaluate(escaped, 0, 0);
+    const double expected = bounds.second >= bounds.first ? bounds.second : 7;
+    close(result.value, expected, "iterator boundary escape value");
+    close(result.gradient[0], 0, "iterator boundary escape theta gradient");
+  }
+
+  Executor targeted(outer(iterator_target_plan()));
+  const Evaluation target_result = evaluate(targeted, 0, 0);
+  close(target_result.value, 6, "iterator target keeps reached values");
+  close(target_result.gradient[0], 0, "iterator target theta gradient");
+
+  Executor nested(outer(nested_iterator_plan()));
+  const Evaluation nested_result = evaluate(nested, .25, 0);
+  close(nested_result.value, 3, "nested iterator value");
+  close(nested_result.gradient[0], 12, "nested iterator theta gradient");
+  close(nested_result.gradient[1], 0, "nested iterator beta gradient");
+
+  Executor update(outer(iterator_update_plan()));
+  const Evaluation updated = evaluate(update, .25, 0);
+  close(updated.value, 1.5, "iterator update value");
+  close(updated.gradient[0], 6, "iterator update theta gradient");
+  close(updated.gradient[1], 0, "iterator update beta gradient");
+  Executor direct_update(outer(iterator_update_plan(true)));
+  Executor extent_update(outer(iterator_update_plan(true, true)));
+  const Evaluation direct = evaluate(direct_update, .25, 0);
+  const Evaluation extent = evaluate(extent_update, .25, 0);
+  check(std::memcmp(&updated, &direct, sizeof(Evaluation)) == 0 &&
+            std::memcmp(&updated, &extent, sizeof(Evaluation)) == 0,
+        "direct-input updates match the packed update bitwise");
+  const Evaluation repeated = evaluate(update, .25, 0);
+  check(std::memcmp(&updated, &repeated, sizeof(Evaluation)) == 0,
+        "in-place update resets between evaluations");
+
+  struct RangeEvaluation {
+    double value = 0;
+    double gradient[8] = {};
+    std::vector<std::array<double, 6>> reverse_values;
+  };
+  const auto run_range = [](bool direct, bool separate_extent) {
+    range_update_reverse_values.clear();
+    Executor executor(
+        outer(range_update_plan(direct, separate_extent), {6, 1, 1}));
+    const double point[] = {10, 20, 30, 40, 50, 60, .25, -.5};
+    std::copy(std::begin(point), std::end(point), executor.params_data());
+    RangeEvaluation result;
+    result.value = executor.gradient(result.gradient);
+    result.reverse_values = range_update_reverse_values;
+    return result;
+  };
+  const RangeEvaluation packed = run_range(false, false);
+  const RangeEvaluation direct_range = run_range(true, true);
+  check(std::memcmp(&packed.value, &direct_range.value, sizeof(double)) == 0 &&
+            std::memcmp(packed.gradient, direct_range.gradient,
+                        sizeof(packed.gradient)) == 0,
+        "multi-descriptor range update matches packed bitwise");
+  close(packed.value, 3157.75, "ordered range update result");
+  const double expected_gradient[] = {0, 0, 4, 8, 16, 32, 3, 6};
+  for (size_t i = 0; i < std::size(expected_gradient); ++i)
+    close(packed.gradient[i], expected_gradient[i],
+          "ordered range update gradient");
+  const std::vector<std::array<double, 6>> expected_reverse = {
+      {{.75, -1.5, 30, 40, 50, 60}},
+      {{.5, -1, 30, 40, 50, 60}},
+      {{.25, -.5, 30, 40, 50, 60}},
+  };
+  check(packed.reverse_values == expected_reverse &&
+            direct_range.reverse_values == expected_reverse,
+        "range update restores historical primals in LIFO order");
+
+  Executor inactive(outer(inactive_range_update_plan()));
+  const Evaluation inactive_result = evaluate(inactive, .25, 0);
+  close(inactive_result.value, 40.75, "inactive range update result");
+  close(inactive_result.gradient[0], 163, "inactive range update gradient");
+
+  Executor aliased(outer(aliased_update_plan()));
+  const Evaluation aliased_result = evaluate(aliased, .25, 0);
+  close(aliased_result.value, 102, "outgoing aliases preserve snapshot values");
+  close(aliased_result.gradient[0], 8,
+        "outgoing aliases preserve snapshot gradients");
+
+  Executor loop_aliased(outer(loop_aliased_update_plan()));
+  const Evaluation loop_aliased_result = evaluate(loop_aliased, .25, 0);
+  close(loop_aliased_result.value, 51.75,
+        "loop-backedge alias preserves snapshot value");
+  close(loop_aliased_result.gradient[0], 7,
+        "loop-backedge alias preserves snapshot gradient");
+
+  duplicate_site_backward_calls = 0;
+  Executor duplicate(outer(duplicate_node_plan()));
+  const Evaluation duplicate_result = evaluate(duplicate, 2, 3);
+  close(duplicate_result.value, 6, "duplicate operation value");
+  close(duplicate_result.gradient[0], 3, "duplicate operation theta gradient");
+  close(duplicate_result.gradient[1], 2, "duplicate operation beta gradient");
+  check(duplicate_site_backward_calls == 1,
+        "reverse resolves the exact duplicate operation node");
+}
+
+static std::shared_ptr<StructuredLoop> scalar_index_loop_plan(bool direct) {
   auto plan = std::make_shared<StructuredLoop>();
   const int base = plan->body.add_slot(3, false);
   const int theta = plan->body.add_slot(1, false);
@@ -1296,45 +1478,21 @@ static std::shared_ptr<StructuredLoop> scalar_index_loop_plan(
   const int zero = scalar(*plan, 0);
   const int total = plan->body.add_slot(1, false);
   const int next = plan->body.add_slot(1, false);
-  plan->imports = {{base, 0, 1}, {theta, 1, 0}};
-
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  spec->selected_size = 1;
+  plan->imports = {{base, 0, 1, true}, {theta, 1, 0, true}};
+  auto spec = single_spec(3);
   spec->input_count = direct ? 2 : 0;
   Node index = call(*plan, OP_INDEX_DYNAMIC, {base, iterator}, selected);
-  const int index_op = index.op;
-  plan->body.ops[static_cast<size_t>(index_op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
+  attach(*plan, index.op, spec);
   plan->root =
       sequence({alias(total, zero),
-                counted(one, three, iterator, 3,
+                counted(one, three, iterator,
                         sequence({std::move(index),
                                   call(*plan, OP_MUL, {selected, theta}, term),
                                   call(*plan, OP_ADD, {total, term}, next),
                                   alias(total, next)}))});
   plan->outputs = {total};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  if (force_ordinary) {
-    check(set_forward(plan->root, index_op, ordinary_index_forward),
-          "find scalar index forward callback");
-    check(set_backward(plan->root, index_op, ordinary_index_backward),
-          "find scalar index backward callback");
-  }
+  plan->prepare();
   return plan;
-}
-
-static Graph scalar_index_loop_outer(std::shared_ptr<StructuredLoop> plan) {
-  Graph graph;
-  graph.add_slot(5, true);
-  graph.add_slot(1, true);
-  const int output = graph.add_slot(1, false);
-  const int op = graph.add_op(OP_LOOP, {0, 1}, output);
-  graph.ops[op].udata = plan.get();
-  graph.udata_pool.push_back(std::move(plan));
-  graph.result_slot = output;
-  return graph;
 }
 
 static std::shared_ptr<StructuredLoop> zero_scalar_index_plan(bool invalid) {
@@ -1343,8 +1501,7 @@ static std::shared_ptr<StructuredLoop> zero_scalar_index_plan(bool invalid) {
   const int selectors = plan->body.add_slot(3, false);
   plan->fills.push_back({selectors, {1, 0, invalid ? 3.0 : 2.0}});
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{base, 0, 0}};
-
+  plan->imports = {{base, 0, 0, true}};
   auto spec = std::make_shared<DynamicIndexSpec>();
   spec->axes = {
       {DynamicIndexSpec::Axis::Range, 2, 2, 1, 0},
@@ -1353,24 +1510,11 @@ static std::shared_ptr<StructuredLoop> zero_scalar_index_plan(bool invalid) {
   spec->axes[0].count_input_offset = 1;
   spec->selected_size = 1;
   Node index = call(*plan, OP_INDEX_DYNAMIC, {base, selectors}, result);
-  plan->body.ops[static_cast<size_t>(index.op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
+  attach(*plan, index.op, spec);
   plan->root = std::move(index);
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
-}
-
-static Graph zero_scalar_index_outer(std::shared_ptr<StructuredLoop> plan) {
-  Graph graph;
-  graph.add_slot(4, true);
-  const int output = graph.add_slot(1, false);
-  const int op = graph.add_op(OP_LOOP, {0}, output);
-  graph.ops[op].udata = plan.get();
-  graph.udata_pool.push_back(std::move(plan));
-  graph.result_slot = output;
-  return graph;
 }
 
 static std::shared_ptr<StructuredLoop> selector_only_scalar_index_plan() {
@@ -1379,17 +1523,12 @@ static std::shared_ptr<StructuredLoop> selector_only_scalar_index_plan() {
   const int base = plan->body.add_slot(3, false);
   plan->fills.push_back({base, {10, 20, 30}});
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{selector, 0, 0}};
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  spec->selected_size = 1;
+  plan->imports = {{selector, 0, 0, true}};
   Node index = call(*plan, OP_INDEX_DYNAMIC, {base, selector}, result);
-  plan->body.ops[static_cast<size_t>(index.op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
+  attach(*plan, index.op, single_spec(3));
   plan->root = std::move(index);
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
@@ -1404,100 +1543,21 @@ static std::shared_ptr<StructuredLoop> scalar_index_after_updates_plan() {
   const int rhs = plan->body.add_slot(1, false);
   const int updated = plan->body.add_slot(3, false);
   const int selected = plan->body.add_slot(1, false);
-  plan->imports = {{base, 0, 0}, {theta, 1, 0}};
-
-  auto update_spec = std::make_shared<DynamicIndexSpec>();
-  update_spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  update_spec->selected_size = 1;
+  plan->imports = {{base, 0, 0, true}, {theta, 1, 0, true}};
   Node update =
       call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, rhs}, updated);
-  plan->body.ops[static_cast<size_t>(update.op)].udata = update_spec.get();
-  plan->body.udata_pool.push_back(update_spec);
-  auto index_spec = std::make_shared<DynamicIndexSpec>();
-  index_spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  index_spec->selected_size = 1;
+  attach(*plan, update.op, single_spec(3));
   Node index = call(*plan, OP_INDEX_DYNAMIC, {current, two}, selected);
-  plan->body.ops[static_cast<size_t>(index.op)].udata = index_spec.get();
-  plan->body.udata_pool.push_back(index_spec);
+  attach(*plan, index.op, single_spec(3));
   plan->root =
       sequence({alias(current, base),
-                counted(one, two, iterator, 2,
+                counted(one, two, iterator,
                         sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
                                   std::move(update), alias(current, updated)})),
                 std::move(index)});
   plan->outputs = {selected};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 1,
-        "scalar index integration retains compact update site");
+  plan->prepare();
   return plan;
-}
-
-static Graph scalar_index_after_updates_outer(
-    std::shared_ptr<StructuredLoop> plan) {
-  Graph graph;
-  graph.add_slot(3, true);
-  graph.add_slot(1, true);
-  const int output = graph.add_slot(1, false);
-  const int op = graph.add_op(OP_LOOP, {0, 1}, output);
-  graph.ops[op].udata = plan.get();
-  graph.udata_pool.push_back(std::move(plan));
-  graph.result_slot = output;
-  return graph;
-}
-
-static std::shared_ptr<StructuredLoop> scalar_index_redirect_plan(
-    bool active_redirect) {
-  auto plan = std::make_shared<StructuredLoop>();
-  const int base = plan->body.add_slot(32, false);
-  const int one = scalar(*plan, 1);
-  const int upper = scalar(*plan, 32);
-  const int zero = scalar(*plan, 0);
-  const int iterator = plan->body.add_slot(1, false);
-  const int selected = plan->body.add_slot(1, false);
-  const int redirected = plan->body.add_slot(1, false);
-  const int later = plan->body.add_slot(1, false);
-  plan->imports = {{base, 0, 0}};
-
-  auto first_spec = std::make_shared<DynamicIndexSpec>();
-  first_spec->axes = {{DynamicIndexSpec::Axis::Single, 32, 1, 1, 0}};
-  first_spec->selected_size = 1;
-  Node first = call(*plan, OP_INDEX_DYNAMIC, {base, one}, selected);
-  plan->body.ops[static_cast<size_t>(first.op)].udata = first_spec.get();
-  plan->body.udata_pool.push_back(first_spec);
-
-  Node redirect = call(*plan, active_redirect ? OP_ADD : OP_COMPARE,
-                       {selected, zero}, redirected);
-  const int redirect_op = redirect.op;
-  auto later_spec = std::make_shared<DynamicIndexSpec>();
-  later_spec->axes = {{DynamicIndexSpec::Axis::Single, 32, 1, 1, 0}};
-  later_spec->selected_size = 1;
-  Node later_index = call(*plan, OP_INDEX_DYNAMIC, {base, iterator}, later);
-  plan->body.ops[static_cast<size_t>(later_index.op)].udata = later_spec.get();
-  plan->body.udata_pool.push_back(later_spec);
-  plan->root =
-      sequence({std::move(first), std::move(redirect),
-                counted(one, upper, iterator, 32, std::move(later_index))});
-  plan->outputs = {redirected};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(set_forward(plan->root, redirect_op, redirect_first_input),
-        "find record-scalar redirect callback");
-  if (!active_redirect)
-    check(set_backward(plan->root, redirect_op, nullptr),
-          "disable record-scalar redirect backward callback");
-  return plan;
-}
-
-static Graph scalar_index_redirect_outer(std::shared_ptr<StructuredLoop> plan) {
-  Graph graph;
-  graph.add_slot(32, true);
-  const int output = graph.add_slot(1, false);
-  const int op = graph.add_op(OP_LOOP, {0}, output);
-  graph.ops[op].udata = plan.get();
-  graph.udata_pool.push_back(std::move(plan));
-  graph.result_slot = output;
-  return graph;
 }
 
 static std::shared_ptr<StructuredLoop> scalar_index_target_plan() {
@@ -1505,37 +1565,16 @@ static std::shared_ptr<StructuredLoop> scalar_index_target_plan() {
   const int base = plan->body.add_slot(3, false);
   const int one = scalar(*plan, 1);
   const int selected = plan->body.add_slot(1, false);
-  plan->imports = {{base, 0, 0}};
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  spec->selected_size = 1;
+  plan->imports = {{base, 0, 0, true}};
   Node index = call(*plan, OP_INDEX_DYNAMIC, {base, one}, selected);
-  plan->body.ops[static_cast<size_t>(index.op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
-  Node target;
-  target.kind = Node::Target;
-  target.src = selected;
-  plan->root = sequence({std::move(index), std::move(target)});
+  attach(*plan, index.op, single_spec(3));
+  plan->root = sequence({std::move(index), target(selected)});
   plan->has_target = true;
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
-static Graph scalar_index_three_parameter_outer(
-    std::shared_ptr<StructuredLoop> plan) {
-  Graph graph;
-  graph.add_slot(3, true);
-  const int output = graph.add_slot(1, false);
-  const int op = graph.add_op(OP_LOOP, {0}, output);
-  graph.ops[op].udata = plan.get();
-  graph.udata_pool.push_back(std::move(plan));
-  graph.result_slot = output;
-  return graph;
-}
-
-static std::shared_ptr<StructuredLoop> scalar_index_update_rhs_plan(
-    bool force_ordinary_index) {
+static std::shared_ptr<StructuredLoop> scalar_index_update_rhs_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int base = plan->body.add_slot(3, false);
   const int one = scalar(*plan, 1);
@@ -1545,84 +1584,55 @@ static std::shared_ptr<StructuredLoop> scalar_index_update_rhs_plan(
   const int updated = plan->body.add_slot(3, false);
   const int selected = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{base, 0, 0}};
-
-  auto update_spec = std::make_shared<DynamicIndexSpec>();
-  update_spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  update_spec->selected_size = 1;
+  plan->imports = {{base, 0, 0, true}};
   Node update =
       call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, selected}, updated);
-  plan->body.ops[static_cast<size_t>(update.op)].udata = update_spec.get();
-  plan->body.udata_pool.push_back(update_spec);
-
-  auto index_spec = std::make_shared<DynamicIndexSpec>();
-  index_spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  index_spec->selected_size = 1;
+  attach(*plan, update.op, single_spec(3));
   Node index = call(*plan, OP_INDEX_DYNAMIC, {base, one}, selected);
-  const int index_op = index.op;
-  plan->body.ops[static_cast<size_t>(index.op)].udata = index_spec.get();
-  plan->body.udata_pool.push_back(index_spec);
+  attach(*plan, index.op, single_spec(3));
   plan->root =
       sequence({std::move(index), alias(current, base),
-                counted(one, two, iterator, 2,
+                counted(one, two, iterator,
                         sequence({std::move(update), alias(current, updated)})),
                 call(*plan, OP_SUM_VEC, {current}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(
-      plan->compact_update_sites == 1 &&
-          plan->root.children[2].children[0].children[0].compact_update_cell >=
-              0,
-      "record-scalar RHS update selects compact history");
-  if (force_ordinary_index) {
-    check(set_forward(plan->root, index_op, ordinary_index_forward),
-          "find record-scalar RHS index forward callback");
-    check(set_backward(plan->root, index_op, ordinary_index_backward),
-          "find record-scalar RHS index backward callback");
-  }
+  plan->prepare();
   return plan;
 }
 
-static void compact_scalar_index_tests() {
+static void scalar_index_tests() {
   const double point[] = {7, 1e16, -1e16, 1, 9, .25};
   const double expected_gradient[] = {0, .25, .25, .25, 0, 0};
+  Evaluation previous;
   for (bool direct : {false, true}) {
-    ordinary_index_forward_calls = ordinary_index_backward_calls = 0;
-    Executor compact(
-        scalar_index_loop_outer(scalar_index_loop_plan(direct, false)));
-    Executor ordinary(
-        scalar_index_loop_outer(scalar_index_loop_plan(direct, true)));
-    std::copy(std::begin(point), std::end(point), compact.params_data());
-    std::copy(std::begin(point), std::end(point), ordinary.params_data());
-    double compact_gradient[6] = {};
-    double ordinary_gradient[6] = {};
-    const double compact_value = compact.gradient(compact_gradient);
-    const double ordinary_value = ordinary.gradient(ordinary_gradient);
-    check(std::memcmp(&compact_value, &ordinary_value, sizeof(double)) == 0 &&
-              std::memcmp(compact_gradient, ordinary_gradient,
-                          sizeof(compact_gradient)) == 0,
-          "compact scalar index has bitwise ordinary-path parity");
-    check(
-        ordinary_index_forward_calls == 3 && ordinary_index_backward_calls == 3,
-        "custom scalar index callbacks force ordinary history");
-    close(compact_value, .25, "compact scalar index value");
+    Executor executor(outer(scalar_index_loop_plan(direct), {5, 1}));
+    std::copy(std::begin(point), std::end(point), executor.params_data());
+    double gradient[6] = {};
+    const double value = executor.gradient(gradient);
+    close(value, .25, "scalar index loop value");
     for (size_t i = 0; i < std::size(expected_gradient); ++i)
-      close(compact_gradient[i], expected_gradient[i],
-            "compact scalar index gradient");
+      close(gradient[i], expected_gradient[i], "scalar index loop gradient");
+    Evaluation current;
+    current.value = value;
+    current.gradient[0] = gradient[1];
+    current.gradient[1] = gradient[2];
+    if (direct)
+      check(std::memcmp(&previous, &current, sizeof(Evaluation)) == 0,
+            "direct scalar index matches packed bitwise");
+    previous = current;
   }
 
-  Executor zero(zero_scalar_index_outer(zero_scalar_index_plan(false)));
+  Executor zero(outer(zero_scalar_index_plan(false), {4}));
   const double zero_point[] = {1, 2, 3, 4};
   std::copy(std::begin(zero_point), std::end(zero_point), zero.params_data());
   double zero_gradient[4] = {};
   close(zero.gradient(zero_gradient), 0,
-        "compact scalar index supports an empty reached selection");
+        "scalar index supports an empty reached selection");
   check(std::all_of(std::begin(zero_gradient), std::end(zero_gradient),
                     [](double value) { return value == 0; }),
-        "empty compact scalar index does not scatter an adjoint");
+        "empty scalar index does not scatter an adjoint");
 
-  Executor invalid(zero_scalar_index_outer(zero_scalar_index_plan(true)));
+  Executor invalid(outer(zero_scalar_index_plan(true), {4}));
   std::copy(std::begin(zero_point), std::end(zero_point),
             invalid.params_data());
   try {
@@ -1633,352 +1643,43 @@ static void compact_scalar_index_tests() {
 
   Executor selector_only(outer(selector_only_scalar_index_plan()));
   const Evaluation selector_result = evaluate(selector_only, 2, 0);
-  close(selector_result.value, 20, "selector-only active scalar index value");
+  close(selector_result.value, 20, "selector-only scalar index value");
   close(selector_result.gradient[0], 0,
         "scalar index does not differentiate its selector");
-  close(selector_result.gradient[1], 0,
-        "unused scalar index input has zero gradient");
 
-  Executor updated(
-      scalar_index_after_updates_outer(scalar_index_after_updates_plan()));
+  Executor updated(outer(scalar_index_after_updates_plan(), {3, 1}));
   const double updated_point[] = {10, 20, 30, .25};
   std::copy(std::begin(updated_point), std::end(updated_point),
             updated.params_data());
   double updated_gradient[4] = {};
   close(updated.gradient(updated_gradient), .5,
-        "scalar index reads a compactly updated value");
+        "scalar index reads an in-place updated value");
   const double expected_updated_gradient[] = {0, 0, 0, 2};
   for (size_t i = 0; i < std::size(expected_updated_gradient); ++i)
     close(updated_gradient[i], expected_updated_gradient[i],
-          "scalar index routes through a shared update adjoint");
+          "scalar index routes through the update adjoint");
 
-  std::array<double, 32> redirect_point{};
-  for (size_t i = 0; i < redirect_point.size(); ++i)
-    redirect_point[i] = static_cast<double>(i + 1);
-  for (bool active_redirect : {false, true}) {
-    Executor redirected(scalar_index_redirect_outer(
-        scalar_index_redirect_plan(active_redirect)));
-    std::copy(redirect_point.begin(), redirect_point.end(),
-              redirected.params_data());
-    std::array<double, 32> redirect_gradient{};
-    close(redirected.gradient(redirect_gradient.data()), 1,
-          "record scalar survives redirected output and record relocation");
-    for (size_t i = 0; i < redirect_gradient.size(); ++i)
-      close(redirect_gradient[i], active_redirect && i == 0 ? 1 : 0,
-            "redirected record scalar gradient follows callback contract");
-  }
-
-  Executor targeted(
-      scalar_index_three_parameter_outer(scalar_index_target_plan()));
+  Executor targeted(outer(scalar_index_target_plan(), {3}));
   const double target_point[] = {2, 3, 4};
   std::copy(std::begin(target_point), std::end(target_point),
             targeted.params_data());
   double target_gradient[3] = {};
   close(targeted.gradient(target_gradient), 2,
-        "record scalar contributes a target leaf");
-  close(target_gradient[0], 1,
-        "record scalar receives and scatters a target adjoint");
-  close(target_gradient[1], 0,
-        "record scalar target leaves unselected input unchanged");
-  close(target_gradient[2], 0,
-        "record scalar target leaves final input unchanged");
+        "indexed value contributes a target leaf");
+  close(target_gradient[0], 1, "indexed target leaf scatters its adjoint");
+  close(target_gradient[1], 0, "indexed target leaves other inputs unchanged");
+  close(target_gradient[2], 0, "indexed target leaves final input unchanged");
 
-  ordinary_index_forward_calls = ordinary_index_backward_calls = 0;
-  Executor update_rhs(
-      scalar_index_three_parameter_outer(scalar_index_update_rhs_plan(false)));
-  Executor ordinary_update_rhs(
-      scalar_index_three_parameter_outer(scalar_index_update_rhs_plan(true)));
+  Executor update_rhs(outer(scalar_index_update_rhs_plan(), {3}));
   std::copy(std::begin(target_point), std::end(target_point),
             update_rhs.params_data());
-  std::copy(std::begin(target_point), std::end(target_point),
-            ordinary_update_rhs.params_data());
   double update_rhs_gradient[3] = {};
-  double ordinary_update_rhs_gradient[3] = {};
-  const double update_rhs_value = update_rhs.gradient(update_rhs_gradient);
-  const double ordinary_update_rhs_value =
-      ordinary_update_rhs.gradient(ordinary_update_rhs_gradient);
-  check(std::memcmp(&update_rhs_value, &ordinary_update_rhs_value,
-                    sizeof(double)) == 0 &&
-            std::memcmp(update_rhs_gradient, ordinary_update_rhs_gradient,
-                        sizeof(update_rhs_gradient)) == 0,
-        "record scalar RHS has bitwise ordinary-path parity");
-  close(update_rhs_value, 8, "record scalar RHS update value");
+  close(update_rhs.gradient(update_rhs_gradient), 8,
+        "indexed right-hand side update value");
   const double expected_rhs_gradient[] = {2, 0, 1};
   for (size_t i = 0; i < std::size(expected_rhs_gradient); ++i)
     close(update_rhs_gradient[i], expected_rhs_gradient[i],
-          "record scalar RHS update gradient");
-  check(ordinary_index_forward_calls == 1 && ordinary_index_backward_calls == 1,
-        "record scalar RHS ordinary comparison replays its callback");
-}
-
-static void compact_iterator_history_tests() {
-  iterator_forward_values.clear();
-  iterator_reverse_values.clear();
-  Executor history(outer(iterator_history_plan()));
-  const Evaluation traced = evaluate(history, .25, 0);
-  close(traced.value, 0, "inline iterator history value");
-  close(traced.gradient[0], 0, "inline iterator history theta gradient");
-  check(iterator_forward_values == std::vector<double>({-1, 0, 1}),
-        "inline iterator forward values are exact");
-  check(iterator_reverse_values == std::vector<double>({1, 0, -1}),
-        "inline iterator reverse values preserve history");
-
-  Executor retry(outer(iterator_history_plan()));
-  iterator_throw_once = true;
-  bool threw = false;
-  try {
-    (void)evaluate(retry, .25, 0);
-  } catch (const std::runtime_error& error) {
-    threw = std::string(error.what()) == "injected iterator callback failure";
-  }
-  check(threw, "inline iterator preserves callback exception");
-  iterator_forward_values.clear();
-  iterator_reverse_values.clear();
-  const Evaluation retried = evaluate(retry, .25, 0);
-  close(retried.value, traced.value, "inline iterator retry value");
-  close(retried.gradient[0], traced.gradient[0],
-        "inline iterator retry theta gradient");
-  check(iterator_forward_values == std::vector<double>({-1, 0, 1}) &&
-            iterator_reverse_values == std::vector<double>({1, 0, -1}),
-        "inline iterator retry rebuilds historical values");
-
-  for (const auto& bounds : std::vector<std::pair<int32_t, int32_t>>{
-           {std::numeric_limits<int32_t>::min(),
-            std::numeric_limits<int32_t>::min() + 1},
-           {std::numeric_limits<int32_t>::max() - 1,
-            std::numeric_limits<int32_t>::max()},
-           {1, 0}}) {
-    Executor escaped(outer(iterator_escape_plan(bounds.first, bounds.second)));
-    const Evaluation result = evaluate(escaped, 0, 0);
-    const double expected = bounds.second >= bounds.first ? bounds.second : 7;
-    close(result.value, expected, "inline iterator boundary escape value");
-    close(result.gradient[0], 0,
-          "inline iterator boundary escape theta gradient");
-    close(result.gradient[1], 0,
-          "inline iterator boundary escape beta gradient");
-  }
-
-  Executor target(outer(iterator_target_plan()));
-  const Evaluation targeted = evaluate(target, 0, 0);
-  close(targeted.value, 6, "inline iterator target keeps reached values");
-  close(targeted.gradient[0], 0, "inline iterator target theta gradient");
-  close(targeted.gradient[1], 0, "inline iterator target beta gradient");
-
-  Executor nested(outer(nested_iterator_plan()));
-  const Evaluation nested_result = evaluate(nested, .25, 0);
-  close(nested_result.value, 3, "nested inline iterator value");
-  close(nested_result.gradient[0], 12, "nested inline iterator theta gradient");
-  close(nested_result.gradient[1], 0, "nested inline iterator beta gradient");
-
-  update_reverse_values.clear();
-  Executor update(outer(iterator_update_plan()));
-  const Evaluation updated = evaluate(update, .25, 0);
-  close(updated.value, 1.5, "inline iterator compact-update value");
-  close(updated.gradient[0], 6,
-        "inline iterator compact-update theta gradient");
-  close(updated.gradient[1], 0, "inline iterator compact-update beta gradient");
-  check(update_reverse_values ==
-            std::vector<std::array<double, 3>>(
-                {{{.25, .5, 30}}, {{.25, 20, 30}}, {{10, 20, 30}}}),
-        "custom update reverse sees ordinary historical inputs");
-
-  Executor frame_free(outer(iterator_update_plan(nullptr)));
-  Executor retained(outer(iterator_update_plan(retained_update_backward)));
-  Executor direct_retained(outer(
-      iterator_update_plan(retained_update_backward, nullptr, true, true)));
-  const Evaluation compact = evaluate(frame_free, .25, 0);
-  const Evaluation reference = evaluate(retained, .25, 0);
-  const Evaluation direct_reference = evaluate(direct_retained, .25, 0);
-  check(std::memcmp(&compact, &reference, sizeof(Evaluation)) == 0,
-        "frame-free compact reverse has bitwise ordinary-path parity");
-  check(std::memcmp(&reference, &direct_reference, sizeof(Evaluation)) == 0,
-        "multi-descriptor retained scalar reverse has bitwise packed parity");
-  const Evaluation repeated = evaluate(frame_free, .25, 0);
-  check(std::memcmp(&compact, &repeated, sizeof(Evaluation)) == 0,
-        "frame-free compact reverse resets between evaluations");
-  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
-  Executor shared_ref(outer(iterator_update_plan(nullptr)));
-  const Evaluation reused_ref = evaluate(shared_ref, .25, 0);
-  test_setenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS", "1");
-  const Evaluation distinct_ref = evaluate(shared_ref, .25, 0);
-  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
-  const Evaluation reused_again = evaluate(shared_ref, .25, 0);
-  check(std::memcmp(&reused_ref, &distinct_ref, sizeof(Evaluation)) == 0 &&
-            std::memcmp(&reused_ref, &reused_again, sizeof(Evaluation)) == 0,
-        "shared compact-update Ref reuse has bitwise ablation parity");
-  Executor direct_frame_free(
-      outer(iterator_update_plan(nullptr, nullptr, true)));
-  const Evaluation direct_compact = evaluate(direct_frame_free, .25, 0);
-  check(std::memcmp(&compact, &direct_compact, sizeof(Evaluation)) == 0,
-        "direct-input frame-free compact reverse has bitwise packed parity");
-  ordinary_update_forward_calls = 0;
-  Executor custom_forward(
-      outer(iterator_update_plan(nullptr, ordinary_update_forward)));
-  const Evaluation custom_forward_result = evaluate(custom_forward, .25, 0);
-  check(ordinary_update_forward_calls == 3 &&
-            std::memcmp(&compact, &custom_forward_result, sizeof(Evaluation)) ==
-                0,
-        "custom update forward callback forces the ordinary path");
-
-  struct RangeEvaluation {
-    double value = 0;
-    double gradient[8] = {};
-    std::vector<std::array<double, 6>> reverse_values;
-    std::vector<const double*> forward_addresses;
-  };
-  const auto run_range = [](bool ordinary, bool direct = false,
-                            bool separate_extent = false) {
-    range_update_reverse_values.clear();
-    range_update_forward_addresses.clear();
-    Executor executor(range_update_outer(
-        range_update_plan(ordinary, direct, separate_extent)));
-    const double point[] = {10, 20, 30, 40, 50, 60, .25, -.5};
-    std::copy(std::begin(point), std::end(point), executor.params_data());
-    RangeEvaluation result;
-    result.value = executor.gradient(result.gradient);
-    result.reverse_values = range_update_reverse_values;
-    result.forward_addresses = range_update_forward_addresses;
-    return result;
-  };
-  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
-  range_update_forward_addresses.clear();
-  const RangeEvaluation delta = run_range(false);
-  const RangeEvaluation ordinary = run_range(true);
-  const RangeEvaluation direct_delta = run_range(false, true, true);
-  check(std::memcmp(&delta.value, &ordinary.value, sizeof(double)) == 0 &&
-            std::memcmp(delta.gradient, ordinary.gradient,
-                        sizeof(delta.gradient)) == 0,
-        "ordered range delta has bitwise ordinary-path parity");
-  check(std::memcmp(&delta.value, &direct_delta.value, sizeof(double)) == 0 &&
-            std::memcmp(delta.gradient, direct_delta.gradient,
-                        sizeof(delta.gradient)) == 0,
-        "multi-descriptor range delta has bitwise packed parity");
-  check(
-      ordinary_update_forward_calls == 4 && ordinary_update_backward_calls == 4,
-      "custom ordered range callbacks force the ordinary path");
-  close(delta.value, 3157.75, "ordered range delta result");
-  const double expected_gradient[] = {0, 0, 4, 8, 16, 32, 3, 6};
-  for (size_t i = 0; i < std::size(expected_gradient); ++i)
-    close(delta.gradient[i], expected_gradient[i],
-          "ordered range delta gradient");
-  const std::vector<std::array<double, 6>> expected_reverse = {
-      {{.75, -1.5, 30, 40, 50, 60}},
-      {{.5, -1, 30, 40, 50, 60}},
-      {{.25, -.5, 30, 40, 50, 60}},
-  };
-  check(delta.reverse_values == expected_reverse &&
-            ordinary.reverse_values == expected_reverse &&
-            direct_delta.reverse_values == expected_reverse,
-        "ordered range delta restores historical primals in LIFO order");
-  check(delta.forward_addresses.size() == 3 &&
-            delta.forward_addresses[0] == delta.forward_addresses[1] &&
-            delta.forward_addresses[1] == delta.forward_addresses[2],
-        "ordered range delta reuses one anchored primal buffer");
-  check(ordinary.forward_addresses.size() == 3 &&
-            ordinary.forward_addresses[0] != ordinary.forward_addresses[1] &&
-            ordinary.forward_addresses[1] != ordinary.forward_addresses[2],
-        "ordinary range fallback keeps distinct output buffers");
-
-  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
-  Executor inactive_delta(outer(inactive_range_update_plan(false)));
-  Executor inactive_ordinary(outer(inactive_range_update_plan(true)));
-  const Evaluation inactive_compact = evaluate(inactive_delta, .25, 0);
-  const Evaluation inactive_reference = evaluate(inactive_ordinary, .25, 0);
-  check(std::memcmp(&inactive_compact, &inactive_reference,
-                    sizeof(Evaluation)) == 0 &&
-            ordinary_update_forward_calls == 3 &&
-            ordinary_update_backward_calls == 0,
-        "inactive range delta has bitwise ordinary-path parity");
-  close(inactive_compact.value, 40.75, "inactive range delta result");
-  close(inactive_compact.gradient[0], 163,
-        "inactive range delta outer gradient");
-
-  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
-  Executor aliased_compact(outer(aliased_update_plan(false)));
-  Executor aliased_ordinary(outer(aliased_update_plan(true)));
-  range_update_forward_addresses.clear();
-  const Evaluation aliased = evaluate(aliased_compact, .25, 0);
-  const auto aliased_compact_addresses = range_update_forward_addresses;
-  range_update_forward_addresses.clear();
-  const Evaluation aliased_reference = evaluate(aliased_ordinary, .25, 0);
-  const auto aliased_ordinary_addresses = range_update_forward_addresses;
-  check(std::memcmp(&aliased, &aliased_reference, sizeof(Evaluation)) == 0 &&
-            ordinary_update_forward_calls == 3 &&
-            ordinary_update_backward_calls == 3,
-        "outgoing alias invalidation has bitwise ordinary-path parity");
-  check(aliased_compact_addresses.size() == 3 &&
-            aliased_compact_addresses[0] != aliased_compact_addresses[1] &&
-            aliased_compact_addresses[1] == aliased_compact_addresses[2] &&
-            aliased_ordinary_addresses.size() == 3 &&
-            aliased_ordinary_addresses[0] != aliased_ordinary_addresses[1] &&
-            aliased_ordinary_addresses[1] != aliased_ordinary_addresses[2],
-        "compact mutation resumes after one copy-on-write update");
-  close(aliased.value, 102, "outgoing aliases preserve snapshot values");
-  close(aliased.gradient[0], 8, "outgoing aliases preserve snapshot gradients");
-
-  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
-  Executor loop_aliased_compact(outer(loop_aliased_update_plan(false)));
-  Executor loop_aliased_ordinary(outer(loop_aliased_update_plan(true)));
-  range_update_forward_addresses.clear();
-  const Evaluation loop_aliased = evaluate(loop_aliased_compact, .25, 0);
-  const auto loop_aliased_compact_addresses = range_update_forward_addresses;
-  range_update_forward_addresses.clear();
-  const Evaluation loop_aliased_reference =
-      evaluate(loop_aliased_ordinary, .25, 0);
-  const auto loop_aliased_ordinary_addresses = range_update_forward_addresses;
-  check(std::memcmp(&loop_aliased, &loop_aliased_reference,
-                    sizeof(Evaluation)) == 0 &&
-            ordinary_update_forward_calls == 3 &&
-            ordinary_update_backward_calls == 3,
-        "loop-backedge alias invalidation has bitwise ordinary-path parity");
-  check(loop_aliased_compact_addresses.size() == 3 &&
-            loop_aliased_compact_addresses[0] !=
-                loop_aliased_compact_addresses[1] &&
-            loop_aliased_compact_addresses[1] ==
-                loop_aliased_compact_addresses[2] &&
-            loop_aliased_ordinary_addresses.size() == 3 &&
-            loop_aliased_ordinary_addresses[0] !=
-                loop_aliased_ordinary_addresses[1] &&
-            loop_aliased_ordinary_addresses[1] !=
-                loop_aliased_ordinary_addresses[2],
-        "compact mutation resumes across an aliasing loop backedge");
-  close(loop_aliased.value, 51.75,
-        "loop-backedge alias preserves snapshot value");
-  close(loop_aliased.gradient[0], 7,
-        "loop-backedge alias preserves snapshot gradient");
-
-  ordinary_update_forward_calls = ordinary_update_backward_calls = 0;
-  Executor retained_compact(outer(retained_scalar_update_plan(false)));
-  Executor retained_ordinary(outer(retained_scalar_update_plan(true)));
-  range_update_forward_addresses.clear();
-  const Evaluation retained_result = evaluate(retained_compact, .25, 0);
-  const auto retained_compact_addresses = range_update_forward_addresses;
-  range_update_forward_addresses.clear();
-  const Evaluation retained_reference = evaluate(retained_ordinary, .25, 0);
-  const auto retained_ordinary_addresses = range_update_forward_addresses;
-  check(std::memcmp(&retained_result, &retained_reference,
-                    sizeof(Evaluation)) == 0 &&
-            ordinary_update_forward_calls == 2 &&
-            ordinary_update_backward_calls == 1,
-        "retained scalar record has bitwise ordinary-path parity");
-  check(retained_compact_addresses.size() == 2 &&
-            retained_compact_addresses[0] == retained_compact_addresses[1] &&
-            retained_ordinary_addresses.size() == 2 &&
-            retained_ordinary_addresses[0] != retained_ordinary_addresses[1],
-        "unshared active scalar update uses retained compact history");
-  close(retained_result.value, 37.25, "retained scalar record value");
-  close(retained_result.gradient[0], 1, "retained scalar record gradient");
-
-  duplicate_site_backward_calls = 0;
-  Executor duplicate_sites(outer(duplicate_record_site_plan()));
-  const Evaluation duplicate = evaluate(duplicate_sites, 2, 3);
-  close(duplicate.value, 6, "duplicate operation record-site value");
-  close(duplicate.gradient[0], 3,
-        "duplicate operation record-site theta gradient");
-  close(duplicate.gradient[1], 2,
-        "duplicate operation record-site beta gradient");
-  check(duplicate_site_backward_calls == 1,
-        "reverse resolves the exact duplicate operation node");
+          "indexed right-hand side update gradient");
 }
 
 static std::shared_ptr<StructuredLoop> integer_history_plan() {
@@ -1993,24 +1694,22 @@ static std::shared_ptr<StructuredLoop> integer_history_plan() {
   const int result = plan->body.add_slot(1, false);
   const int term = plan->body.add_slot(1, false);
   const int next = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
+  plan->imports = {{theta, 0, 0, true}};
   Node arithmetic = call(*plan, OP_INT_ARITH, {iterator, two}, integer_result);
   plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = 2;
   Node multiply = call(*plan, OP_MUL, {theta, integer_result}, term);
   const int multiply_op = multiply.op;
   plan->root =
       sequence({alias(result, zero),
-                counted(lower, upper, iterator, 3,
+                counted(lower, upper, iterator,
                         sequence({std::move(arithmetic), std::move(multiply),
                                   call(*plan, OP_ADD, {result, term}, next),
                                   alias(result, next)}))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(set_forward(plan->root, multiply_op, trace_iterator_forward),
-        "find integer-result trace forward callback");
-  check(set_backward(plan->root, multiply_op, trace_iterator_backward),
-        "find integer-result trace backward callback");
+  plan->prepare();
+  check(set_forward(plan->root, multiply_op, trace_iterator_forward) &&
+            set_backward(plan->root, multiply_op, trace_iterator_backward),
+        "find integer-result trace callbacks");
   return plan;
 }
 
@@ -2023,14 +1722,10 @@ static std::shared_ptr<StructuredLoop> comparison_target_plan() {
   const int compared = plan->body.add_slot(1, false);
   Node comparison = call(*plan, OP_COMPARE, {iterator, zero}, compared);
   plan->body.ops[static_cast<size_t>(comparison.op)].variant = 0;
-  Node target;
-  target.kind = Node::Target;
-  target.src = compared;
-  plan->root = counted(lower, upper, iterator, 3,
-                       sequence({std::move(comparison), std::move(target)}));
+  plan->root = counted(lower, upper, iterator,
+                       sequence({std::move(comparison), target(compared)}));
   plan->has_target = true;
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
@@ -2044,16 +1739,13 @@ static std::shared_ptr<StructuredLoop> computed_nested_bound_plan() {
   Node arithmetic =
       call(*plan, OP_INT_ARITH, {outer_iterator, one}, inner_upper);
   plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = 0;
-  Node target;
-  target.kind = Node::Target;
-  target.src = inner_iterator;
   plan->root = counted(
-      one, two, outer_iterator, 2,
-      sequence({std::move(arithmetic), counted(one, inner_upper, inner_iterator,
-                                               3, std::move(target))}));
+      one, two, outer_iterator,
+      sequence({std::move(arithmetic),
+                counted(one, inner_upper, inner_iterator,
+                        target(inner_iterator))}));
   plan->has_target = true;
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
@@ -2067,8 +1759,7 @@ static std::shared_ptr<StructuredLoop> integer_output_plan(double a, double b) {
   plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = 0;
   plan->root = sequence({std::move(arithmetic), alias(result, integer_result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
@@ -2078,13 +1769,12 @@ static std::shared_ptr<StructuredLoop> imported_integer_output_plan(
   const int left = plan->body.add_slot(1, false);
   const int right = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{left, 0, 0}, {right, 1, 0}};
+  plan->imports = {{left, 0, 0, true}, {right, 1, 0, true}};
   Node arithmetic = call(*plan, OP_INT_ARITH, {left, right}, result);
   plan->body.ops[static_cast<size_t>(arithmetic.op)].variant = variant;
   plan->root = std::move(arithmetic);
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
@@ -2116,7 +1806,6 @@ static double* inactive_workspace_address = nullptr;
 static bool inactive_workspace_stable = true;
 static bool inactive_workspace_disjoint = true;
 static bool inactive_workspace_throw_once = false;
-static int registered_redirect_calls = 0;
 static bool workspace_producer_throw_once = false;
 
 static int64_t inactive_workspace_size(const Op&, const Slot*) { return 3; }
@@ -2160,15 +1849,18 @@ static std::shared_ptr<StructuredLoop> inactive_workspace_plan() {
   const int result = plan->body.add_slot(1, false);
   Node workspace = call(*plan, OP_INT_ARITH, {iterator, two}, first);
   plan->body.ops[static_cast<size_t>(workspace.op)].out2 = second;
+  const int workspace_op = workspace.op;
   plan->root = sequence(
       {alias(result, zero),
-       counted(lower, upper, iterator, 3,
+       counted(lower, upper, iterator,
                sequence({std::move(workspace),
                          call(*plan, OP_ADD, {first, second}, combined),
                          alias(result, combined)}))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
+  const Node* node = find_call(plan->root, workspace_op);
+  check(node && node->storage == Node::Transient,
+        "inactive two-output kernel read by inactive work is transient");
   return plan;
 }
 
@@ -2188,68 +1880,46 @@ static std::shared_ptr<StructuredLoop> inactive_zero_output_plan() {
   plan->body.ops[static_cast<size_t>(second_call.op)].out2 = second;
   plan->root =
       sequence({alias(result, zero),
-                counted(lower, upper, iterator, 3,
+                counted(lower, upper, iterator,
                         sequence({std::move(empty_call), std::move(second_call),
                                   alias(result, second)}))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
-static void redirect_inactive_output(KernelCtx& context) {
-  ++registered_redirect_calls;
-  context.out.data = context.in[0].data;
-}
-
-static std::shared_ptr<StructuredLoop> redirected_inactive_output_plan() {
-  auto plan = std::make_shared<StructuredLoop>();
-  const int lower = scalar(*plan, 1);
-  const int upper = scalar(*plan, 2);
-  const int iterator = plan->body.add_slot(1, false);
-  const int zero = scalar(*plan, 0);
-  const int result = plan->body.add_slot(1, false);
-  plan->root = counted(lower, upper, iterator, 2,
-                       call(*plan, OP_ADD, {iterator, zero}, result));
-  plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  return plan;
-}
-
-static std::shared_ptr<StructuredLoop> inactive_location_target_plan() {
+static std::shared_ptr<StructuredLoop> inactive_target_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int two = scalar(*plan, 2);
   const int three = scalar(*plan, 3);
   const int result = plan->body.add_slot(1, false);
-  Node target;
-  target.kind = Node::Target;
-  target.src = result;
   plan->root =
-      sequence({call(*plan, OP_ADD, {two, three}, result), std::move(target)});
+      sequence({call(*plan, OP_ADD, {two, three}, result), target(result)});
   plan->has_target = true;
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> inactive_location_bound_plan() {
+static std::shared_ptr<StructuredLoop> computed_bound_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int one = scalar(*plan, 1);
   const int two = scalar(*plan, 2);
   const int upper = plan->body.add_slot(1, false);
   const int iterator = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->root =
-      sequence({call(*plan, OP_ADD, {one, two}, upper),
-                counted(one, upper, iterator, 3, alias(result, iterator))});
+  Node bound = call(*plan, OP_ADD, {one, two}, upper);
+  const int bound_op = bound.op;
+  plan->root = sequence(
+      {std::move(bound), counted(one, upper, iterator, alias(result, iterator))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
+  const Node* node = find_call(plan->root, bound_op);
+  check(node && node->storage == Node::Transient,
+        "loop bound read only by control is transient");
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> repeated_forward_only_output_plan(
+static std::shared_ptr<StructuredLoop> repeated_output_plan(
     int upper_value = 4) {
   auto plan = std::make_shared<StructuredLoop>();
   const int lower = scalar(*plan, 1);
@@ -2258,109 +1928,42 @@ static std::shared_ptr<StructuredLoop> repeated_forward_only_output_plan(
   const int two = scalar(*plan, 2);
   const int result = plan->body.add_slot(1, false);
   plan->fills.push_back({result, {99}});
-  plan->root = counted(lower, upper, iterator, std::max(0, upper_value),
+  plan->root = counted(lower, upper, iterator,
                        call(*plan, OP_ADD, {iterator, two}, result));
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
-static std::vector<const double*> forward_only_output_addresses;
-
-static void trace_forward_only_output(KernelCtx& context) {
-  forward_only_output_addresses.push_back(context.out.data);
-  context.out.data[0] = context.in[0].data[0] + context.in[1].data[0];
-}
-
-static void throwing_workspace_producer(KernelCtx& context) {
+static void throwing_producer(KernelCtx& context) {
   if (workspace_producer_throw_once && context.in[0].data[0] == 2) {
     workspace_producer_throw_once = false;
-    throw std::runtime_error("injected workspace producer failure");
+    throw std::runtime_error("injected producer failure");
   }
   context.out.data[0] = context.in[0].data[0] + context.in[1].data[0];
 }
 
-static std::shared_ptr<StructuredLoop> workspace_skipped_escape_plan() {
-  auto plan = std::make_shared<StructuredLoop>();
-  const int lower = scalar(*plan, 1);
-  const int upper = scalar(*plan, 2);
-  const int iterator = plan->body.add_slot(1, false);
-  const int one = scalar(*plan, 1);
-  const int ten = scalar(*plan, 10);
-  const int initial = scalar(*plan, 99);
-  const int produced = plan->body.add_slot(1, false);
-  const int condition = plan->body.add_slot(1, false);
-  const int redirected = plan->body.add_slot(1, false);
-  const int result = plan->body.add_slot(1, false);
-  Node compare = call(*plan, OP_COMPARE, {iterator, one}, condition);
-  plan->body.ops[static_cast<size_t>(compare.op)].variant = 4;
-  Node redirect = call(*plan, OP_COMPARE, {produced}, redirected);
-  const int redirect_op = redirect.op;
-  plan->root = sequence(
-      {alias(result, initial),
-       counted(lower, upper, iterator, 2,
-               sequence({call(*plan, OP_ADD, {iterator, ten}, produced),
-                         std::move(compare),
-                         branch(condition,
-                                sequence({std::move(redirect),
-                                          alias(result, redirected)}),
-                                sequence({}))}))});
-  plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(set_forward(plan->root, redirect_op, redirect_first_input),
-        "find skipped workspace redirect callback");
-  return plan;
-}
-
-static std::shared_ptr<StructuredLoop> workspace_redirect_chain_plan() {
-  auto plan = std::make_shared<StructuredLoop>();
-  const int theta = plan->body.add_slot(1, false);
-  const int lower = scalar(*plan, 1);
-  const int upper = scalar(*plan, 3);
-  const int iterator = plan->body.add_slot(1, false);
-  const int one = scalar(*plan, 1);
-  const int produced = plan->body.add_slot(1, false);
-  const int redirected = plan->body.add_slot(1, false);
-  const int active = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
-  Node redirect = call(*plan, OP_COMPARE, {produced}, redirected);
-  const int redirect_op = redirect.op;
-  Node target;
-  target.kind = Node::Target;
-  target.src = active;
-  plan->root =
-      counted(lower, upper, iterator, 3,
-              sequence({call(*plan, OP_ADD, {iterator, one}, produced),
-                        std::move(redirect),
-                        call(*plan, OP_MUL, {theta, redirected}, active),
-                        std::move(target)}));
-  plan->has_target = true;
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(set_forward(plan->root, redirect_op, redirect_first_input),
-        "find forward-only redirected consumer");
-  return plan;
-}
-
-static std::shared_ptr<StructuredLoop> inactive_location_reverse_plan() {
+static std::shared_ptr<StructuredLoop> inactive_input_reverse_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int two = scalar(*plan, 2);
   const int three = scalar(*plan, 3);
   const int inactive = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
-  plan->root = sequence({call(*plan, OP_ADD, {two, three}, inactive),
-                         call(*plan, OP_MUL, {theta, inactive}, result)});
+  plan->imports = {{theta, 0, 0, true}};
+  Node sum = call(*plan, OP_ADD, {two, three}, inactive);
+  const int sum_op = sum.op;
+  plan->root = sequence(
+      {std::move(sum), call(*plan, OP_MUL, {theta, inactive}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
+  const Node* node = find_call(plan->root, sum_op);
+  check(node && node->storage == Node::Retained && !node->active,
+        "inactive value read by active work is retained");
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> inactive_location_update_plan() {
+static std::shared_ptr<StructuredLoop> inactive_update_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int lower = scalar(*plan, 1);
   const int upper = scalar(*plan, 3);
@@ -2371,23 +1974,16 @@ static std::shared_ptr<StructuredLoop> inactive_location_update_plan() {
   const int rhs = scalar(*plan, 7);
   const int updated = plan->body.add_slot(3, false);
   const int result = plan->body.add_slot(1, false);
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 3, 1, 1, 0}};
-  spec->selected_size = 1;
   Node update =
       call(*plan, OP_SET_INDEX_DYNAMIC, {current, iterator, rhs}, updated);
-  plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
+  attach(*plan, update.op, single_spec(3));
   plan->root =
       sequence({alias(current, base),
-                counted(lower, upper, iterator, 3,
+                counted(lower, upper, iterator,
                         sequence({std::move(update), alias(current, updated)})),
                 call(*plan, OP_SUM_VEC, {current}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 1,
-        "inactive location update selects compact history");
+  plan->prepare();
   return plan;
 }
 
@@ -2428,47 +2024,36 @@ static std::shared_ptr<StructuredLoop> active_workspace_plan() {
   const int product = plan->body.add_slot(1, false);
   const int sum = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
+  plan->imports = {{theta, 0, 0, true}};
   Node workspace = call(*plan, OP_INT_ARITH, {theta, two}, product);
   plan->body.ops[static_cast<size_t>(workspace.op)].out2 = sum;
   plan->root = sequence(
       {std::move(workspace), call(*plan, OP_ADD, {product, sum}, result)});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
+  plan->prepare();
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> custom_integer_plan() {
-  auto plan = integer_output_plan(2, 3);
-  check(set_forward(plan->root, 0, custom_integer_forward),
-        "find custom integer callback");
-  return plan;
-}
-
-static void compact_integer_result_tests() {
+static void integer_result_tests() {
   iterator_forward_values.clear();
   iterator_reverse_values.clear();
   Executor history(outer(integer_history_plan()));
   const Evaluation traced = evaluate(history, .25, 0);
-  close(traced.value, 0, "inline integer history value");
-  close(traced.gradient[0], 0, "inline integer history theta gradient");
+  close(traced.value, 0, "integer history value");
+  close(traced.gradient[0], 0, "integer history theta gradient");
   check(iterator_forward_values == std::vector<double>({-2, 0, 2}),
-        "inline integer forward values are exact");
+        "integer forward values are exact");
   check(iterator_reverse_values == std::vector<double>({2, 0, -2}),
-        "inline integer reverse values preserve history");
+        "integer reverse values preserve history");
 
   Executor comparison_target(outer(comparison_target_plan()));
   const Evaluation compared = evaluate(comparison_target, 0, 0);
-  close(compared.value, 1, "inline comparison target keeps reached values");
-  close(compared.gradient[0], 0, "inline comparison target theta gradient");
-  close(compared.gradient[1], 0, "inline comparison target beta gradient");
+  close(compared.value, 1, "comparison target keeps reached values");
+  close(compared.gradient[0], 0, "comparison target theta gradient");
 
   Executor nested_bound(outer(computed_nested_bound_plan()));
   const Evaluation nested = evaluate(nested_bound, 0, 0);
-  close(nested.value, 9, "inline integer supplies nested loop bound");
-  close(nested.gradient[0], 0, "inline integer bound theta gradient");
-  close(nested.gradient[1], 0, "inline integer bound beta gradient");
+  close(nested.value, 9, "integer result supplies nested loop bound");
 
   for (const auto& point : std::vector<std::pair<double, double>>{
            {static_cast<double>(std::numeric_limits<int32_t>::min()), 0},
@@ -2476,9 +2061,7 @@ static void compact_integer_result_tests() {
     Executor boundary(outer(integer_output_plan(point.first, point.second)));
     const Evaluation result = evaluate(boundary, 0, 0);
     close(result.value, point.first + point.second,
-          "inline integer boundary escapes through output alias");
-    close(result.gradient[0], 0, "inline integer boundary theta gradient");
-    close(result.gradient[1], 0, "inline integer boundary beta gradient");
+          "integer boundary escapes through output alias");
   }
 
   Executor retry(outer(imported_integer_output_plan()));
@@ -2490,11 +2073,10 @@ static void compact_integer_result_tests() {
     threw = std::string(error.what()) ==
             "integer arithmetic exceeds Stan integer range";
   }
-  check(threw, "inline integer preserves arithmetic exception");
+  check(threw, "integer arithmetic exception is preserved");
   const Evaluation retried = evaluate(retry, 2, 3);
-  close(retried.value, 5, "inline integer retry value");
-  close(retried.gradient[0], 0, "inline integer retry theta gradient");
-  close(retried.gradient[1], 0, "inline integer retry beta gradient");
+  close(retried.value, 5, "integer retry value");
+  close(retried.gradient[0], 0, "integer retry theta gradient");
 
   Executor division_retry(outer(imported_integer_output_plan(3)));
   threw = false;
@@ -2503,19 +2085,20 @@ static void compact_integer_result_tests() {
   } catch (const std::domain_error& error) {
     threw = std::string(error.what()) == "integer division by zero";
   }
-  check(threw, "inline integer preserves division exception");
-  const Evaluation divided = evaluate(division_retry, 4, 2);
-  close(divided.value, 2, "inline integer division retry value");
-  close(divided.gradient[0], 0, "inline integer division retry theta gradient");
-  close(divided.gradient[1], 0, "inline integer division retry beta gradient");
+  check(threw, "integer division exception is preserved");
+  close(evaluate(division_retry, 4, 2).value, 2,
+        "integer division retry value");
 
   custom_integer_calls = 0;
-  Executor custom(outer(custom_integer_plan()));
-  const Evaluation custom_result = evaluate(custom, 0, 0);
-  close(custom_result.value, 5.5,
-        "custom integer callback keeps ordinary result semantics");
-  check(custom_integer_calls == 1,
-        "custom integer callback uses ordinary retained path");
+  {
+    auto plan = integer_output_plan(2, 3);
+    check(set_forward(plan->root, 0, custom_integer_forward),
+          "find custom integer callback");
+    Executor custom(outer(plan));
+    close(evaluate(custom, 0, 0).value, 5.5,
+          "node forward override is honoured");
+  }
+  check(custom_integer_calls == 1, "node forward override runs once");
 
   custom_integer_calls = 0;
   {
@@ -2523,12 +2106,10 @@ static void compact_integer_result_tests() {
     replacement.forward = registered_custom_integer_forward;
     ScopedKernelOverride overridden(OP_INT_ARITH, replacement);
     Executor registered_custom(outer(integer_output_plan(2, 3)));
-    const Evaluation registered_result = evaluate(registered_custom, 0, 0);
-    close(registered_result.value, 5.5,
-          "registered custom integer callback is not inlined");
+    close(evaluate(registered_custom, 0, 0).value, 5.5,
+          "registered kernel override is honoured");
   }
-  check(custom_integer_calls == 1,
-        "pre-prepare custom integer callback keeps ordinary path");
+  check(custom_integer_calls == 1, "registered kernel override runs once");
 
   inactive_workspace_calls = 0;
   inactive_workspace_address = nullptr;
@@ -2548,21 +2129,17 @@ static void compact_integer_result_tests() {
       workspace_threw =
           std::string(error.what()) == "injected inactive workspace failure";
     }
-    check(workspace_threw, "inactive workspace preserves callback exception");
+    check(workspace_threw, "transient kernel exception is preserved");
     const Evaluation workspace_result = evaluate(workspace, 0, 0);
     close(workspace_result.value, 11,
-          "inactive workspace preserves second output and retry");
-    close(workspace_result.gradient[0], 0,
-          "inactive workspace retry theta gradient");
-    close(workspace_result.gradient[1], 0,
-          "inactive workspace retry beta gradient");
+          "transient kernel preserves second output and retry");
   }
   check(inactive_workspace_calls == 5,
-        "inactive workspace executes reached callbacks only");
+        "transient kernel executes reached calls only");
   check(inactive_workspace_stable,
-        "inactive callback scratch is reused across calls and retry");
+        "transient scratch is reused across calls and retry");
   check(inactive_workspace_disjoint,
-        "inactive callback workspace descriptors remain disjoint");
+        "transient workspace descriptors remain disjoint");
 
   inactive_workspace_calls = 0;
   inactive_workspace_address = nullptr;
@@ -2575,153 +2152,53 @@ static void compact_integer_result_tests() {
     replacement.scratch_size = inactive_workspace_size;
     ScopedKernelOverride overridden(OP_INT_ARITH, replacement);
     Executor zero_output(outer(inactive_zero_output_plan()));
-    const Evaluation result = evaluate(zero_output, 0, 0);
-    close(result.value, 6,
-          "inactive workspace preserves zero primary and second output");
+    close(evaluate(zero_output, 0, 0).value, 6,
+          "zero-length primary output keeps the second output");
   }
-  check(inactive_workspace_calls == 6,
-        "inactive zero-output callbacks execute without arena anchors");
-  check(inactive_workspace_stable && inactive_workspace_disjoint,
-        "inactive zero-output workspace remains stable and disjoint");
+  check(inactive_workspace_calls == 6, "zero-length outputs execute");
 
-  Evaluation redirected_result, retained_redirected_result;
-  registered_redirect_calls = 0;
+  Executor inactive_target(outer(inactive_target_plan()));
+  close(evaluate(inactive_target, 0, 0).value, 5,
+        "inactive value reaches the target reduction");
+
+  Executor computed_bound(outer(computed_bound_plan()));
+  close(evaluate(computed_bound, 0, 0).value, 3,
+        "computed value supplies a counted-loop bound");
+
+  Executor repeated_output(outer(repeated_output_plan()));
+  close(evaluate(repeated_output, 0, 0).value, 6,
+        "forward-only loop output keeps its final value");
+  Executor zero_trip(outer(repeated_output_plan(0)));
+  close(evaluate(zero_trip, 0, 0).value, 99,
+        "zero-trip loop preserves its initial output");
+
   {
     Kernel replacement = *find_kernel(OP_ADD);
-    replacement.forward = redirect_inactive_output;
+    replacement.forward = throwing_producer;
     ScopedKernelOverride overridden(OP_ADD, replacement);
-    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-    Executor redirected(outer(redirected_inactive_output_plan()));
-    redirected_result = evaluate(redirected, 0, 0);
-    test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
-    Executor retained_redirected(outer(redirected_inactive_output_plan()));
-    retained_redirected_result = evaluate(retained_redirected, 0, 0);
-    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-  }
-  close(redirected_result.value, 2,
-        "registered redirected producer keeps its final value");
-  check(registered_redirect_calls == 4,
-        "registered redirected producer executes every reached call");
-  check(std::memcmp(&redirected_result, &retained_redirected_result,
-                    sizeof(Evaluation)) == 0,
-        "registered redirected producer has bitwise ablation parity");
-
-  Executor inactive_target(outer(inactive_location_target_plan()));
-  const Evaluation targeted = evaluate(inactive_target, 0, 0);
-  close(targeted.value, 5, "inactive arena handle reaches target reduction");
-
-  Executor inactive_bound(outer(inactive_location_bound_plan()));
-  const Evaluation bounded = evaluate(inactive_bound, 0, 0);
-  close(bounded.value, 3, "inactive arena handle supplies counted-loop bound");
-
-  Evaluation reused, retained;
-  {
-    Kernel replacement = *find_kernel(OP_ADD);
-    replacement.forward = trace_forward_only_output;
-    ScopedKernelOverride overridden(OP_ADD, replacement);
-    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-    forward_only_output_addresses.clear();
-    Executor reused_output(outer(repeated_forward_only_output_plan()));
-    reused = evaluate(reused_output, 0, 0);
-    check(forward_only_output_addresses.size() == 4 &&
-              std::adjacent_find(forward_only_output_addresses.begin(),
-                                 forward_only_output_addresses.end(),
-                                 std::not_equal_to<const double*>()) ==
-                  forward_only_output_addresses.end(),
-          "forward-only loop calls reuse one output address");
-    test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
-    forward_only_output_addresses.clear();
-    Executor retained_output(outer(repeated_forward_only_output_plan()));
-    retained = evaluate(retained_output, 0, 0);
-    check(forward_only_output_addresses.size() == 4 &&
-              std::adjacent_find(forward_only_output_addresses.begin(),
-                                 forward_only_output_addresses.end(),
-                                 std::equal_to<const double*>()) ==
-                  forward_only_output_addresses.end(),
-          "forward-only workspace ablation retains distinct outputs");
-    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-
-    forward_only_output_addresses.clear();
-    Executor zero_trip(outer(repeated_forward_only_output_plan(0)));
-    const Evaluation zero_trip_result = evaluate(zero_trip, 0, 0);
-    close(zero_trip_result.value, 99,
-          "zero-trip workspace loop preserves its initial output");
-    check(forward_only_output_addresses.empty(),
-          "zero-trip workspace loop allocates no reached call storage");
-  }
-  close(reused.value, 6, "forward-only loop output keeps final value");
-  check(std::memcmp(&reused, &retained, sizeof(Evaluation)) == 0,
-        "forward-only workspace has bitwise same-binary parity");
-
-  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-  Executor skipped_escape(outer(workspace_skipped_escape_plan()));
-  const Evaluation escaped = evaluate(skipped_escape, 0, 0);
-  test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
-  Executor retained_escape(outer(workspace_skipped_escape_plan()));
-  const Evaluation retained_escaped = evaluate(retained_escape, 0, 0);
-  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-  close(escaped.value, 11,
-        "skipped redirect keeps the earlier workspace producer value");
-  check(std::memcmp(&escaped, &retained_escaped, sizeof(Evaluation)) == 0,
-        "skipped workspace escape has bitwise ablation parity");
-
-  Evaluation retried_workspace, retained_retry;
-  {
-    Kernel replacement = *find_kernel(OP_ADD);
-    replacement.forward = throwing_workspace_producer;
-    ScopedKernelOverride overridden(OP_ADD, replacement);
-    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-    Executor retry_workspace(outer(repeated_forward_only_output_plan(3)));
+    Executor retry_producer(outer(repeated_output_plan(3)));
     workspace_producer_throw_once = true;
-    bool workspace_producer_threw = false;
+    bool producer_threw = false;
     try {
-      (void)evaluate(retry_workspace, 0, 0);
+      (void)evaluate(retry_producer, 0, 0);
     } catch (const std::runtime_error& error) {
-      workspace_producer_threw =
-          std::string(error.what()) == "injected workspace producer failure";
+      producer_threw =
+          std::string(error.what()) == "injected producer failure";
     }
-    check(workspace_producer_threw,
-          "workspace producer preserves its forward exception");
-    retried_workspace = evaluate(retry_workspace, 0, 0);
-    test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
-    Executor retained_workspace(outer(repeated_forward_only_output_plan(3)));
-    retained_retry = evaluate(retained_workspace, 0, 0);
-    test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
+    check(producer_threw, "producer preserves its forward exception");
+    close(evaluate(retry_producer, 0, 0).value, 5,
+          "producer retry rebuilds its output");
   }
-  close(retried_workspace.value, 5,
-        "workspace producer retry rebuilds its canonical output");
-  check(
-      std::memcmp(&retried_workspace, &retained_retry, sizeof(Evaluation)) == 0,
-      "workspace producer retry has bitwise ablation parity");
 
-  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-  Executor redirect_chain(outer(workspace_redirect_chain_plan()));
-  const Evaluation redirected_chain = evaluate(redirect_chain, 2, 0);
-  test_setenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE", "1");
-  Executor retained_chain(outer(workspace_redirect_chain_plan()));
-  const Evaluation retained_redirect_chain = evaluate(retained_chain, 2, 0);
-  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
-  close(redirected_chain.value, 18,
-        "redirected workspace input preserves target values");
-  close(redirected_chain.gradient[0], 9,
-        "redirected workspace input preserves reverse primals");
-  check(std::memcmp(&redirected_chain, &retained_redirect_chain,
-                    sizeof(Evaluation)) == 0,
-        "redirected workspace input has bitwise ablation parity");
-
-  Executor inactive_reverse(outer(inactive_location_reverse_plan()));
+  Executor inactive_reverse(outer(inactive_input_reverse_plan()));
   const Evaluation reversed = evaluate(inactive_reverse, 4, 0);
-  close(reversed.value, 20,
-        "active operation reads inactive arena-handle primal");
-  close(reversed.gradient[0], 5,
-        "reverse operation reads inactive arena-handle primal");
-  close(reversed.gradient[1], 0,
-        "inactive arena-handle input has no adjoint storage");
+  close(reversed.value, 20, "active operation reads an inactive primal");
+  close(reversed.gradient[0], 5, "reverse reads the inactive primal");
+  close(reversed.gradient[1], 0, "inactive input has no adjoint");
 
-  Executor inactive_update(outer(inactive_location_update_plan()));
-  const Evaluation updated = evaluate(inactive_update, 0, 0);
-  close(updated.value, 21,
-        "inactive arena handle supplies compact-update base");
+  Executor inactive_update(outer(inactive_update_plan()));
+  close(evaluate(inactive_update, 0, 0).value, 21,
+        "inactive in-place update value");
 
   active_workspace_forward_calls = 0;
   active_workspace_backward_calls = 0;
@@ -2737,11 +2214,10 @@ static void compact_integer_result_tests() {
     const Evaluation active = evaluate(active_workspace, 3, 0);
     close(active.value, 11, "active scratchful callback value");
     close(active.gradient[0], 3, "active scratchful callback gradient");
-    close(active.gradient[1], 0, "active scratchful callback beta gradient");
   }
   check(active_workspace_forward_calls == 1 &&
             active_workspace_backward_calls == 1,
-        "active scratchful callback retains reverse record");
+        "active scratchful callback retains one reverse record");
   check(active_workspace_history_ok,
         "active scratchful callback retains forward scratch for reverse");
 }
@@ -2750,7 +2226,7 @@ static std::atomic<int> invariant_first_calls{0};
 static std::atomic<int> invariant_second_calls{0};
 static std::atomic<int> invariant_active_calls{0};
 static std::atomic<int> invariant_variant_calls{0};
-static std::atomic<int> compact_dependent_compare_calls{0};
+static std::atomic<int> dependent_compare_calls{0};
 
 static void count_invariant_first(KernelCtx& context) {
   ++invariant_first_calls;
@@ -2772,9 +2248,8 @@ static void count_invariant_variant(KernelCtx& context) {
   ++invariant_variant_calls;
   find_kernel(OP_ADD)->forward(context);
 }
-
-static void count_compact_dependent_compare(KernelCtx& context) {
-  ++compact_dependent_compare_calls;
+static void count_dependent_compare(KernelCtx& context) {
+  ++dependent_compare_calls;
   find_kernel(OP_COMPARE)->forward(context);
 }
 
@@ -2791,7 +2266,7 @@ static std::shared_ptr<StructuredLoop> invariant_plan(int trips) {
   const int active = plan->body.add_slot(1, false);
   const int variant = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
+  plan->imports = {{theta, 0, 0, true}};
   Node first = call(*plan, OP_ADD, {two, three}, invariant_first);
   const int first_op = first.op;
   Node second = call(*plan, OP_MUL, {invariant_first, two}, invariant_second);
@@ -2802,25 +2277,26 @@ static std::shared_ptr<StructuredLoop> invariant_plan(int trips) {
   const int variant_op = variant_call.op;
   plan->root =
       sequence({alias(result, theta),
-                counted(lower, upper, iterator, std::max(0, trips),
+                counted(lower, upper, iterator,
                         sequence({std::move(first), std::move(second),
                                   std::move(active_call), alias(result, active),
                                   std::move(variant_call)}))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(set_forward(plan->root, first_op, count_invariant_first),
-        "find first invariant callback");
-  check(set_forward(plan->root, second_op, count_invariant_second),
-        "find transitive invariant callback");
-  check(set_forward(plan->root, active_op, count_invariant_active),
-        "find active callback");
-  check(set_forward(plan->root, variant_op, count_invariant_variant),
-        "find iterator-dependent callback");
+  plan->prepare();
+  check(find_call(plan->root, first_op)->invariant_loop == 0 &&
+            find_call(plan->root, second_op)->invariant_loop == 0 &&
+            find_call(plan->root, active_op)->invariant_loop == -1 &&
+            find_call(plan->root, variant_op)->invariant_loop == -1,
+        "invariance follows the written set of the enclosing loop");
+  check(set_forward(plan->root, first_op, count_invariant_first) &&
+            set_forward(plan->root, second_op, count_invariant_second) &&
+            set_forward(plan->root, active_op, count_invariant_active) &&
+            set_forward(plan->root, variant_op, count_invariant_variant),
+        "find invariant plan callbacks");
   return plan;
 }
 
-static std::shared_ptr<StructuredLoop> compact_invariant_guard_plan() {
+static std::shared_ptr<StructuredLoop> dependent_guard_plan() {
   auto plan = std::make_shared<StructuredLoop>();
   const int theta = plan->body.add_slot(1, false);
   const int one = scalar(*plan, 1);
@@ -2837,20 +2313,15 @@ static std::shared_ptr<StructuredLoop> compact_invariant_guard_plan() {
   const int term = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
   const int next = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
-
-  auto spec = std::make_shared<DynamicIndexSpec>();
-  spec->axes = {{DynamicIndexSpec::Axis::Single, 1, 1, 1, 0}};
-  spec->selected_size = 1;
+  plan->imports = {{theta, 0, 0, true}};
   Node update = call(*plan, OP_SET_INDEX_DYNAMIC, {current, one, rhs}, updated);
-  plan->body.ops[static_cast<size_t>(update.op)].udata = spec.get();
-  plan->body.udata_pool.push_back(spec);
+  attach(*plan, update.op, single_spec(1));
   Node comparison = call(*plan, OP_COMPARE, {current, threshold}, compared);
   const int comparison_op = comparison.op;
   plan->body.ops[static_cast<size_t>(comparison_op)].variant = 2;
   plan->root =
       sequence({alias(current, base), alias(result, zero),
-                counted(one, three, iterator, 3,
+                counted(one, three, iterator,
                         sequence({call(*plan, OP_MUL, {theta, iterator}, rhs),
                                   std::move(update), alias(current, updated),
                                   std::move(comparison),
@@ -2858,34 +2329,29 @@ static std::shared_ptr<StructuredLoop> compact_invariant_guard_plan() {
                                   call(*plan, OP_ADD, {result, term}, next),
                                   alias(result, next)}))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(plan->compact_update_sites == 1,
-        "compact invariant guard selects compact history");
-  check(set_forward(plan->root, comparison_op, count_compact_dependent_compare),
-        "find compact-dependent comparison callback");
+  plan->prepare();
+  check(find_call(plan->root, comparison_op)->invariant_loop == -1,
+        "a read of an in-place updated container is not invariant");
+  check(set_forward(plan->root, comparison_op, count_dependent_compare),
+        "find dependent comparison callback");
   return plan;
 }
 
 static Evaluation evaluate_invariant(Executor& executor, double theta) {
-  executor.params_data()[0] = theta;
-  executor.params_data()[1] = 0;
-  Evaluation result;
-  result.value = executor.gradient(result.gradient);
-  return result;
+  return evaluate(executor, theta, 0);
 }
 
 static void loop_invariant_reuse_tests() {
-  test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
   auto plan = invariant_plan(3);
   Executor enabled(outer(plan));
   invariant_first_calls = invariant_second_calls = 0;
   invariant_active_calls = invariant_variant_calls = 0;
   const Evaluation first = evaluate_invariant(enabled, .25);
+  close(first.value, 30.25, "invariant plan value");
+  close(first.gradient[0], 1, "invariant plan gradient");
   check(invariant_first_calls == 1 && invariant_second_calls == 1,
-        "inactive invariant chain executes once per loop invocation");
-  check(invariant_active_calls == 3,
-        "active loop work retains every reverse record");
+        "inactive invariant chain executes once per loop entry");
+  check(invariant_active_calls == 3, "active loop work runs every iteration");
   check(invariant_variant_calls == 3, "iterator-dependent work is not reused");
   const Evaluation second = evaluate_invariant(enabled, .25);
   check(invariant_first_calls == 2 && invariant_second_calls == 2,
@@ -2893,40 +2359,13 @@ static void loop_invariant_reuse_tests() {
   check(std::memcmp(&first, &second, sizeof(Evaluation)) == 0,
         "repeated invariant evaluation is bitwise stable");
 
-  test_setenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE", "1");
-  Executor disabled(outer(plan));
-  invariant_first_calls = invariant_second_calls = 0;
-  invariant_active_calls = invariant_variant_calls = 0;
-  const Evaluation baseline = evaluate_invariant(disabled, .25);
-  test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
-  check(invariant_first_calls == 3 && invariant_second_calls == 3,
-        "invariant ablation executes every reached callback");
-  check(std::memcmp(&first, &baseline, sizeof(Evaluation)) == 0,
-        "invariant reuse has bitwise same-binary parity");
-
-  // Compact versions can deliberately reuse one physical handle. Their
-  // entire alias root must remain outside the handle-keyed invariant cache,
-  // including data-only consumers whose output is used by active work.
-  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
-  compact_dependent_compare_calls = 0;
-  Executor compact_guard(outer(compact_invariant_guard_plan()));
-  const Evaluation compact_guard_reused =
-      evaluate_invariant(compact_guard, .25);
-  check(compact_dependent_compare_calls == 3,
-        "compact-dependent data work recomputes with shared handles");
-  close(compact_guard_reused.value, .5,
-        "compact-dependent data work preserves changing values");
-  close(compact_guard_reused.gradient[0], 2,
-        "compact-dependent data work preserves active gradients");
-  test_setenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS", "1");
-  compact_dependent_compare_calls = 0;
-  const Evaluation compact_guard_distinct =
-      evaluate_invariant(compact_guard, .25);
-  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
-  check(compact_dependent_compare_calls == 3 &&
-            std::memcmp(&compact_guard_reused, &compact_guard_distinct,
-                        sizeof(Evaluation)) == 0,
-        "compact-dependent data work has bitwise Ref-ablation parity");
+  dependent_compare_calls = 0;
+  Executor dependent(outer(dependent_guard_plan()));
+  const Evaluation dependent_result = evaluate_invariant(dependent, .25);
+  check(dependent_compare_calls == 3,
+        "work reading an in-place container recomputes every iteration");
+  close(dependent_result.value, .5, "dependent guard value");
+  close(dependent_result.gradient[0], 2, "dependent guard gradient");
 
   auto zero = invariant_plan(0);
   Executor zero_executor(outer(zero));
@@ -2936,9 +2375,8 @@ static void loop_invariant_reuse_tests() {
         "zero-trip loop does not pre-execute invariants");
   close(zero_result.value, .25, "zero-trip invariant value");
 
-  // A downstream site can run before a conditional invariant is first
-  // reached. Exact input-handle matching must refresh it when that definition
-  // appears, then permit reuse.
+  // A conditional definition first reached in a later iteration: the
+  // definition is invariant, its consumer reads a loop-written slot and is not.
   auto late = std::make_shared<StructuredLoop>();
   const int late_theta = late->body.add_slot(1, false);
   const int late_lower = scalar(*late, 1);
@@ -2948,7 +2386,7 @@ static void loop_invariant_reuse_tests() {
   const int late_condition = late->body.add_slot(1, false);
   const int late_source = late->body.add_slot(1, false);
   const int late_result = late->body.add_slot(1, false);
-  late->imports = {{late_theta, 0, 0}};
+  late->imports = {{late_theta, 0, 0, true}};
   Node comparison =
       call(*late, OP_COMPARE, {late_iterator, late_one}, late_condition);
   late->body.ops[static_cast<size_t>(comparison.op)].variant = 2;
@@ -2957,25 +2395,22 @@ static void loop_invariant_reuse_tests() {
   Node late_use = call(*late, OP_ADD, {late_source, late_one}, late_result);
   const int late_use_op = late_use.op;
   late->root = counted(
-      late_lower, late_upper, late_iterator, 3,
+      late_lower, late_upper, late_iterator,
       sequence(
           {std::move(comparison),
            branch(late_condition, std::move(late_definition), sequence({})),
            std::move(late_use)}));
   late->outputs = {late_result};
-  late->prepare(1 << 20);
-  late->dynamic_history = true;
-  check(set_forward(late->root, late_definition_op, count_invariant_first),
-        "find late invariant definition");
-  check(set_forward(late->root, late_use_op, count_invariant_second_add),
-        "find late invariant consumer");
+  late->prepare();
+  check(set_forward(late->root, late_definition_op, count_invariant_first) &&
+            set_forward(late->root, late_use_op, count_invariant_second_add),
+        "find late invariant callbacks");
   invariant_first_calls = invariant_second_calls = 0;
   Executor late_executor(outer(late));
-  const Evaluation late_result_value = evaluate_invariant(late_executor, 0);
-  close(late_result_value.value, 3,
-        "invariant cache observes a late conditional definition");
-  check(invariant_first_calls == 1 && invariant_second_calls == 2,
-        "changed input handles refresh a downstream invariant cache");
+  close(evaluate_invariant(late_executor, 0).value, 3,
+        "late conditional definition value");
+  check(invariant_first_calls == 1 && invariant_second_calls == 3,
+        "late definition is cached and its loop-written consumer is not");
 
   auto while_plan = std::make_shared<StructuredLoop>();
   const int while_theta = while_plan->body.add_slot(1, false);
@@ -2986,7 +2421,7 @@ static void loop_invariant_reuse_tests() {
   const int while_next = while_plan->body.add_slot(1, false);
   const int while_invariant = while_plan->body.add_slot(1, false);
   const int while_result = while_plan->body.add_slot(1, false);
-  while_plan->imports = {{while_theta, 0, 0}};
+  while_plan->imports = {{while_theta, 0, 0, true}};
   Node while_compare = call(*while_plan, OP_COMPARE,
                             {while_three, while_counter}, while_condition);
   while_plan->body.ops[static_cast<size_t>(while_compare.op)].variant = 2;
@@ -2994,21 +2429,20 @@ static void loop_invariant_reuse_tests() {
       call(*while_plan, OP_ADD, {while_one, while_one}, while_invariant);
   const int while_constant_op = while_constant.op;
   while_plan->root = while_loop(
-      while_condition, 3, std::move(while_compare),
+      while_condition, std::move(while_compare),
       sequence(
           {std::move(while_constant),
            call(*while_plan, OP_ADD, {while_counter, while_one}, while_next),
            alias(while_counter, while_next),
            alias(while_result, while_invariant)}));
   while_plan->outputs = {while_result};
-  while_plan->prepare(1 << 20);
-  while_plan->dynamic_history = true;
+  while_plan->prepare();
   check(set_forward(while_plan->root, while_constant_op, count_invariant_first),
         "find while invariant callback");
   invariant_first_calls = 0;
   Executor while_executor(outer(while_plan));
-  const Evaluation while_result_value = evaluate_invariant(while_executor, 0);
-  close(while_result_value.value, 2, "while invariant result");
+  close(evaluate_invariant(while_executor, 0).value, 2,
+        "while invariant result");
   check(invariant_first_calls == 1,
         "while body reuses its inactive invariant result");
 }
@@ -3032,7 +2466,7 @@ static void record_control_add_backward(KernelCtx& context) {
 }
 static void throw_then_record_control_add(KernelCtx& context) {
   if (control_throw_once.exchange(false))
-    throw std::runtime_error("injected inactive-control failure");
+    throw std::runtime_error("injected control failure");
   record_control_add(context);
 }
 
@@ -3063,7 +2497,7 @@ static std::shared_ptr<StructuredLoop> control_cone_plan(bool active_control) {
   const int condition = plan->body.add_slot(1, false);
   const int result = plan->body.add_slot(1, false);
   const int updated = plan->body.add_slot(1, false);
-  plan->imports = {{theta, 0, 0}};
+  plan->imports = {{theta, 0, 0, true}};
   Node first_call = call(*plan, OP_ADD, {iterator, zero}, first);
   const int first_op = first_call.op;
   std::vector<Node> control;
@@ -3085,140 +2519,53 @@ static std::shared_ptr<StructuredLoop> control_cone_plan(bool active_control) {
       branch(condition, sequence({std::move(update), alias(result, updated)}),
              sequence({})));
   plan->root =
-      sequence({alias(result, zero), counted(lower, upper, iterator, 3,
-                                             sequence(std::move(control)))});
+      sequence({alias(result, zero),
+                counted(lower, upper, iterator, sequence(std::move(control)))});
   plan->outputs = {result};
-  plan->prepare(1 << 20);
-  plan->dynamic_history = true;
-  check(set_forward(plan->root, first_op, record_control_add),
-        "find inactive-control first callback");
-  check(set_forward(plan->root, compare_op, record_control_compare),
-        "find inactive-control terminal callback");
+  plan->prepare();
+  check(find_call(plan->root, first_op)->storage ==
+            (active_control ? Node::Retained : Node::Transient),
+        "control-cone head storage follows its readers' activity");
+  check(find_call(plan->root, compare_op)->storage == Node::Transient,
+        "control-cone comparison is transient");
+  check(set_forward(plan->root, first_op, record_control_add) &&
+            set_forward(plan->root, compare_op, record_control_compare),
+        "find control-cone callbacks");
   if (active_control)
     check(
         set_backward(plan->root, active_middle_op, record_control_add_backward),
-        "find later active control-cone backward callback");
+        "find active control-cone backward callback");
   return plan;
 }
 
-static void inactive_control_tests() {
-  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
+static void control_tests() {
   auto plan = control_cone_plan(false);
-  Executor enabled(outer(plan));
+  Executor inactive(outer(plan));
   control_first_outputs.clear();
   control_second_outputs.clear();
-  const Evaluation direct = evaluate_invariant(enabled, .25);
+  const Evaluation direct = evaluate_invariant(inactive, .25);
   close(direct.value, .5, "inactive-control branch result");
   close(direct.gradient[0], 2, "inactive-control branch gradient");
   check(control_first_outputs.size() == 3 &&
             control_second_outputs.size() == 3 &&
             one_address(control_first_outputs) &&
             one_address(control_second_outputs),
-        "inactive control cone uses body-sized canonical outputs");
+        "transient control cone reuses one workspace cell per kernel");
 
-  test_setenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL", "1");
-  Executor disabled(outer(plan));
-  control_first_outputs.clear();
-  control_second_outputs.clear();
-  const Evaluation ordinary = evaluate_invariant(disabled, .25);
-  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
-  check(std::memcmp(&direct, &ordinary, sizeof(Evaluation)) == 0,
-        "inactive-control elision has bitwise same-binary parity");
-  check(control_first_outputs.size() == 3 &&
-            distinct_addresses(control_first_outputs),
-        "inactive-control ablation retains per-call outputs");
-
-  // An active external handle used only by a later site rejects the complete
-  // cone before its inactive first output is overwritten. Reverse must retain
-  // and invoke the active middle callback.
   auto active_plan = control_cone_plan(true);
   Executor active_executor(outer(active_plan));
   control_first_outputs.clear();
   control_second_outputs.clear();
   control_backward_calls = 0;
   const Evaluation active = evaluate_invariant(active_executor, .25);
-  close(active.value, .5, "later-active control-cone result");
-  close(active.gradient[0], 2, "later-active control-cone gradient");
+  close(active.value, .5, "active control-cone result");
+  close(active.gradient[0], 2, "active control-cone gradient");
   check(control_first_outputs.size() == 3 &&
             distinct_addresses(control_first_outputs),
-        "later active input makes the whole control cone ordinary");
+        "a value read by active work keeps every version");
   check(control_backward_calls == 3,
-        "later active control site preserves zero-seed reverse callbacks");
+        "active control member runs its backward every iteration");
 
-  // H6C can reuse an invariant first member while H6B continues direct
-  // execution for the iterator-dependent remainder of the same cone. The
-  // early H6C return must still finish its H6B site and avoid cone reentry.
-  auto interaction_plan = std::make_shared<StructuredLoop>();
-  const int interaction_theta = interaction_plan->body.add_slot(1, false);
-  const int interaction_lower = scalar(*interaction_plan, 1);
-  const int interaction_upper = scalar(*interaction_plan, 3);
-  const int interaction_iterator = interaction_plan->body.add_slot(1, false);
-  const int interaction_zero = scalar(*interaction_plan, 0);
-  const int interaction_two = scalar(*interaction_plan, 2);
-  const int interaction_three = scalar(*interaction_plan, 3);
-  const int interaction_limit = scalar(*interaction_plan, 8);
-  const int interaction_invariant = interaction_plan->body.add_slot(1, false);
-  const int interaction_variant = interaction_plan->body.add_slot(1, false);
-  const int interaction_condition = interaction_plan->body.add_slot(1, false);
-  const int interaction_result = interaction_plan->body.add_slot(1, false);
-  const int interaction_updated = interaction_plan->body.add_slot(1, false);
-  interaction_plan->imports = {{interaction_theta, 0, 0}};
-  Node interaction_first =
-      call(*interaction_plan, OP_ADD, {interaction_two, interaction_three},
-           interaction_invariant);
-  const int interaction_first_op = interaction_first.op;
-  Node interaction_later =
-      call(*interaction_plan, OP_ADD,
-           {interaction_iterator, interaction_invariant}, interaction_variant);
-  const int interaction_later_op = interaction_later.op;
-  Node interaction_compare =
-      call(*interaction_plan, OP_COMPARE,
-           {interaction_variant, interaction_limit}, interaction_condition);
-  interaction_plan->body.ops[static_cast<size_t>(interaction_compare.op)]
-      .variant = 0;
-  const int interaction_compare_op = interaction_compare.op;
-  Node interaction_update =
-      call(*interaction_plan, OP_ADD, {interaction_result, interaction_theta},
-           interaction_updated);
-  interaction_plan->root = sequence(
-      {alias(interaction_result, interaction_zero),
-       counted(
-           interaction_lower, interaction_upper, interaction_iterator, 3,
-           sequence({std::move(interaction_first), std::move(interaction_later),
-                     std::move(interaction_compare),
-                     branch(interaction_condition,
-                            sequence({std::move(interaction_update),
-                                      alias(interaction_result,
-                                            interaction_updated)}),
-                            sequence({}))}))});
-  interaction_plan->outputs = {interaction_result};
-  interaction_plan->prepare(1 << 20);
-  interaction_plan->dynamic_history = true;
-  check(set_forward(interaction_plan->root, interaction_first_op,
-                    count_invariant_first),
-        "find H6C member of inactive control cone");
-  check(set_forward(interaction_plan->root, interaction_later_op,
-                    record_control_add),
-        "find later H6B member after H6C reuse");
-  check(set_forward(interaction_plan->root, interaction_compare_op,
-                    record_control_compare),
-        "find terminal H6B member after H6C reuse");
-  invariant_first_calls = 0;
-  control_first_outputs.clear();
-  control_second_outputs.clear();
-  Executor interaction_executor(outer(interaction_plan));
-  const Evaluation interaction = evaluate_invariant(interaction_executor, .25);
-  close(interaction.value, .5, "H6C and H6B interaction result");
-  close(interaction.gradient[0], 2, "H6C and H6B interaction gradient");
-  check(invariant_first_calls == 1,
-        "H6C reuses the first inactive control-cone member");
-  check(control_first_outputs.size() == 3 &&
-            control_second_outputs.size() == 3 &&
-            one_address(control_first_outputs) &&
-            one_address(control_second_outputs),
-        "H6B continues direct execution after H6C reuse");
-
-  // While guards include the final false condition evaluation.
   auto while_plan = std::make_shared<StructuredLoop>();
   const int while_theta = while_plan->body.add_slot(1, false);
   const int counter = scalar(*while_plan, 0);
@@ -3228,35 +2575,31 @@ static void inactive_control_tests() {
   const int first = while_plan->body.add_slot(1, false);
   const int condition = while_plan->body.add_slot(1, false);
   const int next = while_plan->body.add_slot(1, false);
-  while_plan->imports = {{while_theta, 0, 0}};
+  while_plan->imports = {{while_theta, 0, 0, true}};
   Node first_call = call(*while_plan, OP_ADD, {counter, zero}, first);
   const int first_op = first_call.op;
   Node compare = call(*while_plan, OP_COMPARE, {three, first}, condition);
   while_plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
   const int compare_op = compare.op;
   while_plan->root = while_loop(
-      condition, 3, sequence({std::move(first_call), std::move(compare)}),
+      condition, sequence({std::move(first_call), std::move(compare)}),
       sequence({call(*while_plan, OP_ADD, {counter, one}, next),
                 alias(counter, next)}));
   while_plan->outputs = {counter};
-  while_plan->prepare(1 << 20);
-  while_plan->dynamic_history = true;
-  check(set_forward(while_plan->root, first_op, record_control_add),
-        "find while control-cone first callback");
-  check(set_forward(while_plan->root, compare_op, record_control_compare),
-        "find while control-cone terminal callback");
+  while_plan->prepare();
+  check(set_forward(while_plan->root, first_op, record_control_add) &&
+            set_forward(while_plan->root, compare_op, record_control_compare),
+        "find while control-cone callbacks");
   control_first_outputs.clear();
   control_second_outputs.clear();
   Executor while_executor(outer(while_plan));
-  const Evaluation while_value = evaluate_invariant(while_executor, 0);
-  close(while_value.value, 3, "inactive-control while result");
+  close(evaluate_invariant(while_executor, 0).value, 3,
+        "while without capacity proof runs to its guard");
   check(control_first_outputs.size() == 4 &&
             control_second_outputs.size() == 4 &&
             one_address(control_first_outputs),
-        "inactive-control while includes its final false guard");
+        "while guard evaluates once more than its body");
 
-  // A value that escapes the cone cannot use canonical storage because a
-  // later iteration could overwrite a published historical value.
   auto escaped_plan = std::make_shared<StructuredLoop>();
   const int escaped_theta = escaped_plan->body.add_slot(1, false);
   const int escaped_lower = scalar(*escaped_plan, 1);
@@ -3267,7 +2610,7 @@ static void inactive_control_tests() {
   const int escaped_first = escaped_plan->body.add_slot(1, false);
   const int escaped_condition = escaped_plan->body.add_slot(1, false);
   const int escaped_output = escaped_plan->body.add_slot(1, false);
-  escaped_plan->imports = {{escaped_theta, 0, 0}};
+  escaped_plan->imports = {{escaped_theta, 0, 0, true}};
   Node escaped_add = call(*escaped_plan, OP_ADD,
                           {escaped_iterator, escaped_zero}, escaped_first);
   const int escaped_add_op = escaped_add.op;
@@ -3276,25 +2619,22 @@ static void inactive_control_tests() {
            escaped_condition);
   escaped_plan->body.ops[static_cast<size_t>(escaped_compare.op)].variant = 0;
   escaped_plan->root =
-      counted(escaped_lower, escaped_upper, escaped_iterator, 3,
+      counted(escaped_lower, escaped_upper, escaped_iterator,
               sequence({std::move(escaped_add), std::move(escaped_compare),
                         branch(escaped_condition, sequence({}), sequence({})),
                         alias(escaped_output, escaped_first)}));
   escaped_plan->outputs = {escaped_output};
-  escaped_plan->prepare(1 << 20);
-  escaped_plan->dynamic_history = true;
+  escaped_plan->prepare();
   check(set_forward(escaped_plan->root, escaped_add_op, record_control_add),
         "find escaping control value callback");
   control_first_outputs.clear();
   Executor escaped_executor(outer(escaped_plan));
-  const Evaluation escaped = evaluate_invariant(escaped_executor, 0);
-  close(escaped.value, 3, "escaping control value result");
+  close(evaluate_invariant(escaped_executor, 0).value, 3,
+        "escaping control value result");
   check(control_first_outputs.size() == 3 &&
             distinct_addresses(control_first_outputs),
-        "escaping control value retains ordinary history");
+        "an aliased control value is retained");
 
-  // If a cone callback throws after direct execution starts, a fresh forward
-  // must rebuild its handles and start the cone from a clean state.
   auto retry_plan = control_cone_plan(false);
   int retry_op = -1;
   std::function<void(const Node&)> find_first = [&](const Node& node) {
@@ -3316,31 +2656,21 @@ static void inactive_control_tests() {
   try {
     (void)evaluate_invariant(retry_executor, .25);
   } catch (const std::runtime_error& error) {
-    threw = std::string(error.what()) == "injected inactive-control failure";
+    threw = std::string(error.what()) == "injected control failure";
   }
-  check(threw, "inactive-control callback preserves forward exception");
+  check(threw, "transient callback preserves its forward exception");
   const Evaluation retry = evaluate_invariant(retry_executor, .25);
   check(std::memcmp(&direct, &retry, sizeof(Evaluation)) == 0,
-        "inactive-control retry rebuilds clean execution state");
+        "retry after a transient failure rebuilds clean state");
 }
 
-static Evaluation evaluate(Executor& executor, double theta, double beta) {
-  executor.params_data()[0] = theta;
-  executor.params_data()[1] = beta;
-  Evaluation result;
-  result.value = executor.gradient(result.gradient);
-  return result;
-}
-
-static void dynamic_history_concurrency_tests() {
+static void concurrency_tests() {
   auto reference_plan = recurrence(64);
   Executor reference(outer(reference_plan));
   const Evaluation expected_a = evaluate(reference, .1, .7);
   const Evaluation expected_b = evaluate(reference, -.2, .3);
 
-  auto dynamic_plan = recurrence(64);
-  dynamic_plan->dynamic_history = true;
-  const Graph graph = outer(dynamic_plan);
+  const Graph graph = outer(recurrence(64));
   Executor first(graph), second(graph);
   std::atomic<bool> start{false};
   std::atomic<bool> correct{true};
@@ -3361,7 +2691,7 @@ static void dynamic_history_concurrency_tests() {
   a.join();
   b.join();
   check(correct.load(std::memory_order_relaxed),
-        "dynamic history is isolated across concurrent executors");
+        "executor state is isolated across concurrent executors");
 }
 
 static std::atomic<bool> fail_forward{false};
@@ -3391,9 +2721,8 @@ static bool install_failure_callbacks(StructuredLoop& plan, Node& node) {
   return false;
 }
 
-static void dynamic_history_failure_tests() {
+static void failure_tests() {
   auto plan = recurrence(8);
-  plan->dynamic_history = true;
   check(install_failure_callbacks(*plan, plan->root),
         "failure test finds a native callback");
   Executor executor(outer(plan));
@@ -3409,7 +2738,7 @@ static void dynamic_history_failure_tests() {
     forward_threw =
         std::string(error.what()) == "injected structured forward failure";
   }
-  check(forward_threw, "dynamic history preserves a forward exception");
+  check(forward_threw, "forward exception is preserved");
 
   fail_backward.store(true);
   bool backward_threw = false;
@@ -3419,17 +2748,75 @@ static void dynamic_history_failure_tests() {
     backward_threw =
         std::string(error.what()) == "injected structured backward failure";
   }
-  check(backward_threw, "dynamic history preserves a backward exception");
+  check(backward_threw, "backward exception is preserved");
+
+  bool stale_reverse = false;
+  try {
+    KernelCtx stale{};
+    structured_loop_backward(stale);
+  } catch (const std::logic_error&) {
+    stale_reverse = true;
+  }
+  check(stale_reverse, "reverse without a forward is refused");
 
   auto reference_plan = recurrence(8);
   Executor reference(outer(reference_plan));
   const Evaluation expected = evaluate(reference, .1, .7);
   const Evaluation actual = evaluate(executor, .1, .7);
-  close(actual.value, expected.value, "dynamic history retry value");
+  close(actual.value, expected.value, "retry after failures value");
   close(actual.gradient[0], expected.gradient[0],
-        "dynamic history retry theta gradient");
+        "retry after failures theta gradient");
   close(actual.gradient[1], expected.gradient[1],
-        "dynamic history retry beta gradient");
+        "retry after failures beta gradient");
+}
+
+static void refusal_tests() {
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int theta = plan->body.add_slot(1, false);
+    plan->imports = {{theta, 0, 0, true}};
+    Node exit;
+    exit.kind = Node::Break;
+    plan->root = sequence({std::move(exit)});
+    plan->outputs = {theta};
+    bool rejected = false;
+    try {
+      plan->prepare();
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    check(rejected, "break outside a loop is rejected");
+  }
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int theta = plan->body.add_slot(1, false);
+    const int wide = plan->body.add_slot(2, false);
+    plan->imports = {{theta, 0, 0, true}};
+    plan->root = alias(wide, theta);
+    plan->outputs = {wide};
+    bool rejected = false;
+    try {
+      plan->prepare();
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    check(rejected, "alias between different lengths is rejected");
+  }
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int theta = plan->body.add_slot(1, false);
+    const int result = plan->body.add_slot(1, false);
+    plan->imports = {{theta, 0, 0, true}};
+    plan->root = call(*plan, OP_LOOP, {theta}, result);
+    plan->outputs = {result};
+    bool rejected = false;
+    try {
+      plan->prepare();
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    check(rejected, "nested OP_LOOP is rejected");
+  }
 }
 
 static void automatic_policy_tests() {
@@ -3442,9 +2829,6 @@ static void automatic_policy_tests() {
   compare_gradients(small_auto, small_off, {{.1, .7}},
                     "small auto target parity", "small auto gradient parity");
 
-  // A repeated outer loop containing runtime control is the structural class
-  // that motivated ctsem support. The selector sees the shape and trip count;
-  // it does not know this fixture's name.
   const auto hazard_auto = compile_fixture("structured_nested", 32, Mode::Auto);
   const auto hazard_off = compile_fixture("structured_nested", 32, Mode::Off);
   const StructuredLoop* hazard_plan = retained(hazard_auto);
@@ -3467,10 +2851,6 @@ static void automatic_policy_tests() {
   check(retained(renamed_auto) != nullptr,
         "alpha-renaming preserves automatic structural selection");
 
-  // The same structural hazard can contain a body outside native coverage.
-  // Force proves that the candidate is unsupported; auto must discard that
-  // isolated trial and produce the exact legacy graph rather than publishing
-  // a partial OP_LOOP.
   bool force_refused = false;
   try {
     (void)compile_fixture("structured_auto_refusal", 32, Mode::Force);
@@ -3502,15 +2882,16 @@ static void direct_index_lowering_tests() {
   const StructuredLoop* packed_plan = retained(packed);
   check(direct_plan && packed_plan,
         "direct-index ablation keeps structured execution");
-  if (direct_plan && packed_plan)
-    check(direct_plan->compact_update_sites ==
-                  packed_plan->compact_update_sites &&
-              direct_plan->compact_update_sites > 0,
-          "direct updates preserve compact-update admission");
   size_t direct_reads = 0, direct_updates = 0, direct_concats = 0,
          packed_reads = 0, packed_updates = 0, packed_concats = 0;
   bool direct_multi_selector = false;
-  if (direct_plan)
+  size_t in_place = 0;
+  std::function<void(const Node&)> count_in_place = [&](const Node& node) {
+    in_place += node.kind == Node::KernelCall && node.storage == Node::InPlace;
+    for (const auto& child : node.children) count_in_place(child);
+  };
+  if (direct_plan) {
+    count_in_place(direct_plan->root);
     for (const auto& op : direct_plan->body.ops) {
       direct_concats += op.opcode == OP_CONCAT2;
       if (op.opcode == OP_SET_INDEX_DYNAMIC) {
@@ -3533,6 +2914,8 @@ static void direct_index_lowering_tests() {
         }
       }
     }
+  }
+  check(in_place > 0, "lowered indexed assignment is fused in place");
   if (packed_plan)
     for (const auto& op : packed_plan->body.ops) {
       packed_concats += op.opcode == OP_CONCAT2;
@@ -3565,48 +2948,32 @@ static void direct_index_lowering_tests() {
   compare_gradients(direct, legacy, {{.1, .7}, {-.2, .3}},
                     "direct-index legacy value parity",
                     "direct-index legacy gradient parity");
-
-  test_setenv("STANLI_STRUCTURED_HISTORY_BYTES", "1");
-  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
-  const auto dynamic_direct =
-      compile_fixture("structured_direct_index", 4, Mode::Force);
-  test_setenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS", "1");
-  const auto dynamic_packed =
-      compile_fixture("structured_direct_index", 4, Mode::Force);
-  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
-  test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
-  check(retained(dynamic_direct) && retained(dynamic_direct)->dynamic_history,
-        "direct-index test exercises dynamic history");
-  compare_gradients(dynamic_direct, dynamic_packed, {{.1, .7}, {-.2, .3}},
-                    "dynamic direct-index value parity",
-                    "dynamic direct-index gradient parity");
 }
 
 int main() {
   test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
-  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
+  transient_classification_tests();
+  invariant_active_reuse_tests();
+  inplace_import_base_tests();
+  inplace_promotion_tests();
+  inplace_duplicate_position_tests();
+  inplace_lifo_undo_tests();
   runtime_trip_tests();
-  compact_import_reference_tests();
+  import_reference_tests();
   direct_index_kernel_tests();
   forced_control_tests();
-  dynamic_history_tests();
-  compact_scalar_index_tests();
-  compact_iterator_history_tests();
-  compact_integer_result_tests();
+  iterator_history_tests();
+  scalar_index_tests();
+  integer_result_tests();
   loop_invariant_reuse_tests();
-  inactive_control_tests();
-  dynamic_history_concurrency_tests();
-  dynamic_history_failure_tests();
+  control_tests();
+  concurrency_tests();
+  failure_tests();
+  refusal_tests();
   automatic_policy_tests();
   direct_index_lowering_tests();
   test_unsetenv("STANLI_STRUCTURED_LOOPS");
-  test_unsetenv("STANLI_STRUCTURED_HISTORY_BYTES");
-  test_unsetenv("STANLI_NO_STRUCTURED_INVARIANT_REUSE");
-  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_CONTROL");
-  test_unsetenv("STANLI_NO_STRUCTURED_INACTIVE_WORKSPACE");
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
-  test_unsetenv("STANLI_NO_STRUCTURED_RECORD_SCALARS");
-  test_unsetenv("STANLI_NO_STRUCTURED_SHARED_UPDATE_REFS");
-  if (failures == 0) std::printf("test_structured_loop_production OK\n");
+  if (failures == 0) std::printf("test_structured_loop OK\n");
   return failures != 0;
 }
