@@ -8,39 +8,6 @@ std::map<std::string, IntRange> region_analysis_ints;
 int region_control_depth = 0;
 bool region_control_active = false;
 unsigned structured_outer_depth = 0;
-uint64_t structured_target_sites = 0;
-static constexpr uint64_t region_target_limit = 1ULL << 32;
-uint64_t region_target_count(const mir::Stmt& s, unsigned depth = 0) {
-  if (depth > 32) return region_target_limit;
-  uint64_t count = s.kind == mir::Stmt::TargetPE;
-  if (s.read_transform && s.read_transform->kind != mir::Transform::Identity)
-    ++count;
-  std::function<void(const mir::Expr&)> expression = [&](const mir::Expr& e) {
-    if (e.name.find("_jacobian") != std::string::npos) ++count;
-    if (e.kind == mir::Expr::FunApp &&
-        e.fn_lib == mir::Expr::Lib::UserDefined) {
-      auto f = fun_defs.find(e.name);
-      if (f == fun_defs.end())
-        count = region_target_limit;
-      else
-        for (const auto& body : f->second->body)
-          count = std::min(region_target_limit,
-                           count + region_target_count(body, depth + 1));
-    }
-    for (const auto& a : e.args) expression(a);
-  };
-  expression(s.rhs);
-  expression(s.init);
-  expression(s.cond);
-  expression(s.target);
-  expression(s.lower);
-  expression(s.upper);
-  for (const auto& arg : s.fn_args) expression(arg);
-  for (const auto& body : s.body)
-    count = std::min(region_target_limit,
-                     count + region_target_count(body, depth + 1));
-  return std::min(region_target_limit, count);
-}
 
 void region_flush() {
   while (region_emitted < g.ops.size()) {
@@ -1062,15 +1029,80 @@ std::optional<Val> region_expr(const mir::Expr& e) {
   return lower_runtime_scalar(e);
 }
 
+static const std::map<std::string, int>& runtime_comparisons() {
+  static const std::map<std::string, int> table = {
+      {"Less__", 0}, {"Leq__", 1},    {"Greater__", 2},
+      {"Geq__", 3},  {"Equals__", 4}, {"NEquals__", 5},
+      {"PNot__", 6}, {"is_nan", 7},   {"is_inf", 8}};
+  return table;
+}
+static const std::map<std::string, int>& runtime_int_arithmetic() {
+  static const std::map<std::string, int> table = {
+      {"Plus__", 0},      {"Minus__", 1},  {"Times__", 2}, {"Divide__", 3},
+      {"IntDivide__", 3}, {"Modulo__", 4}, {"PMinus__", 5}};
+  return table;
+}
+static bool runtime_scalar_form(const mir::Expr& e) {
+  if (e.kind != mir::Expr::FunApp || e.fn_lib != mir::Expr::Lib::StanLib)
+    return false;
+  if (runtime_comparisons().count(e.name)) return true;
+  return e.unsized.leaf == mir::UnsizedLeaf::Int && e.unsized.depth == 0 &&
+         runtime_int_arithmetic().count(e.name);
+}
+
+bool runtime_only(const mir::Expr& e) {
+  return !in_write_array && needs_runtime_value(e) && !try_eval_pure(e);
+}
+bool runtime_int_expression(const mir::Expr& e) {
+  if (in_write_array || !runtime_scalar_form(e)) return false;
+  bool found = false;
+  const auto integer_reads = [&](const auto& self, const mir::Expr& x) -> bool {
+    if (x.kind == mir::Expr::Var || x.kind == mir::Expr::Indexed) {
+      if (!needs_runtime_value(x)) return true;
+      found = true;
+      return x.type_ == "UInt";
+    }
+    for (const auto& argument : x.args)
+      if (!self(self, argument)) return false;
+    return true;
+  };
+  return integer_reads(integer_reads, e) && found && !try_eval_pure(e);
+}
+bool runtime_selector(const mir::Expr& index) {
+  for (const auto& argument : index.args)
+    if (runtime_only(argument)) return true;
+  return false;
+}
+std::optional<long> static_int(const mir::Expr& e) {
+  try {
+    return eval_int(e);
+  } catch (const CompileError&) {
+    if (in_write_array || !needs_runtime_value(e)) throw;
+    return std::nullopt;
+  }
+}
+void bind_runtime_int(const std::string& name, const mir::Expr& e,
+                      const std::string& raw) {
+  Val v = lower_expr(e);
+  SlotInfo expected;
+  expected.param_free = v.si.param_free;
+  require_binding(v, 1, expected, name, raw);
+  v.autodiff = false;
+  v.si = expected;
+  if (in_write_array) v.si.param_free = false;
+  scope[name] = v;
+  decls[name] = DeclView{1, false, expected};
+  int_env.erase(name);
+  int_locals.erase(name);
+  td.env().erase(name);
+}
+
 // These kernels also serve consumers outside a retained region. Integer
 // identity and dependence do not imply that a value is known at prepare.
 std::optional<Val> lower_runtime_scalar(const mir::Expr& e) {
   if (e.kind != mir::Expr::FunApp || e.fn_lib != mir::Expr::Lib::StanLib)
     return {};
-  static const std::map<std::string, int> comparisons = {
-      {"Less__", 0}, {"Leq__", 1},    {"Greater__", 2},
-      {"Geq__", 3},  {"Equals__", 4}, {"NEquals__", 5},
-      {"PNot__", 6}, {"is_nan", 7},   {"is_inf", 8}};
+  const auto& comparisons = runtime_comparisons();
   auto comparison = comparisons.find(e.name);
   if (comparison != comparisons.end()) {
     Val a = lower_expr(e.args.at(0)), v;
@@ -1086,9 +1118,7 @@ std::optional<Val> lower_runtime_scalar(const mir::Expr& e) {
     return v;
   }
   if (e.unsized.leaf == mir::UnsizedLeaf::Int && e.unsized.depth == 0) {
-    static const std::map<std::string, int> arithmetic = {
-        {"Plus__", 0},      {"Minus__", 1},  {"Times__", 2}, {"Divide__", 3},
-        {"IntDivide__", 3}, {"Modulo__", 4}, {"PMinus__", 5}};
+    const auto& arithmetic = runtime_int_arithmetic();
     auto operation = arithmetic.find(e.name);
     if (operation != arithmetic.end()) {
       auto range = region_range(e);
@@ -1731,14 +1761,6 @@ static int64_t region_setting(const char* name, int64_t fallback) {
   return end && *end == 0 && value >= 0 ? static_cast<int64_t>(value)
                                         : fallback;
 }
-bool structured_enabled() const {
-  if (in_write_array) return false;
-  // Auto is deliberately scoped to a selected trial. In the parent lowerer
-  // it must leave all ordinary scalar/index/control decisions alone.
-  return region_current || structured_policy == StructuredMode::Prefer ||
-         structured_policy == StructuredMode::Force;
-}
-
 bool region_runtime_control(const mir::Stmt& root) const {
   std::set<std::string> visited;
   std::function<bool(const mir::Stmt&, unsigned)> statement;

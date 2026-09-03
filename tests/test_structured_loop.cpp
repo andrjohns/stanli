@@ -16,6 +16,7 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -837,14 +838,16 @@ static std::string fixture_mir(const std::string& name) {
   return text.str();
 }
 
-enum class Mode { Auto, Off, Force };
+enum class Mode { Auto, Off, Prefer, Force };
 
 static CompiledModel compile_fixture(const std::string& name, DataMap data,
                                      Mode mode) {
   if (mode == Mode::Auto)
     test_unsetenv("STANLI_STRUCTURED_LOOPS");
   else
-    test_setenv("STANLI_STRUCTURED_LOOPS", mode == Mode::Off ? "0" : "force");
+    test_setenv("STANLI_STRUCTURED_LOOPS", mode == Mode::Off      ? "0"
+                                           : mode == Mode::Prefer ? "1"
+                                                                  : "force");
   return compile_model(fixture_mir(name), data);
 }
 
@@ -2998,6 +3001,27 @@ static void automatic_policy_tests() {
                     "top-level while gradient parity");
 }
 
+static void prefer_parent_tests() {
+  DataMap data;
+  data.set_int("N", 1);
+  std::optional<CompiledModel> prefer;
+  try {
+    prefer = compile_fixture("structured_prefer_shape", data, Mode::Prefer);
+  } catch (const CompileError& error) {
+    std::printf("  %s\n", error.what());
+  }
+  check(prefer.has_value(),
+        "prefer compiles a shape query on an indexed value");
+  if (!prefer) return;
+  const auto legacy =
+      compile_fixture("structured_prefer_shape", data, Mode::Off);
+  check(retained(*prefer) == nullptr, "prefer finds no loop to retain");
+  check(same_graph_shape(prefer->graph, legacy.graph),
+        "prefer leaves loop-free lowering on the legacy path");
+  compare_gradients(*prefer, legacy, {{.5, -.2, .1}, {-1.0, .4, .3}},
+                    "prefer target parity", "prefer gradient parity");
+}
+
 static void direct_index_lowering_tests() {
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
   const auto direct =
@@ -4034,6 +4058,7 @@ int main() {
   failure_tests();
   refusal_tests();
   automatic_policy_tests();
+  prefer_parent_tests();
   direct_index_lowering_tests();
   memo_tests();
   trace_tests();
