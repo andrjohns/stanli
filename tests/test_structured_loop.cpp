@@ -143,10 +143,12 @@ static std::shared_ptr<DynamicIndexSpec> single_spec(int64_t extent) {
 }
 
 static Graph outer(std::shared_ptr<StructuredLoop> plan,
-                   std::vector<int64_t> param_lens = {1, 1}) {
+                   std::vector<int64_t> param_lens = {1, 1},
+                   std::vector<int64_t> data_lens = {}) {
   Graph graph;
   std::vector<int> inputs;
   for (int64_t len : param_lens) inputs.push_back(graph.add_slot(len, true));
+  for (int64_t len : data_lens) inputs.push_back(graph.add_slot(len, false));
   int64_t output_len = plan->has_target ? 1 : 0;
   for (int slot : plan->outputs) output_len += plan->body.slots[slot].len;
   const int output = graph.add_slot(output_len, false);
@@ -2348,8 +2350,9 @@ static void loop_invariant_reuse_tests() {
   check(invariant_active_calls == 3, "active loop work runs every iteration");
   check(invariant_variant_calls == 3, "iterator-dependent work is not reused");
   const Evaluation second = evaluate_invariant(enabled, .25);
-  check(invariant_first_calls == 2 && invariant_second_calls == 6,
-        "invariant cache resets for a new forward evaluation");
+  check(invariant_first_calls == 1 && invariant_second_calls == 3 &&
+            invariant_active_calls == 6 && invariant_variant_calls == 3,
+        "data-only work replays from the memo tape on a new evaluation");
   check(std::memcmp(&first, &second, sizeof(Evaluation)) == 0,
         "repeated invariant evaluation is bitwise stable");
 
@@ -2942,6 +2945,338 @@ static void direct_index_lowering_tests() {
                     "direct-index legacy gradient parity");
 }
 
+static std::atomic<int> memo_int_calls{0};
+static std::atomic<int> memo_compare_calls{0};
+static std::atomic<int> memo_index_calls{0};
+
+static void count_memo_int(KernelCtx& context) {
+  ++memo_int_calls;
+  find_kernel(OP_INT_ARITH)->forward(context);
+}
+static void count_memo_compare(KernelCtx& context) {
+  ++memo_compare_calls;
+  find_kernel(OP_COMPARE)->forward(context);
+}
+static void count_memo_index(KernelCtx& context) {
+  ++memo_index_calls;
+  find_kernel(OP_INDEX_DYNAMIC)->forward(context);
+}
+
+static const Node* find_kind(const Node& node, Node::Kind kind) {
+  if (node.kind == kind) return &node;
+  for (const auto& child : node.children)
+    if (const Node* found = find_kind(child, kind)) return found;
+  return nullptr;
+}
+
+static size_t count_memo(const Node& node) {
+  size_t total = node.memo ? 1 : 0;
+  for (const auto& child : node.children) total += count_memo(child);
+  return total;
+}
+
+// theta * sum(1..n) where the sum is an integer chain on the data import n.
+static std::shared_ptr<StructuredLoop> memo_counter_plan(bool with_break) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int n = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int three = scalar(*plan, 3);
+  const int iterator = plan->body.add_slot(1, false);
+  const int acc = plan->body.add_slot(1, false);
+  plan->fills.push_back({acc, {0}});
+  const int next = plan->body.add_slot(1, false);
+  const int stop = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false}, {n, 2, 0, false, true}};
+  Node step = call(*plan, OP_INT_ARITH, {acc, iterator}, next);
+  const int step_op = step.op;
+  std::vector<Node> body;
+  if (with_break) {
+    Node compare = call(*plan, OP_COMPARE, {iterator, three}, stop);
+    plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+    Node exit;
+    exit.kind = Node::Break;
+    body.push_back(std::move(compare));
+    body.push_back(branch(stop, std::move(exit), sequence({})));
+  }
+  body.push_back(std::move(step));
+  body.push_back(alias(acc, next));
+  plan->root = sequence({counted(one, n, iterator, sequence(std::move(body))),
+                         call(*plan, OP_MUL, {theta, acc}, result)});
+  plan->outputs = {result};
+  plan->prepare();
+  check(set_forward(plan->root, step_op, count_memo_int),
+        "find memo counter callback");
+  return plan;
+}
+
+static Evaluation evaluate_memo(Executor& executor, double theta, double n) {
+  executor.value_ptr(2)[0] = n;
+  return evaluate(executor, theta, 0);
+}
+
+// index table[k] > 0 selects the active arm; `active_compare` swaps the
+// comparison threshold for theta so the condition depends on a parameter.
+static std::shared_ptr<StructuredLoop> memo_branch_plan(bool active_compare) {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int table = plan->body.add_slot(3, false);
+  const int k = plan->body.add_slot(1, false);
+  const int zero = scalar(*plan, 0);
+  const int three = scalar(*plan, 3);
+  const int picked = plan->body.add_slot(1, false);
+  const int condition = plan->body.add_slot(1, false);
+  const int scaled = plan->body.add_slot(1, false);
+  const int result = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false},
+                   {table, 2, 0, false, true},
+                   {k, 3, 0, false, true}};
+  Node index = call(*plan, OP_INDEX_DYNAMIC, {table, k}, picked);
+  attach(*plan, index.op, single_spec(3));
+  const int index_op = index.op;
+  Node compare = call(*plan, OP_COMPARE,
+                      {picked, active_compare ? theta : zero}, condition);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+  const int compare_op = compare.op;
+  plan->root =
+      sequence({std::move(index), std::move(compare),
+                branch(condition,
+                       sequence({call(*plan, OP_MUL, {theta, three}, scaled),
+                                 alias(result, scaled)}),
+                       alias(result, zero))});
+  plan->outputs = {result};
+  plan->prepare();
+  check(set_forward(plan->root, index_op, count_memo_index) &&
+            set_forward(plan->root, compare_op, count_memo_compare),
+        "find memo branch callbacks");
+  return plan;
+}
+
+static Evaluation evaluate_branch(Executor& executor, double theta,
+                                  double table_at_two) {
+  executor.value_ptr(2)[0] = 0;
+  executor.value_ptr(2)[1] = table_at_two;
+  executor.value_ptr(2)[2] = 0;
+  executor.value_ptr(3)[0] = 2;
+  return evaluate(executor, theta, 0);
+}
+
+static void memo_tests() {
+  {
+    auto plan = memo_counter_plan(false);
+    const Node* loop = find_kind(plan->root, Node::For);
+    check(loop && loop->memo && plan->memo_count == 1 &&
+              count_memo(plan->root) == 1,
+          "data-only counted loop is the memo node");
+    memo_int_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {1}));
+    const Evaluation first = evaluate_memo(executor, .25, 4);
+    close(first.value, 2.5, "memo loop first value");
+    close(first.gradient[0], 10, "memo loop first gradient");
+    check(memo_int_calls == 4, "memo loop records on the first evaluation");
+    const Evaluation second = evaluate_memo(executor, .5, 4);
+    close(second.value, 5, "memo loop replayed value");
+    close(second.gradient[0], 10, "memo loop replayed gradient");
+    check(memo_int_calls == 4, "memo loop replays without kernel calls");
+    const Evaluation third = evaluate_memo(executor, .5, 4);
+    check(std::memcmp(&second, &third, sizeof(Evaluation)) == 0,
+          "memo replay is bitwise stable");
+  }
+  {
+    auto plan = memo_branch_plan(false);
+    check(plan->memo_count == 1 && plan->root.children.size() == 2 &&
+              plan->root.children[0].memo &&
+              plan->root.children[0].kind == Node::Sequence &&
+              plan->root.children[0].children.size() == 2 &&
+              !plan->root.children[1].memo,
+          "data-only condition cone is grouped into one memo sequence");
+    memo_index_calls = memo_compare_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {3, 1}));
+    const Evaluation first = evaluate_branch(executor, .25, 5);
+    close(first.value, .75, "memo branch first value");
+    close(first.gradient[0], 3, "memo branch first gradient");
+    const Evaluation second = evaluate_branch(executor, .5, 5);
+    close(second.value, 1.5, "memo branch replayed value");
+    close(second.gradient[0], 3, "memo branch replayed gradient");
+    check(memo_index_calls == 1 && memo_compare_calls == 1,
+          "memo condition cone is not recomputed");
+    Executor other(outer(memo_branch_plan(false), {1, 1}, {3, 1}));
+    const Evaluation no_arm = evaluate_branch(other, .25, 0);
+    close(no_arm.value, 0, "memo branch takes the data-selected arm");
+    close(no_arm.gradient[0], 0, "memo branch inactive arm gradient");
+  }
+  {
+    auto plan = memo_branch_plan(true);
+    const Node* branch_node = find_kind(plan->root, Node::If);
+    check(branch_node && !branch_node->memo && plan->memo_count == 1 &&
+              plan->root.children[0].memo &&
+              plan->root.children[0].children.size() == 1,
+          "parameter-dependent comparison leaves only the data read memoized");
+    memo_index_calls = memo_compare_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {3, 1}));
+    const Evaluation first = evaluate_branch(executor, .25, 5);
+    close(first.value, .75, "dependent branch first value");
+    close(first.gradient[0], 3, "dependent branch first gradient");
+    const Evaluation second = evaluate_branch(executor, 10, 5);
+    close(second.value, 0, "dependent branch switches arms");
+    close(second.gradient[0], 0, "dependent branch switched gradient");
+    check(memo_compare_calls == 2 && memo_index_calls == 1,
+          "parameter-dependent comparison runs every evaluation");
+  }
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int theta = plan->body.add_slot(1, false);
+    const int n = plan->body.add_slot(1, false);
+    const int one = scalar(*plan, 1);
+    const int two = scalar(*plan, 2);
+    const int zero = scalar(*plan, 0);
+    const int iterator = plan->body.add_slot(1, false);
+    const int positive = plan->body.add_slot(1, false);
+    const int doubled = plan->body.add_slot(1, false);
+    const int acc = plan->body.add_slot(1, false);
+    plan->fills.push_back({acc, {0}});
+    const int result = plan->body.add_slot(1, false);
+    plan->imports = {{theta, 0, 0, true, false}, {n, 2, 0, false, true}};
+    Node compare = call(*plan, OP_COMPARE, {theta, zero}, positive);
+    plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+    Node step = call(*plan, OP_INT_ARITH, {two, two}, doubled);
+    plan->body.ops[static_cast<size_t>(step.op)].variant = 2;
+    const int step_op = step.op;
+    plan->root = sequence(
+        {std::move(compare),
+         branch(positive,
+                counted(one, n, iterator,
+                        sequence({std::move(step), alias(acc, doubled)})),
+                sequence({})),
+         call(*plan, OP_MUL, {theta, acc}, result)});
+    plan->outputs = {result};
+    plan->prepare();
+    check(plan->memo_count == 0 && count_memo(plan->root) == 0,
+          "loop under a parameter-dependent branch is not memoized");
+    check(set_forward(plan->root, step_op, count_memo_int),
+          "find guarded loop callback");
+    memo_int_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {1}));
+    const Evaluation skipped = evaluate_memo(executor, -.5, 3);
+    close(skipped.value, 0, "guarded loop skipped value");
+    close(skipped.gradient[0], 0, "guarded loop skipped gradient");
+    check(memo_int_calls == 0, "guarded loop skipped executes nothing");
+    const Evaluation first = evaluate_memo(executor, .25, 3);
+    close(first.value, 1, "guarded loop taken value");
+    close(first.gradient[0], 4, "guarded loop taken gradient");
+    const Evaluation second = evaluate_memo(executor, .5, 3);
+    close(second.value, 2, "guarded loop second value");
+    close(second.gradient[0], 4, "guarded loop second gradient");
+    check(memo_int_calls == 2, "guarded loop recomputes on every entry");
+  }
+  {
+    auto plan = memo_counter_plan(true);
+    const Node* loop = find_kind(plan->root, Node::For);
+    check(loop && loop->memo && plan->memo_count == 1,
+          "break targeting a loop inside the memo node is allowed");
+    memo_int_calls = 0;
+    Executor executor(outer(plan, {1, 1}, {1}));
+    const Evaluation first = evaluate_memo(executor, .25, 10);
+    close(first.value, 1.5, "memo break loop first value");
+    close(first.gradient[0], 6, "memo break loop first gradient");
+    const Evaluation second = evaluate_memo(executor, .5, 10);
+    close(second.value, 3, "memo break loop replayed value");
+    close(second.gradient[0], 6, "memo break loop replayed gradient");
+    check(memo_int_calls == 3, "memo break loop replays without kernel calls");
+
+    auto escaping = std::make_shared<StructuredLoop>();
+    const int theta = escaping->body.add_slot(1, false);
+    const int n = escaping->body.add_slot(1, false);
+    const int one = scalar(*escaping, 1);
+    const int three = scalar(*escaping, 3);
+    const int iterator = escaping->body.add_slot(1, false);
+    const int stop = escaping->body.add_slot(1, false);
+    const int term = escaping->body.add_slot(1, false);
+    const int acc = escaping->body.add_slot(1, false);
+    escaping->fills.push_back({acc, {0}});
+    const int next = escaping->body.add_slot(1, false);
+    escaping->imports = {{theta, 0, 0, true, false}, {n, 2, 0, false, true}};
+    Node compare = call(*escaping, OP_COMPARE, {iterator, three}, stop);
+    escaping->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+    const int compare_op = compare.op;
+    Node exit;
+    exit.kind = Node::Break;
+    escaping->root = counted(
+        one, n, iterator,
+        sequence(
+            {std::move(compare), branch(stop, std::move(exit), sequence({})),
+             call(*escaping, OP_MUL, {theta, iterator}, term),
+             call(*escaping, OP_ADD, {acc, term}, next), alias(acc, next)}));
+    escaping->outputs = {acc};
+    escaping->prepare();
+    const Node* guard = find_kind(escaping->root, Node::If);
+    const Node* body = &escaping->root.children[0];
+    check(guard && !guard->memo && !escaping->root.memo &&
+              escaping->memo_count == 1 && body->children.size() == 5 &&
+              body->children[0].memo && body->children[0].children.size() == 1,
+          "branch whose break escapes is not memoized, its condition is");
+    check(set_forward(escaping->root, compare_op, count_memo_compare),
+          "find escaping break callback");
+    memo_compare_calls = 0;
+    Executor escaping_executor(outer(escaping, {1, 1}, {1}));
+    const Evaluation escaped = evaluate_memo(escaping_executor, .25, 10);
+    close(escaped.value, 1.5, "escaping break value");
+    close(escaped.gradient[0], 6, "escaping break gradient");
+    check(memo_compare_calls == 4, "escaping break guard evaluated per trip");
+    const Evaluation replayed = evaluate_memo(escaping_executor, .5, 10);
+    close(replayed.value, 3, "escaping break replayed value");
+    close(replayed.gradient[0], 6, "escaping break replayed gradient");
+    check(memo_compare_calls == 4, "escaping break guard replays from tape");
+  }
+  {
+    auto plan = std::make_shared<StructuredLoop>();
+    const int theta = plan->body.add_slot(1, false);
+    const int k = plan->body.add_slot(1, false);
+    const int zero = scalar(*plan, 0);
+    const int one = scalar(*plan, 1);
+    const int two = scalar(*plan, 2);
+    const int three = scalar(*plan, 3);
+    const int x = plan->body.add_slot(1, false);
+    const int scaled = plan->body.add_slot(1, false);
+    const int condition = plan->body.add_slot(1, false);
+    const int result = plan->body.add_slot(1, false);
+    plan->imports = {{theta, 0, 0, true, false}, {k, 2, 0, false, true}};
+    Node compare = call(*plan, OP_COMPARE, {k, two}, condition);
+    plan->body.ops[static_cast<size_t>(compare.op)].variant = 4;
+    plan->root = sequence({call(*plan, OP_MUL, {theta, three}, scaled),
+                           alias(x, scaled), std::move(compare),
+                           branch(condition, sequence({}), alias(x, zero)),
+                           call(*plan, OP_MUL, {x, one}, result)});
+    plan->outputs = {result};
+    plan->prepare();
+    const Node* guard = find_kind(plan->root, Node::If);
+    check(guard && !guard->memo && plan->memo_count == 1,
+          "conditional data-only write of a parameter slot is not memoized");
+    Executor executor(outer(plan, {1, 1}, {1}));
+    const Evaluation first = evaluate_memo(executor, .25, 2);
+    close(first.value, .75, "untaken data-only overwrite first value");
+    close(first.gradient[0], 3, "untaken data-only overwrite first gradient");
+    const Evaluation second = evaluate_memo(executor, .5, 2);
+    close(second.value, 1.5, "untaken data-only overwrite second value");
+    close(second.gradient[0], 3, "untaken data-only overwrite second gradient");
+  }
+  {
+    const Graph graph = outer(memo_counter_plan(false), {1, 1}, {1});
+    Executor first(graph), second(graph);
+    memo_int_calls = 0;
+    const Evaluation a = evaluate_memo(first, .25, 4);
+    check(memo_int_calls == 4, "first executor records its own tape");
+    const Evaluation b = evaluate_memo(second, .25, 4);
+    check(memo_int_calls == 8, "second executor does not share the tape");
+    check(std::memcmp(&a, &b, sizeof(Evaluation)) == 0,
+          "independent tapes agree");
+    (void)evaluate_memo(first, .5, 4);
+    (void)evaluate_memo(second, .5, 4);
+    check(memo_int_calls == 8, "each executor replays its own tape");
+  }
+}
+
 int main() {
   test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
   transient_classification_tests();
@@ -2964,6 +3299,7 @@ int main() {
   refusal_tests();
   automatic_policy_tests();
   direct_index_lowering_tests();
+  memo_tests();
   test_unsetenv("STANLI_STRUCTURED_LOOPS");
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
   if (failures == 0) std::printf("test_structured_loop OK\n");

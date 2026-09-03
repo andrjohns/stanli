@@ -96,7 +96,11 @@ void prepare_node(StructuredLoop& p, Node& n, unsigned depth,
   ++p.node_count;
   if (n.storage != Node::InPlace) n.storage = Node::Retained;
   n.active = false;
+  n.memo = false;
   n.invariant_loop = -1;
+  n.memo_index = -1;
+  n.memo_outs.clear();
+  n.memo_fresh = 0;
   n.site = ~uint32_t{0};
   n.workspace = -1;
   n.loop_index = -1;
@@ -232,6 +236,232 @@ void fuse_updates(StructuredLoop& p, Node& n, SlotUses& uses) {
   for (auto& c : n.children) fuse_updates(p, c, uses);
 }
 
+struct Memoizer {
+  StructuredLoop& p;
+  const SlotUses& uses;
+  std::vector<char> param_dep, escape;
+  bool changed = false;
+
+  Memoizer(StructuredLoop& plan, const SlotUses& slot_uses)
+      : p(plan),
+        uses(slot_uses),
+        param_dep(plan.body.slots.size(), 0),
+        escape(plan.loop_count, 0) {
+    for (const auto& in : p.imports)
+      if (!in.data_only) param_dep[in.slot] = 1;
+  }
+
+  void mark(std::vector<char>& set, int i) {
+    if (!set[i]) set[i] = changed = true;
+  }
+  bool controlled(const Node& n) const {
+    switch (n.kind) {
+      case Node::If:
+        return param_dep[n.condition];
+      case Node::For:
+        return param_dep[n.lower] || param_dep[n.upper] || escape[n.loop_index];
+      case Node::While:
+        return param_dep[n.condition] || escape[n.loop_index];
+      default:
+        return false;
+    }
+  }
+
+  void propagate(const Node& n, bool ctrl, int loop) {
+    switch (n.kind) {
+      case Node::KernelCall: {
+        const Op& op = p.body.ops[n.op];
+        bool any = ctrl;
+        for (int k = 0; k < op.n_in; ++k) any |= param_dep[op.in[k]] != 0;
+        if (!any) return;
+        if (n.storage == Node::InPlace) {
+          mark(param_dep, op.in[0]);
+        } else {
+          mark(param_dep, op.out);
+          if (op.out2 >= 0) mark(param_dep, op.out2);
+        }
+        return;
+      }
+      case Node::Alias:
+        if (ctrl || param_dep[n.src]) mark(param_dep, n.dst);
+        return;
+      case Node::Break:
+      case Node::Continue:
+        if (ctrl) mark(escape, loop);
+        return;
+      case Node::Target:
+        return;
+      case Node::Sequence:
+        for (const auto& c : n.children) propagate(c, ctrl, loop);
+        return;
+      case Node::If:
+        for (const auto& c : n.children)
+          propagate(c, ctrl || param_dep[n.condition], loop);
+        return;
+      case Node::For: {
+        const bool inner = ctrl || controlled(n);
+        if (inner) mark(param_dep, n.iterator);
+        propagate(n.children[0], inner, n.loop_index);
+        return;
+      }
+      case Node::While: {
+        const bool inner = ctrl || controlled(n);
+        for (const auto& c : n.children) propagate(c, inner, n.loop_index);
+        return;
+      }
+    }
+  }
+
+  bool memoizable(const Node& n, int loops) const {
+    switch (n.kind) {
+      case Node::Sequence:
+        return std::all_of(n.children.begin(), n.children.end(),
+                           [&](const Node& c) { return memoizable(c, loops); });
+      case Node::KernelCall: {
+        const Op& op = p.body.ops[n.op];
+        if (n.storage == Node::InPlace || is_effectful_op(op.opcode) ||
+            param_dep[op.out] || (op.out2 >= 0 && param_dep[op.out2]))
+          return false;
+        for (int k = 0; k < op.n_in; ++k)
+          if (param_dep[op.in[k]]) return false;
+        return true;
+      }
+      case Node::Alias:
+        return !param_dep[n.src] && !param_dep[n.dst];
+      case Node::If:
+        return !controlled(n) && memoizable(n.children[0], loops) &&
+               memoizable(n.children[1], loops);
+      case Node::For:
+        return !controlled(n) && !param_dep[n.iterator] &&
+               memoizable(n.children[0], loops + 1);
+      case Node::While:
+        return !controlled(n) && memoizable(n.children[0], loops + 1) &&
+               memoizable(n.children[1], loops + 1);
+      case Node::Break:
+      case Node::Continue:
+        return loops > 0;
+      case Node::Target:
+        return false;
+    }
+    return false;
+  }
+
+  void group(Node& n, bool ok) {
+    if (n.kind == Node::If || n.kind == Node::For || n.kind == Node::While) {
+      if (ok && memoizable(n, 0)) {
+        n.memo = true;
+        return;
+      }
+      for (auto& c : n.children) group(c, ok && !controlled(n));
+      return;
+    }
+    if (n.kind != Node::Sequence) return;
+    std::vector<Node> grouped, run;
+    const auto flush = [&] {
+      if (run.empty()) return;
+      Node block;
+      block.memo = true;
+      block.children = std::move(run);
+      grouped.push_back(std::move(block));
+      ++p.node_count;
+      run.clear();
+    };
+    for (auto& c : n.children) {
+      if ((c.kind == Node::KernelCall || c.kind == Node::Alias) && ok &&
+          memoizable(c, 0)) {
+        run.push_back(std::move(c));
+        continue;
+      }
+      flush();
+      group(c, ok);
+      grouped.push_back(std::move(c));
+    }
+    flush();
+    if (grouped.size() == 1 && grouped[0].kind == Node::Sequence &&
+        grouped[0].memo) {
+      n.memo = true;
+      n.children = std::move(grouped[0].children);
+      --p.node_count;
+    } else {
+      n.children = std::move(grouped);
+    }
+  }
+
+  void reads(const Node& n, std::vector<int>& count) const {
+    switch (n.kind) {
+      case Node::KernelCall: {
+        const Op& op = p.body.ops[n.op];
+        for (int k = 0; k < op.n_in; ++k) ++count[op.in[k]];
+        break;
+      }
+      case Node::Alias:
+        ++count[n.src];
+        break;
+      case Node::Target:
+        ++count[n.src];
+        break;
+      case Node::If:
+      case Node::While:
+        ++count[n.condition];
+        break;
+      case Node::For:
+        ++count[n.lower];
+        ++count[n.upper];
+        break;
+      default:
+        break;
+    }
+    for (const auto& c : n.children) reads(c, count);
+  }
+  void writes(const Node& n, std::vector<int>& out) const {
+    switch (n.kind) {
+      case Node::KernelCall: {
+        const Op& op = p.body.ops[n.op];
+        out.push_back(op.out);
+        if (op.out2 >= 0) out.push_back(op.out2);
+        break;
+      }
+      case Node::Alias:
+        out.push_back(n.dst);
+        break;
+      case Node::For:
+        out.push_back(n.iterator);
+        break;
+      default:
+        break;
+    }
+    for (const auto& c : n.children) writes(c, out);
+  }
+  void number(Node& n) {
+    if (n.memo) {
+      if (p.memo_count >= static_cast<size_t>(std::numeric_limits<int>::max()))
+        throw std::length_error("too many structured memo nodes");
+      n.memo_index = static_cast<int>(p.memo_count++);
+      std::vector<int> inside(p.body.slots.size(), 0), written;
+      reads(n, inside);
+      writes(n, written);
+      std::sort(written.begin(), written.end());
+      written.erase(std::unique(written.begin(), written.end()), written.end());
+      for (int s : written) {
+        const int outside = uses.kernel[s] + uses.alias[s] + uses.control[s] +
+                            uses.target[s] - inside[s];
+        if (outside > 0 || uses.output[s]) n.memo_outs.push_back(s);
+      }
+      return;
+    }
+    for (auto& c : n.children) number(c);
+  }
+
+  void run() {
+    do {
+      changed = false;
+      propagate(p.root, false, -1);
+    } while (changed);
+    group(p.root, true);
+    number(p.root);
+  }
+};
+
 void classify(StructuredLoop& p) {
   const size_t slots = p.body.slots.size();
   SlotUses uses(p);
@@ -263,6 +493,7 @@ void classify(StructuredLoop& p) {
   };
   walk(p.root, loops, count_uses);
   fuse_updates(p, p.root, uses);
+  Memoizer(p, uses).run();
 
   std::vector<char> active(slots, 0);
   for (const auto& in : p.imports)
@@ -351,14 +582,23 @@ void classify(StructuredLoop& p) {
   };
   walk(p.root, loops, mark_invariant);
 
+  const auto retained = [&](int s) {
+    return uses.alias[s] || uses.target[s] || uses.output[s] ||
+           inplace_base[s] || active_reader[s];
+  };
+  auto split_memo_outs = [&](Node& n, const std::vector<int>&) {
+    if (!n.memo) return;
+    n.memo_fresh =
+        static_cast<size_t>(std::stable_partition(n.memo_outs.begin(),
+                                                  n.memo_outs.end(), retained) -
+                            n.memo_outs.begin());
+  };
+  walk(p.root, loops, split_memo_outs);
+
   auto classify_transient = [&](Node& n, const std::vector<int>&) {
     if (n.kind != Node::KernelCall || n.active || n.storage == Node::InPlace)
       return;
     const Op& op = p.body.ops[n.op];
-    const auto retained = [&](int s) {
-      return uses.alias[s] || uses.target[s] || uses.output[s] ||
-             inplace_base[s] || active_reader[s];
-    };
     if (retained(op.out) || (op.out2 >= 0 && retained(op.out2))) return;
     n.storage = Node::Transient;
     n.workspace = p.workspace_size;
@@ -852,8 +1092,14 @@ struct LoopState : KernelState {
   std::vector<uint32_t> transient_sites;
   std::vector<double> adjoints;
   std::vector<double> target_work;
+  std::vector<std::vector<double>> memo_tape;
+  std::vector<int64_t> memo_entries, memo_stride, memo_ordinal;
+  std::vector<const Node*> memo_nodes;
+  std::vector<int64_t> memo_shared_base, memo_shared;
+  size_t memo_restores = 0;
   int64_t adjoint_size = 0;
   bool reverse_ready = false;
+  bool memo_ready = false;
   bool report_tape =
       std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS") != nullptr;
 
@@ -865,8 +1111,22 @@ struct LoopState : KernelState {
         node_version2(plan.site_count, -1),
         loop_generation(plan.loop_count, 0),
         ctx(plan.site_count),
-        sites(plan.site_count, nullptr) {
+        sites(plan.site_count, nullptr),
+        memo_tape(plan.memo_count),
+        memo_entries(plan.memo_count, 0),
+        memo_stride(plan.memo_count, 0),
+        memo_ordinal(plan.memo_count, 0),
+        memo_nodes(plan.memo_count, nullptr),
+        memo_shared_base(plan.memo_count, 0) {
     collect(plan.root);
+    int64_t shared = 0;
+    for (size_t m = 0; m < memo_nodes.size(); ++m) {
+      const Node* n = memo_nodes[m];
+      if (!n) throw std::logic_error("structured loop memo numbering is stale");
+      memo_shared_base[m] = shared;
+      shared += static_cast<int64_t>(n->memo_outs.size() - n->memo_fresh);
+    }
+    memo_shared.assign(static_cast<size_t>(shared), -1);
     for (size_t site = 0; site < sites.size(); ++site) {
       const Node* n = sites[site];
       if (!n) throw std::logic_error("structured loop site numbering is stale");
@@ -895,6 +1155,14 @@ struct LoopState : KernelState {
       if (n.site >= sites.size())
         throw std::logic_error("structured loop site numbering is stale");
       sites[n.site] = &n;
+    }
+    if (n.memo) {
+      if (n.memo_index < 0 ||
+          static_cast<size_t>(n.memo_index) >= memo_stride.size())
+        throw std::logic_error("structured loop memo numbering is stale");
+      memo_nodes[static_cast<size_t>(n.memo_index)] = &n;
+      int64_t& stride = memo_stride[static_cast<size_t>(n.memo_index)];
+      for (int slot : n.memo_outs) stride = add(stride, p.body.slots[slot].len);
     }
     for (const auto& c : n.children) collect(c);
   }
@@ -1033,6 +1301,39 @@ struct Execution {
   }
 
   Flow forward(const Node& n) {
+    if (!n.memo) return run(n);
+    const size_t m = static_cast<size_t>(n.memo_index);
+    const int64_t k = s.memo_ordinal[m]++;
+    std::vector<double>& tape = s.memo_tape[m];
+    if (!s.memo_ready) {
+      const Flow flow = run(n);
+      for (int slot : n.memo_outs) {
+        const double* v = value(slot);
+        tape.insert(tape.end(), v, v + p.body.slots[slot].len);
+      }
+      ++s.memo_entries[m];
+      return flow;
+    }
+    if (k >= s.memo_entries[m])
+      throw std::logic_error("structured memo trace mismatch");
+    double* v = tape.data() + k * s.memo_stride[m];
+    size_t j = 0;
+    for (; j < n.memo_fresh; ++j) {
+      s.bindings[n.memo_outs[j]] = make_version(v, -1);
+      v += p.body.slots[n.memo_outs[j]].len;
+    }
+    const int64_t* shared = s.memo_shared.data() + s.memo_shared_base[m];
+    for (; j < n.memo_outs.size(); ++j) {
+      const int64_t version = shared[j - n.memo_fresh];
+      s.versions[static_cast<size_t>(version)].value = v;
+      s.bindings[n.memo_outs[j]] = version;
+      v += p.body.slots[n.memo_outs[j]].len;
+    }
+    ++s.memo_restores;
+    return Normal;
+  }
+
+  Flow run(const Node& n) {
     switch (n.kind) {
       case Node::Sequence:
         for (const auto& child : n.children) {
@@ -1191,7 +1492,7 @@ void StructuredLoop::prepare() {
       throw std::invalid_argument("invalid structured import");
   }
   for (int s : outputs) slot(*this, s);
-  node_count = site_count = loop_count = 0;
+  node_count = site_count = loop_count = memo_count = 0;
   workspace_size = 0;
   std::vector<char> out_seen(body.slots.size(), 0);
   prepare_node(*this, root, 0, 0, out_seen);
@@ -1237,6 +1538,15 @@ void structured_loop_forward(KernelCtx& ctx) {
   }
   std::fill(s.node_generation.begin(), s.node_generation.end(), -1);
   std::fill(s.loop_generation.begin(), s.loop_generation.end(), 0);
+  std::fill(s.memo_ordinal.begin(), s.memo_ordinal.end(), 0);
+  if (!s.memo_ready) {
+    for (auto& tape : s.memo_tape) tape.clear();
+    std::fill(s.memo_entries.begin(), s.memo_entries.end(), 0);
+  } else {
+    for (auto& version : s.memo_shared) version = e.make_version(nullptr, -1);
+  }
+  const bool replaying = s.memo_ready;
+  s.memo_restores = 0;
   for (auto& c : s.ctx) c.eval_state = ctx.eval_state;
 
   e.forward(p.root);
@@ -1267,25 +1577,28 @@ void structured_loop_forward(KernelCtx& ctx) {
     }
     ctx.out.data[pos++] = count ? s.target_work[0] : 0.0;
   }
-  if (s.report_tape) {
+  if (s.report_tape && (replaying || p.memo_count == 0)) {
     s.report_tape = false;
     size_t arena_used = 0;
     for (const auto& block : s.arena.blocks) arena_used += block.used;
-    size_t kernel_records = 0, copies = 0, updates = 0;
+    size_t kernel_records = 0, copies = 0, updates = 0, memo_tape = 0;
     for (const auto& r : s.records) {
       kernel_records += r.kind == Record::Kernel;
       copies += r.kind == Record::Copy;
       updates += r.kind == Record::InPlace;
     }
+    for (const auto& tape : s.memo_tape) memo_tape += tape.size();
     std::fprintf(stderr,
                  "stanli_structured tape: arena=%zu adjoints=%lld versions=%zu "
                  "handles=%zu kernel_records=%zu updates=%zu undo=%zu "
-                 "copies=%zu targets=%zu workspace=%zu\n",
+                 "copies=%zu targets=%zu workspace=%zu memo_nodes=%zu "
+                 "memo_restores=%zu memo_tape=%zu\n",
                  arena_used, static_cast<long long>(s.adjoint_size),
                  s.versions.size(), s.handles.size(), kernel_records, updates,
                  s.undo.size() / 2, copies, s.target_refs.size(),
-                 s.workspace.size());
+                 s.workspace.size(), p.memo_count, s.memo_restores, memo_tape);
   }
+  s.memo_ready = true;
   s.reverse_ready = true;
 }
 

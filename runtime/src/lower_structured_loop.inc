@@ -1987,19 +1987,23 @@ bool try_lower_region(
       auto p = std::make_shared<StructuredLoop>();
       trial.region_current = &p->root;
       std::map<int, int> imported;
-      std::map<int, bool> import_active;
-      const auto import_slot = [&](int parent, bool active) {
+      std::map<int, bool> import_active, import_data_only;
+      const auto import_slot = [&](int parent, bool active, bool data_only) {
         if (parent < 0) return;
-        if (!imported.count(parent))
+        if (!imported.count(parent)) {
           imported[parent] = trial.add_slot(g.slots[parent].len, false);
+          import_data_only[parent] = true;
+        }
         import_active[parent] = import_active[parent] || active;
+        import_data_only[parent] = import_data_only[parent] && data_only;
       };
       // Runtime geometry slots can be anonymous declaration snapshots, so
       // collect them explicitly rather than assuming every imported slot
       // has its own source-level name.
       for (const auto& item : scope) {
-        import_slot(item.second.slot, item.second.autodiff);
-        for (int dim : item.second.runtime_dims) import_slot(dim, false);
+        import_slot(item.second.slot, item.second.autodiff,
+                    item.second.si.param_free);
+        for (int dim : item.second.runtime_dims) import_slot(dim, false, true);
       }
       for (const auto& in : imported) {
         if (auto range = int_ranges.find(in.first); range != int_ranges.end())
@@ -2073,9 +2077,9 @@ bool try_lower_region(
           p->body.slots[in.second].len = 0;
           continue;
         }
-        p->imports.push_back({in.second,
-                              static_cast<int>(candidate_inputs.size()), 0,
-                              import_active[in.first]});
+        p->imports.push_back(
+            {in.second, static_cast<int>(candidate_inputs.size()), 0,
+             import_active[in.first], import_data_only[in.first]});
         candidate_inputs.push_back(in.first);
       }
       if (candidate_inputs.size() > 6) {
