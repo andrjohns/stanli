@@ -467,3 +467,99 @@ bounds, `eval_int` would fail). The island `param_free` refinement at the
 Gate for the change: the 130-model corpus census under `STANLI_STRUCTURED_LOOPS=0`
 and unset must produce byte-identical graph dumps for every model that
 compiles today, and accel_gp must compile under `=1`.
+
+## Addendum: straight-line segments run on the register machine
+
+Profile of ctsem N=400 after the previous steps (337 ms per gradient): 42% of
+samples are the tree walk itself (`Execution::run`/`forward`), 17% the dynamic
+index kernels' per-call validation, under 10% Eigen. The body executes 23M
+tree nodes per gradient for 3.9M tape records. A scalar recurrence retained
+under `=1` pays ~25 ns per kernel round trip against the flat executor's 13.
+
+The repository already has the fix for scalar-heavy straight-line code: the
+register `Program` (program.hpp) with its generated reverse pass
+(adjoint.hpp), which the island carver builds from graph ops. A run of
+kernel calls in a body becomes one program: scalar ops become register
+instructions dispatched by a switch, matrix ops stay `CALL`s, aliases become
+register renames, and the whole run costs one arena frame and one tape
+record instead of one record, one version and up to six handles per kernel.
+This program stream is also the input a stencil JIT would compile.
+
+### Compiler side (`island.cpp` / `island.hpp`)
+
+```cpp
+struct SegmentItem { int op = -1; int alias_dst = -1, alias_src = -1; };
+struct SegmentBinding { int slot = -1; int reg = 0; int len = 0; };
+struct Segment {
+  IslandProg program;            // forward code, calls, pool, adj, n_regs
+  std::vector<SegmentBinding> ins, outs;
+};
+bool compile_segment(const Graph& g, const std::vector<SegmentItem>& items,
+                     const std::unordered_map<int, const std::vector<double>*>& constants,
+                     const std::vector<int>& live_outs,
+                     const std::vector<char>& slot_active, Segment* out);
+```
+
+Reuses the carver's `Compiler` over the items in order: an op item goes
+through `Compiler::compile` (with no last-use aliasing, so `base_dead_here`
+is false), an alias item sets `reg_of[dst] = read_reg(src)`. Unseen slots
+read are live-ins (`cc.live_in_slots`, any number; the six-input limit does
+not apply because the loop executor seeds registers itself); slots in
+`constants` are absorbed. `live_outs` are the slots the caller says are read
+after the run; their registers, flattened, become `program.out_regs`. Then
+`compact_island_gated(program, false)`, `gen_adjoint`, and `native_adj` is
+required. Refuse (return false) when any op is outside the vocabulary
+(`in_vocab`, which also excludes propto densities and effect kernels), when
+the adjoint is refused, or when a live-out's adjoint cells
+`adj.adj_reg[reg .. reg+len)` are not contiguous (a version needs one
+adjoint range). `ins[k].active` comes from `slot_active`.
+
+### Payload and prepare
+
+`StructuredLoop` gains `std::vector<Segment> segments`; `Node` gains
+`kind = Segment` and `int segment = -1`. As the last step of `classify()`,
+after memo grouping and transient classification, every non-memo Sequence
+is scanned for maximal runs of consecutive children that are either an
+Alias or a KernelCall with `storage != InPlace`, not
+`(invariant_loop >= 0 && active)`, and not `is_effectful_op`. A run with at
+least two kernel ops is offered to `compile_segment` with live-outs = slots
+written in the run (kernel out/out2, alias dst) that are read anywhere
+outside it (kernel input, alias src, control, target, output; the SlotUses
+counts minus the run's own reads). On success the run is replaced by one
+Segment node (`active` = any live-in active, given a `site`). On failure the
+run stays as it is. Nodes inside memo subtrees are left alone.
+
+### Executor
+
+- Forward: `frame = arena.allocate(n_regs)`; for each `in`: copy `len`
+  values from `value(slot)` into `frame + reg`, and if the segment is
+  active push the live-in version handle; `run_program(program, frame,
+  eval_state)`; if active reserve `program.adj.n_regs` adjoint cells at
+  `base`; for each `out`: `bindings[slot] = make_version(frame + reg, active
+  ? base + adj_reg[reg] : -1)`; push `Record{Segment, site, handles,
+  frame_version, base}` where `frame_version` is an inactive version created
+  for `frame`. `++effects`.
+- Backward: `run_adjoint(program, program.adj, frame, adjoints + base)` (the
+  file was zeroed by `assign` and already holds the live-out seeds through
+  the versions' offsets); then for each active live-in with a non-null
+  `adj(handle)`: `dst[i] += file[adj_reg[reg + i]]`.
+
+### Tests
+
+Programmatic plans in tests/test_structured_loop.cpp: a three-kernel scalar
+recurrence body becomes one Segment node (assert `segments.size() == 1`,
+tree has one Segment child) with values and gradients equal to the
+unsegmented plan at two parameter values; a run mixing a matrix kernel (CALL)
+and scalar ops; an alias inside the run whose cell is a live-out; a run
+whose live-out is read only in the next iteration (loop-carried through the
+cell); a run containing an in-place update splits into two segments around
+it; a run with a lone kernel op stays a KernelCall; an effect kernel stays a
+KernelCall; a refused adjoint (a kernel with no backward feeding an active
+consumer, or an op outside the vocabulary) leaves the run as KernelCalls.
+The fixture-based retained-vs-unrolled comparisons keep passing at 1e-12.
+
+### Expected effect
+
+m1 (scalar recurrence, N=10k, `=1`): from 836 µs toward the unrolled 404 µs
+or below, since the three kernels become three register instructions. ctsem
+N=400: fewer tree visits and records; the CALL-heavy Kalman step gains less.
