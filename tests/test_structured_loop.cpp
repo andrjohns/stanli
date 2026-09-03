@@ -165,6 +165,23 @@ static Graph outer(std::shared_ptr<StructuredLoop> plan,
   return graph;
 }
 
+// Plans whose tests observe individual kernel calls keep every call as its
+// own node; segment_tests covers the register-machine path.
+static void prepare_kernels(StructuredLoop& plan) {
+  test_setenv("STANLI_NO_STRUCTURED_SEGMENTS", "1");
+  plan.prepare();
+  test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
+}
+
+template <class Build>
+static std::shared_ptr<StructuredLoop> unsegmented(Build build) {
+  test_setenv("STANLI_NO_STRUCTURED_SEGMENTS", "1");
+  auto plan = build();
+  test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
+  check(plan->segments.empty(), "segments are off under the switch");
+  return plan;
+}
+
 struct Evaluation {
   double value = 0;
   double gradient[2] = {0, 0};
@@ -1019,7 +1036,7 @@ static std::shared_ptr<StructuredLoop> iterator_history_plan() {
                                   call(*plan, OP_ADD, {result, term}, next),
                                   alias(result, next)}))});
   plan->outputs = {result};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(set_forward(plan->root, multiply_op, trace_iterator_forward) &&
             set_backward(plan->root, multiply_op, trace_iterator_backward),
         "find iterator trace callbacks");
@@ -1340,7 +1357,7 @@ static std::shared_ptr<StructuredLoop> duplicate_node_plan() {
   plan->root = sequence(
       {call(*plan, OP_MUL, {theta, beta}, product), std::move(replacement)});
   plan->outputs = {second_product};
-  plan->prepare();
+  prepare_kernels(*plan);
   plan->root.children[1].backward = duplicate_site_backward;
   return plan;
 }
@@ -1720,7 +1737,7 @@ static std::shared_ptr<StructuredLoop> integer_history_plan() {
                                   call(*plan, OP_ADD, {result, term}, next),
                                   alias(result, next)}))});
   plan->outputs = {result};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(set_forward(plan->root, multiply_op, trace_iterator_forward) &&
             set_backward(plan->root, multiply_op, trace_iterator_backward),
         "find integer-result trace callbacks");
@@ -2294,7 +2311,7 @@ static std::shared_ptr<StructuredLoop> invariant_plan(int trips) {
                                   std::move(active_call), alias(result, active),
                                   std::move(variant_call)}))});
   plan->outputs = {result};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(find_call(plan->root, first_op)->invariant_loop == 0 &&
             find_call(plan->root, second_op)->invariant_loop == -1 &&
             find_call(plan->root, active_op)->invariant_loop == -1 &&
@@ -2341,7 +2358,7 @@ static std::shared_ptr<StructuredLoop> dependent_guard_plan() {
                                   call(*plan, OP_ADD, {result, term}, next),
                                   alias(result, next)}))});
   plan->outputs = {result};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(find_call(plan->root, comparison_op)->invariant_loop == -1,
         "a read of an in-place updated container is not invariant");
   check(set_forward(plan->root, comparison_op, count_dependent_compare),
@@ -2535,7 +2552,7 @@ static std::shared_ptr<StructuredLoop> control_cone_plan(bool active_control) {
       sequence({alias(result, zero),
                 counted(lower, upper, iterator, sequence(std::move(control)))});
   plan->outputs = {result};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(find_call(plan->root, first_op)->storage ==
             (active_control ? Node::Retained : Node::Transient),
         "control-cone head storage follows its readers' activity");
@@ -2734,7 +2751,7 @@ static void iterator_cell_tests() {
                                     call(*plan, OP_ADD, {result, term}, next),
                                     alias(result, next)}))});
     plan->outputs = {result};
-    plan->prepare();
+    prepare_kernels(*plan);
     check(plan->root.children[1].storage == Node::Retained,
           "iterator read by active work keeps every version");
     check(set_forward(plan->root, scale_op, record_iterator_mul),
@@ -2807,7 +2824,7 @@ static bool install_failure_callbacks(StructuredLoop& plan, Node& node) {
 }
 
 static void failure_tests() {
-  auto plan = recurrence(8);
+  auto plan = unsegmented([] { return recurrence(8); });
   check(install_failure_callbacks(*plan, plan->root),
         "failure test finds a native callback");
   Executor executor(outer(plan));
@@ -3366,7 +3383,7 @@ static void memo_tests() {
              call(*escaping, OP_MUL, {theta, iterator}, term),
              call(*escaping, OP_ADD, {acc, term}, next), alias(acc, next)}));
     escaping->outputs = {acc};
-    escaping->prepare();
+    prepare_kernels(*escaping);
     const Node* guard = find_kind(escaping->root, Node::If);
     const Node* body = &escaping->root.children[0];
     check(guard && !guard->memo && !escaping->root.memo &&
@@ -3489,7 +3506,7 @@ static std::shared_ptr<StructuredLoop> traced_branch_plan(bool reuse_guard) {
   }
   plan->root = counted(one, three, iterator, sequence(std::move(body)));
   plan->outputs = {acc};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(set_forward(plan->root, index_op, count_memo_index) &&
             set_forward(plan->root, compare_op, count_memo_compare) &&
             set_forward(plan->root, scale_op, record_arm_mul),
@@ -3541,7 +3558,7 @@ static std::shared_ptr<StructuredLoop> traced_while_plan(bool param_break) {
       {alias(x, theta), while_loop(more, sequence({std::move(compare)}),
                                    sequence(std::move(body)))});
   plan->outputs = {x};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(set_forward(plan->root, compare_op, count_memo_compare) &&
             set_forward(plan->root, grow_op, count_mul_forward),
         "find traced while callbacks");
@@ -3594,7 +3611,7 @@ static std::shared_ptr<StructuredLoop> traced_chain_plan() {
                                          alias(acc, next)}),
                                sequence({}))}));
   plan->outputs = {acc};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(set_forward(plan->root, index_op, count_memo_index) &&
             set_forward(plan->root, compare_op, count_memo_compare) &&
             set_forward(plan->root, index2_op, count_memo_index) &&
@@ -3789,7 +3806,7 @@ static std::shared_ptr<StructuredLoop> row_scan_plan(int rows,
   }
   plan->root = counted(one, last, iterator, sequence(std::move(body)));
   plan->outputs = {acc};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(set_forward(plan->root, index_op, count_memo_index) &&
             set_forward(plan->root, compare_op, count_memo_compare) &&
             set_forward(plan->root, scale_op, record_arm_mul),
@@ -3842,7 +3859,7 @@ static std::shared_ptr<StructuredLoop> nested_scan_plan() {
                                sequence({}))}));
   plan->root = counted(one, three, k, sequence({std::move(inner)}));
   plan->outputs = {acc};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(set_forward(plan->root, index_op, count_memo_index) &&
             set_forward(plan->root, scale_op, record_arm_mul),
         "find nested scan callbacks");
@@ -3880,7 +3897,7 @@ static std::shared_ptr<StructuredLoop> break_scan_plan(int rows) {
                 branch(guard, std::move(exit), sequence({})), std::move(scale),
                 call(*plan, OP_ADD, {acc, term}, next), alias(acc, next)}));
   plan->outputs = {acc};
-  plan->prepare();
+  prepare_kernels(*plan);
   check(set_forward(plan->root, index_op, count_memo_index) &&
             set_forward(plan->root, scale_op, record_arm_mul),
         "find break scan callbacks");
@@ -4040,15 +4057,6 @@ static size_t count_kind(const Node& node, Node::Kind kind) {
   size_t total = node.kind == kind ? 1 : 0;
   for (const auto& child : node.children) total += count_kind(child, kind);
   return total;
-}
-
-template <class Build>
-static std::shared_ptr<StructuredLoop> unsegmented(Build build) {
-  test_setenv("STANLI_NO_STRUCTURED_SEGMENTS", "1");
-  auto plan = build();
-  test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
-  check(plan->segments.empty(), "segments are off under the switch");
-  return plan;
 }
 
 static bool binds_slot(const std::vector<SegmentBinding>& bindings, int slot) {
@@ -4303,7 +4311,8 @@ static void segment_tests() {
               count_kind(plan->root, Node::Alias) == 1,
           "recurrence body is one segment node");
     const Node* loop = find_kind(plan->root, Node::For);
-    check(loop && loop->children[0].kind == Node::Segment,
+    check(loop && loop->children[0].children.size() == 1 &&
+              loop->children[0].children[0].kind == Node::Segment,
           "segment node replaces the loop body");
     if (!plan->segments.empty()) {
       const Segment& segment = plan->segments[0];

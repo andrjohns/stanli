@@ -2,6 +2,7 @@
 #define STANLI_STRUCTURED_LOOP_HPP
 
 #include <stanli/graph.hpp>
+#include <stanli/island.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -53,7 +54,8 @@ struct StructuredLoop {
       While,
       Break,
       Continue,
-      Target
+      Target,
+      Segment
     } kind = Sequence;
     enum Storage { Retained, Transient, InPlace } storage = Retained;
     bool active = false;
@@ -66,6 +68,7 @@ struct StructuredLoop {
     int64_t workspace = -1;
     int64_t kernel_scratch = 0;
     int loop_index = -1;
+    int segment = -1;
     // Live-out slots of a memo node. The first `memo_fresh` may be held by an
     // alias, record or target and get a new version per visit; the rest are
     // only read in place and share one version whose pointer moves.
@@ -92,6 +95,9 @@ struct StructuredLoop {
   std::vector<int> outputs;
   bool has_target = false;  // one scalar output after `outputs`
   Node root;
+  // Straight-line runs of the body compiled to register programs; a Segment
+  // node's `segment` indexes this.
+  std::vector<Segment> segments;
   int64_t initial_size = 0;
   int64_t workspace_size = 0;
   size_t node_count = 0, site_count = 0, loop_count = 0, memo_count = 0,

@@ -10,6 +10,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace stanli {
@@ -105,6 +106,7 @@ void prepare_node(StructuredLoop& p, Node& n, unsigned depth,
   n.site = ~uint32_t{0};
   n.workspace = -1;
   n.loop_index = -1;
+  n.segment = -1;
   const bool loop = n.kind == Node::For || n.kind == Node::While;
   if (loop) {
     if (p.loop_count >= static_cast<size_t>(std::numeric_limits<int>::max()))
@@ -185,6 +187,8 @@ void prepare_node(StructuredLoop& p, Node& n, unsigned depth,
       if (!p.has_target)
         throw std::invalid_argument("structured target needs a target output");
       break;
+    case Node::Segment:
+      throw std::invalid_argument("structured segments are formed by prepare");
   }
   for (auto& c : n.children)
     prepare_node(p, c, depth + 1, loop_depth + loop, out_seen);
@@ -293,6 +297,7 @@ struct Memoizer {
         if (ctrl) mark(escape, loop);
         return;
       case Node::Target:
+      case Node::Segment:
         return;
       case Node::Sequence:
         for (const auto& c : n.children) propagate(c, ctrl, loop);
@@ -344,6 +349,7 @@ struct Memoizer {
       case Node::Continue:
         return loops > 0;
       case Node::Target:
+      case Node::Segment:
         return false;
     }
     return false;
@@ -500,6 +506,135 @@ struct Memoizer {
   }
 };
 
+// Straight-line runs of kernel calls and aliases become one register
+// program each. Kernels whose callbacks were customised, in-place updates,
+// cached active kernels and effects keep their own node.
+struct Segmenter {
+  StructuredLoop& p;
+  const SlotUses& uses;
+  const std::vector<char>& active;
+  std::unordered_map<int, const std::vector<double>*> constants;
+
+  Segmenter(StructuredLoop& plan, const SlotUses& slot_uses,
+            const std::vector<char>& slot_active)
+      : p(plan), uses(slot_uses), active(slot_active) {
+    std::vector<char> written(p.body.slots.size(), 0);
+    for (const auto& in : p.imports) written[in.slot] = 1;
+    std::vector<int> loops;
+    auto mark = [&](Node& n, const std::vector<int>&) {
+      switch (n.kind) {
+        case Node::KernelCall: {
+          const Op& op = p.body.ops[n.op];
+          written[n.storage == Node::InPlace ? op.in[0] : op.out] = 1;
+          if (op.out2 >= 0) written[op.out2] = 1;
+          break;
+        }
+        case Node::Alias:
+          written[n.dst] = 1;
+          break;
+        case Node::For:
+          written[n.iterator] = 1;
+          break;
+        default:
+          break;
+      }
+    };
+    walk(p.root, loops, mark);
+    for (const auto& fill : p.fills)
+      if (!written[fill.first]) constants[fill.first] = &fill.second;
+  }
+
+  bool eligible(const Node& n) const {
+    if (n.kind == Node::Alias) return true;
+    if (n.kind != Node::KernelCall || n.storage == Node::InPlace ||
+        (n.invariant_loop >= 0 && n.active))
+      return false;
+    const Op& op = p.body.ops[n.op];
+    const Kernel* k = find_kernel(op.opcode);
+    return k && n.forward == k->forward && n.backward == k->backward &&
+           segment_supports(p.body, op);
+  }
+
+  bool compile(const std::vector<Node>& run, Node& result) {
+    std::vector<SegmentItem> items;
+    std::vector<int> inside(p.body.slots.size(), 0), written;
+    for (const Node& n : run) {
+      SegmentItem item;
+      if (n.kind == Node::Alias) {
+        item.alias_dst = n.dst;
+        item.alias_src = n.src;
+        ++inside[n.src];
+        written.push_back(n.dst);
+      } else {
+        const Op& op = p.body.ops[n.op];
+        item.op = n.op;
+        for (int k = 0; k < op.n_in; ++k) ++inside[op.in[k]];
+        written.push_back(op.out);
+        if (op.out2 >= 0) written.push_back(op.out2);
+      }
+      items.push_back(item);
+    }
+    std::vector<int> live_outs;
+    for (int s : written)
+      if (uses.output[s] || uses.kernel[s] + uses.alias[s] + uses.control[s] +
+                                    uses.target[s] - inside[s] >
+                                0)
+        live_outs.push_back(s);
+    Segment segment;
+    if (!compile_segment(p.body, items, constants, live_outs, active, &segment))
+      return false;
+    if (p.segments.size() >= static_cast<size_t>(std::numeric_limits<int>::max()))
+      throw std::length_error("too many structured segments");
+    result.kind = Node::Segment;
+    result.segment = static_cast<int>(p.segments.size());
+    result.active = std::any_of(segment.program.ins.begin(),
+                                segment.program.ins.end(),
+                                [](const IslandProg::LiveIn& in) {
+                                  return in.active;
+                                });
+    p.segments.push_back(std::move(segment));
+    return true;
+  }
+
+  void visit(Node& n, bool memo) {
+    memo = memo || n.memo;
+    if (n.kind == Node::Sequence && !memo) {
+      std::vector<Node> grouped;
+      size_t i = 0;
+      while (i < n.children.size()) {
+        size_t j = i, kernels = 0;
+        while (j < n.children.size() && eligible(n.children[j]))
+          kernels += n.children[j++].kind == Node::KernelCall;
+        Node segment;
+        if (kernels >= 2) {
+          std::vector<Node> run(
+              std::make_move_iterator(n.children.begin() +
+                                      static_cast<ptrdiff_t>(i)),
+              std::make_move_iterator(n.children.begin() +
+                                      static_cast<ptrdiff_t>(j)));
+          if (compile(run, segment)) {
+            grouped.push_back(std::move(segment));
+            p.node_count -= run.size() - 1;
+            i = j;
+            continue;
+          }
+          std::move(run.begin(), run.end(),
+                    n.children.begin() + static_cast<ptrdiff_t>(i));
+        }
+        const size_t stop = std::max(j, i + 1);
+        while (i < stop) grouped.push_back(std::move(n.children[i++]));
+      }
+      n.children = std::move(grouped);
+    }
+    for (auto& c : n.children) visit(c, memo);
+  }
+};
+
+void form_segments(StructuredLoop& p, const SlotUses& uses,
+                   const std::vector<char>& active) {
+  Segmenter(p, uses, active).visit(p.root, false);
+}
+
 void classify(StructuredLoop& p) {
   const size_t slots = p.body.slots.size();
   SlotUses uses(p);
@@ -652,6 +787,16 @@ void classify(StructuredLoop& p) {
             add(add(length(p, op.out), length(p, op.out2)), n.kernel_scratch));
   };
   walk(p.root, loops, classify_transient);
+
+  p.segments.clear();
+  if (!std::getenv("STANLI_NO_STRUCTURED_SEGMENTS"))
+    form_segments(p, uses, active);
+  p.site_count = 0;
+  auto renumber = [&](Node& n, const std::vector<int>&) {
+    if (n.kind == Node::KernelCall)
+      n.site = static_cast<uint32_t>(p.site_count++);
+  };
+  walk(p.root, loops, renumber);
 }
 
 void compare_forward(KernelCtx& c) {
@@ -1130,12 +1275,14 @@ struct Version {
 };
 
 struct Record {
-  enum Kind : uint8_t { Kernel, InPlace, Copy };
+  enum Kind : uint8_t { Kernel, InPlace, Copy, Segment };
   uint8_t kind;
-  uint32_t site;
-  int64_t handles;  // Kernel: first saved input version; InPlace: undo offset
-  int64_t out;      // Kernel: out version; InPlace: base; Copy: from
-  int64_t other;    // InPlace: rhs version; Copy: to version
+  uint32_t site;    // Segment: index into StructuredLoop::segments
+  int64_t handles;  // Kernel, Segment: first saved input version;
+                    // InPlace: undo offset
+  int64_t out;      // Kernel: out version; InPlace: base; Copy: from;
+                    // Segment: frame version
+  int64_t other;    // InPlace: rhs version; Copy: to; Segment: adjoint base
 };
 static_assert(sizeof(Record) == 32, "records are the largest tape entry");
 
@@ -1552,8 +1699,35 @@ struct Execution {
         ++s.effects;
         s.target_refs.push_back(s.bindings[n.src]);
         return Normal;
+      case Node::Segment:
+        run_segment(n, p.segments[static_cast<size_t>(n.segment)]);
+        ++s.effects;
+        return Normal;
     }
     throw std::logic_error("invalid structured node");
+  }
+
+  void run_segment(const Node& n, const Segment& segment) {
+    const IslandProg& program = segment.program;
+    double* frame = s.arena.allocate(program.n_regs);
+    int64_t handles = -1;
+    if (n.active) {
+      handles = static_cast<int64_t>(s.handles.size());
+      for (const auto& in : segment.ins) s.handles.push_back(s.bindings[in.slot]);
+    }
+    for (const auto& in : segment.ins)
+      std::copy_n(value(in.slot), in.len, frame + in.reg);
+    run_program(program, frame, outer.eval_state);
+    const int64_t base = n.active ? reserve_adjoint(program.adj.n_regs) : -1;
+    for (const auto& out : segment.outs)
+      s.bindings[out.slot] = make_version(
+          frame + out.reg,
+          n.active ? base + program.adj.adj_reg[static_cast<size_t>(out.reg)]
+                   : -1);
+    if (n.active)
+      s.records.push_back(Record{Record::Segment,
+                                 static_cast<uint32_t>(n.segment), handles,
+                                 make_version(frame, -1), base});
   }
 
   void backward() {
@@ -1608,6 +1782,22 @@ struct Execution {
           const int64_t len = p.body.slots[op.in[0]].len;
           if (from && to)
             for (int64_t k = 0; k < len; ++k) from[k] += to[k];
+          break;
+        }
+        case Record::Segment: {
+          const Segment& segment = p.segments[r.site];
+          const IslandProg& program = segment.program;
+          const double* frame = s.versions[static_cast<size_t>(r.out)].value;
+          double* file = s.adjoints.data() + r.other;
+          run_adjoint(program, program.adj, frame, file);
+          for (size_t k = 0; k < segment.ins.size(); ++k) {
+            double* dst = adj(s.handles[static_cast<size_t>(r.handles) + k]);
+            if (!dst) continue;
+            const auto& in = segment.ins[k];
+            for (int i = 0; i < in.len; ++i)
+              dst[i] +=
+                  file[program.adj.adj_reg[static_cast<size_t>(in.reg + i)]];
+          }
           break;
         }
       }
@@ -1740,11 +1930,13 @@ void structured_loop_forward(KernelCtx& ctx) {
     s.report_tape = false;
     size_t arena_used = 0;
     for (const auto& block : s.arena.blocks) arena_used += block.used;
-    size_t kernel_records = 0, copies = 0, updates = 0, memo_tape = 0;
+    size_t kernel_records = 0, copies = 0, updates = 0, memo_tape = 0,
+           segment_records = 0;
     for (const auto& r : s.records) {
       kernel_records += r.kind == Record::Kernel;
       copies += r.kind == Record::Copy;
       updates += r.kind == Record::InPlace;
+      segment_records += r.kind == Record::Segment;
     }
     for (const auto& tape : s.memo_tape) memo_tape += tape.size();
     std::fprintf(stderr,
@@ -1752,12 +1944,13 @@ void structured_loop_forward(KernelCtx& ctx) {
                  "handles=%zu kernel_records=%zu updates=%zu undo=%zu "
                  "copies=%zu targets=%zu workspace=%zu memo_nodes=%zu "
                  "memo_restores=%zu memo_tape=%zu traces=%zu trace=%zu "
-                 "visits=%zu\n",
+                 "visits=%zu segments=%zu segment_records=%zu\n",
                  arena_used, static_cast<long long>(s.adjoint_size),
                  s.versions.size(), s.handles.size(), kernel_records, updates,
                  s.undo.size() / 2, copies, s.target_refs.size(),
                  s.workspace.size(), p.memo_count, s.memo_restores, memo_tape,
-                 p.trace_count, s.trace.size(), s.visits);
+                 p.trace_count, s.trace.size(), s.visits, p.segments.size(),
+                 segment_records);
   }
   s.memo_ready = true;
   s.reverse_ready = true;
