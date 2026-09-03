@@ -1286,6 +1286,7 @@ struct BlockArena {
 
 template <class T>
 void right_size(std::vector<T>& v) {
+  if (v.empty()) return;
   const size_t want = v.size() + v.size() / 8;
   if (v.capacity() > 2 * want || v.capacity() < want) {
     std::vector<T> fresh;
