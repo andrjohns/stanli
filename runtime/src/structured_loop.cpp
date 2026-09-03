@@ -100,7 +100,6 @@ void prepare_node(StructuredLoop& p, Node& n, unsigned depth,
   n.trace = false;
   n.invariant_loop = -1;
   n.memo_index = -1;
-  n.trace_index = -1;
   n.memo_outs.clear();
   n.memo_fresh = 0;
   n.site = ~uint32_t{0};
@@ -354,9 +353,15 @@ struct Memoizer {
     return uses.kernel[s] + uses.alias[s] + uses.control[s] + uses.target[s] -
            inside[s];
   }
+  bool data_controlled(const Node& n) const {
+    if (controlled(n)) return false;
+    return std::all_of(n.children.begin(), n.children.end(),
+                       [&](const Node& c) { return data_controlled(c); });
+  }
   bool traceable(const Node& n) const {
     if (controlled(n)) return false;
     if (n.kind == Node::If) return true;
+    if (n.kind == Node::For) return data_controlled(n.children[0]);
     if (n.kind != Node::While || !memoizable(n.children[0], 1)) return false;
     std::vector<int> inside(p.body.slots.size(), 0), written;
     reads(n.children[0], inside);
@@ -373,12 +378,14 @@ struct Memoizer {
         return;
       }
       if (ok && traceable(n)) {
-        if (p.trace_count >=
-            static_cast<size_t>(std::numeric_limits<int>::max()))
-          throw std::length_error("too many structured trace nodes");
         n.trace = true;
-        n.trace_index = static_cast<int>(p.trace_count++);
-        ++traced[n.condition];
+        ++p.trace_count;
+        if (n.kind == Node::For) {
+          ++traced[n.lower];
+          ++traced[n.upper];
+        } else {
+          ++traced[n.condition];
+        }
       }
       for (auto& c : n.children) group(c, ok && !controlled(n));
       return;
@@ -1135,10 +1142,10 @@ struct LoopState : KernelState {
   std::vector<int64_t> memo_entries, memo_stride, memo_ordinal;
   std::vector<const Node*> memo_nodes;
   std::vector<int64_t> memo_shared_base, memo_shared;
-  std::vector<std::vector<uint8_t>> trace_arms;
-  std::vector<std::vector<int64_t>> trace_counts;
-  std::vector<int64_t> trace_ordinal;
-  size_t memo_restores = 0;
+  std::vector<int64_t> trace;
+  size_t trace_pos = 0;
+  uint64_t effects = 0;
+  size_t memo_restores = 0, visits = 0;
   int64_t adjoint_size = 0;
   bool reverse_ready = false;
   bool memo_ready = false;
@@ -1160,10 +1167,7 @@ struct LoopState : KernelState {
         memo_stride(plan.memo_count, 0),
         memo_ordinal(plan.memo_count, 0),
         memo_nodes(plan.memo_count, nullptr),
-        memo_shared_base(plan.memo_count, 0),
-        trace_arms(plan.trace_count),
-        trace_counts(plan.trace_count),
-        trace_ordinal(plan.trace_count, 0) {
+        memo_shared_base(plan.memo_count, 0) {
     collect(plan.root);
     int64_t shared = 0;
     for (size_t m = 0; m < memo_nodes.size(); ++m) {
@@ -1210,9 +1214,6 @@ struct LoopState : KernelState {
       int64_t& stride = memo_stride[static_cast<size_t>(n.memo_index)];
       for (int slot : n.memo_outs) stride = add(stride, p.body.slots[slot].len);
     }
-    if (n.trace && (n.trace_index < 0 ||
-                    static_cast<size_t>(n.trace_index) >= trace_ordinal.size()))
-      throw std::logic_error("structured loop trace numbering is stale");
     if (n.kind == Node::For && n.storage == Node::Transient)
       transient_loops.push_back(&n);
     for (const auto& c : n.children) collect(c);
@@ -1351,18 +1352,34 @@ struct Execution {
                                runtime.selected, nullptr});
   }
 
-  template <class T>
-  T replay(const std::vector<std::vector<T>>& traces, int index) {
-    const size_t t = static_cast<size_t>(index);
-    const size_t k = static_cast<size_t>(s.trace_ordinal[t]++);
-    if (k >= traces[t].size())
+  int64_t read_trace() {
+    if (s.trace_pos >= s.trace.size())
       throw std::logic_error("structured control trace mismatch");
-    return traces[t][k];
+    return s.trace[s.trace_pos++];
+  }
+
+  void bind_iterator(const Node& n, double at) {
+    if (n.storage == Node::Transient) {
+      const int64_t version = s.loop_version[n.loop_index];
+      *s.versions[static_cast<size_t>(version)].value = at;
+      s.bindings[n.iterator] = version;
+      return;
+    }
+    double* cell = s.arena.allocate(1);
+    *cell = at;
+    s.bindings[n.iterator] = make_version(cell, -1);
   }
 
   Flow forward(const Node& n) {
     if (!n.memo) return run(n);
-    if (n.memo_outs.empty()) return s.memo_ready ? Normal : run(n);
+    if (n.memo_outs.empty()) {
+      if (s.memo_ready) return Normal;
+      const uint64_t effects = s.effects;
+      const Flow flow = run(n);
+      s.effects = effects;
+      return flow;
+    }
+    ++s.effects;
     const size_t m = static_cast<size_t>(n.memo_index);
     const int64_t k = s.memo_ordinal[m]++;
     std::vector<double>& tape = s.memo_tape[m];
@@ -1395,6 +1412,7 @@ struct Execution {
   }
 
   Flow run(const Node& n) {
+    ++s.visits;
     switch (n.kind) {
       case Node::Sequence:
         for (const auto& child : n.children) {
@@ -1422,6 +1440,7 @@ struct Execution {
             run_in_place(n, op, c);
             break;
         }
+        ++s.effects;
         if (n.invariant_loop >= 0) {
           s.node_generation[n.site] = s.loop_generation[n.invariant_loop];
           s.node_version[n.site] = s.bindings[op.out];
@@ -1430,23 +1449,29 @@ struct Execution {
         return Normal;
       }
       case Node::Alias:
+        ++s.effects;
         s.bindings[n.dst] = s.bindings[n.src];
         s.owner[static_cast<size_t>(s.bindings[n.src])] = -1;
         return Normal;
       case Node::If: {
         size_t arm;
         if (n.trace && s.memo_ready) {
-          arm = replay(s.trace_arms, n.trace_index);
+          arm = static_cast<size_t>(read_trace());
         } else {
           arm = value(n.condition)[0] != 0.0 ? 0 : 1;
-          if (n.trace)
-            s.trace_arms[static_cast<size_t>(n.trace_index)].push_back(
-                static_cast<uint8_t>(arm));
+          if (n.trace) s.trace.push_back(static_cast<int64_t>(arm));
         }
         return forward(n.children[arm]);
       }
       case Node::For: {
         ++s.loop_generation[n.loop_index];
+        if (n.trace && s.memo_ready) {
+          for (int64_t left = read_trace(); left-- > 0;) {
+            bind_iterator(n, static_cast<double>(read_trace()));
+            if (forward(n.children[0]) == Break) break;
+          }
+          return Normal;
+        }
         const double lo = value(n.lower)[0], hi = value(n.upper)[0];
         if (!std::isfinite(lo) || !std::isfinite(hi) || std::trunc(lo) != lo ||
             std::trunc(hi) != hi || lo < std::numeric_limits<int32_t>::min() ||
@@ -1455,31 +1480,41 @@ struct Execution {
             hi > std::numeric_limits<int32_t>::max())
           throw std::logic_error("structured loop invalid integer bounds");
         const int64_t count = hi >= lo ? static_cast<int64_t>(hi - lo) + 1 : 0;
-        if (n.storage == Node::Transient) {
-          const int64_t version = s.loop_version[n.loop_index];
-          double* iterator = s.versions[static_cast<size_t>(version)].value;
+        if (!n.trace) {
           for (int64_t i = 0; i < count; ++i) {
-            *iterator = lo + static_cast<double>(i);
-            s.bindings[n.iterator] = version;
+            bind_iterator(n, lo + static_cast<double>(i));
             if (forward(n.children[0]) == Break) break;
           }
           return Normal;
         }
+        const size_t start = s.trace.size();
+        s.trace.push_back(0);
+        int64_t effective = 0;
         for (int64_t i = 0; i < count; ++i) {
-          double* iterator = s.arena.allocate(1);
-          *iterator = lo + static_cast<double>(i);
-          s.bindings[n.iterator] = make_version(iterator, -1);
-          if (forward(n.children[0]) == Break) break;
+          const double at = lo + static_cast<double>(i);
+          const size_t mark = s.trace.size();
+          const uint64_t effects = s.effects;
+          s.trace.push_back(static_cast<int64_t>(at));
+          bind_iterator(n, at);
+          const Flow flow = forward(n.children[0]);
+          if (s.effects == effects)
+            s.trace.resize(mark);
+          else
+            ++effective;
+          if (flow == Break) break;
         }
+        s.trace[start] = effective;
         return Normal;
       }
       case Node::While: {
         ++s.loop_generation[n.loop_index];
         if (n.trace && s.memo_ready) {
-          for (int64_t i = replay(s.trace_counts, n.trace_index); i-- > 0;)
+          for (int64_t left = read_trace(); left-- > 0;)
             if (forward(n.children[1]) == Break) break;
           return Normal;
         }
+        const size_t start = s.trace.size();
+        if (n.trace) s.trace.push_back(0);
         int64_t count = 0;
         for (;;) {
           if (forward(n.children[0]) == Break) break;
@@ -1487,15 +1522,17 @@ struct Execution {
           ++count;
           if (forward(n.children[1]) == Break) break;
         }
-        if (n.trace)
-          s.trace_counts[static_cast<size_t>(n.trace_index)].push_back(count);
+        if (n.trace) s.trace[start] = count;
         return Normal;
       }
       case Node::Break:
+        ++s.effects;
         return Break;
       case Node::Continue:
+        ++s.effects;
         return Continue;
       case Node::Target:
+        ++s.effects;
         s.target_refs.push_back(s.bindings[n.src]);
         return Normal;
     }
@@ -1633,11 +1670,11 @@ void structured_loop_forward(KernelCtx& ctx) {
   std::fill(s.node_generation.begin(), s.node_generation.end(), -1);
   std::fill(s.loop_generation.begin(), s.loop_generation.end(), 0);
   std::fill(s.memo_ordinal.begin(), s.memo_ordinal.end(), 0);
-  std::fill(s.trace_ordinal.begin(), s.trace_ordinal.end(), 0);
+  s.trace_pos = 0;
+  s.visits = 0;
   if (!s.memo_ready) {
     for (auto& tape : s.memo_tape) tape.clear();
-    for (auto& arms : s.trace_arms) arms.clear();
-    for (auto& counts : s.trace_counts) counts.clear();
+    s.trace.clear();
     std::fill(s.memo_entries.begin(), s.memo_entries.end(), 0);
   } else {
     for (auto& version : s.memo_shared) version = e.make_version(nullptr, -1);
@@ -1689,12 +1726,13 @@ void structured_loop_forward(KernelCtx& ctx) {
                  "stanli_structured tape: arena=%zu adjoints=%lld versions=%zu "
                  "handles=%zu kernel_records=%zu updates=%zu undo=%zu "
                  "copies=%zu targets=%zu workspace=%zu memo_nodes=%zu "
-                 "memo_restores=%zu memo_tape=%zu traces=%zu\n",
+                 "memo_restores=%zu memo_tape=%zu traces=%zu trace=%zu "
+                 "visits=%zu\n",
                  arena_used, static_cast<long long>(s.adjoint_size),
                  s.versions.size(), s.handles.size(), kernel_records, updates,
                  s.undo.size() / 2, copies, s.target_refs.size(),
                  s.workspace.size(), p.memo_count, s.memo_restores, memo_tape,
-                 p.trace_count);
+                 p.trace_count, s.trace.size(), s.visits);
   }
   s.memo_ready = true;
   s.reverse_ready = true;

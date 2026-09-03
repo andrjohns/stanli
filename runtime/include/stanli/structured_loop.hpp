@@ -58,11 +58,10 @@ struct StructuredLoop {
     enum Storage { Retained, Transient, InPlace } storage = Retained;
     bool active = false;
     bool memo = false;
-    // If/While whose data-only decision is recorded once and replayed.
+    // If/For/While whose data-only decisions are recorded once and replayed.
     bool trace = false;
     int invariant_loop = -1;
     int memo_index = -1;
-    int trace_index = -1;
     uint32_t site = ~uint32_t{0};
     int64_t workspace = -1;
     int64_t kernel_scratch = 0;
