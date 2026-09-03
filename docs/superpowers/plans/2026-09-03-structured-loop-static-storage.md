@@ -416,3 +416,54 @@ Before: `memo_restores=8051046 memo_tape=8198097`, 88 ms per gradient, 298 MB.
 After: `memo_restores=95841 memo_tape=176387 traces=495 trace=648813
 visits=1988500`, 27 ms per gradient, 188 MB. Parity with main is bitwise at
 two points and across six replayed points in one process.
+
+## Addendum: selector and the Prefer flag
+
+### What the measurements say
+
+- Retaining a loop whose body carries control the unrolled path cannot fold is
+  a large win at every size: a `while` inside a `for` is 1.3x faster retained
+  at N=100 and 57x at N=10k; a parameter-dependent `if` inside a data loop is
+  3.5x faster at N=100 and 22x at N=1000. The legacy path emits one island
+  per iteration and the islands' reverse pass is quadratic.
+- Retaining a loop the unrolled path can vectorize (`target += normal_lpdf(y[i]
+  | ...)`, `y_hat[i] = a[county[i]]`) loses 15-60x even after the rewrite,
+  because reroll turns it into one vector kernel.
+- Retaining a plain recurrence with no control loses 1.4-1.8x on dispatch.
+- Under `STANLI_STRUCTURED_LOOPS=1`, `structured_enabled()` also changes nine
+  non-loop lowering decisions in the parent; that path crashes accel_gp
+  (`runtime-control region: function dot_self`) because `needs_runtime_value`
+  treats `rows(lscale)` as runtime when static evaluation would have folded
+  it.
+
+### Selector
+
+`region_auto_profitable` becomes:
+
+- the statement is a `For` at outer depth 1 with exact bounds and at least 32
+  trips, or a `While` at outer depth 1;
+- `region_runtime_control(s)`: the body, transitively through UDF bodies
+  (bounded depth, visited set), contains a `While`, an `IfElse` whose
+  condition is not `data_only`, or a `TernaryIf`/`EAnd`/`EOr` expression whose
+  condition is not `data_only`.
+
+The `region_cost >= 1e6` gate and `region_contains_while` are deleted. After
+the trial lowers, the candidate is kept only if its tree still contains an
+`If` or `While` node (specialization may have folded the hazard away).
+
+`region_unroll_profitable`, Prefer and Force keep their meaning for testing.
+`structured_target_sites` and `region_target_count` are dead and deleted.
+
+### Parent lowering
+
+The nine `structured_enabled()` sites in `lower.cpp` outside a region become
+mode independent: the runtime-value path is taken only when
+`needs_runtime_value(e)` and `try_eval_pure(e)` fails (or, for the `For`
+bounds, `eval_int` would fail). The island `param_free` refinement at the
+`OP_ISLAND` emission site is removed; islands keep the legacy dependence.
+`structured_enabled()` then reads `region_current != nullptr` and the
+`Prefer`/`Force` clauses go away.
+
+Gate for the change: the 130-model corpus census under `STANLI_STRUCTURED_LOOPS=0`
+and unset must produce byte-identical graph dumps for every model that
+compiles today, and accel_gp must compile under `=1`.
