@@ -186,14 +186,11 @@ void run_call_var(const Program::Call& call, stan::math::var* reg) {
     reverse.idata = site->idata.data();
     reverse.n_idata = (int64_t)site->idata.size();
     reverse.udata = site->udata_owner.get();
-    if (!site->vector_output) {
-      reverse.out_adj = output_varis[0]->adj_;
-    } else {
-      for (int i = 0; i < site->out_len; ++i)
-        adjoints[(size_t)(out_offset + i)] = output_varis[(size_t)i]->adj_;
-      reverse.out_adj_vec = Desc{
-          adjoint_base ? adjoint_base + out_offset : nullptr, site->out_len};
-    }
+    for (int i = 0; i < site->out_len; ++i)
+      adjoints[(size_t)(out_offset + i)] = output_varis[(size_t)i]->adj_;
+    reverse.out_adj_vec =
+        Desc{adjoint_base ? adjoint_base + out_offset : nullptr, site->out_len};
+    reverse.out_adj = site->out_len == 1 ? output_varis[0]->adj_ : 0.0;
     site->backward(reverse);
 
     size_t vari_at = input_varis.size();

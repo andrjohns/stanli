@@ -204,9 +204,6 @@ struct Program {
     int32_t in_len[6] = {0, 0, 0, 0, 0, 0};
     int32_t out = 0;
     int32_t out_len = 0;
-    // Logical container-ness cannot be recovered from width: vector[1] and a
-    // scalar both occupy one register but use different KernelCtx adjoints.
-    bool vector_output = false;
     int32_t scratch = 0;
     int32_t scratch_len = 0;
     std::vector<int> idata;

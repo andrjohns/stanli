@@ -1718,7 +1718,6 @@ struct ProgramCompiler {
     }
     call.out = out.reg;
     call.out_len = out.len;
-    call.vector_output = !is_scalar(out);
     call.idata = std::move(idata);
     call.udata_owner = std::move(udata);
 

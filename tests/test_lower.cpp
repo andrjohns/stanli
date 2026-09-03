@@ -5807,6 +5807,28 @@ int main() {
           "solve_powell_tol max_num_steps in the gradient pass");
   }
 
+  // A one-element vector produced by a kernel call inside runtime control
+  // receives its adjoint the same way the graph delivers every one-element
+  // output.
+  {
+    CompiledModel vm = compile_model(
+        slurp("tests/fixtures/region_vector1_binary.tmir.sexp"), DataMap());
+    check(count_opcode(vm, OP_ISLAND) > 0, "vector[1] region island");
+    Executor vex(std::move(vm.graph));
+    vm.bind(vex);
+    double gradient[1] = {};
+
+    vex.params_data()[0] = -1.0;
+    expect_eq("vector[1] region untaken lp", vex.gradient(gradient), -0.5);
+    expect_eq("vector[1] region untaken gradient", gradient[0], 1.0);
+
+    vex.params_data()[0] = 4.0;
+    const double lp = vex.gradient(gradient);
+    check(std::fabs(lp + 3.0) < 1e-12, "vector[1] region taken lp");
+    check(std::fabs(gradient[0] + 3.2) < 1e-12,
+          "vector[1] region taken gradient " + std::to_string(gradient[0]));
+  }
+
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations
   // themselves. An infinite bound is no bound -- the element is the
   // identity and adds no jacobian term -- and the kernels used to
