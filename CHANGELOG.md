@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.11.0
+
 ### Call Stan functions from Python
 
 `stanli.Function` exposes pure, value-returning Stan UDFs through a separate
@@ -15,6 +17,126 @@ Repeated calls now pack exact Python `float`/`int` scalars directly, bypassing
 NumPy conversion. Native handles retain immutable function lookup tables;
 overload selection and validation still run per call. Argument storage and
 interpreter state remain call-local, including for concurrent/reentrant calls.
+
+### Large data-dependent loops compile as native graph regions
+
+Stan programs whose loop trip count is known only from data, with
+parameter-dependent control flow in the body (the shape of ctsem's
+Kalman-recursion `while` loop, for example), previously had that loop
+unrolled fully into the compiled graph, which becomes expensive to prepare
+and hold in memory once the trip count and nested state grow large. Such loops can now compile to a
+native graph region that walks the body at runtime instead of unrolling it.
+The path is a conservative addition: unsupported bodies fall back to the
+exact prior unrolling behavior, and existing models continue to compile and
+match bitwise (#248).
+
+Follow-up work reduced the memory this runtime representation needs by
+reusing loop-invariant results across iterations and storing per-iteration
+history compactly, so larger instances of these models compile within
+practical memory instead of exhausting it.
+
+### Parameter-dependent control flow supports more of Stan
+
+The register-program path, used to run `while` loops and other control flow
+that depends on parameters, now supports `print` statements without
+duplicating their output during autodiff replay, and `reject()` with a
+runtime-constructed message, consistent across the C API and BridgeStan. It
+also lowers Jacobian transforms for all fifteen constrained-parameter types.
+
+Recursive and data-dependent user-defined functions, mixed integer and real
+arguments, and additional regular functions such as `sin`, `atan2`,
+`tgamma`, Bessel and factorial functions, `ldexp`, `lmgamma`, and
+`binary_log_loss` now work inside this control flow and inside ODE
+right-hand sides, with reverse-mode gradients computed alongside the rest of
+the graph. Reductions such as `prod`, `min`, and `max` also preserve Stan's
+argument grouping across range, gather, indexed-container, and
+user-defined-function-result arguments.
+
+### Sampling can start from Pathfinder draws
+
+Python, R, and the browser can now start NUTS sampling from unconstrained
+draws produced by a single Pathfinder path instead of explicit initial
+values, with validated tuning options and reproducible seeding across
+chains. Pathfinder initialization and explicit initial values are mutually
+exclusive, existing explicit-initialization behavior is unchanged, and
+Pathfinder's own PSIS resampling is skipped since only the initial draws are
+needed (#303).
+
+### Initial values can be given on the constrained scale
+
+stanli had the forward parameter transforms but not their inverses, so every
+initialization surface accepted only unconstrained values. Python's
+`Model.unconstrain()` and R's `unconstrain()` now convert a constrained
+parameter draw to the unconstrained vector a sampler expects, including
+bounds that depend on an earlier parameter such as `vector<lower=alpha>`.
+The same conversion is available through the C API and through BridgeStan's
+`bs_param_unconstrain`, `bs_param_unconstrain_json`, and
+`bs_param_initialize`.
+
+### Individual Stan functions can be called from C++
+
+A new `stanli::Function` API evaluates pure, value-returning Stan
+user-defined functions directly, without compiling or running a full model,
+similar to the R interfaces' popular `expose_stan_functions`. It accepts a
+model source file, source string, or cached MIR, takes arguments by name
+through a `DataMap`, and returns a shape-preserving result, with overload
+resolution and argument validation handled the same way a model's own
+function calls are.
+
+### reduce_sum compiles and runs
+
+Stan models that call `reduce_sum` now compile and run. Slices execute
+serially; parallel or threaded execution is not yet implemented.
+
+### More built-in functions, RNGs, and densities lower
+
+`reverse`, `block`, `to_matrix`, the `linspaced_*` and
+`zeros_`/`ones_`-prefixed constant-fill families, `identity_matrix`,
+`csr_extract_v`/`csr_extract_u`, and a generalized `rep_array` (scalar or
+container elements, over one to three replication axes) now compile and
+evaluate.
+
+`gp_exp_quad_cov` and `normal_id_glm_lpdf` accept a parameter (non-data)
+matrix argument, `is_inf` is supported alongside `is_nan`, `not_a_number`
+and `negative_infinity` join the existing nullary math constants,
+`profile(...)` is treated as a transparent wrapper instead of failing, and
+generated-quantities density accumulation covers
+`neg_binomial_2_lpmf`/`neg_binomial_2_log_lpmf` and the non-Cholesky
+`multi_normal_lpdf`.
+
+`gumbel_rng`, `dirichlet_rng`, and `beta_binomial_rng` are supported in
+generated quantities and, along with `exponential_rng`, inside
+parameter-dependent runtime-control regions such as a `while` loop, so a
+model no longer drops an entire section to the interpreter just to draw
+from one of these inside such a loop.
+
+`multiply_lower_tri_self_transpose` returned an incorrect result in the
+compiled graph for any matrix with a non-zero upper triangle; it now calls
+Stan Math's own implementation in both the graph and the register-program
+backend.
+
+### The browser shows sampling diagnostics and generated quantities
+
+Completed NUTS runs in the browser now show the same diagnostic report the
+Python and R samplers print: divergences, maximum-treedepth saturation,
+E-BFMI, rank-normalized R-hat, and bulk/tail effective sample size across
+chains, computed in a background worker for both single-run and comparison
+views. WALNUTS runs mark these diagnostics as unavailable rather than
+showing a stale NUTS-shaped report, and Pathfinder keeps its existing k-hat
+display. A run too short to compute a diagnostic reports it as incomplete
+rather than implying a clean run, and a run whose draws are already
+available keeps them if diagnostic reporting itself fails (#292).
+
+Generated quantities are shown in a collapsed table section, and the
+selected parameter's plot no longer disappears while navigating between
+parameters with the arrow keys.
+
+### Generated-quantity export works on Windows again
+
+The Windows build was missing the exported `stanli_wa_n_generated_start`
+symbol needed to locate where generated quantities begin in a run's output,
+which broke `test_capi.exe` and any client linked against the Windows DLL,
+including BridgeStan clients. The export is restored.
 
 ## 0.10.0
 

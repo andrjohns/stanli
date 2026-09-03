@@ -206,29 +206,31 @@ point, both sides `-O3` with FP contraction pinned off:
 <!--gen:bench_table_us-->
 | model | stanli | CmdStan | speedup |
 | --- | ---: | ---: | ---: |
-| `gpcm_latent_reg_irt` | 121.1 us | 1337.7 us | **11.0x** |
-| `dogs` | 7.1 us | 63.7 us | **8.9x** |
-| `radon_pooled` | 45.4 us | 320.9 us | **7.1x** |
-| `GLM_Poisson_model` | 0.39 us | 2.0 us | **5.2x** |
+| `gpcm_latent_reg_irt` | 121.8 us | 1337.7 us | **11.0x** |
+| `dogs` | 7.2 us | 63.7 us | **8.9x** |
+| `radon_pooled` | 45.9 us | 320.9 us | **7.0x** |
+| `GLM_Poisson_model` | 0.40 us | 2.0 us | **5.0x** |
 | `state_space_stochastic_level_stochastic_seasonal` | 6.7 us | 26.3 us | **3.9x** |
 | `eight_schools_noncentered` | 0.23 us | 0.74 us | **3.2x** |
-| `logistic_regression_rhs` | 40.8 us | 113.1 us | **2.8x** |
-| `normal_mixture` | 41.8 us | 88.2 us | **2.1x** |
-| `hierarchical_gp` | 29.9 us | 47.6 us | **1.6x** |
-| `hmm_example` | 17.5 us | 27.1 us | **1.6x** |
+| `logistic_regression_rhs` | 40.7 us | 113.1 us | **2.8x** |
+| `soil_incubation` | 26.7 us | 60.9 us | **2.3x** |
+| `normal_mixture` | 41.7 us | 88.2 us | **2.1x** |
+| `lotka_volterra` | 20.8 us | 41.3 us | **2.0x** |
+| `hmm_example` | 16.1 us | 27.1 us | **1.7x** |
 | `garch11` | 7.0 us | 9.7 us | **1.4x** |
+| `hierarchical_gp` | 42.2 us | 47.6 us | **1.1x** |
+| `one_comp_mm_elim_abs` | 459.4 us | 470.7 us | **1.0x** |
 | `diamonds` | 31.1 us | 31.5 us | **1.0x** |
-| `one_comp_mm_elim_abs` | 522.9 us | 470.7 us | 0.90x |
-| `soil_incubation` | 67.8 us | 60.9 us | 0.90x |
-| `lotka_volterra` | 47.6 us | 41.3 us | 0.87x |
+| `gp_regr` | 5.6 us | 4.7 us | 0.84x |
+| `gp_pois_regr` | 5.3 us | 3.9 us | 0.75x |
 <!--/gen-->
 
 The wins come from op granularity. CmdStan's var tape allocates, walks,
 and frees one node per scalar operation per leapfrog step; stanli pays
 a fixed cost per *op*, and a vectorized statement over N elements
 amortizes that to nothing. Across the whole posteriordb corpus the
-median is <!--gen:corpus_median-->2.91x<!--/gen--> and
-<!--gen:corpus_at_par-->116<!--/gen--> of
+median is <!--gen:corpus_median-->2.92x<!--/gen--> and
+<!--gen:corpus_at_par-->117<!--/gen--> of
 <!--gen:corpus_n_grad-->119<!--/gen--> models are at or above CmdStan.
 
 Repeated independent work produces the largest wins. Dense kernels and serial
