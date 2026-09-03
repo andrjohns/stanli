@@ -149,6 +149,11 @@ symbol needed to locate where generated quantities begin in a run's output,
 which broke `test_capi.exe` and any client linked against the Windows DLL,
 including BridgeStan clients. The export is restored.
 
+By default a loop is retained when it is an outermost `while`, or an
+outermost `for` of at least 32 iterations whose body contains a `while` or a
+branch chosen by a parameter; every other loop unrolls as before.
+`STANLI_STRUCTURED_LOOPS=1` now changes only which loops are retained.
+
 ## 0.10.0
 
 ### ctsem's structured-control vocabulary lowers
