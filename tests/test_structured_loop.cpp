@@ -3390,11 +3390,11 @@ static std::shared_ptr<StructuredLoop> traced_branch_plan(bool reuse_guard) {
   std::vector<Node> body;
   body.push_back(std::move(index));
   body.push_back(std::move(compare));
-  body.push_back(branch(guard,
-                        sequence({std::move(scale),
-                                  call(*plan, OP_ADD, {acc, term}, next),
-                                  alias(acc, next)}),
-                        sequence({})));
+  body.push_back(
+      branch(guard,
+             sequence({std::move(scale), call(*plan, OP_ADD, {acc, term}, next),
+                       alias(acc, next)}),
+             sequence({})));
   if (reuse_guard) {
     const int bonus = plan->body.add_slot(1, false);
     const int bumped = plan->body.add_slot(1, false);
@@ -3452,10 +3452,9 @@ static std::shared_ptr<StructuredLoop> traced_while_plan(bool param_break) {
   }
   body.push_back(call(*plan, OP_INT_ARITH, {j, one}, bumped));
   body.push_back(alias(j, bumped));
-  plan->root =
-      sequence({alias(x, theta),
-                while_loop(more, sequence({std::move(compare)}),
-                           sequence(std::move(body)))});
+  plan->root = sequence(
+      {alias(x, theta), while_loop(more, sequence({std::move(compare)}),
+                                   sequence(std::move(body)))});
   plan->outputs = {x};
   plan->prepare();
   check(set_forward(plan->root, compare_op, count_memo_compare) &&
@@ -3497,18 +3496,18 @@ static std::shared_ptr<StructuredLoop> traced_chain_plan() {
   const int compare2_op = compare2.op;
   Node scale = call(*plan, OP_MUL, {theta, iterator}, term);
   const int scale_op = scale.op;
-  plan->root = counted(
-      one, three, iterator,
-      sequence({std::move(index), std::move(compare),
-                branch(positive,
-                       sequence({std::move(index2), std::move(compare2),
-                                 alias(guard, small)}),
-                       alias(guard, zero)),
-                branch(guard,
-                       sequence({std::move(scale),
-                                 call(*plan, OP_ADD, {acc, term}, next),
-                                 alias(acc, next)}),
-                       sequence({}))}));
+  plan->root =
+      counted(one, three, iterator,
+              sequence({std::move(index), std::move(compare),
+                        branch(positive,
+                               sequence({std::move(index2), std::move(compare2),
+                                         alias(guard, small)}),
+                               alias(guard, zero)),
+                        branch(guard,
+                               sequence({std::move(scale),
+                                         call(*plan, OP_ADD, {acc, term}, next),
+                                         alias(acc, next)}),
+                               sequence({}))}));
   plan->outputs = {acc};
   plan->prepare();
   check(set_forward(plan->root, index_op, count_memo_index) &&
@@ -3614,7 +3613,8 @@ static void trace_tests() {
     const Node* guard = find_memo(plan->root);
     const Node* branch_node = find_kind(plan->root, Node::If);
     check(guard && guard->memo_outs.size() == 1 && branch_node &&
-              branch_node->trace && guard->memo_outs[0] == branch_node->condition,
+              branch_node->trace &&
+              guard->memo_outs[0] == branch_node->condition,
           "guard read by an active kernel stays a live-out");
     memo_index_calls = memo_compare_calls = 0;
     Executor executor(outer(plan, {1, 1}, {3}));
