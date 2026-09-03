@@ -8,6 +8,7 @@
 #include <stanli/dae.hpp>
 #include <stanli/graph.hpp>
 #include <stanli/island.hpp>
+#include <stanli/ode_adjoint.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/packet.hpp>
 #include <stanli/wa_interp.hpp>
@@ -5540,22 +5541,77 @@ int main() {
     double dae_lp = dex.gradient(gradient);
     check(std::fabs(dae_lp + 4.4) < 1e-8,
           "DAE untaken lp " + std::to_string(dae_lp));
-    check(std::fabs(gradient[0] - 1.0) < 1e-8,
-          "DAE untaken gate gradient");
-    check(std::fabs(gradient[1] + 1.0) < 1e-7,
-          "DAE untaken initial gradient");
-    check(std::fabs(gradient[2] + 2.8) < 1e-7,
-          "DAE untaken rate gradient");
+    check(std::fabs(gradient[0] - 1.0) < 1e-8, "DAE untaken gate gradient");
+    check(std::fabs(gradient[1] + 1.0) < 1e-7, "DAE untaken initial gradient");
+    check(std::fabs(gradient[2] + 2.8) < 1e-7, "DAE untaken rate gradient");
 
     dex.params_data()[0] = 1.0;
     dae_lp = dex.gradient(gradient);
     check(std::fabs(dae_lp + 1.8) < 1e-8,
           "DAE taken lp " + std::to_string(dae_lp));
-    check(std::fabs(gradient[0] + 1.0) < 1e-8,
-          "DAE taken gate gradient");
+    check(std::fabs(gradient[0] + 1.0) < 1e-8, "DAE taken gate gradient");
     check(std::fabs(gradient[1]) < 1e-7, "DAE taken initial gradient");
-    check(std::fabs(gradient[2] + 2.6) < 1e-7,
-          "DAE taken rate gradient");
+    check(std::fabs(gradient[2] + 2.6) < 1e-7, "DAE taken rate gradient");
+  }
+
+  // The CVODES adjoint frontend uses the same retained callback packing in an
+  // ordinary expression and inside runtime control. Its reverse kernel runs
+  // one weighted adjoint solve and propagates y0, t0, ts, and callback args.
+  {
+    CompiledModel am = compile_model(
+        slurp("tests/fixtures/ode_adjoint_region.tmir.sexp"), DataMap());
+    check(am.n_unconstrained == 5, "adjoint ODE parameter width");
+    int adjoint_calls = 0;
+    for (const Op& op : am.graph.ops) {
+      if (op.opcode != OP_ISLAND) continue;
+      const auto* program = static_cast<const IslandProg*>(op.udata);
+      for (const Program::Call& call : program->calls) {
+        if (call.opcode != OP_ODE_ADJOINT) continue;
+        ++adjoint_calls;
+        const auto* spec =
+            static_cast<const OdeAdjointSpec*>(call.udata_owner.get());
+        check(spec != nullptr && spec->prog.ok,
+              "adjoint ODE retained callback register program");
+      }
+    }
+    check(adjoint_calls == 2, "adjoint ODE shared kernel calls");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    double gradient[5] = {};
+    aex.params_data()[0] = -1.0;
+    aex.params_data()[1] = 2.0;
+    aex.params_data()[2] = 0.1;
+    aex.params_data()[3] = 0.4;
+    aex.params_data()[4] = 3.0;
+
+    const double value_only = aex.forward_value_only();
+    check(std::fabs(value_only + 4.185) < 1e-8,
+          "adjoint ODE value-only lp " + std::to_string(value_only));
+    double lp = aex.gradient(gradient);
+    check(std::fabs(lp + 4.185) < 1e-8,
+          "adjoint ODE untaken lp " + std::to_string(lp));
+    check(std::fabs(gradient[0] - 1.0) < 1e-7,
+          "adjoint ODE untaken gate gradient");
+    check(std::fabs(gradient[1] + 1.0) < 1e-7,
+          "adjoint ODE untaken y0 gradient");
+    check(std::fabs(gradient[2] + 3.1) < 1e-6,
+          "adjoint ODE untaken t0 gradient");
+    check(std::fabs(gradient[3] - 2.6) < 1e-6,
+          "adjoint ODE untaken ts gradient");
+    check(std::fabs(gradient[4] + 2.7) < 1e-6,
+          "adjoint ODE untaken callback gradient");
+
+    aex.params_data()[0] = 1.0;
+    lp = aex.gradient(gradient);
+    check(std::fabs(lp + 1.285) < 1e-8,
+          "adjoint ODE taken lp " + std::to_string(lp));
+    check(std::fabs(gradient[0] + 1.0) < 1e-7,
+          "adjoint ODE taken gate gradient");
+    check(std::fabs(gradient[1]) < 1e-7, "adjoint ODE taken y0 gradient");
+    check(std::fabs(gradient[2] + 6.1) < 1e-6, "adjoint ODE taken t0 gradient");
+    check(std::fabs(gradient[3] - 5.6) < 1e-6, "adjoint ODE taken ts gradient");
+    check(std::fabs(gradient[4] + 2.4) < 1e-6,
+          "adjoint ODE taken callback gradient");
   }
 
   // tests/fixtures/infbounds.stan: infinite bounds on the declarations

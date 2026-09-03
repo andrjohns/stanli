@@ -13,6 +13,7 @@
 #include <stanli/mir_decode.hpp>
 #include <stanli/mir_interp.hpp>
 #include <stanli/ode.hpp>
+#include <stanli/ode_adjoint.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/island.hpp>
 #include <stanli/structured_loop.hpp>
@@ -3205,6 +3206,139 @@ struct Lowering {
     return true;
   }
 
+  bool lower_program_ode_adjoint(ProgramCompiler& c, const mir::Expr& e,
+                                 Range* out_range) {
+    const auto call = mir::ode_call(e.name);
+    if (!call || call->method != mir::OdeMethod::Adjoint) return false;
+    if (e.args.size() < call->callback_args_begin ||
+        e.args[0].kind != mir::Expr::Var)
+      c.bail(e.name + ": expected a right-hand side and solver controls");
+
+    const auto constant = [&](size_t i, const std::string& role) {
+      auto value = try_eval_pure(e.args[i]);
+      if (!value) c.bail(role + " must be data-only and known at compile time");
+      return *value;
+    };
+    const auto scalar_real = [&](size_t i, const std::string& role) {
+      DataMap::Entry value = constant(i, role);
+      if (value.is_int) {
+        if (value.i.size() != 1) c.bail(role + " must be one real");
+        return static_cast<double>(value.i[0]);
+      }
+      if (value.r.size() != 1) c.bail(role + " must be one real");
+      return value.r[0];
+    };
+    const auto scalar_int = [&](size_t i, const std::string& role) {
+      DataMap::Entry value = constant(i, role);
+      if (!value.is_int || value.i.size() != 1)
+        c.bail(role + " must be one integer");
+      return value.i[0];
+    };
+    const auto vector_real = [&](size_t i, const std::string& role) {
+      DataMap::Entry value = constant(i, role);
+      if (value.is_int) c.bail(role + " must be a real vector");
+      return value.r;
+    };
+
+    auto spec = std::make_shared<OdeAdjointSpec>();
+    spec->adopt(fun_defs);
+    spec->rhs_name = e.args[0].name;
+    spec->callback_name = spec->rhs_name;
+    if (!spec->rhs())
+      c.bail(e.name + ": unknown right-hand side " + spec->rhs_name);
+    spec->relative_tolerance_forward =
+        scalar_real(4, "adjoint ODE forward relative tolerance");
+    spec->absolute_tolerance_forward =
+        vector_real(5, "adjoint ODE forward absolute tolerance");
+    spec->relative_tolerance_backward =
+        scalar_real(6, "adjoint ODE backward relative tolerance");
+    spec->absolute_tolerance_backward =
+        vector_real(7, "adjoint ODE backward absolute tolerance");
+    spec->relative_tolerance_quadrature =
+        scalar_real(8, "adjoint ODE quadrature relative tolerance");
+    spec->absolute_tolerance_quadrature =
+        scalar_real(9, "adjoint ODE quadrature absolute tolerance");
+    spec->max_num_steps = scalar_int(10, "adjoint ODE maximum steps");
+    spec->num_steps_between_checkpoints =
+        scalar_int(11, "adjoint ODE checkpoint interval");
+    spec->interpolation_polynomial =
+        (int)scalar_int(12, "adjoint ODE interpolation polynomial");
+    spec->solver_forward = (int)scalar_int(13, "adjoint ODE forward solver");
+    spec->solver_backward = (int)scalar_int(14, "adjoint ODE backward solver");
+
+    const Range y0 = c.expr(e.args[1]);
+    const Range t0 = c.expr(e.args[2]);
+    const Range ts = c.expr(e.args[3]);
+    if (y0.kind != ViewKind::Vector)
+      c.bail(e.name + ": initial state must be a vector");
+    if (!c.is_scalar(t0)) c.bail(e.name + ": initial time must be scalar");
+    if (ts.kind != ViewKind::Array)
+      c.bail(e.name + ": output times must be an array");
+    const int S = y0.len;
+    const int N = ts.len;
+    if ((int)spec->absolute_tolerance_forward.size() != S ||
+        (int)spec->absolute_tolerance_backward.size() != S)
+      c.bail(e.name + ": absolute tolerance vectors must match state size");
+    if (S < 0 || N < 0 || (N && S > ProgramCompiler::kMaxRegs / N))
+      c.bail(e.name + ": result is too large");
+
+    std::vector<Range> active = pack_callback_arguments<Range>(
+        *spec, e.args, call->callback_args_begin, e.args.size(),
+        [&](size_t i) {
+          Range value = c.expr(e.args[i]);
+          return std::make_pair(value, value.len);
+        },
+        [&](size_t i) {
+          DataMap::Entry value = constant(i, "adjoint ODE data argument");
+          if (value.is_int)
+            c.bail("adjoint ODE real data argument is integer-valued");
+          const bool matrix = e.args[i].type_ == "UMatrix";
+          const bool nested_matrix =
+              e.args[i].unsized.depth != 0 &&
+              e.args[i].unsized.leaf == mir::UnsizedLeaf::Matrix;
+          return graph_order(value, matrix, nested_matrix);
+        },
+        [&](size_t i) {
+          DataMap::Entry value = constant(i, "adjoint ODE integer argument");
+          if (!value.is_int)
+            c.bail("adjoint ODE integer argument is real-valued");
+          return value.i;
+        },
+        [&](const std::string& message) { c.bail(e.name + ": " + message); });
+
+    int parameter_count = 0;
+    for (const Range& value : active) {
+      if (value.len > ProgramCompiler::kMaxRegs - parameter_count)
+        c.bail(e.name + ": active callback arguments are too large");
+      parameter_count += value.len;
+    }
+    Range theta{c.konst(0.0), 1};
+    theta.kind = ViewKind::Vector;
+    if (parameter_count != 0) {
+      theta = Range{c.alloc(parameter_count), parameter_count};
+      theta.kind = ViewKind::Vector;
+      int at = 0;
+      for (const Range& value : active)
+        for (int k = 0; k < value.len; ++k)
+          c.emit(Program::MOV, theta.reg + at++, value.reg + k);
+    }
+    spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), S, spec->args);
+
+    Range result{0, N * S};
+    result.kind = ViewKind::Array;
+    result.dims = {N, S};
+    result.leaf = ViewKind::Vector;
+    const uint8_t activity =
+        static_cast<uint8_t>((!e.args[1].data_only ? 0x1u : 0u) |
+                             (!e.args[2].data_only ? 0x2u : 0u) |
+                             (!e.args[3].data_only ? 0x4u : 0u) |
+                             (parameter_count != 0 ? 0x8u : 0u));
+    *out_range = c.kernel_call(OP_ODE_ADJOINT, {y0, t0, ts, theta}, result,
+                               static_cast<uint8_t>(0x10u | activity), activity,
+                               {N, S}, spec, e.name);
+    return true;
+  }
+
   bool lower_program_dae(ProgramCompiler& c, const mir::Expr& e,
                          Range* out_range) {
     const auto call = mir::dae_call(e.name);
@@ -3269,8 +3403,7 @@ struct Lowering {
         },
         [&](size_t i) {
           DataMap::Entry value = constant(i, "DAE data argument");
-          if (value.is_int)
-            c.bail("DAE real data argument is integer-valued");
+          if (value.is_int) c.bail("DAE real data argument is integer-valued");
           const bool matrix = e.args[i].type_ == "UMatrix";
           const bool nested_matrix =
               e.args[i].unsized.depth != 0 &&
@@ -3279,8 +3412,7 @@ struct Lowering {
         },
         [&](size_t i) {
           DataMap::Entry value = constant(i, "DAE integer argument");
-          if (!value.is_int)
-            c.bail("DAE integer argument is real-valued");
+          if (!value.is_int) c.bail("DAE integer argument is real-valued");
           return value.i;
         },
         [&](const std::string& message) { c.bail(e.name + ": " + message); });
@@ -3308,10 +3440,10 @@ struct Lowering {
     result.kind = ViewKind::Array;
     result.dims = {N, S};
     result.leaf = ViewKind::Vector;
-    const uint8_t activity = static_cast<uint8_t>(
-        (!e.args[1].data_only ? 0x1u : 0u) |
-        (!e.args[2].data_only ? 0x2u : 0u) |
-        (parameter_count != 0 ? 0x4u : 0u));
+    const uint8_t activity =
+        static_cast<uint8_t>((!e.args[1].data_only ? 0x1u : 0u) |
+                             (!e.args[2].data_only ? 0x2u : 0u) |
+                             (parameter_count != 0 ? 0x4u : 0u));
     *out_range = c.kernel_call(OP_DAE, {y0, yp0, theta}, result,
                                static_cast<uint8_t>(0x8u | activity), activity,
                                {(int)N, S}, spec, e.name);
@@ -3325,7 +3457,8 @@ struct Lowering {
     if (higher_order->family == mir::HigherOrderFamily::Integrate1D)
       return lower_program_quadrature(c, e, out_range);
     if (higher_order->family == mir::HigherOrderFamily::Ode)
-      return lower_program_ode(c, e, out_range);
+      return lower_program_ode_adjoint(c, e, out_range) ||
+             lower_program_ode(c, e, out_range);
     if (higher_order->family == mir::HigherOrderFamily::Dae)
       return lower_program_dae(c, e, out_range);
     if (higher_order->family != mir::HigherOrderFamily::Algebra) return false;
@@ -5545,6 +5678,9 @@ struct Lowering {
       case BuiltinFamily::Quadrature:
         return lower_quadrature_fn(e, actuals);
       case BuiltinFamily::Ode:
+        if (const auto call = mir::ode_call(e.name);
+            call && call->method == mir::OdeMethod::Adjoint)
+          return lower_program_expression(e);
         if (auto v = lower_ode_fn(e, actuals)) return *v;
         break;
       case BuiltinFamily::Dae:

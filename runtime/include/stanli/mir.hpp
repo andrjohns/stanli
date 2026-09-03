@@ -628,7 +628,7 @@ inline std::optional<OdeCall> ode_call(std::string_view name) {
   if (name == "ode_adams_tol") return OdeCall{OdeMethod::Adams, false, true, 7};
   if (name == "ode_ckrk_tol") return OdeCall{OdeMethod::Ckrk, false, true, 7};
   if (name == "ode_adjoint_tol_ctl")
-    return OdeCall{OdeMethod::Adjoint, false, true, 0};
+    return OdeCall{OdeMethod::Adjoint, false, true, 15};
   return {};
 }
 

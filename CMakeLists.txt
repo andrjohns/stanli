@@ -281,6 +281,7 @@ set(STANLI_RUNTIME_SOURCES
   runtime/kernels/quadrature.cpp
   runtime/kernels/ode.cpp
   runtime/kernels/dae.cpp
+  runtime/kernels/ode_adjoint.cpp
   runtime/src/ode_prog.cpp
   runtime/src/program.cpp
   runtime/src/program_transform.cpp

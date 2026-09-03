@@ -13,7 +13,9 @@ integrated `map_rect` probe covers its empty-job case; `map_rect_region.stan`
 covers nonempty serial calls through both graph and runtime-control lowering.
 `ode_region.stan` similarly covers every legacy and modern forward ODE solver
 through runtime control. `dae_region.stan` covers `dae` and `dae_tol` through
-the same retained-callback and graph/Program kernel-call infrastructure. The
+the same retained-callback and graph/Program kernel-call infrastructure.
+`ode_adjoint_region.stan` covers the CVODES adjoint solver across ordinary and
+runtime-control expressions, including active initial/output times. The
 quadrature family has focused graph/runtime-control coverage in
 `quadrature_region.stan`;
 `gaussian_dlm_obs_lpdf` is explicitly unsupported, not silently skipped.

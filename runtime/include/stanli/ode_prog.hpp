@@ -140,9 +140,8 @@ void seed_dae_regs(const RhsProgram& p, const T_time& t, const T_y* y,
 template <typename T, typename T_time, typename T_y, typename T_yp,
           typename T_theta>
 std::vector<T>& eval_dae_regs(const RhsProgram& p, const T_time& t,
-                              const T_y* y, const T_yp* yp,
-                              const T_theta* th, size_t n_th_source,
-                              const double* xr) {
+                              const T_y* y, const T_yp* yp, const T_theta* th,
+                              size_t n_th_source, const double* xr) {
   std::vector<T>& reg = rhs_regs<T>();
   seed_dae_regs<T>(p, t, y, yp, th, n_th_source, xr, reg);
   run_program(p, reg);
@@ -167,8 +166,8 @@ template <typename T, typename T_time, typename T_y, typename T_yp,
 void run_dae_into(const RhsProgram& p, const T_time& t, const T_y* y,
                   const T_yp* yp, const T_theta* th, size_t n_th_source,
                   const double* xr, T* out) {
-  const std::vector<T>& reg = detail::eval_dae_regs<T>(
-      p, t, y, yp, th, n_th_source, xr);
+  const std::vector<T>& reg =
+      detail::eval_dae_regs<T>(p, t, y, yp, th, n_th_source, xr);
   for (size_t i = 0; i < p.out_regs.size(); ++i)
     out[i] = reg[(size_t)p.out_regs[i]];
 }

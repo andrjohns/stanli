@@ -17,9 +17,11 @@ namespace {
 // The register regions run_rhs seeds before the program starts, in the order
 // the fields appear on RhsProgram.
 void compact_rhs(RhsProgram& p) {
-  std::vector<std::pair<int, int>> seeded{
-      {p.t_reg, 1}, {p.y0, p.n_y}, {p.yp0, p.n_yp},
-      {p.th0, p.n_th}, {p.xr0, p.n_xr}};
+  std::vector<std::pair<int, int>> seeded{{p.t_reg, 1},
+                                          {p.y0, p.n_y},
+                                          {p.yp0, p.n_yp},
+                                          {p.th0, p.n_th},
+                                          {p.xr0, p.n_xr}};
   compact_program(p, seeded);
   p.t_reg = seeded[0].first;
   p.y0 = seeded[1].first;
