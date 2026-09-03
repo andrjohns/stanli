@@ -544,12 +544,18 @@ struct Segmenter {
       if (!written[fill.first]) constants[fill.first] = &fill.second;
   }
 
+  // A segment copies every live-in into its frame and gives each copied
+  // element an adjoint cell; a kernel call reads its inputs where they are.
+  static constexpr int64_t input_cap = 16;
+
   bool eligible(const Node& n) const {
     if (n.kind == Node::Alias) return true;
     if (n.kind != Node::KernelCall || n.storage == Node::InPlace ||
         (n.invariant_loop >= 0 && n.active))
       return false;
     const Op& op = p.body.ops[n.op];
+    for (int k = 0; k < op.n_in; ++k)
+      if (length(p, op.in[k]) > input_cap) return false;
     const Kernel* k = find_kernel(op.opcode);
     return k && n.forward == k->forward && n.backward == k->backward &&
            segment_supports(p.body, op);
