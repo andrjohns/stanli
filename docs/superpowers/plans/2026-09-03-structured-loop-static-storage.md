@@ -563,3 +563,85 @@ The fixture-based retained-vs-unrolled comparisons keep passing at 1e-12.
 m1 (scalar recurrence, N=10k, `=1`): from 836 µs toward the unrolled 404 µs
 or below, since the three kernels become three register instructions. ctsem
 N=400: fewer tree visits and records; the CALL-heavy Kalman step gains less.
+
+## Addendum: the JIT, staged
+
+Date: 2026-09-03. Status: proposal, not started. Depends on the segment
+addendum (bodies as `Program` streams) being in.
+
+### What is left to gain, and where
+
+Measured after segments on the scalar recurrence (m1, N=10k, 462 µs per
+gradient against 399 µs unrolled): libm tanh/cosh 26%, Program interpreter
+forward plus generated adjoint 29%, tape bookkeeping (tree walk, frame
+allocation, versions, records, the reverse record loop) 41%.
+
+After segments, a retained iteration costs: the tree walk over the body's
+few remaining nodes, one arena frame per segment, live-in copies, one record
+per segment, `run_program` (switch dispatch, ~3 ns per scalar instruction,
+a kernel call per CALL) and `run_adjoint` (same shape backwards). For a
+scalar recurrence the switch and the per-iteration bookkeeping are the same
+order of magnitude; for a matrix body the kernels dominate and nothing below
+changes them. A JIT that only replaced `run_program` would therefore buy a
+fraction of the remaining time. The design below compiles the loop, not the
+instruction.
+
+### Stage 1: one frame per iteration
+
+A For or While whose body, after segment formation, contains only Segment
+nodes, Alias nodes, traced Ifs and memo nodes (no nested loop, no InPlace)
+gets a fixed frame layout: the segments' register files at fixed offsets,
+one control word per traced If, the iterator, and the live-in handles the
+active segments save. The loop allocates one arena block per entry sized
+`trips * stride` for a For (a While grows in blocks) and the backward walks
+frames arithmetically instead of through records: one record per loop
+entry. The segments' `run_program` calls then read and write inside one
+contiguous frame with static offsets, which is what a stencil needs.
+
+This is portable and needs no new machinery; it removes the per-segment
+records and most version traffic for the common body.
+
+### Stage 2: copy-and-patch stencils for Program streams
+
+The `Program` opcode set is closed (about 35 codes plus CALL) and the
+generated adjoint is a second stream over the same codes. Each opcode gets a
+stencil: a C function over `(double* frame)` whose register offsets,
+constants and call targets are holes, ending in a tail call to the next
+stencil. Compiling a segment concatenates the stencils for its forward
+stream, patches the holes with the segment's register offsets, and does the
+same for its adjoint stream. Kernel CALLs and libm calls stay calls; scalar
+arithmetic, moves, comparisons and densities' partial rules become straight
+machine code. A frame-relative addressing mode means one segment compiles
+once and runs at any frame address.
+
+What this needs:
+
+- Stencil sources: one `stencils.c` compiled per target with a fixed calling
+  convention and `musttail` continuations. Generated at build time only by
+  developers: a `tools/gen_stencils.py` runs clang and `llvm-objdump` and
+  writes `runtime/jit/stencils_<arch>.inc` (bytes plus relocation lists).
+  The tables are checked in, the way fixture MIR is, and a CI job with LLVM
+  regenerates and diffs them. Ordinary builds, wheels and R packages need
+  no LLVM.
+- A patcher per architecture: x86-64 (abs64, rel32) and arm64 (BRANCH26,
+  ADRP/ADD page pairs, MOVZ/MOVK immediates), roughly 150 lines each.
+- Executable memory: `mmap(MAP_JIT)` plus `pthread_jit_write_protect_np`
+  and `sys_icache_invalidate` on macOS, `mprotect` on Linux, `VirtualAlloc`
+  on Windows; about 80 lines.
+- Fallback: `STANLI_JIT=0`, any unsupported opcode, any unsupported
+  platform (wasm) runs the interpreter over the same Program. The JIT is
+  never required for correctness, and every JIT'd segment is verified
+  against the interpreter bitwise in the test suite, opcode by opcode.
+
+Expected: scalar-dominated bodies 3-5x over the interpreter; CALL-dominated
+bodies unchanged. Cost: about 1,500 lines plus generated tables and a
+dev-only LLVM dependency.
+
+### Decision points for the owner
+
+1. Is a checked-in generated table with a dev-only clang/llvm-objdump
+   requirement acceptable, or must the build stay pure CMake+C++?
+2. Which platforms first: arm64 macOS (development machine), then x86-64
+   Linux (CI), Windows later, wasm never.
+3. Whether Stage 1 alone (portable, no machine code) is where to stop if the
+   measured gap after segments is mostly bookkeeping rather than dispatch.
