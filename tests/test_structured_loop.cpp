@@ -4100,13 +4100,13 @@ static std::shared_ptr<StructuredLoop> call_segment_plan() {
   Node set_index;
   set_index.kind = Node::KernelCall;
   set_index.op = plan->body.add_op(OP_SET_INDEX, {x, scaled}, updated, {1});
-  plan->root = sequence(
-      {alias(acc, beta),
-       counted(lower, upper, iterator,
-               sequence({call(*plan, OP_MUL, {acc, theta}, scaled),
-                         std::move(set_index),
-                         call(*plan, OP_SUM_VEC, {updated}, total),
-                         alias(acc, total), alias(x, updated)}))});
+  plan->root =
+      sequence({alias(acc, beta),
+                counted(lower, upper, iterator,
+                        sequence({call(*plan, OP_MUL, {acc, theta}, scaled),
+                                  std::move(set_index),
+                                  call(*plan, OP_SUM_VEC, {updated}, total),
+                                  alias(acc, total), alias(x, updated)}))});
   plan->outputs = {acc};
   plan->prepare();
   return plan;
@@ -4126,11 +4126,10 @@ static std::shared_ptr<StructuredLoop> alias_out_plan() {
   const int product = plan->body.add_slot(1, false);
   const int sum = plan->body.add_slot(1, false);
   plan->imports = {{theta, 0, 0, true}, {beta, 1, 0, true}};
-  plan->root = counted(lower, upper, iterator,
-                       sequence({call(*plan, OP_MUL, {acc, beta}, product),
-                                 alias(x, product),
-                                 call(*plan, OP_ADD, {x, theta}, sum),
-                                 alias(acc, sum)}));
+  plan->root = counted(
+      lower, upper, iterator,
+      sequence({call(*plan, OP_MUL, {acc, beta}, product), alias(x, product),
+                call(*plan, OP_ADD, {x, theta}, sum), alias(acc, sum)}));
   plan->outputs = {acc, x};
   plan->prepare();
   return plan;
@@ -4235,12 +4234,12 @@ static std::shared_ptr<StructuredLoop> effect_plan() {
   spec->shapes_match = true;
   plan->body.ops[static_cast<size_t>(check_node.op)].udata = spec.get();
   plan->body.udata_pool.push_back(std::move(spec));
-  plan->root = counted(lower, upper, iterator,
-                       sequence({call(*plan, OP_MUL, {acc, beta}, product),
-                                 call(*plan, OP_ADD, {product, theta}, sum),
-                                 std::move(check_node),
-                                 call(*plan, OP_MUL, {sum, two}, doubled),
-                                 alias(acc, doubled)}));
+  plan->root = counted(
+      lower, upper, iterator,
+      sequence({call(*plan, OP_MUL, {acc, beta}, product),
+                call(*plan, OP_ADD, {product, theta}, sum),
+                std::move(check_node), call(*plan, OP_MUL, {sum, two}, doubled),
+                alias(acc, doubled)}));
   plan->outputs = {acc};
   plan->prepare();
   return plan;
@@ -4264,11 +4263,10 @@ static std::shared_ptr<StructuredLoop> foreign_op_plan() {
   plan->imports = {{theta, 0, 0, true}, {beta, 1, 0, true}};
   Node index = call(*plan, OP_INDEX_DYNAMIC, {table, iterator}, picked);
   attach(*plan, index.op, single_spec(3));
-  plan->root = counted(lower, upper, iterator,
-                       sequence({call(*plan, OP_MUL, {acc, beta}, product),
-                                 std::move(index),
-                                 call(*plan, OP_ADD, {product, picked}, sum),
-                                 alias(acc, sum)}));
+  plan->root = counted(
+      lower, upper, iterator,
+      sequence({call(*plan, OP_MUL, {acc, beta}, product), std::move(index),
+                call(*plan, OP_ADD, {product, picked}, sum), alias(acc, sum)}));
   plan->outputs = {acc};
   plan->prepare();
   return plan;
@@ -4291,12 +4289,11 @@ static std::shared_ptr<StructuredLoop> no_backward_plan() {
   plan->imports = {{theta, 0, 0, true}, {beta, 1, 0, true}};
   Node compare = call(*plan, OP_COMPARE, {product, theta}, positive);
   plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
-  plan->root = counted(lower, upper, iterator,
-                       sequence({call(*plan, OP_MUL, {acc, beta}, product),
-                                 std::move(compare),
-                                 call(*plan, OP_MUL, {positive, theta}, gated),
-                                 call(*plan, OP_ADD, {product, gated}, sum),
-                                 alias(acc, sum)}));
+  plan->root = counted(
+      lower, upper, iterator,
+      sequence({call(*plan, OP_MUL, {acc, beta}, product), std::move(compare),
+                call(*plan, OP_MUL, {positive, theta}, gated),
+                call(*plan, OP_ADD, {product, gated}, sum), alias(acc, sum)}));
   plan->outputs = {acc};
   plan->prepare();
   return plan;
@@ -4376,9 +4373,9 @@ static void segment_tests() {
   }
   {
     auto plan = lone_kernel_plan();
-    check(plan->segments.empty() &&
-              count_kind(plan->root, Node::KernelCall) == 1,
-          "a lone kernel stays a kernel call");
+    check(
+        plan->segments.empty() && count_kind(plan->root, Node::KernelCall) == 1,
+        "a lone kernel stays a kernel call");
   }
   {
     auto plan = effect_plan();
@@ -4399,9 +4396,9 @@ static void segment_tests() {
   }
   {
     auto plan = foreign_op_plan();
-    check(plan->segments.empty() &&
-              count_kind(plan->root, Node::KernelCall) == 3,
-          "op outside the vocabulary leaves the run as kernel calls");
+    check(
+        plan->segments.empty() && count_kind(plan->root, Node::KernelCall) == 3,
+        "op outside the vocabulary leaves the run as kernel calls");
     compare_segmented(foreign_op_plan, "unsegmented run matches itself");
   }
   {

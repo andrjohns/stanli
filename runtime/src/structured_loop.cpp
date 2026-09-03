@@ -507,8 +507,7 @@ struct Memoizer {
 };
 
 // Straight-line runs of kernel calls and aliases become one register
-// program each. Kernels whose callbacks were customised, in-place updates,
-// cached active kernels and effects keep their own node.
+// program each.
 struct Segmenter {
   StructuredLoop& p;
   const SlotUses& uses;
@@ -589,15 +588,14 @@ struct Segmenter {
     Segment segment;
     if (!compile_segment(p.body, items, constants, live_outs, active, &segment))
       return false;
-    if (p.segments.size() >= static_cast<size_t>(std::numeric_limits<int>::max()))
+    if (p.segments.size() >=
+        static_cast<size_t>(std::numeric_limits<int>::max()))
       throw std::length_error("too many structured segments");
     result.kind = Node::Segment;
     result.segment = static_cast<int>(p.segments.size());
-    result.active = std::any_of(segment.program.ins.begin(),
-                                segment.program.ins.end(),
-                                [](const IslandProg::LiveIn& in) {
-                                  return in.active;
-                                });
+    result.active =
+        std::any_of(segment.program.ins.begin(), segment.program.ins.end(),
+                    [](const IslandProg::LiveIn& in) { return in.active; });
     if (std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS"))
       std::fprintf(stderr,
                    "stanli_structured segment: items=%zu instr=%zu calls=%zu "
@@ -782,8 +780,7 @@ void classify(StructuredLoop& p) {
   };
   walk(p.root, loops, renumber);
 
-  // A segment's backward reads the frame it copied its inputs into, so only
-  // the kernel calls left standing hold their inputs' versions.
+  // Segments read their inputs from their own frame.
   std::vector<char> inplace_base(slots, 0), active_reader(slots, 0);
   auto mark_readers = [&](Node& n, const std::vector<int>&) {
     if (n.kind != Node::KernelCall) return;
@@ -1742,7 +1739,8 @@ struct Execution {
     int64_t handles = -1;
     if (n.active) {
       handles = static_cast<int64_t>(s.handles.size());
-      for (const auto& in : segment.ins) s.handles.push_back(s.bindings[in.slot]);
+      for (const auto& in : segment.ins)
+        s.handles.push_back(s.bindings[in.slot]);
     }
     for (const auto& in : segment.ins) {
       const double* v = value(in.slot);

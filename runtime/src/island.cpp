@@ -179,9 +179,7 @@ struct Compiler {
   int64_t n_call_scratch = 0;
   bool ok = true;
   int max_live_ins = kMaxLiveIns;
-  // Segments give a kernel without a backward an empty one: the loop
-  // executor never ran a backward for it either.
-  bool noop_backward = false;
+  bool noop_backward = false;  // a kernel without a backward gets an empty one
 
   // A copy-then-modify op (SET_INDEX/SET_SLICE writing a slot distinct
   // from its base) can reuse the base's registers when nothing reads the
@@ -777,8 +775,8 @@ int carve_islands(Graph& g,
 
 bool segment_supports(const Graph& g, const Op& op) {
   if (is_effectful_op(op.opcode) || !in_vocab(g, op)) return false;
-  // The vector unaries the compiler has no range instruction for would refuse
-  // the whole run at compile time; keep them out so the run splits instead.
+  // A vector unary without a range instruction splits the run instead of
+  // refusing it.
   const int unary = unary_code(op.opcode);
   return unary < 0 || g.slots[op.out].len == 1 || unary == Program::LOG ||
          unary == Program::EXP;
@@ -791,8 +789,18 @@ bool compile_segment(
     Segment* out) {
   static const std::unordered_map<int, size_t> no_last_use;
   static const std::unordered_set<int> no_pinned;
-  Compiler cc{g,    constants, no_last_use, no_pinned, {}, {}, {}, 0, 0,
-              true, std::numeric_limits<int>::max(), true};
+  Compiler cc{g,
+              constants,
+              no_last_use,
+              no_pinned,
+              {},
+              {},
+              {},
+              0,
+              0,
+              true,
+              std::numeric_limits<int>::max(),
+              true};
   std::vector<int> written;
   std::unordered_set<int> written_set;
   const auto write = [&](int slot) {
@@ -841,8 +849,8 @@ bool compile_segment(
     off += (size_t)len;
   }
   for (size_t k = 0; k < cc.prog.ins.size(); ++k)
-    segment.ins.push_back(SegmentBinding{cc.live_in_slots[k], cc.prog.ins[k].reg,
-                                         cc.prog.ins[k].len});
+    segment.ins.push_back(SegmentBinding{
+        cc.live_in_slots[k], cc.prog.ins[k].reg, cc.prog.ins[k].len});
   segment.program = std::move(cc.prog);
   *out = std::move(segment);
   return true;
