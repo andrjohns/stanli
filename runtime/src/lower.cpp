@@ -45,12 +45,6 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(__APPLE__)
-#include <sys/sysctl.h>
-#elif defined(__linux__)
-#include <unistd.h>
-#endif
-
 namespace stanli {
 namespace {
 
@@ -811,7 +805,6 @@ struct Lowering {
   // order for arrays, so compile-time observation must never reuse them.
   std::map<ObservationKey, DataMap::Entry> observations;
   std::vector<int> target_terms;
-  std::set<int> target_fragments;
   std::vector<int> jac_slots;
   std::map<std::string, const mir::FunDef*> fun_defs;
   // A generic UDF keeps one scalar template type per formal. Locals and its
@@ -8696,31 +8689,6 @@ struct Lowering {
     return terms[0];
   }
 
-  int reduce_target_sources(const std::vector<int>& terms) {
-    auto spec = std::make_shared<TargetReduction>();
-    int64_t packed_len = 0;
-    int packed = -1;
-    for (int id : terms) {
-      const int64_t len = g.slots[id].len;
-      const bool fragment = target_fragments.count(id);
-      if ((!fragment && len != 1) || (fragment && len < 1))
-        fail("invalid target source shape");
-      spec->sources.push_back({packed_len, len - fragment, fragment});
-      if (len > (int64_t{1} << 52) - packed_len)
-        fail("target source capacity overflow");
-      packed_len += len;
-      spec->capacity += len - fragment;
-      packed = packed < 0
-                   ? id
-                   : emit_raw(OP_CONCAT2, {packed, id}, packed_len, {}).slot;
-    }
-    if (packed < 0) return const_slot(0);
-    Val result = emit_raw(OP_TARGET_REDUCE, {packed}, 1, {});
-    g.ops.back().udata = spec.get();
-    g.udata_pool.push_back(std::move(spec));
-    return result.slot;
-  }
-
   // The write_array graph: same unconstrained draw in, every CSV column out.
   // Forward-only, so no target, no jacobian, no adjoints -- but the same
   // lowering, and the same passes, because generated quantities are unrolled
@@ -8822,12 +8790,6 @@ struct Lowering {
                target_terms.size(), out.views.size());
     const auto lower_time = prep.start();
     for (const auto& s : p.log_prob) lower_stmt(s);
-    const bool fragmented_target = !target_fragments.empty();
-    if (fragmented_target) {
-      std::vector<int> ordered = target_terms;
-      ordered.insert(ordered.end(), jac_slots.begin(), jac_slots.end());
-      target_terms = {reduce_target_sources(ordered)};
-    }
     prep.graph(prep_graph, "lower", lower_time, g, out.fills,
                target_terms.size(), out.views.size());
     // Jacobian terms and constrained-parameter views are read straight out
@@ -8933,8 +8895,7 @@ struct Lowering {
                islands);
     const auto reduce_time = prep.start();
     std::vector<int> all = target_terms;
-    if (!fragmented_target)
-      all.insert(all.end(), jac_slots.begin(), jac_slots.end());
+    all.insert(all.end(), jac_slots.begin(), jac_slots.end());
     g.result_slot = reduce_terms(all);
     prep.graph(prep_graph, "reduce", reduce_time, g, out.fills,
                target_terms.size(), out.views.size());

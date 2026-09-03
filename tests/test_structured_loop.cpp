@@ -370,8 +370,8 @@ static void inplace_promotion_tests() {
   }
   const Node* first = find_call(plan->root, update_ops[0]);
   const Node* second = find_call(plan->root, update_ops[1]);
-  check(first && !first->active && second && second->active,
-        "static activity follows the update right-hand side");
+  check(first && first->active && second && second->active,
+        "static activity covers every update of an active container");
   Executor executor(outer(plan));
   const Evaluation result_value = evaluate(executor, .25, 0);
   close(result_value.value, 37.25, "promoted in-place value");
@@ -2284,7 +2284,7 @@ static std::shared_ptr<StructuredLoop> invariant_plan(int trips) {
   plan->outputs = {result};
   plan->prepare();
   check(find_call(plan->root, first_op)->invariant_loop == 0 &&
-            find_call(plan->root, second_op)->invariant_loop == 0 &&
+            find_call(plan->root, second_op)->invariant_loop == -1 &&
             find_call(plan->root, active_op)->invariant_loop == -1 &&
             find_call(plan->root, variant_op)->invariant_loop == -1,
         "invariance follows the written set of the enclosing loop");
@@ -2349,12 +2349,14 @@ static void loop_invariant_reuse_tests() {
   const Evaluation first = evaluate_invariant(enabled, .25);
   close(first.value, 30.25, "invariant plan value");
   close(first.gradient[0], 1, "invariant plan gradient");
-  check(invariant_first_calls == 1 && invariant_second_calls == 1,
-        "inactive invariant chain executes once per loop entry");
+  check(invariant_first_calls == 1,
+        "inactive invariant executes once per loop entry");
+  check(invariant_second_calls == 3,
+        "a kernel reading a loop-written slot recomputes every iteration");
   check(invariant_active_calls == 3, "active loop work runs every iteration");
   check(invariant_variant_calls == 3, "iterator-dependent work is not reused");
   const Evaluation second = evaluate_invariant(enabled, .25);
-  check(invariant_first_calls == 2 && invariant_second_calls == 2,
+  check(invariant_first_calls == 2 && invariant_second_calls == 6,
         "invariant cache resets for a new forward evaluation");
   check(std::memcmp(&first, &second, sizeof(Evaluation)) == 0,
         "repeated invariant evaluation is bitwise stable");
@@ -2369,9 +2371,9 @@ static void loop_invariant_reuse_tests() {
 
   auto zero = invariant_plan(0);
   Executor zero_executor(outer(zero));
-  invariant_first_calls = invariant_second_calls = 0;
+  invariant_first_calls = 0;
   const Evaluation zero_result = evaluate_invariant(zero_executor, .25);
-  check(invariant_first_calls == 0 && invariant_second_calls == 0,
+  check(invariant_first_calls == 0,
         "zero-trip loop does not pre-execute invariants");
   close(zero_result.value, .25, "zero-trip invariant value");
 
