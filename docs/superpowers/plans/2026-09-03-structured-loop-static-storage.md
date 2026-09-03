@@ -338,3 +338,51 @@ ctsem N=33: the `while (whenyes ...)` loop (4.8M calls) and the per-row
 condition cones (5 kernels x 700K visits) become one ordinal load and one
 version per visit. Kernel calls should drop from 11.1M to well under 2M and
 RSS back below the pre-rewrite 86 MB.
+
+## Addendum 2: replaying data-only control decisions
+
+After subtree memoization ctsem N=33 still performs 8M memo restores per
+gradient (66 MB of tape). They come from loops whose body is a data-only guard
+followed by an active arm, `for (ri in 1:size(ms)) if (m == ms[ri,7] && ...)
+{ ... }`: the guard cone is memoized, but its result is a live-out because the
+`If` reads it, so every visit restores a value and creates or moves a version.
+The unrolled path keeps only the iterations whose guard is true.
+
+The decision itself is data-only, so record it instead of the value.
+
+### Static
+
+In `group()`, when a node is reached with `ok == true` (every enclosing
+If/While/For is data-only controlled) and is not memoizable as a whole:
+
+- An `If` with `!controlled(n)` gets `trace = true` and a dense `trace_index`.
+- A `While` with `!controlled(n)` whose condition child `children[0]` is
+  memoizable gets `trace = true` and a `trace_index`.
+
+`For` nodes are not traced. Reads of `n.condition` by a traced node are not
+outside reads in `number()` (subtract them from `uses.control`), so a guard
+cone whose only consumer is a traced node has no live-outs.
+
+### Executor
+
+`LoopState` gets one trace per traced node (`std::vector<uint8_t>` for If
+arms, `std::vector<int64_t>` for While iteration counts), an ordinal per
+traced node reset every forward, filled while `!memo_ready` and read
+afterwards; a mismatch throws `logic_error("structured control trace
+mismatch")`.
+
+- Traced `If`, replaying: read the arm from the trace and run that child
+  without evaluating `value(condition)`.
+- Traced `While`, replaying: read the count `c` and run `children[1]` `c`
+  times without running `children[0]`; Break inside the body still exits.
+- Memo node with no live-outs, replaying: return `Normal` immediately without
+  touching its ordinal (each tape is indexed independently).
+
+Recording: the traced If appends the arm it takes; the traced While appends
+the number of body executions.
+
+### Expected effect
+
+The ms-scan iteration becomes an iterator write, a skipped guard cone and one
+trace byte. Memo restores should fall from 8M to well under 1M per gradient
+and the tape from 66 MB to a few MB.
