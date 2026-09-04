@@ -4719,18 +4719,18 @@ struct Lowering {
       --udf_depth;
       fail("UDF recursion too deep in " + e.name);
     }
-    auto sc_saved = scope;
+    auto sc_saved = std::move(scope);
     auto region_cells_saved = region_cells;
     const int region_depth_saved = region_control_depth;
     if (region_current) {
       region_cells.clear();
       region_control_depth = 0;
     }
-    auto formal_autodiff_saved = udf_formal_autodiff;
-    auto ie_saved = int_env;
-    auto decls_saved = decls;
-    auto il_saved = int_locals;
-    auto env_saved = td.env();
+    auto formal_autodiff_saved = std::move(udf_formal_autodiff);
+    auto ie_saved = std::move(int_env);
+    auto decls_saved = std::move(decls);
+    auto il_saved = std::move(int_locals);
+    auto env_saved = std::move(td.env());
     scope.clear();
     udf_formal_autodiff.clear();
     int_env.clear();
