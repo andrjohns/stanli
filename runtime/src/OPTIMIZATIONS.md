@@ -1075,11 +1075,12 @@ baseline in the same commit. Re-profile before implementing any of them, since
 profile share is a ceiling on the win and the `pow` entry below shows how a
 large share can still yield nothing.
 
-Softmax backward as a packet dot product (`adjoint.cpp`). The fold is written
-by hand because Stan Math reduces var expressions, which have no packet
-access. `Map(p).dot(Map(oa))` measured 5.86x on the reduction alone.
-`OP_SOFTMAX` is 37% of `gpcm_latent_reg_irt`'s gradient and most of that is
-backward. Drift is reorder-class, about 1e-15 relative on realistic lengths.
+Softmax backward as a packet dot product (`adjoint.cpp`). Declined
+2026-09-04. The 37% share once measured on `gpcm_latent_reg_irt` predates the
+`OP_CATEGORICAL_LOGIT_GLM_LPMF` fusion; no corpus model now reaches a softmax
+backward at gradient time. The reassociated dot also fails the 10 ULP budget
+by construction: `adj_i = p_i (oa_i - d)` cancels when `oa_i` is close to
+`d`, so a 1e-16 relative change in `d` became 23 to 128 ULP in the tests.
 
 Gather backward via segmented reduction (`elementwise.cpp`). The ascending
 scatter-add matches var edge order; a rowwise sum over a presorted index
