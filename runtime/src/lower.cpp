@@ -2553,7 +2553,11 @@ struct Lowering {
         }
         // Data-only slicing with no native path (e.g. one matrix out of a
         // data array of matrices) evaluates at compile time.
-        if (auto v = fold_const(e)) return *v;
+        const bool base_seen = e.args[0].kind != mir::Expr::Var ||
+                               td.find(e.args[0].name) != nullptr;
+        if (base_seen) {
+          if (auto v = fold_const(e)) return *v;
+        }
         int64_t flat = 0;
         if (all_single && e.args.size() == 2 &&
             (e.type_ == "UReal" || e.type_ == "UInt")) {
