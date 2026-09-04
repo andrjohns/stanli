@@ -25,7 +25,6 @@ type 'a compilation =
 
 type pass_selection =
   { vectorize_loops: bool
-  ; distribute_same_lane_density_loops: bool
   ; max_o1_statement_depth_cost: int option }
 
 (* A flat procedure has cost equal to its statement count.  Nesting weights
@@ -36,7 +35,6 @@ let default_o1_statement_depth_budget = 20_000
 
 let default_pass_selection =
   { vectorize_loops= true
-  ; distribute_same_lane_density_loops= false
   ; max_o1_statement_depth_cost= Some default_o1_statement_depth_budget }
 
 type structural_stats =
@@ -127,10 +125,6 @@ let compile_mir_with_passes ?include_source ~passes ~model_name code =
     match compiled.result with
     | Error error -> (Error error, [])
     | Ok mir -> (
-      let selected_mir =
-        if passes.distribute_same_lane_density_loops then
-          Stanli_mir_transforms.distribute_same_lane_density_loops mir
-        else mir in
       let settings =
         { (Analysis_and_optimization.Optimize.level_optimizations O1) with
           vectorize_loops= passes.vectorize_loops } in
@@ -140,13 +134,13 @@ let compile_mir_with_passes ?include_source ~passes ~model_name code =
               candidate) in
       match passes.max_o1_statement_depth_cost with
       | None -> (
-        match optimize selected_mir settings with
+        match optimize mir settings with
         | Error internal -> (Error (Internal_error internal), [])
         | Ok optimized -> (Ok optimized, []) )
       | Some budget -> (
         match
           Common.ICE.with_exn_message (fun () ->
-              Analysis_and_optimization.Optimize.function_inlining selected_mir)
+              Analysis_and_optimization.Optimize.function_inlining mir)
         with
         | Error internal -> (Error (Internal_error internal), [])
         | Ok inlined ->

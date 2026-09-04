@@ -19,7 +19,6 @@ type 'a compilation =
 (** Source-level MIR passes that stanli may add to upstream's O1 policy. *)
 type pass_selection =
   { vectorize_loops: bool
-  ; distribute_same_lane_density_loops: bool
   ; max_o1_statement_depth_cost: int option }
 
 val default_pass_selection : pass_selection

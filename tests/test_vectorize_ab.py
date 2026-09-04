@@ -170,18 +170,6 @@ class VectorizeAbTest(unittest.TestCase):
                 vectorize_ab.VECTORIZE_LOOPS, False, 1)
         self.assertEqual(run.call_args.args[0], [
             "probe", "--vectorize-loops", "off",
-            "--distribute-same-lane-density-loops", "off",
-            "--output", output, pathlib.Path("model.stan"),
-        ])
-
-        with mock.patch.object(vectorize_ab, "run_command",
-                               return_value=completed) as run:
-            vectorize_ab.compile_source(
-                "probe", pathlib.Path("model.stan"), output,
-                vectorize_ab.DISTRIBUTE_SAME_LANE_DENSITY_LOOPS, True, 1)
-        self.assertEqual(run.call_args.args[0], [
-            "probe", "--vectorize-loops", "on",
-            "--distribute-same-lane-density-loops", "on",
             "--output", output, pathlib.Path("model.stan"),
         ])
 

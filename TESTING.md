@@ -71,9 +71,7 @@ below give the details and known exceptions.
 ## MIR loop-vectorization measurement
 
 [`harnesses/vectorize_ab.py`](harnesses/vectorize_ab.py) measures one source
-MIR pass against an explicit pass-off oracle. It selects upstream
-`vectorize_loops` by default; `--candidate-pass
-distribute-same-lane-density-loops` selects the Stanli-owned loop rewrite.
+MIR pass against an explicit pass-off oracle: upstream `vectorize_loops`.
 The test-only OCaml probe compiles each source once with the candidate off and
 once with it on; every later check consumes those exact portable MIR files
 through `stanli_check --mir`. All other source-pass choices are explicit and

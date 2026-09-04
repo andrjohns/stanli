@@ -1,6 +1,4 @@
-let usage =
-  "usage: stanli-vectorize-probe --vectorize-loops off|on "
-  ^ "[--distribute-same-lane-density-loops off|on] --output OUT MODEL.stan"
+let usage = "usage: stanli-vectorize-probe --vectorize-loops off|on --output OUT MODEL.stan"
 
 let fail_usage message =
   prerr_endline message;
@@ -12,40 +10,30 @@ let enabled_value option = function
   | "on" -> true
   | value -> fail_usage ("unknown " ^ option ^ " value: " ^ value)
 
-let rec parse_args index vectorize distribute output model =
-  if index = Array.length Sys.argv then (vectorize, distribute, output, model)
+let rec parse_args index vectorize output model =
+  if index = Array.length Sys.argv then (vectorize, output, model)
   else
     match Sys.argv.(index) with
     | "--vectorize-loops" when index + 1 < Array.length Sys.argv ->
         let enabled = enabled_value "vectorize-loops" Sys.argv.(index + 1) in
-        parse_args (index + 2) (Some enabled) distribute output model
-    | "--distribute-same-lane-density-loops"
-      when index + 1 < Array.length Sys.argv ->
-        let enabled =
-          enabled_value "distribute-same-lane-density-loops"
-            Sys.argv.(index + 1) in
-        parse_args (index + 2) vectorize (Some enabled) output model
+        parse_args (index + 2) (Some enabled) output model
     | "--output" when index + 1 < Array.length Sys.argv ->
-        parse_args (index + 2) vectorize distribute
-          (Some Sys.argv.(index + 1))
-          model
-    | ("--vectorize-loops" | "--distribute-same-lane-density-loops" | "--output")
-      as option ->
+        parse_args (index + 2) vectorize (Some Sys.argv.(index + 1)) model
+    | ("--vectorize-loops" | "--output") as option ->
         fail_usage ("missing value for " ^ option)
     | argument when String.starts_with ~prefix:"-" argument ->
         fail_usage ("unknown option: " ^ argument)
     | path -> (
         match model with
-        | None -> parse_args (index + 1) vectorize distribute output (Some path)
+        | None -> parse_args (index + 1) vectorize output (Some path)
         | Some _ -> fail_usage "more than one model path was provided")
 
 let () =
-  let vectorize, distribute, output, model = parse_args 1 None None None None in
+  let vectorize, output, model = parse_args 1 None None None in
   let vectorize =
     match vectorize with
     | Some enabled -> enabled
     | None -> fail_usage "--vectorize-loops is required" in
-  let distribute = Option.value ~default:false distribute in
   let output =
     match output with
     | Some path -> path
@@ -61,10 +49,7 @@ let () =
       exit 1 in
   let compilation =
     Stanli_pipeline.compile_mir_with_passes
-      ~passes:
-        { vectorize_loops= vectorize
-        ; distribute_same_lane_density_loops= distribute
-        ; max_o1_statement_depth_cost= None }
+      ~passes:{vectorize_loops= vectorize; max_o1_statement_depth_cost= None}
       ~model_name:"embedded_model" code
       ~include_source:
         (Frontend.Include_files.FileSystemPaths [Filename.dirname model]) in

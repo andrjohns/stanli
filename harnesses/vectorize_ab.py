@@ -54,12 +54,7 @@ from verify_refs import (POINTS, corpus_input, corpus_models, gate_for,  # noqa:
                          parse_wa, worst_pair)
 
 VECTORIZE_LOOPS = "vectorize-loops"
-DISTRIBUTE_SAME_LANE_DENSITY_LOOPS = \
-    "distribute-same-lane-density-loops"
-CANDIDATE_PASSES = (
-    VECTORIZE_LOOPS,
-    DISTRIBUTE_SAME_LANE_DENSITY_LOOPS,
-)
+CANDIDATE_PASSES = (VECTORIZE_LOOPS,)
 EXPECTED_MIR_CHANGES = {
     VECTORIZE_LOOPS: frozenset((
         "covid19imperial_v2",
@@ -67,17 +62,6 @@ EXPECTED_MIR_CHANGES = {
         "normal_mixture",
         "radon_pooled",
         "soil_incubation",
-    )),
-    DISTRIBUTE_SAME_LANE_DENSITY_LOOPS: frozenset((
-        "radon_county_intercept",
-        "radon_partially_pooled_centered",
-        "radon_partially_pooled_noncentered",
-        "radon_variable_intercept_centered",
-        "radon_variable_intercept_noncentered",
-        "radon_variable_intercept_slope_centered",
-        "radon_variable_intercept_slope_noncentered",
-        "radon_variable_slope_centered",
-        "radon_variable_slope_noncentered",
     )),
 }
 GRADIENT_MODELS = {
@@ -89,11 +73,6 @@ GRADIENT_MODELS = {
         "low_dim_gauss_mix",
         "hmm_example",
         "eight_schools_noncentered",
-    )),
-    DISTRIBUTE_SAME_LANE_DENSITY_LOOPS: frozenset((
-        "radon_county_intercept",
-        "radon_partially_pooled_centered",
-        "radon_variable_intercept_slope_noncentered",
     )),
 }
 
@@ -505,15 +484,7 @@ def compile_source(compiler, source, output, candidate_pass, enabled,
                    timeout):
     selected = "on" if enabled else "off"
     if candidate_pass == VECTORIZE_LOOPS:
-        pass_arguments = [
-            "--vectorize-loops", selected,
-            "--distribute-same-lane-density-loops", "off",
-        ]
-    elif candidate_pass == DISTRIBUTE_SAME_LANE_DENSITY_LOOPS:
-        pass_arguments = [
-            "--vectorize-loops", "on",
-            "--distribute-same-lane-density-loops", selected,
-        ]
+        pass_arguments = ["--vectorize-loops", selected]
     else:
         raise ValueError(f"unknown candidate pass: {candidate_pass}")
     command = [compiler, *pass_arguments, "--output", output, source]
