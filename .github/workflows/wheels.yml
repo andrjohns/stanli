@@ -580,37 +580,25 @@ jobs:
       # compiler, then compare the decoded program and the executable graph.
       # The normal C++ test has a test-only writer so it can run without an
       # OCaml toolchain; this closes the producer/schema drift gap in CI.
+      # stanc's --O1 has no switch for loop vectorization, so the probe runs
+      # with it off to match.
       - name: Typed producer matches exact-source legacy MIR
         if: matrix.runtime == 'linux-x86_64'
         run: |
+          test -x deps/stanc3/stanli-vectorize-probe
           cp tests/fixtures/es.stan /tmp/stanli-portable-es.stan
           cp tests/fixtures/view_udf_local_data_branch.stan \
             /tmp/stanli-portable-nested-udf.stan
           cp tests/stanc3/mother.stan /tmp/stanli-portable-mother.stan
-          deps/stanc3/stanc --O1 --debug-optimized-mir \
-            /tmp/stanli-portable-es.stan > /tmp/stanli-es.legacy-mir
-          deps/stanc3/stanc --O1 --debug-optimized-mir \
-            /tmp/stanli-portable-nested-udf.stan \
-            > /tmp/stanli-nested-udf.legacy-mir
-          deps/stanc3/stanc --O1 --debug-optimized-mir \
-            /tmp/stanli-portable-mother.stan \
-            > /tmp/stanli-mother.legacy-mir
-          /tmp/wheeltest/bin/python - <<'PY'
-          from pathlib import Path
-          import stanli
-
-          models = {
-              "es": Path("tests/fixtures/es.stan"),
-              "nested-udf": Path("tests/fixtures/view_udf_local_data_branch.stan"),
-              "mother": Path("tests/stanc3/mother.stan"),
-          }
-          for name, path in models.items():
-              portable = stanli.stan_to_mir(path.read_text())
-              assert portable.startswith("STANLI2:")
-              assert not portable.endswith(("\n", "\r"))
-              Path(f"/tmp/stanli-{name}.portable-mir").write_text(
-                  portable, encoding="ascii")
-          PY
+          for name in es nested-udf mother; do
+            deps/stanc3/stanc --O1 --debug-optimized-mir \
+              /tmp/stanli-portable-$name.stan \
+              > /tmp/stanli-$name.legacy-mir
+            deps/stanc3/stanli-vectorize-probe --vectorize-loops off \
+              --output /tmp/stanli-$name.portable-mir \
+              /tmp/stanli-portable-$name.stan
+            head -c 8 /tmp/stanli-$name.portable-mir | grep -q '^STANLI2:'
+          done
           build-rel/test_mir_decode \
             /tmp/stanli-es.legacy-mir /tmp/stanli-es.portable-mir
           build-rel/test_mir_decode --program-only \

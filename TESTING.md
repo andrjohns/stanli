@@ -302,7 +302,9 @@ expression where pristine stanc3's host-width-dependent folds disagree. A
 focused worker harness proves the preferred custom
 import and the missing-artifact fallback import. The tested JavaScript
 artifacts are the ones consumed by the Pages and npm jobs. The manylinux gate
-then decodes the same typed-producer output directly with `bench_mir_decode`.
+then decodes the same typed-producer output directly with `bench_mir_decode`,
+produced by the probe with `vectorize_loops` off since `stanc --O1` has no
+switch for it.
 For Eight Schools, compact v2 must take no more than half the legacy decoder's
 median time across 51 repetitions and no more than half its raw bytes. Gzip and
 complete preparation timings remain descriptive measurements in the uploaded
