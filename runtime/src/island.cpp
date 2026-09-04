@@ -103,14 +103,13 @@ int unary_code(uint16_t oc) {
 // The meta ops carry udata (message text, an ODE spec) or are the island
 // itself; propto stays refused for the same reason as above.
 bool callable(const Graph& g, const Op& op) {
+  if (has_op_trait(op.opcode, op_trait::kVariantGrouped)) return false;
   switch (op.opcode) {
     case OP_ISLAND:
     case OP_ODE:
     case OP_DAE:
     case OP_ODE_ADJOINT:
     case OP_RNG:
-    case OP_PROD_VEC:
-    case OP_EXTREMA_VEC:
     case OP_PRINT:
     case OP_REJECT:
       return false;

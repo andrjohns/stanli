@@ -35,6 +35,8 @@
 #include <stanli/optable.hpp>
 #include <stanli/partition.hpp>
 
+#include "pass_util.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 #include <unordered_map>
@@ -59,13 +61,6 @@ constexpr int64_t kDensityElem = 6;
 // not turn that into a quadratic term.
 constexpr int64_t kMaxSplits = 32;
 
-using Fills = std::vector<std::pair<int, std::vector<double>>>;
-
-bool is_element_store(const Op& op) {
-  return (op.opcode == OP_SET_INDEX || op.opcode == OP_SET_INDEX_INPLACE) &&
-         op.n_in == 2 && op.n_idata == 1 && op.out == op.in[0];
-}
-
 // OP_CATEGORICAL is on ops_match's blocklist because its spec pointer is not
 // comparable; here the spec's fields go into the key instead. It is admitted
 // only as a lane's delimiter, and only the GLM arm below has an emission for
@@ -73,8 +68,9 @@ bool is_element_store(const Op& op) {
 bool is_blocked(const Op& op, bool is_delimiter) {
   if (op.opcode == OP_CATEGORICAL)
     return !is_delimiter || op.udata == nullptr || op.out2 >= 0;
-  return is_effectful_op(op.opcode) || op.opcode == OP_PROD_VEC ||
-         op.opcode == OP_EXTREMA_VEC || op.out2 >= 0 || op.udata != nullptr;
+  return is_effectful_op(op.opcode) ||
+         has_op_trait(op.opcode, op_trait::kVariantGrouped) || op.out2 >= 0 ||
+         op.udata != nullptr;
 }
 
 // Opcodes whose immediates are positions rather than values: two lanes
@@ -181,22 +177,6 @@ struct Glm {
   int64_t m = 0;
 };
 
-struct Key {
-  std::vector<int64_t> w;
-  bool operator==(const Key& o) const { return w == o.w; }
-};
-
-struct KeyHash {
-  size_t operator()(const Key& k) const {
-    size_t h = 1469598103934665603ull;
-    for (int64_t v : k.w) {
-      h ^= static_cast<size_t>(v);
-      h *= 1099511628211ull;
-    }
-    return h;
-  }
-};
-
 }  // namespace
 
 PartitionStats partition_lanes(Graph& g, Fills& fills,
@@ -237,26 +217,12 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
   // made re-roll quadratic in time on ldaK5; binary search reads only the
   // entries that can matter, and every entry read is counted so the scaling
   // test can assert on an exact integer.
-  const auto first_at_or_after = [&](const std::vector<size_t>& v, size_t x) {
-    size_t lo = 0, hi = v.size();
-    while (lo < hi) {
-      const size_t mid = lo + (hi - lo) / 2;
-      ++st.list_steps;
-      if (v[mid] < x)
-        lo = mid + 1;
-      else
-        hi = mid;
-    }
-    return v.begin() + (ptrdiff_t)lo;
-  };
-  const auto any_at_or_after = [&](const std::vector<size_t>& v, size_t x) {
-    return first_at_or_after(v, x) != v.end();
-  };
   // The first entry in [lo, hi) that is not one of `mine`, else n_ops.
   const auto first_in_range_but = [&](const std::vector<size_t>& v, size_t lo,
                                       size_t hi,
                                       const std::unordered_set<size_t>& mine) {
-    for (auto it = first_at_or_after(v, lo); it != v.end() && *it < hi; ++it) {
+    for (auto it = first_at_or_after(v, lo, st.list_steps);
+         it != v.end() && *it < hi; ++it) {
       ++st.list_steps;
       if (mine.count(*it) == 0) return *it;
     }
@@ -291,7 +257,7 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
       if (o < 0 || prev.out2 >= 0 || g.slots[(size_t)o].is_param ||
           term_set.count(o) != 0 || root_set.count(o) != 0 ||
           writers[(size_t)o].size() != 1 ||
-          any_at_or_after(uses[(size_t)o], u + 1))
+          any_at_or_after(uses[(size_t)o], u + 1, st.list_steps))
         break;
       --begin;
     }
@@ -356,10 +322,7 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
     buckets[(size_t)ins.first->second].push_back((int)li);
   }
 
-  // The dedup'd constant pool: slot -> value, for len-1 fills.
-  std::unordered_map<int, double> const_val;
-  for (const auto& f : fills)
-    if (f.second.size() == 1) const_val.emplace(f.first, f.second[0]);
+  const std::unordered_map<int, double> const_val = scalar_constants(fills);
 
   std::vector<char> dropped(n_ops, 0);
   std::vector<int> emit_at(n_ops, -1);
@@ -406,7 +369,7 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
     const size_t hi = lanes[(size_t)ids[(size_t)(n - 1)]].end;
     const auto settled = [&](int s) {
       if (s < 0 || (size_t)s >= n_slots) return false;
-      const auto it = first_at_or_after(writers[(size_t)s], lo);
+      const auto it = first_at_or_after(writers[(size_t)s], lo, st.list_steps);
       return it == writers[(size_t)s].end() || *it >= hi;
     };
 
@@ -606,7 +569,8 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
     const size_t last_end = lanes[(size_t)ids[(size_t)(L - 1)]].end;
     const auto settled = [&](int s) {
       if (s < 0 || (size_t)s >= n_slots) return false;
-      const auto it = first_at_or_after(writers[(size_t)s], first_begin);
+      const auto it =
+          first_at_or_after(writers[(size_t)s], first_begin, st.list_steps);
       if (it == writers[(size_t)s].end() || *it >= last_end) return true;
       split_at = std::min(split_at, *it);
       return false;
@@ -834,7 +798,8 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
           if (reader < n_ops || other < n_ops) {
             split_at = std::min(split_at, std::min(reader, other));
             ok = false;
-          } else if (any_at_or_after(writers[(size_t)vec], last_end)) {
+          } else if (any_at_or_after(writers[(size_t)vec], last_end,
+                                     st.list_steps)) {
             ok = false;
           }
         }

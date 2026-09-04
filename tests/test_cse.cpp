@@ -112,6 +112,23 @@ static void test_keeps_effectful_ops() {
   }
 }
 
+// A compiled region or solver never merges, even without a udata payload.
+static void test_never_merges_solver_ops() {
+  const uint16_t solver_ops[] = {OP_DAE, OP_ODE_ADJOINT};
+  for (uint16_t oc : solver_ops) {
+    Graph g;
+    Fills fills;
+    const int p = g.add_slot(1, true);
+    const int a = g.add_slot(1, false), b = g.add_slot(1, false);
+    g.add_op(oc, {p}, a);
+    g.add_op(oc, {p}, b);
+    std::vector<int> terms;
+    const CseStats st = cse(g, fills, terms, {});
+    std::string what = std::string(opcode_name(oc)) + " never merges";
+    expect(what.c_str(), st.ops_removed == 0 && g.ops.size() == 2);
+  }
+}
+
 // Same opcode, same inputs, different immediates: different elements.
 static void test_idata_distinguishes() {
   Graph g;
@@ -229,6 +246,7 @@ int main() {
   test_merges_identical_ops();
   test_rewrites_target_terms();
   test_keeps_effectful_ops();
+  test_never_merges_solver_ops();
   test_idata_distinguishes();
   test_refuses_mutated_slot();
   test_chain_dedup();
