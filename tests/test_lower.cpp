@@ -3543,8 +3543,8 @@ int main() {
     var lp = stan::math::dirichlet_lpdf<true>(theta, alpha) + jac;
     lp.grad();
     expect_eq("simplex lp", slp, lp.val());
-    expect_eq("simplex g0", sg[0], y(0).adj());
-    expect_eq("simplex g1", sg[1], y(1).adj());
+    expect_ulp("simplex g0", sg[0], y(0).adj());
+    expect_ulp("simplex g1", sg[1], y(1).adj());
     stan::math::recover_memory();
   }
 

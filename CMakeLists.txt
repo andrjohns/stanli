@@ -816,7 +816,7 @@ set(STANLI_TESTS
   test_odevariadic test_algebra test_estimate test_brmsmono
   test_reduce_sum
   test_structured_arrays test_pathfinder test_unconstrain
-  test_init_interp)
+  test_init_interp test_constrain_structured)
 foreach(STANLI_TEST IN LISTS STANLI_TESTS)
   stanli_add_test(${STANLI_TEST})
 endforeach()

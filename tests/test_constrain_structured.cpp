@@ -1,0 +1,192 @@
+#include <stanli/graph.hpp>
+#include <stanli/optable.hpp>
+
+#include <stan/math.hpp>
+
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+namespace {
+
+using namespace stanli;
+
+int failures = 0;
+
+void check(bool ok, const std::string& what) {
+  if (!ok) {
+    ++failures;
+    std::printf("FAIL %s\n", what.c_str());
+  }
+}
+
+int64_t ulp_key(double d) {
+  int64_t i;
+  std::memcpy(&i, &d, sizeof(i));
+  return i < 0 ? std::numeric_limits<int64_t>::min() - i : i;
+}
+
+void expect_ulp(const std::string& what, double got, double want) {
+  const int64_t d = std::llabs(ulp_key(got) - ulp_key(want));
+  if (d > 2) {
+    ++failures;
+    std::printf("FAIL %-24s got %.17g want %.17g (%lld ulp)\n", what.c_str(),
+                got, want, (long long)d);
+  }
+}
+
+struct Batch {
+  std::vector<double> x;     // nb * inner_raw
+  std::vector<double> seed;  // nb * inner_con
+  double out2_adj;
+};
+
+struct RunResult {
+  std::vector<double> in_adj;
+  std::vector<double> out;
+  double lp;
+};
+
+RunResult run_kernel(uint16_t opcode, const Batch& b, int64_t nb,
+                     int64_t inner_raw, int64_t inner_con) {
+  const Kernel* k = find_kernel(opcode);
+  if (!k) throw std::runtime_error("missing kernel");
+  RunResult r;
+  r.in_adj.assign((size_t)(nb * inner_raw), 0.0);
+  r.out.assign((size_t)(nb * inner_con), 0.0);
+  std::vector<double> scratch((size_t)(nb * inner_raw), 0.0);
+  int idata[3] = {(int)nb, (int)inner_raw, (int)inner_con};
+  KernelCtx ctx;
+  ctx.n_in = 1;
+  ctx.in[0] = Desc{const_cast<double*>(b.x.data()), nb * inner_raw};
+  ctx.out = Desc{r.out.data(), nb * inner_con};
+  ctx.out2 = Desc{&r.lp, 1};
+  ctx.scratch = scratch.data();
+  ctx.idata = idata;
+  ctx.n_idata = 3;
+  ctx.in_adj[0] = Desc{r.in_adj.data(), nb * inner_raw};
+  ctx.out_adj_vec = Desc{const_cast<double*>(b.seed.data()), nb * inner_con};
+  ctx.out2_adj = b.out2_adj;
+  k->forward(ctx);
+  k->backward(ctx);
+  return r;
+}
+
+using stan::math::var;
+
+std::vector<double> reference_simplex(const Batch& b, int64_t nb,
+                                      int64_t inner_raw, int64_t inner_con) {
+  std::vector<double> adj((size_t)(nb * inner_raw));
+  for (int64_t bi = 0; bi < nb; ++bi) {
+    Eigen::Matrix<var, -1, 1> y(inner_raw);
+    for (int64_t i = 0; i < inner_raw; ++i)
+      y(i) = b.x[(size_t)(bi * inner_raw + i)];
+    var lp = 0.0;
+    auto theta = stan::math::simplex_constrain(y, lp);
+    Eigen::Map<const Eigen::VectorXd> seed(b.seed.data() + bi * inner_con,
+                                           inner_con);
+    var obj = stan::math::dot_product(seed, theta) + b.out2_adj * lp;
+    stan::math::grad(obj.vi_);
+    for (int64_t i = 0; i < inner_raw; ++i)
+      adj[(size_t)(bi * inner_raw + i)] = y(i).adj();
+    stan::math::recover_memory();
+  }
+  return adj;
+}
+
+std::vector<double> reference_ordered(const Batch& b, int64_t nb,
+                                      int64_t inner_raw, int64_t inner_con) {
+  std::vector<double> adj((size_t)(nb * inner_raw));
+  for (int64_t bi = 0; bi < nb; ++bi) {
+    Eigen::Matrix<var, -1, 1> x(inner_raw);
+    for (int64_t i = 0; i < inner_raw; ++i)
+      x(i) = b.x[(size_t)(bi * inner_raw + i)];
+    var lp = 0.0;
+    auto y = stan::math::ordered_constrain(x, lp);
+    Eigen::Map<const Eigen::VectorXd> seed(b.seed.data() + bi * inner_con,
+                                           inner_con);
+    var obj = stan::math::dot_product(seed, y) + b.out2_adj * lp;
+    stan::math::grad(obj.vi_);
+    for (int64_t i = 0; i < inner_raw; ++i)
+      adj[(size_t)(bi * inner_raw + i)] = x(i).adj();
+    stan::math::recover_memory();
+  }
+  return adj;
+}
+
+std::vector<double> reference_positive_ordered(const Batch& b, int64_t nb,
+                                               int64_t inner_raw,
+                                               int64_t inner_con) {
+  std::vector<double> adj((size_t)(nb * inner_raw));
+  for (int64_t bi = 0; bi < nb; ++bi) {
+    Eigen::Matrix<var, -1, 1> x(inner_raw);
+    for (int64_t i = 0; i < inner_raw; ++i)
+      x(i) = b.x[(size_t)(bi * inner_raw + i)];
+    var lp = 0.0;
+    auto y = stan::math::positive_ordered_constrain(x, lp);
+    Eigen::Map<const Eigen::VectorXd> seed(b.seed.data() + bi * inner_con,
+                                           inner_con);
+    var obj = stan::math::dot_product(seed, y) + b.out2_adj * lp;
+    stan::math::grad(obj.vi_);
+    for (int64_t i = 0; i < inner_raw; ++i)
+      adj[(size_t)(bi * inner_raw + i)] = x(i).adj();
+    stan::math::recover_memory();
+  }
+  return adj;
+}
+
+}  // namespace
+
+int main() {
+  const int64_t nb = 2, K = 4;
+
+  {
+    Batch b;
+    b.x = {0.3, -0.8, 0.5, -0.2, 0.6, -0.4};
+    b.seed = {0.1, -0.2, 0.3, 0.4, -0.5, 0.25, 0.05, -0.15};
+    b.out2_adj = 0.37;
+    const RunResult got = run_kernel(OP_CONSTRAIN_SIMPLEX, b, nb, K - 1, K);
+    const std::vector<double> want = reference_simplex(b, nb, K - 1, K);
+    for (int64_t i = 0; i < nb * (K - 1); ++i)
+      expect_ulp("simplex in_adj[" + std::to_string(i) + "]",
+                 got.in_adj[(size_t)i], want[(size_t)i]);
+  }
+
+  {
+    Batch b;
+    b.x = {0.2, -0.1, 0.4, -0.3, -0.5, 0.3, 0.1, -0.2};
+    b.seed = {0.15, -0.25, 0.35, -0.05, 0.4, -0.1, 0.2, 0.3};
+    b.out2_adj = -0.42;
+    const RunResult got = run_kernel(OP_CONSTRAIN_ORDERED, b, nb, K, K);
+    const std::vector<double> want = reference_ordered(b, nb, K, K);
+    for (int64_t i = 0; i < nb * K; ++i)
+      expect_ulp("ordered in_adj[" + std::to_string(i) + "]",
+                 got.in_adj[(size_t)i], want[(size_t)i]);
+
+    const Kernel* k = find_kernel(OP_CONSTRAIN_ORDERED);
+    check(k != nullptr && k->scratch_size != nullptr,
+          "ordered kernel declares a scratch hook");
+  }
+
+  {
+    Batch b;
+    b.x = {0.2, -0.1, 0.4, -0.3, -0.5, 0.3, 0.1, -0.2};
+    b.seed = {0.15, -0.25, 0.35, -0.05, 0.4, -0.1, 0.2, 0.3};
+    b.out2_adj = 0.19;
+    const RunResult got = run_kernel(OP_CONSTRAIN_POS_ORDERED, b, nb, K, K);
+    const std::vector<double> want = reference_positive_ordered(b, nb, K, K);
+    for (int64_t i = 0; i < nb * K; ++i)
+      expect_ulp("pos_ordered in_adj[" + std::to_string(i) + "]",
+                 got.in_adj[(size_t)i], want[(size_t)i]);
+
+    const Kernel* k = find_kernel(OP_CONSTRAIN_POS_ORDERED);
+    check(k != nullptr && k->scratch_size != nullptr,
+          "positive_ordered kernel declares a scratch hook");
+  }
+
+  if (failures == 0) std::printf("test_constrain_structured OK\n");
+  return failures == 0 ? 0 : 1;
+}
