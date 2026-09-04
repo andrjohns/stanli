@@ -872,8 +872,92 @@ static void test_scalar_chain_carved() {
     expect_close("scalar chain v" + std::to_string(i), got[i], want[i]);
 }
 
+static Graph build_native_extras(Fills& fills, std::vector<int>& terms) {
+  Graph g;
+  const int p0 = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  int acc = p0;
+  for (int t = 0; t < 6; ++t) {
+    const int il = g.add_slot(1, false);
+    g.add_op(OP_INV_LOGIT, {acc}, il);
+    const int pw = g.add_slot(1, false);
+    g.add_op(OP_POW, {il, cslot(1.5)}, pw);
+    const int iv = g.add_slot(1, false);
+    g.add_op(OP_INV, {pw}, iv);
+    const int fx = g.add_slot(1, false);
+    g.add_op(OP_FMAX, {iv, cslot(0.2)}, fx);
+    const int fn = g.add_slot(1, false);
+    g.add_op(OP_FMIN, {fx, cslot(5.0)}, fn);
+    const int ab = g.add_slot(1, false);
+    g.add_op(OP_ABS, {fn}, ab);
+    const int ld = g.add_slot(1, false);
+    g.add_op(OP_LOG_DIFF_EXP, {ab, cslot(-1.0)}, ld);
+    const int l1 = g.add_slot(1, false);
+    g.add_op(OP_LOG1P_EXP, {ld}, l1);
+    acc = l1;
+  }
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_ADD, {acc, p0}, lp);
+  g.result_slot = lp;
+  terms = {lp};
+  return g;
+}
+
+static void test_native_extras_carved() {
+  Fills ref_fills;
+  std::vector<int> ref_terms;
+  Graph ref = build_native_extras(ref_fills, ref_terms);
+  const std::vector<double> want = run_grad(std::move(ref), ref_fills);
+
+  Fills fills;
+  std::vector<int> terms;
+  Graph g = build_native_extras(fills, terms);
+  test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);
+  const int carved = carve_islands(g, fills, terms, {});
+  test_unsetenv("STANLI_ISLAND_ALWAYS");
+  expect("native extras carved==1", carved == 1);
+
+  bool has_pow = false, has_fmax = false, has_fmin = false, has_inv = false,
+       has_fabs = false, has_log_diff_exp = false, has_log1p_exp = false,
+       has_call = false;
+  for (const Op& op : g.ops) {
+    if (op.opcode != OP_ISLAND) continue;
+    const auto& p = *static_cast<const IslandProg*>(op.udata);
+    for (const auto& I : p.code) {
+      switch (I.code) {
+        case Program::POW: has_pow = true; break;
+        case Program::FMAX: has_fmax = true; break;
+        case Program::FMIN: has_fmin = true; break;
+        case Program::INV: has_inv = true; break;
+        case Program::FABS: has_fabs = true; break;
+        case Program::LOG_DIFF_EXP: has_log_diff_exp = true; break;
+        case Program::LOG1P_EXP: has_log1p_exp = true; break;
+        case Program::CALL: has_call = true; break;
+        default: break;
+      }
+    }
+  }
+  expect("native extras has POW", has_pow);
+  expect("native extras has FMAX", has_fmax);
+  expect("native extras has FMIN", has_fmin);
+  expect("native extras has INV", has_inv);
+  expect("native extras has FABS", has_fabs);
+  expect("native extras has LOG_DIFF_EXP", has_log_diff_exp);
+  expect("native extras has LOG1P_EXP", has_log1p_exp);
+  expect("native extras no CALL", !has_call);
+
+  const std::vector<double> got = run_grad(std::move(g), fills);
+  expect("native extras sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("native extras v" + std::to_string(i), got[i], want[i]);
+}
+
 // A recurrence threaded through ops the register machine has no
-// instruction for -- POW, a unary from the generated list, a cdf, an
+// instruction for -- ATAN2, a unary from the generated list, a cdf, an
 // integer-outcome lpmf. Each compiles as a CALL to the graph's own
 // kernel, so one op the machine cannot say stops ending the run, and
 // the derivative is the kernel's own backward. The reference is the
@@ -899,12 +983,11 @@ static void test_kernel_call_ops_carved(bool compact) {
   // below exercise mapped addressing rather than identity by accident.
   int acc = seed;
   for (int t = 0; t < 12; ++t) {
-    // inv_logit keeps the recurrence in (0, 1): pow of a negative base at
-    // a non-integer exponent is NaN, and tanh below goes negative.
+    // inv_logit keeps the recurrence in (0, 1), and tanh below goes negative.
     const int il = g.add_slot(1, false);
     g.add_op(OP_INV_LOGIT, {acc}, il);
     const int pw = g.add_slot(1, false);
-    g.add_op(OP_POW, {il, p1}, pw);  // out of vocabulary until CALL
+    g.add_op(OP_ATAN2, {il, p1}, pw);  // out of vocabulary until CALL
     const int sq = g.add_slot(1, false);
     g.add_op(OP_SQUARE, {pw}, sq);
     const int lg = g.add_slot(1, false);
@@ -1299,6 +1382,7 @@ int main() {
   test_softmax3_payload_copy_lifetime();
   test_compact_adjoint_cost_boundary();
   test_scalar_chain_carved();
+  test_native_extras_carved();
   test_inplace_slice_cost_refuses_wide_state();
   if (failures) {
     std::printf("%d failures\n", failures);

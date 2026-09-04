@@ -76,7 +76,10 @@ bool scalar_ins(const Graph& g, const Op& op) {
   X(OP_SQUARE, SQUARE)              \
   X(OP_INV_LOGIT, INV_LOGIT)        \
   X(OP_LOG1M, LOG1M)                \
-  X(OP_TANHV, TANH)
+  X(OP_TANHV, TANH)                 \
+  X(OP_INV, INV)                    \
+  X(OP_ABS, FABS)                   \
+  X(OP_LOG1P_EXP, LOG1P_EXP)
 
 // Unary opcode -> island instruction, or -1.
 int unary_code(uint16_t oc) {
@@ -134,6 +137,10 @@ bool in_vocab(const Graph& g, const Op& op) {
     case OP_ADD_N:
     case OP_LSE2:
     case OP_LOG_MIX:
+    case OP_POW:
+    case OP_FMAX:
+    case OP_FMIN:
+    case OP_LOG_DIFF_EXP:
       return scalar_ins(g, op);
     case OP_INDEX:
     case OP_SET_INDEX:
@@ -417,6 +424,26 @@ struct Compiler {
       case OP_LSE2: {
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
         emit(Program::LSE2, write_reg(op.out), a, b);
+        return ok;
+      }
+      case OP_LOG_DIFF_EXP: {
+        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
+        emit(Program::LOG_DIFF_EXP, write_reg(op.out), a, b);
+        return ok;
+      }
+      case OP_POW: {
+        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
+        emit(Program::POW, write_reg(op.out), a, b);
+        return ok;
+      }
+      case OP_FMAX: {
+        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
+        emit(Program::FMAX, write_reg(op.out), a, b);
+        return ok;
+      }
+      case OP_FMIN: {
+        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
+        emit(Program::FMIN, write_reg(op.out), a, b);
         return ok;
       }
       case OP_LOG_MIX: {
