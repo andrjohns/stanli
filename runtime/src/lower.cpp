@@ -823,6 +823,7 @@ struct Lowering {
   // Lowering generate_quantities rather than log_prob: parameters are columns
   // to emit, not values to differentiate.
   bool in_write_array = false;
+  bool write_array_known_static = false;
   // Read once per lowering. The automatic parent path stays legacy until its
   // cheap outer-loop hazard gate fires, so ordinary expressions and loops pay
   // no repeated environment lookup or recursive scan.
@@ -4741,6 +4742,8 @@ struct Lowering {
     bool returned = false;
     const bool propto_saved = propto_ctx;
     const bool autodiff_saved = udf_autodiff_ctx;
+    const bool known_static_saved = write_array_known_static;
+    write_array_known_static = false;
     propto_ctx = propto_ctx && e.fn_propto;
     udf_autodiff_ctx = false;
     for (size_t i = 0; i < binds.size(); ++i)
@@ -4749,6 +4752,7 @@ struct Lowering {
     auto restore = [&] {
       propto_ctx = propto_saved;
       udf_autodiff_ctx = autodiff_saved;
+      write_array_known_static = known_static_saved;
       scope = std::move(sc_saved);
       region_cells = std::move(region_cells_saved);
       region_control_depth = region_depth_saved;
@@ -8297,13 +8301,23 @@ struct Lowering {
         return;
       }
       case mir::Stmt::Block:
-      case mir::Stmt::SList:
-        if (in_write_array && needs_runtime_control(s)) {
+      case mir::Stmt::SList: {
+        if (!write_array_known_static && in_write_array &&
+            needs_runtime_control(s)) {
           lower_runtime_ifelse(s);
           return;
         }
-        for (const auto& k : s.body) lower_stmt(k);
+        const bool outer_known_static = write_array_known_static;
+        write_array_known_static = true;
+        try {
+          for (const auto& k : s.body) lower_stmt(k);
+        } catch (...) {
+          write_array_known_static = outer_known_static;
+          throw;
+        }
+        write_array_known_static = outer_known_static;
         return;
+      }
       case mir::Stmt::Skip:
         return;
       case mir::Stmt::NRFunApp:
