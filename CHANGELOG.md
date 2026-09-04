@@ -13,6 +13,20 @@ trip count. `while` loops no longer need a compile-time iteration bound and
 `for` loops accept bounds without a known range. `STANLI_STRUCTURED_HISTORY_BYTES`
 and `STANLI_STRUCTURED_MEMORY_PROFILE` are gone.
 
+A retained loop records its first evaluation: work that depends only on data
+is replayed from that record afterwards, data-only branch and loop decisions
+come from a trace, and iterations of a data-controlled loop in which nothing
+observable happened are skipped. On ctsem one gradient at 400 rows fell from
+4.4 s to 0.32 s with identical results. Straight-line runs of scalar body
+kernels run as one register program with a generated reverse pass, so a
+scalar recurrence costs one tape record per iteration instead of one per
+kernel (`STANLI_NO_STRUCTURED_SEGMENTS=1` keeps every kernel its own node).
+
+By default a loop is retained when it is an outermost `while`, or an
+outermost `for` of at least 32 iterations whose body contains a `while` or a
+branch chosen by a parameter; every other loop unrolls as before.
+`STANLI_STRUCTURED_LOOPS=1` now changes only which loops are retained.
+
 ## 0.11.0
 
 ### Call Stan functions from Python
@@ -148,20 +162,6 @@ The Windows build was missing the exported `stanli_wa_n_generated_start`
 symbol needed to locate where generated quantities begin in a run's output,
 which broke `test_capi.exe` and any client linked against the Windows DLL,
 including BridgeStan clients. The export is restored.
-
-A retained loop records its first evaluation: work that depends only on data
-is replayed from that record afterwards, data-only branch and loop decisions
-come from a trace, and iterations of a data-controlled loop in which nothing
-observable happened are skipped. On ctsem one gradient at 400 rows fell from
-4.4 s to 0.32 s with identical results. Straight-line runs of scalar body
-kernels run as one register program with a generated reverse pass, so a
-scalar recurrence costs one tape record per iteration instead of one per
-kernel (`STANLI_NO_STRUCTURED_SEGMENTS=1` keeps every kernel its own node).
-
-By default a loop is retained when it is an outermost `while`, or an
-outermost `for` of at least 32 iterations whose body contains a `while` or a
-branch chosen by a parameter; every other loop unrolls as before.
-`STANLI_STRUCTURED_LOOPS=1` now changes only which loops are retained.
 
 ## 0.10.0
 
