@@ -1133,6 +1133,14 @@ constfold and CSE as well: 376,848 ops, per-draw write_array 7.22 ms to
 shrink, none grow, and the replay is unchanged. Partition, elide_stores, and
 islands stay off: write_array has no target reduction to feed them.
 
+## Data JSON parsing (`data.cpp`), declined 2026-09-04
+
+`nn_rbm1bJ100` spends 1.95 s of its 2.8 s preparation in `json::parse` of a
+183 MB `mnist.json` (94 MB/s, which is nlohmann's DOM speed; the copy into
+`DataMap` is under 5%). A SAX walk would save at most half of that on the one
+corpus model with data this size and costs a second numeric parser, so the
+DOM parse stays.
+
 ## How we check all of this
 
 Every pass changes the graph, and a wrong graph produces wrong numbers
