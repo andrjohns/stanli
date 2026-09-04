@@ -853,6 +853,25 @@ activity masks, vectorized observations, and non-propto calls keep the generic
 Stan Math replay. On `gp_regr` the density falls from 2.48 to 0.70 us and the
 whole gradient from 6.05 to 4.20 us (1.44x internally, 1.12x CmdStan).
 
+## Matvec through Eigen gemv (`elementwise.cpp`, `lower.cpp`)
+
+`OP_MATVEC` used to be a hand-written loop that summed each output element
+over columns in ascending order, matching Stan Math's `Matrix<var>` multiply
+bitwise. On `prophet` (1169x25 and 1169x34) that was 82-83% of the bare
+gradient.
+
+The kernel is now `Eigen::Map` forward and transpose-backward gemv. A
+2026-09-04 --bare A/B (2000 iterations, four matched runs each) moved
+`prophet`'s gradient from 115.5M to 74.3M ns (1.56x; the op itself 97.3M to
+55.7M ns, 1.75x), `accel_splines`'s from 13.4M to 10.4M ns (1.28x; the op
+7.2M to 3.9M ns, 1.85x), and `accel_gp`'s from 13.6M to 11.3M ns (1.21x; the
+op 5.0M to 2.6M ns, 1.90x).
+
+Every affected corpus model's worst ULP against the CmdStan references went
+down (`accel_gp` 12 to 2, `accel_splines` 119 to 3, `prophet` 11520 to 256),
+since CmdStan runs the same Eigen gemv. Against the previous kernel the
+change is 1-4 ULP per element, inside the 10 ULP reassociation budget.
+
 ## Compiled ODE right-hand sides (`ode_prog.cpp`, report fallbacks: `STANLI_DEBUG_ODE=1`)
 
 An ODE model passes a user function (the right-hand side) to a solver
@@ -1061,11 +1080,6 @@ by hand because Stan Math reduces var expressions, which have no packet
 access. `Map(p).dot(Map(oa))` measured 5.86x on the reduction alone.
 `OP_SOFTMAX` is 37% of `gpcm_latent_reg_irt`'s gradient and most of that is
 backward. Drift is reorder-class, about 1e-15 relative on realistic lengths.
-
-Matvec through Eigen gemv (`elementwise.cpp`, `lower.cpp`). The scalar loop
-preserves Stan Math's multiply order at a cost the file comment puts at 82% of
-`prophet`'s gradient. Every matrix model pays something. Drift is 1-2 ULP per
-element against the current form.
 
 Gather backward via segmented reduction (`elementwise.cpp`). The ascending
 scatter-add matches var edge order; a rowwise sum over a presorted index

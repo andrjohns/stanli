@@ -6088,8 +6088,6 @@ struct Lowering {
       }
       if (is_matrix(a.si)) {
         if (a.si.param_free && is_vector(b.si)) {
-          // Data matrix * vector keeps the tuned MATVEC kernel (its
-          // accumulation order is matched to the var path).
           if (g.slots[b.slot].len != a.si.cols)
             fail(e.name + ": inner dimension mismatch", e.raw);
           return with_layout(
