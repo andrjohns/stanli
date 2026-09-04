@@ -24,6 +24,7 @@ import csv
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,8 +39,15 @@ BENCH = REPO / "build-rel/bench_grad"
 RUN = REPO / "build-rel/stanli_run"
 STANC = REPO / "deps/stanc3/stanc"
 COLS = ["model", "params", "stanli_prep_s", "stanli_ns_grad",
-        "stanli_sample_s", "cmdstan_build_s", "cmdstan_ns_grad",
-        "cmdstan_sample_s", "note"]
+        "stanli_sample_s", "stanli_grads", "cmdstan_build_s",
+        "cmdstan_ns_grad", "cmdstan_sample_s", "note"]
+
+GRAD_COUNT_RE = re.compile(r"stanli_run: (\d+) gradient evaluations")
+
+
+def parse_grad_count(stderr_text):
+    m = GRAD_COUNT_RE.search(stderr_text or "")
+    return m.group(1) if m else ""
 
 
 def row_line(row):
@@ -50,6 +58,13 @@ def row_line(row):
     if not values[-1]:
         values[-1] = '""'
     return "\t".join(values) + "\n"
+
+
+def upgrade_header(fieldnames, rows):
+    if fieldnames == COLS:
+        return None
+    return ("\t".join(COLS) + "\n"
+            + "".join(row_line(rows[m]) for m in sorted(rows)))
 
 
 # Returns (result, status): status is "ok", "fail" (non-zero exit) or
@@ -91,9 +106,14 @@ def main():
     old_rows = {}
     if out_path.exists():
         with out_path.open(newline="") as f:
-            for row in csv.DictReader(f, delimiter="\t"):
+            reader = csv.DictReader(f, delimiter="\t")
+            for row in reader:
                 done.add(row["model"])
                 old_rows[row["model"]] = row
+            fieldnames = reader.fieldnames
+        text = upgrade_header(fieldnames, old_rows)
+        if text is not None:
+            out_path.write_text(text)
     else:
         out_path.write_text("\t".join(COLS) + "\n")
     if stanli_only:
@@ -156,9 +176,11 @@ def main():
                              timeout)
                 if st == "ok":
                     row["stanli_sample_s"] = f"{time.perf_counter() - t0:.2f}"
+                    row["stanli_grads"] = parse_grad_count(s.stderr)
                 elif st == "timeout":
                     notes.append("stanli_sample_timeout")
                 else:
+                    row["stanli_grads"] = parse_grad_count(s.stderr)
                     err = (s.stderr.strip().splitlines() or [""])[-1][:60]
                     notes.append(f"stanli_sample_fail({err})")
 

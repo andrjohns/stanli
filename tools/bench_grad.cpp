@@ -1,12 +1,19 @@
 // Per-gradient latency at a fixed point, or file-to-bound-executor latency
-// with --prep (no warmup or model evaluation).
+// with --prep (no warmup or model evaluation). By default the timed loop
+// pays the same var round trip stan::model::gradient does for CmdStan
+// (tools/bench_cmdstan_grad.cpp); --bare times the bare Executor::gradient
+// call instead.
 #include <stanli/compile.hpp>
 #include <stanli/graph.hpp>
+#include <stanli/model_adapter.hpp>
+
+#include <stan/math.hpp>
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -20,7 +27,8 @@ static std::string slurp(const char* p) {
 
 int main(int argc, char** argv) {
   if (argc < 4) {
-    std::fprintf(stderr, "usage: bench_grad mir.sexp data.json N|--prep\n");
+    std::fprintf(stderr,
+                 "usage: bench_grad mir.sexp data.json N|--prep [--bare]\n");
     return 2;
   }
   const bool prep_only = std::string(argv[3]) == "--prep";
@@ -29,6 +37,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "bench_grad: N must be positive\n");
     return 2;
   }
+  bool bare = false;
+  for (int i = 4; i < argc; ++i)
+    if (std::string(argv[i]) == "--bare") bare = true;
   using Clock = std::chrono::steady_clock;
   using Time = Clock::time_point;
   const char* prep_env = std::getenv("STANLI_PROFILE_PREP");
@@ -110,10 +121,25 @@ int main(int argc, char** argv) {
   const char* prof_env = std::getenv("STANLI_PROFILE");
   const bool profile = prof_env && prof_env[0] != '0';
   const int64_t n = ex.n_params();
-  for (int64_t i = 0; i < n; ++i)
-    ex.params_data()[i] = 0.1 + 0.05 * (i % 7) - 0.15 * (i % 3);
+  std::vector<double> q(n);
+  for (int64_t i = 0; i < n; ++i) q[i] = 0.1 + 0.05 * (i % 7) - 0.15 * (i % 3);
   std::vector<double> grad(n);
   double sink = 0;
+  stanli::ExecutorModel model(ex);
+  const auto one_bare = [&]() {
+    for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = q[i];
+    sink += ex.gradient(grad.data());
+  };
+  const auto one_var = [&]() {
+    Eigen::Matrix<stan::math::var, -1, 1> qv(n);
+    for (int64_t i = 0; i < n; ++i) qv(i) = q[i];
+    stan::math::var v =
+        model.log_prob<true, true, stan::math::var>(qv, &std::cerr);
+    v.grad();
+    sink += v.val();
+    for (int64_t i = 0; i < n; ++i) grad[i] = qv(i).adj();
+    stan::math::recover_memory();
+  };
   // Warm up by time, not by count: 1000 evaluations is nothing on a scalar
   // model and 90 seconds on an ODE one.
   int warmup_evals = 0;
@@ -121,7 +147,10 @@ int main(int argc, char** argv) {
   {
     auto w0 = std::chrono::steady_clock::now();
     for (int i = 0; i < 1000; ++i) {
-      sink += ex.gradient(grad.data());
+      if (bare)
+        one_bare();
+      else
+        one_var();
       ++warmup_evals;
       if (std::chrono::steady_clock::now() - w0 >
           std::chrono::milliseconds(200))
@@ -132,7 +161,11 @@ int main(int argc, char** argv) {
   const int64_t driver_ns = prep_ns(driver_start);
   if (profile) ex.set_profile(true);
   auto t0 = std::chrono::steady_clock::now();
-  for (int i = 0; i < N; ++i) sink += ex.gradient(grad.data());
+  if (bare) {
+    for (int i = 0; i < N; ++i) one_bare();
+  } else {
+    for (int i = 0; i < N; ++i) one_var();
+  }
   auto t1 = std::chrono::steady_clock::now();
   if (profile) std::fprintf(stderr, "%s", ex.profile_report().c_str());
   const double ns =
