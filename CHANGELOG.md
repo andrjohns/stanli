@@ -2,10 +2,19 @@
 
 ## Unreleased
 
+## 0.11.1
+
 ### Fixes
 
 The generated reverse pass no longer reads out of bounds when an island
 contains a zero-length range copy.
+
+A dispatch buffer for calls into higher-order kernel backwards (ODE adjoint
+solves, quadrature, DAE, islands) was shared across recursive invocations.
+When an island's own generated backward itself called another such kernel,
+the inner call overwrote the arguments the outer call still needed after it
+returned, producing a wrong gradient for models that nest one of these
+inside another. The buffer is now allocated per call.
 
 ### Retained loops store one version per write
 
