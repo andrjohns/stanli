@@ -685,6 +685,7 @@ struct Lowering {
             {"multi_normal_rng", BuiltinFamily::MultiNormalRng},
             {"dirichlet_rng", BuiltinFamily::DirichletRng},
             {"categorical_rng", BuiltinFamily::CategoricalRng},
+            {"categorical_logit_rng", BuiltinFamily::CategoricalRng},
             {"append_array", BuiltinFamily::AppendArray},
             {"Transpose__", BuiltinFamily::Matrix},
             {"transpose", BuiltinFamily::Matrix},
@@ -4869,20 +4870,51 @@ struct Lowering {
     return draw;
   }
 
+  Val lower_regular_unary(uint16_t opcode, const std::string& type_,
+                          const std::string& name, const std::string& raw,
+                          Val a) {
+    SlotInfo si = a.si;
+    // Shape-preserving unaries keep rows/cols (softmax/cumulative_sum
+    // are vector-only, so they never carry one).
+    if (opcode != OP_SOFTMAX && opcode != OP_CUMSUM) {
+      if (type_ == "UMatrix" && !is_matrix(si))
+        fail(name + ": matrix result has unknown logical extents", raw);
+      stamp_kind(&si, type_);
+    } else {
+      si = view_of(type_);
+    }
+    si.param_free = a.si.param_free;
+    const bool packet_supported =
+        opcode != OP_SOFTMAX && opcode != OP_LOG_SOFTMAX && opcode != OP_CUMSUM;
+    // These functions return freshly allocated Eigen containers. Their
+    // result starts at lane zero independently of the input's provenance;
+    // the other unary operations are elementwise evaluator expressions.
+    const ExpressionLayout layout =
+        packet_supported ? elementwise_layout({a}) : owning_layout(si);
+    return with_layout(emit_value(opcode, {a}, g.slots[a.slot].len, si),
+                       layout);
+  }
+
   Val lower_categorical_rng(const mir::Expr& e, CallArguments& actuals) {
+    const bool is_logit = e.name == "categorical_logit_rng";
     if (!in_write_array)
-      fail("categorical_rng is supported only in generated quantities", e.raw);
+      fail(e.name + " is supported only in generated quantities", e.raw);
     if (e.args.size() != 1 || e.type_ != "UInt" ||
         e.unsized.leaf != mir::UnsizedLeaf::Int || e.unsized.depth != 0)
-      fail("categorical_rng: expected one scalar int result", e.raw);
+      fail(e.name + ": expected one scalar int result", e.raw);
     const mir::Expr& probabilities = actuals.at(0).expr();
     if (probabilities.type_ != "UVector" || probabilities.unsized.depth != 0 ||
         probabilities.unsized.leaf != mir::UnsizedLeaf::Vector)
-      fail("categorical_rng: expected one probability-vector argument", e.raw);
+      fail(e.name + ": expected one " + (is_logit ? "logit" : "probability") +
+               "-vector argument",
+           e.raw);
 
     Val argument = actuals.at(0).value();
     if (!is_vector(argument.si))
-      fail("categorical_rng: argument is not a logical vector", e.raw);
+      fail(e.name + ": argument is not a logical vector", e.raw);
+    if (is_logit)
+      argument = lower_regular_unary(OP_SOFTMAX, "UVector", "softmax", e.raw,
+                                     argument);
     Val draw = with_layout(emit_value(OP_RNG, {argument}, 1, view_of(e.type_)),
                            ExpressionLayout::scalar());
     g.ops.back().variant = kCategoricalRngVariant;
@@ -6224,28 +6256,8 @@ struct Lowering {
 
     if (regular != nullptr && regular->kind == RegularKind::Unary) {
       actuals.require_arity(1);
-      Val a = actuals.at(0).value();
-      SlotInfo si = a.si;
-      // Shape-preserving unaries keep rows/cols (softmax/cumulative_sum
-      // are vector-only, so they never carry one).
-      if (regular->opcode != OP_SOFTMAX && regular->opcode != OP_CUMSUM) {
-        if (e.type_ == "UMatrix" && !is_matrix(si))
-          fail(e.name + ": matrix result has unknown logical extents", e.raw);
-        stamp_kind(&si, e.type_);
-      } else {
-        si = view_of(e.type_);
-      }
-      si.param_free = a.si.param_free;
-      const bool packet_supported = regular->opcode != OP_SOFTMAX &&
-                                    regular->opcode != OP_LOG_SOFTMAX &&
-                                    regular->opcode != OP_CUMSUM;
-      // These functions return freshly allocated Eigen containers. Their
-      // result starts at lane zero independently of the input's provenance;
-      // the other unary operations are elementwise evaluator expressions.
-      const ExpressionLayout layout =
-          packet_supported ? elementwise_layout({a}) : owning_layout(si);
-      return with_layout(
-          emit_value(regular->opcode, {a}, g.slots[a.slot].len, si), layout);
+      return lower_regular_unary(regular->opcode, e.type_, e.name, e.raw,
+                                 actuals.at(0).value());
     }
     // plus, and its operator spelling, are the identity on every shape.
     if (e.name == "PPlus__" || (e.name == "plus" && e.args.size() == 1)) {

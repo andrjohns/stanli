@@ -1501,8 +1501,37 @@ void test_categorical_rng_lowering_guards() {
   std::string logit = base;
   logit.replace(call + std::string("(FunApp (StanLib ").size(),
                 std::string("categorical_rng").size(), "categorical_logit_rng");
-  expect_interp(logit, "unsupported function categorical_logit_rng",
-                "categorical-logit stays interpreted");
+  DataMap logit_data;
+  logit_data.set_int("K", 4);
+  CompiledModel logit_cm = compile_model(logit, logit_data);
+  if (!logit_cm.write_array || logit_cm.write_array->interp ||
+      !logit_cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf("FAIL categorical_logit_rng did not lower natively: %s\n",
+                logit_cm.write_array ? logit_cm.write_array->truncated.c_str()
+                                     : "no write_array");
+    return;
+  }
+
+  Executor logit_graph(std::move(logit_cm.write_array->graph));
+  logit_cm.write_array->bind(logit_graph);
+  const std::vector<double> theta{-1.0, 0.5, 2.0, 0.0};
+  for (size_t i = 0; i < theta.size(); ++i)
+    logit_graph.params_data()[i] = theta[i];
+
+  WaRng graph_rng(17), ref_rng(17);
+  logit_graph.run_forward_only(EvalState{&graph_rng});
+  const CompiledModel::ParamView* draw_column = nullptr;
+  for (const auto& column : logit_cm.write_array->columns)
+    if (column.name == "draw") draw_column = &column;
+  const int want = stan::math::categorical_rng(
+      stan::math::softmax(categorical_theta(theta)), ref_rng.gen());
+  if (draw_column == nullptr ||
+      logit_graph.value_ptr(draw_column->slot)[draw_column->storage_index(0)] !=
+          want) {
+    ++failures;
+    std::printf("FAIL categorical_logit_rng draw mismatch vs softmax\n");
+  }
 }
 
 static stanli::DataMap categorical_data(int k) {
