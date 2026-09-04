@@ -989,21 +989,17 @@ double nid_glm_eval(KernelCtx& ctx) {
   else
     pick_x(yd);
   const double v = out.val();
-  // One tape per gradient, not two. The forward differentiates it once
-  // with a seed of 1 and keeps the partials; the backward is then the
-  // contraction every other native kernel does. This used to build the
-  // whole var tape in the forward, throw it away, and build it again in
-  // the backward to call grad() -- 90.9% of diamonds' gradient, and more
-  // work than CmdStan does for the same statement.
-  stan::math::grad(out.vi_);
-  double* s = ctx.scratch;
-  for (int64_t i = 0; i < yv.size(); ++i) *s++ = yv(i).adj();
-  // Column-major, matching the slot layout the backward scatters into.
-  for (int64_t j = 0; j < Xv.cols(); ++j)
-    for (int64_t i = 0; i < Xv.rows(); ++i) *s++ = Xv(i, j).adj();
-  for (int64_t i = 0; i < ctx.in[2].len; ++i) *s++ = alpha(i).adj();
-  for (int64_t i = 0; i < ctx.in[3].len; ++i) *s++ = beta(i).adj();
-  for (int64_t i = 0; i < ctx.in[4].len; ++i) *s++ = sigma(i).adj();
+  if (!values_only()) {
+    stan::math::grad(out.vi_);
+    double* s = ctx.scratch;
+    for (int64_t i = 0; i < yv.size(); ++i) *s++ = yv(i).adj();
+    // Column-major, matching the slot layout the backward scatters into.
+    for (int64_t j = 0; j < Xv.cols(); ++j)
+      for (int64_t i = 0; i < Xv.rows(); ++i) *s++ = Xv(i, j).adj();
+    for (int64_t i = 0; i < ctx.in[2].len; ++i) *s++ = alpha(i).adj();
+    for (int64_t i = 0; i < ctx.in[3].len; ++i) *s++ = beta(i).adj();
+    for (int64_t i = 0; i < ctx.in[4].len; ++i) *s++ = sigma(i).adj();
+  }
   return v;
 }
 
