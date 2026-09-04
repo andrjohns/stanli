@@ -1,7 +1,3 @@
-// Shared declaration of the Lowering class and its small
-// helper types. Private to runtime/src: member function
-// bodies live in lower.cpp, lower_expr.cpp, lower_stmt.cpp,
-// lower_funapp.cpp and lower_higher_order.cpp.
 #ifndef STANLI_LOWER_INTERNAL_HPP
 #define STANLI_LOWER_INTERNAL_HPP
 
