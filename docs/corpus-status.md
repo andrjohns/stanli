@@ -3,7 +3,7 @@
 Evaluating: 119/120
 Differentially verified against CmdStan: 118/120
 
-A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Models that evaluate but are not verified are listed separately and are not counted.
+A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Bitwise counts are reported for information; the numeric policy gate is the ULP budget. Models that evaluate but are not verified are listed separately and are not counted.
 
 | model | values compared | max rel diff | max ULP |
 | --- | ---: | ---: | ---: |

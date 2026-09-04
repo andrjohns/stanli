@@ -1045,16 +1045,16 @@ comparison). After these changes per-op cost is dominated by loading
 the context, not the dispatch, so the remaining lever is fewer ops,
 which is what the passes above are.
 
-## Deferred: reduction reassociation (surveyed 2026-08-25)
+## Unblocked: reduction reassociation (surveyed 2026-08-25, unblocked 2026-09-04)
 
 The candidates below change summation order rather than any elementwise
 result. Each was measured or profiled during the 2026-08-25 precision survey
-and deferred as a policy choice: the corpus reference gate passes either way,
-but models listed as bitwise against CmdStan in
-[`docs/corpus-status.md`](../../docs/corpus-status.md) would move into the
-small-ULP bands. Re-profile before implementing any of them, since profile
-share is a ceiling on the win and the `pow` entry below shows how a large
-share can still yield nothing.
+and is unblocked under the 10 ULP budget for reassociation-class changes.
+Implementations must state that budget in the commit message and update
+[`docs/corpus-status.md`](../../docs/corpus-status.md) and the conformance
+baseline in the same commit. Re-profile before implementing any of them, since
+profile share is a ceiling on the win and the `pow` entry below shows how a
+large share can still yield nothing.
 
 Softmax backward as a packet dot product (`adjoint.cpp`). The fold is written
 by hand because Stan Math reduces var expressions, which have no packet
