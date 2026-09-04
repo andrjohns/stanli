@@ -26,7 +26,7 @@ static int64_t ulp_key(double d) {
   return i < 0 ? (-(int64_t(1) << 63)) - i : i;
 }
 static void expect_ulp(const std::string& what, double got, double want,
-                        int64_t budget) {
+                       int64_t budget) {
   const int64_t d = std::abs(ulp_key(got) - ulp_key(want));
   if (d > budget) {
     ++failures;

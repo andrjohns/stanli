@@ -288,16 +288,15 @@ static std::vector<double> run_gather_dot(const std::vector<int>& idx,
 
 static void test_gather_bwd_repeated_indices() {
   const int64_t J = 5;
-  const std::vector<double> weights_sorted = {
-      1.3, -0.7, 2.1, 0.4, -1.9, 0.05, 3.3, -2.2, 0.11, 1.0, -0.65};
+  const std::vector<double> weights_sorted = {1.3, -0.7, 2.1,  0.4, -1.9, 0.05,
+                                              3.3, -2.2, 0.11, 1.0, -0.65};
   const std::vector<int> idx_sorted = {0, 0, 0, 1, 1, 2, 3, 3, 3, 3, 4};
-  const std::vector<double> weights_unsorted = {
-      0.9, -1.1, 2.3, -0.4, 1.7, -2.9, 0.65, -0.15, 1.05, -0.8};
+  const std::vector<double> weights_unsorted = {0.9,  -1.1, 2.3,   -0.4, 1.7,
+                                                -2.9, 0.65, -0.15, 1.05, -0.8};
   const std::vector<int> idx_unsorted = {2, 0, 3, 0, 1, 3, 2, 0, 4, 1};
 
   auto check = [](const char* tag, const std::vector<int>& idx,
-                   const std::vector<double>& weights, int64_t j,
-                   int budget) {
+                  const std::vector<double>& weights, int64_t j, int budget) {
     const std::vector<double> got = run_gather_dot(idx, weights, j, true);
     std::vector<double> want(j, 1.0);
     for (size_t k = 0; k < idx.size(); ++k) want[idx[k]] += weights[k];

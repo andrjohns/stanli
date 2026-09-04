@@ -929,15 +929,32 @@ static void test_native_extras_carved() {
     const auto& p = *static_cast<const IslandProg*>(op.udata);
     for (const auto& I : p.code) {
       switch (I.code) {
-        case Program::POW: has_pow = true; break;
-        case Program::FMAX: has_fmax = true; break;
-        case Program::FMIN: has_fmin = true; break;
-        case Program::INV: has_inv = true; break;
-        case Program::FABS: has_fabs = true; break;
-        case Program::LOG_DIFF_EXP: has_log_diff_exp = true; break;
-        case Program::LOG1P_EXP: has_log1p_exp = true; break;
-        case Program::CALL: has_call = true; break;
-        default: break;
+        case Program::POW:
+          has_pow = true;
+          break;
+        case Program::FMAX:
+          has_fmax = true;
+          break;
+        case Program::FMIN:
+          has_fmin = true;
+          break;
+        case Program::INV:
+          has_inv = true;
+          break;
+        case Program::FABS:
+          has_fabs = true;
+          break;
+        case Program::LOG_DIFF_EXP:
+          has_log_diff_exp = true;
+          break;
+        case Program::LOG1P_EXP:
+          has_log1p_exp = true;
+          break;
+        case Program::CALL:
+          has_call = true;
+          break;
+        default:
+          break;
       }
     }
   }

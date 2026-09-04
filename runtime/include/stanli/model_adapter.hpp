@@ -60,8 +60,9 @@ class ExecutorModel {
                     "adapter supports double and var");
       Eigen::Map<Eigen::VectorXd>(ex_->params_data(), n) =
           stan::math::value_of(q);
-      double* grad = stan::math::ChainableStack::instance_->memalloc_
-                        .alloc_array<double>(n);
+      double* grad =
+          stan::math::ChainableStack::instance_->memalloc_.alloc_array<double>(
+              n);
       double value;
       try {
         value = ex_->gradient(grad);
@@ -70,12 +71,12 @@ class ExecutorModel {
         // which the sampler treats as a divergence.
         return T(-std::numeric_limits<double>::infinity());
       }
-      stan::math::vari** varis = stan::math::ChainableStack::instance_
-                                     ->memalloc_.alloc_array<stan::math::vari*>(n);
+      stan::math::vari** varis =
+          stan::math::ChainableStack::instance_->memalloc_
+              .alloc_array<stan::math::vari*>(n);
       for (int64_t i = 0; i < n; ++i) varis[i] = q(i).vi_;
-      return stan::math::var(
-          new stan::math::precomputed_gradients_vari(value, (size_t)n, varis,
-                                                     grad));
+      return stan::math::var(new stan::math::precomputed_gradients_vari(
+          value, (size_t)n, varis, grad));
     }
   }
 

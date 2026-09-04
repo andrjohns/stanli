@@ -21,7 +21,7 @@ static int64_t ulp_distance(double a, double b) {
   return k < 0 ? -k : k;
 }
 static void expect_ulp(const std::string& what, double got, double want,
-                        int64_t budget) {
+                       int64_t budget) {
   const int64_t d = ulp_distance(got, want);
   if (d > budget) {
     ++failures;
@@ -31,9 +31,8 @@ static void expect_ulp(const std::string& what, double got, double want,
 }
 
 static void run_case(const std::string& name, int R, int C,
-                      const std::vector<double>& X,
-                      const std::vector<double>& y,
-                      const std::vector<double>& beta, int64_t budget) {
+                     const std::vector<double>& X, const std::vector<double>& y,
+                     const std::vector<double>& beta, int64_t budget) {
   using namespace stanli;
   using stan::math::var;
 
@@ -76,7 +75,7 @@ int main() {
     const int R = 5, C = 3;
     // Column-major X (Stan/Eigen convention).
     const std::vector<double> X = {0.5, 2.0,  -0.4, 0.2, 1.3,  -1.2, -0.7, 0.9,
-                                    0.8, -0.1, 0.3,  1.1, -1.5, -0.6, 0.7};
+                                   0.8, -0.1, 0.3,  1.1, -1.5, -0.6, 0.7};
     const std::vector<double> y = {0.4, -1.0, 2.1, 0.3, -0.8};
     const std::vector<double> beta = {0.25, -0.5, 1.0};
     run_case("small", R, C, X, y, beta, 10);
