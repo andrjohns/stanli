@@ -434,10 +434,14 @@ class MirInterp {
           return;
         }
         // Contiguous subrange write into a 1-D value: x[a:b] = rhs.
-        if (st.lhs_idx.size() == 1 && st.lhs_idx[0].name == "IndexBetween" &&
+        if (st.lhs_idx.size() == 1 &&
+            (st.lhs_idx[0].name == "IndexBetween" ||
+             st.lhs_idx[0].name == "IndexUpfrom") &&
             en->dims.size() == 1) {
           const long a = as_int(st.lhs_idx[0].args[0]);
-          const long b = as_int(st.lhs_idx[0].args[1]);
+          const long b = st.lhs_idx[0].name == "IndexBetween"
+                             ? as_int(st.lhs_idx[0].args[1])
+                             : en->dims[0];
           const int64_t n = b >= a ? b - a + 1 : 0;
           if (n > 0 && (a < 1 || b > en->dims[0] || b > (long)en->r.size()))
             fail("range assignment index out of bounds", st.raw);

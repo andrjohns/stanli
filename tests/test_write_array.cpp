@@ -4388,9 +4388,30 @@ void test_gq_reduction_lowering_guards() {
   // reversed ranges are harmless empty updates.  Mutate its later 4:5 write
   // to pin both sides of the bounds check and a width mismatch; every case
   // must fail closed to WaInterp, which then reports the same invalid write.
-  const size_t tail_range = base.rfind("((Between");
-  const size_t tail_lo = base.find("(Lit Int 4)", tail_range);
-  const size_t tail_hi = base.find("(Lit Int 5)", tail_lo);
+  // z[4:5] is now spelled Upfrom(4); restore the explicit Between(4, 5).
+  std::string range_base = base;
+  {
+    const std::string upfrom =
+        "((Upfrom\n"
+        "         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) "
+        "(adlevel DataOnly))))))";
+    const std::string between =
+        "((Between\n"
+        "         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) "
+        "(adlevel DataOnly))))\n"
+        "         ((pattern (Lit Int 5)) (meta ((type_ UInt) (loc <opaque>) "
+        "(adlevel DataOnly))))))";
+    const size_t at = range_base.find(upfrom);
+    if (at == std::string::npos) {
+      ++failures;
+      std::printf("FAIL reductions guard cannot find the z Upfrom write\n");
+    } else {
+      range_base.replace(at, upfrom.size(), between);
+    }
+  }
+  const size_t tail_range = range_base.rfind("((Between");
+  const size_t tail_lo = range_base.find("(Lit Int 4)", tail_range);
+  const size_t tail_hi = range_base.find("(Lit Int 5)", tail_lo);
   if (tail_range == std::string::npos || tail_lo == std::string::npos ||
       tail_hi == std::string::npos) {
     ++failures;
@@ -4398,7 +4419,7 @@ void test_gq_reduction_lowering_guards() {
   } else {
     const auto expect_invalid_range = [&](long lo, long hi, const char* reason,
                                           const char* what) {
-      std::string mutated = base;
+      std::string mutated = range_base;
       mutated.replace(tail_hi, std::string("(Lit Int 5)").size(),
                       "(Lit Int " + std::to_string(hi) + ")");
       mutated.replace(tail_lo, std::string("(Lit Int 4)").size(),
@@ -4419,7 +4440,7 @@ void test_gq_reduction_lowering_guards() {
 
     // A single range index on a matrix denotes rows, not a contiguous flat
     // slice.  This first tranche has no strided multi-row write opcode.
-    std::string matrix_rows = base;
+    std::string matrix_rows = range_base;
     const size_t lhs_z = matrix_rows.rfind("(LVariable z)", tail_range);
     if (lhs_z == std::string::npos) {
       ++failures;
