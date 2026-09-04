@@ -925,6 +925,9 @@ struct Lowering {
   struct StaticRange {
     int64_t lo, hi;
   };
+  static bool is_range(const mir::Expr& ix) {
+    return ix.name == "IndexBetween" || ix.name == "IndexUpfrom";
+  }
   std::optional<StaticRange> static_range(const mir::Expr& ix, int64_t extent) {
     if (ix.name == "IndexBetween")
       return StaticRange{eval_int(ix.args[0]), eval_int(ix.args[1])};
@@ -949,7 +952,7 @@ struct Lowering {
       check_index(i, extent, what, raw);
       return {i - 1};
     }
-    if (ix.name == "IndexBetween" || ix.name == "IndexUpfrom") {
+    if (is_range(ix)) {
       const StaticRange range = *static_range(ix, extent);
       check_range(range.lo, range.hi, extent, what, raw);
       for (int64_t i = range.lo; i <= range.hi; ++i) out.push_back(i - 1);
@@ -2207,9 +2210,7 @@ struct Lowering {
         // One index on a matrix selects rows. A range or gather is not a
         // contiguous slice in column-major storage, so spell its gather.
         if (e.args.size() == 2 && is_matrix(base.si) &&
-            (e.args[1].name == "IndexBetween" ||
-             e.args[1].name == "IndexUpfrom" ||
-             e.args[1].name == "IndexMulti")) {
+            (is_range(e.args[1]) || e.args[1].name == "IndexMulti")) {
           std::vector<int> rows;
           if (auto range = static_range(e.args[1], base.si.rows)) {
             check_range(range->lo, range->hi, base.si.rows, "matrix row range",
@@ -2239,9 +2240,7 @@ struct Lowering {
         // A range over the outermost array dimension is contiguous because
         // graph storage keeps each whole outer element together. Preserve
         // the complete suffix shape even when its storage width is zero.
-        if (e.args.size() == 2 && is_array(base.si) &&
-            (e.args[1].name == "IndexBetween" ||
-             e.args[1].name == "IndexUpfrom")) {
+        if (e.args.size() == 2 && is_array(base.si) && is_range(e.args[1])) {
           const ArrayShape& sh = array_shape(base.si);
           const StaticRange range = *static_range(e.args[1], sh.dims.front());
           const int64_t lo = range.lo;
@@ -2266,8 +2265,7 @@ struct Lowering {
         }
         // Between subrange read on a 1-D value: v[a:b] is contiguous.
         // hi < lo is empty, not negative-length.
-        if (e.args.size() == 2 && (e.args[1].name == "IndexBetween" ||
-                                   e.args[1].name == "IndexUpfrom")) {
+        if (e.args.size() == 2 && is_range(e.args[1])) {
           const StaticRange range =
               *static_range(e.args[1], g.slots[base.slot].len);
           const int64_t lo = range.lo;
@@ -2366,8 +2364,7 @@ struct Lowering {
              array_shape(base.si).leaf == ViewKind::Vector ||
              array_shape(base.si).leaf == ViewKind::RowVector) &&
             bdims->size() == 2 && e.args[1].name == "IndexSingle" &&
-            (e.args[2].name == "IndexBetween" ||
-             e.args[2].name == "IndexUpfrom")) {
+            is_range(e.args[2])) {
           const int64_t i = eval_int(e.args[1].args[0]);
           const int64_t S = (*bdims)[1];
           const StaticRange range = *static_range(e.args[2], S);
@@ -2408,9 +2405,7 @@ struct Lowering {
               owning_layout(si));
         }
         // Row-range column read M[a:b, j] (contiguous within the column).
-        if (e.args.size() == 3 && is_matrix(base.si) &&
-            (e.args[1].name == "IndexBetween" ||
-             e.args[1].name == "IndexUpfrom") &&
+        if (e.args.size() == 3 && is_matrix(base.si) && is_range(e.args[1]) &&
             e.args[2].name == "IndexSingle") {
           const StaticRange range = *static_range(e.args[1], base.si.rows);
           const int64_t lo = range.lo;
@@ -2433,8 +2428,7 @@ struct Lowering {
         // gather list.
         const auto is_matrix_selector = [](const mir::Expr& index) {
           return index.name == "IndexAll" || index.name == "IndexSingle" ||
-                 index.name == "IndexBetween" || index.name == "IndexUpfrom" ||
-                 index.name == "IndexMulti";
+                 is_range(index) || index.name == "IndexMulti";
         };
         if (e.args.size() == 3 && is_matrix(base.si) &&
             is_matrix_selector(e.args[1]) && is_matrix_selector(e.args[2]) &&
@@ -2506,10 +2500,8 @@ struct Lowering {
                       array_shape(base.si).leaf == ViewKind::RowVector)) {
           const size_t n_arr = bdims->size() - 1;
           const mir::Expr& last = e.args.back();
-          bool prefix_single =
-              e.args.size() == n_arr + 2 &&
-              (last.name == "IndexBetween" || last.name == "IndexUpfrom" ||
-               last.name == "IndexAll");
+          bool prefix_single = e.args.size() == n_arr + 2 &&
+                               (is_range(last) || last.name == "IndexAll");
           for (size_t d = 0; prefix_single && d < n_arr; ++d)
             if (e.args[1 + d].name != "IndexSingle") prefix_single = false;
           if (prefix_single) {
@@ -2522,8 +2514,7 @@ struct Lowering {
             }
             const Addr a = flat_addr(*bdims, false, ix);
             int64_t lo = 1, hi = a.len;
-            const bool ranged =
-                last.name == "IndexBetween" || last.name == "IndexUpfrom";
+            const bool ranged = is_range(last);
             if (ranged) {
               const StaticRange range = *static_range(last, a.len);
               lo = range.lo;
@@ -8041,8 +8032,7 @@ struct Lowering {
             return;
           }
           // Between write w[a:b] = rhs (contiguous on 1-D values).
-          if (s.lhs_idx.size() == 1 && (s.lhs_idx[0].name == "IndexBetween" ||
-                                        s.lhs_idx[0].name == "IndexUpfrom")) {
+          if (s.lhs_idx.size() == 1 && is_range(s.lhs_idx[0])) {
             const bool flat_1d_array =
                 is_array(prev_v.si) &&
                 array_shape(prev_v.si).dims.size() == 1 &&
@@ -8112,9 +8102,7 @@ struct Lowering {
           }
           // Row-range column write M[a:b, j] = rhs (contiguous within the
           // column).
-          if (s.lhs_idx.size() == 2 &&
-              (s.lhs_idx[0].name == "IndexBetween" ||
-               s.lhs_idx[0].name == "IndexUpfrom") &&
+          if (s.lhs_idx.size() == 2 && is_range(s.lhs_idx[0]) &&
               s.lhs_idx[1].name == "IndexSingle" && is_matrix(prev_v.si)) {
             const StaticRange range =
                 *static_range(s.lhs_idx[0], prev_v.si.rows);
