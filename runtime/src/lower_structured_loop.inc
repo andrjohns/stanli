@@ -5,44 +5,9 @@ RegionNode* region_current = nullptr;
 size_t region_emitted = 0;
 std::map<std::string, Val> region_cells;
 std::map<std::string, IntRange> region_analysis_ints;
-std::map<int, mir::Expr> region_real_definitions;
 int region_control_depth = 0;
 bool region_control_active = false;
-int64_t structured_history_used = 0;
 unsigned structured_outer_depth = 0;
-uint64_t structured_target_sites = 0;
-static constexpr uint64_t region_target_limit = 1ULL << 32;
-uint64_t region_target_count(const mir::Stmt& s, unsigned depth = 0) {
-  if (depth > 32) return region_target_limit;
-  uint64_t count = s.kind == mir::Stmt::TargetPE;
-  if (s.read_transform && s.read_transform->kind != mir::Transform::Identity)
-    ++count;
-  std::function<void(const mir::Expr&)> expression = [&](const mir::Expr& e) {
-    if (e.name.find("_jacobian") != std::string::npos) ++count;
-    if (e.kind == mir::Expr::FunApp &&
-        e.fn_lib == mir::Expr::Lib::UserDefined) {
-      auto f = fun_defs.find(e.name);
-      if (f == fun_defs.end())
-        count = region_target_limit;
-      else
-        for (const auto& body : f->second->body)
-          count = std::min(region_target_limit,
-                           count + region_target_count(body, depth + 1));
-    }
-    for (const auto& a : e.args) expression(a);
-  };
-  expression(s.rhs);
-  expression(s.init);
-  expression(s.cond);
-  expression(s.target);
-  expression(s.lower);
-  expression(s.upper);
-  for (const auto& arg : s.fn_args) expression(arg);
-  for (const auto& body : s.body)
-    count = std::min(region_target_limit,
-                     count + region_target_count(body, depth + 1));
-  return std::min(region_target_limit, count);
-}
 
 void region_flush() {
   while (region_emitted < g.ops.size()) {
@@ -208,8 +173,7 @@ std::optional<RealRange> region_enumerated_data_range(const mir::Expr& e) {
       any = true;
     } catch (const std::exception&) {
       // A path-invalid selector may be excluded by an enclosing branch.
-      // Other reachable failures remain runtime failures; they cannot make
-      // the finite values require more retained history.
+      // Other reachable failures remain runtime failures.
     }
   };
   enumerate(0);
@@ -1065,15 +1029,80 @@ std::optional<Val> region_expr(const mir::Expr& e) {
   return lower_runtime_scalar(e);
 }
 
+static const std::map<std::string, int>& runtime_comparisons() {
+  static const std::map<std::string, int> table = {
+      {"Less__", 0}, {"Leq__", 1},    {"Greater__", 2},
+      {"Geq__", 3},  {"Equals__", 4}, {"NEquals__", 5},
+      {"PNot__", 6}, {"is_nan", 7},   {"is_inf", 8}};
+  return table;
+}
+static const std::map<std::string, int>& runtime_int_arithmetic() {
+  static const std::map<std::string, int> table = {
+      {"Plus__", 0},      {"Minus__", 1},  {"Times__", 2}, {"Divide__", 3},
+      {"IntDivide__", 3}, {"Modulo__", 4}, {"PMinus__", 5}};
+  return table;
+}
+static bool runtime_scalar_form(const mir::Expr& e) {
+  if (e.kind != mir::Expr::FunApp || e.fn_lib != mir::Expr::Lib::StanLib)
+    return false;
+  if (runtime_comparisons().count(e.name)) return true;
+  return e.unsized.leaf == mir::UnsizedLeaf::Int && e.unsized.depth == 0 &&
+         runtime_int_arithmetic().count(e.name);
+}
+
+bool runtime_only(const mir::Expr& e) {
+  return !in_write_array && needs_runtime_value(e) && !try_eval_pure(e);
+}
+bool runtime_int_expression(const mir::Expr& e) {
+  if (in_write_array || !runtime_scalar_form(e)) return false;
+  bool found = false;
+  const auto integer_reads = [&](const auto& self, const mir::Expr& x) -> bool {
+    if (x.kind == mir::Expr::Var || x.kind == mir::Expr::Indexed) {
+      if (!needs_runtime_value(x)) return true;
+      found = true;
+      return x.type_ == "UInt";
+    }
+    for (const auto& argument : x.args)
+      if (!self(self, argument)) return false;
+    return true;
+  };
+  return integer_reads(integer_reads, e) && found && !try_eval_pure(e);
+}
+bool runtime_selector(const mir::Expr& index) {
+  for (const auto& argument : index.args)
+    if (runtime_only(argument)) return true;
+  return false;
+}
+std::optional<long> static_int(const mir::Expr& e) {
+  try {
+    return eval_int(e);
+  } catch (const CompileError&) {
+    if (in_write_array || !needs_runtime_value(e)) throw;
+    return std::nullopt;
+  }
+}
+void bind_runtime_int(const std::string& name, const mir::Expr& e,
+                      const std::string& raw) {
+  Val v = lower_expr(e);
+  SlotInfo expected;
+  expected.param_free = v.si.param_free;
+  require_binding(v, 1, expected, name, raw);
+  v.autodiff = false;
+  v.si = expected;
+  if (in_write_array) v.si.param_free = false;
+  scope[name] = v;
+  decls[name] = DeclView{1, false, expected};
+  int_env.erase(name);
+  int_locals.erase(name);
+  td.env().erase(name);
+}
+
 // These kernels also serve consumers outside a retained region. Integer
 // identity and dependence do not imply that a value is known at prepare.
 std::optional<Val> lower_runtime_scalar(const mir::Expr& e) {
   if (e.kind != mir::Expr::FunApp || e.fn_lib != mir::Expr::Lib::StanLib)
     return {};
-  static const std::map<std::string, int> comparisons = {
-      {"Less__", 0}, {"Leq__", 1},    {"Greater__", 2},
-      {"Geq__", 3},  {"Equals__", 4}, {"NEquals__", 5},
-      {"PNot__", 6}, {"is_nan", 7},   {"is_inf", 8}};
+  const auto& comparisons = runtime_comparisons();
   auto comparison = comparisons.find(e.name);
   if (comparison != comparisons.end()) {
     Val a = lower_expr(e.args.at(0)), v;
@@ -1089,9 +1118,7 @@ std::optional<Val> lower_runtime_scalar(const mir::Expr& e) {
     return v;
   }
   if (e.unsized.leaf == mir::UnsizedLeaf::Int && e.unsized.depth == 0) {
-    static const std::map<std::string, int> arithmetic = {
-        {"Plus__", 0},      {"Minus__", 1},  {"Times__", 2}, {"Divide__", 3},
-        {"IntDivide__", 3}, {"Modulo__", 4}, {"PMinus__", 5}};
+    const auto& arithmetic = runtime_int_arithmetic();
     auto operation = arithmetic.find(e.name);
     if (operation != arithmetic.end()) {
       auto range = region_range(e);
@@ -1171,53 +1198,6 @@ std::optional<int64_t> region_while_capacity(const mir::Stmt& s,
   int64_t int_step = 0;
   double real_step_lo = 0, real_step_hi = 0;
   bool valid = true;
-  const auto positive_when_guard_reached =
-      [&](const mir::Expr& increment) -> std::optional<RealRange> {
-    const mir::Expr* definition = &increment;
-    if (increment.kind == mir::Expr::Var) {
-      auto value = scope.find(increment.name);
-      if (value == scope.end()) return {};
-      auto found = region_real_definitions.find(value->second.slot);
-      if (found == region_real_definitions.end()) return {};
-      definition = &found->second;
-    }
-    // x / ceil(x / positive_scale) is positive whenever x is positive.
-    if (definition->kind != mir::Expr::FunApp ||
-        definition->name != "Divide__" || definition->args.size() != 2 ||
-        definition->args[0].kind != mir::Expr::Var)
-      return {};
-    const std::string source = definition->args[0].name;
-    const mir::Expr& denominator = definition->args[1];
-    if (denominator.kind != mir::Expr::FunApp || denominator.name != "ceil" ||
-        denominator.args.size() != 1)
-      return {};
-    const mir::Expr& ratio = denominator.args[0];
-    if (ratio.kind != mir::Expr::FunApp || ratio.name != "Divide__" ||
-        ratio.args.size() != 2 || ratio.args[0].kind != mir::Expr::Var ||
-        ratio.args[0].name != source)
-      return {};
-    auto scale = region_real_range(ratio.args[1]);
-    auto source_range = region_real_range(definition->args[0]);
-    if (!scale || scale->lo <= 0 || !source_range ||
-        !std::isfinite(source_range->positive_lo) || source_range->hi <= 0)
-      return {};
-    // The loop is reachable only when its upper endpoint is positive in x.
-    const mir::Expr& endpoint = guard->args[1];
-    const bool guarded = endpoint.kind == mir::Expr::Var
-                             ? endpoint.name == source
-                             : endpoint.kind == mir::Expr::FunApp &&
-                                   endpoint.name == "Minus__" &&
-                                   !endpoint.args.empty() &&
-                                   endpoint.args[0].kind == mir::Expr::Var &&
-                                   endpoint.args[0].name == source;
-    if (!guarded) return {};
-    const double denominator_hi =
-        std::max(1.0, std::ceil(source_range->hi / scale->lo));
-    RealRange result{source_range->positive_lo / denominator_hi,
-                     source_range->hi};
-    result.positive_lo = result.lo;
-    return result;
-  };
   std::function<void(const mir::Stmt&, bool)> advances =
       [&](const mir::Stmt& st, bool unconditional) {
         if (st.kind == mir::Stmt::For || st.kind == mir::Stmt::While) {
@@ -1251,15 +1231,8 @@ std::optional<int64_t> region_while_capacity(const mir::Stmt& s,
               return;
             }
           } else {
-            if (!real_increment || real_increment->lo <= 0) {
-              auto guarded = positive_when_guard_reached(e.args[1]);
-              if (!guarded) {
-                valid = false;
-                return;
-              }
-              real_increment = guarded;
-            }
-            if (!std::isfinite(real_increment->hi)) {
+            if (!real_increment || real_increment->lo <= 0 ||
+                !std::isfinite(real_increment->hi)) {
               valid = false;
               return;
             }
@@ -1334,9 +1307,9 @@ void lower_region_stmt(const mir::Stmt& s) {
     case mir::Stmt::For: {
       region_prepare_cells(s);
       auto lo = region_range(s.lower), hi = region_range(s.upper);
-      if (!lo || !hi)
-        fail("structured for-loop bounds need a finite capacity", s.raw);
-      const int64_t count = std::max<int64_t>(0, int64_t(hi->hi) - lo->lo + 1);
+      const bool known = lo && hi;
+      const int64_t count =
+          known ? std::max<int64_t>(0, int64_t(hi->hi) - lo->lo + 1) : -1;
       // Recognize the common Stan construction
       //   for (i in 1:size(a)) a[i] = bounded_integer_expression;
       // so later integer reductions know that every element is initialized.
@@ -1363,7 +1336,7 @@ void lower_region_stmt(const mir::Stmt& s) {
               return;
             full_int_writes.emplace_back(body.lhs, &body.rhs);
           };
-      if (lo->lo == 1 && lo->hi == 1 && hi->lo == hi->hi)
+      if (known && lo->lo == 1 && lo->hi == 1 && hi->lo == hi->hi)
         for (const auto& child : s.body) find_full_int_writes(child);
       if (count == 0) return;
       bool has_loop_control = false;
@@ -1377,7 +1350,7 @@ void lower_region_stmt(const mir::Stmt& s) {
             for (const auto& child : body.body) scan_control(child);
           };
       for (const auto& child : s.body) scan_control(child);
-      if (count == 1 && lo->lo == lo->hi && hi->lo == hi->hi &&
+      if (known && count == 1 && lo->lo == lo->hi && hi->lo == hi->hi &&
           lo->lo == hi->hi && !has_loop_control) {
         const auto saved_scope = scope.find(s.loopvar);
         const std::optional<Val> saved_iterator = saved_scope == scope.end()
@@ -1427,7 +1400,7 @@ void lower_region_stmt(const mir::Stmt& s) {
       iterator.si.param_free = lower.si.param_free && upper.si.param_free;
       scope[s.loopvar] = iterator;
       region_forget(s.loopvar);
-      set_int_range(iterator, lo->lo, hi->hi);
+      if (known) set_int_range(iterator, lo->lo, hi->hi);
       region_widen_carried(s, dependencies);
       // One additional pass resolves loop-carried bounds whose update uses
       // another carried integer (ctsem's time[rowi] - time[prevrow]).
@@ -1437,7 +1410,6 @@ void lower_region_stmt(const mir::Stmt& s) {
       loop.lower = lower.slot;
       loop.upper = upper.slot;
       loop.iterator = iterator.slot;
-      loop.capacity = count;
       loop.children.resize(1);
       region_flush();
       RegionNode* parent = region_current;
@@ -1470,30 +1442,28 @@ void lower_region_stmt(const mir::Stmt& s) {
     case mir::Stmt::While: {
       region_prepare_cells(s);
       std::string counter;
-      auto capacity = region_while_capacity(s, &counter);
-      if (!capacity)
-        fail("structured while loop needs a finite capacity proof", s.raw);
+      const bool proven = region_while_capacity(s, &counter).has_value();
       // The counter proof widened its range; all other carried integers
       // are unknown until a declaration/assignment inside the body bounds
       // them.
-      const int counter_slot = scope.at(counter).slot;
-      const auto integer_counter = int_ranges.find(counter_slot);
-      const auto real_counter = real_ranges.find(counter_slot);
-      const std::optional<IntRange> counter_range =
-          integer_counter == int_ranges.end()
-              ? std::optional<IntRange>{}
-              : std::optional<IntRange>{integer_counter->second};
-      const std::optional<RealRange> counter_real_range =
-          real_counter == real_ranges.end()
-              ? std::optional<RealRange>{}
-              : std::optional<RealRange>{real_counter->second};
+      const int counter_slot =
+          proven && scope.count(counter) ? scope.at(counter).slot : -1;
+      std::optional<IntRange> counter_range;
+      std::optional<RealRange> counter_real_range;
+      if (counter_slot >= 0) {
+        if (auto found = int_ranges.find(counter_slot);
+            found != int_ranges.end())
+          counter_range = found->second;
+        if (auto found = real_ranges.find(counter_slot);
+            found != real_ranges.end())
+          counter_real_range = found->second;
+      }
       const auto dependencies = region_dependencies(s);
       region_widen_carried(s, dependencies);
       if (counter_range) int_ranges[counter_slot] = *counter_range;
       if (counter_real_range) real_ranges[counter_slot] = *counter_real_range;
       RegionNode loop;
       loop.kind = RegionNode::While;
-      loop.capacity = *capacity;
       loop.children.resize(2);
       region_flush();
       RegionNode* parent = region_current;
@@ -1747,10 +1717,6 @@ void lower_region_stmt(const mir::Stmt& s) {
         real_range = {};
       }
       region_assign(s.lhs, rhs, range, real_range);
-      const auto assigned = scope.find(s.lhs);
-      if (assigned != scope.end() && g.slots[assigned->second.slot].len == 1 &&
-          s.rhs.unsized.leaf != mir::UnsizedLeaf::Int)
-        region_real_definitions[assigned->second.slot] = s.rhs;
       return;
     }
     case mir::Stmt::TargetPE: {
@@ -1795,52 +1761,24 @@ static int64_t region_setting(const char* name, int64_t fallback) {
   return end && *end == 0 && value >= 0 ? static_cast<int64_t>(value)
                                         : fallback;
 }
-static int64_t region_physical_memory_bytes() {
-#if defined(__APPLE__)
-  uint64_t bytes = 0;
-  size_t size = sizeof(bytes);
-  if (sysctlbyname("hw.memsize", &bytes, &size, nullptr, 0) == 0 &&
-      size == sizeof(bytes) &&
-      bytes <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
-    return static_cast<int64_t>(bytes);
-#elif defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
-  const long pages = sysconf(_SC_PHYS_PAGES);
-  const long size = sysconf(_SC_PAGESIZE);
-  if (pages > 0 && size > 0 &&
-      static_cast<uint64_t>(pages) <=
-          static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) /
-              static_cast<uint64_t>(size))
-    return static_cast<int64_t>(pages) * static_cast<int64_t>(size);
-#endif
-  return std::numeric_limits<int64_t>::max();
-}
-bool structured_enabled() const {
-  if (in_write_array) return false;
-  // Auto is deliberately scoped to a selected trial. In the parent lowerer
-  // it must leave all ordinary scalar/index/control decisions alone.
-  return region_current || structured_policy == StructuredMode::Prefer ||
-         structured_policy == StructuredMode::Force;
-}
-
-static constexpr uint64_t region_auto_operation_threshold = 1000000;
-bool region_contains_while(const mir::Stmt& root) const {
-  std::set<std::string> active_functions;
+bool region_runtime_control(const mir::Stmt& root) const {
+  std::set<std::string> visited;
   std::function<bool(const mir::Stmt&, unsigned)> statement;
   std::function<bool(const mir::Expr&, unsigned)> expression =
       [&](const mir::Expr& e, unsigned depth) {
         if (depth > 32) return false;
+        if (e.kind == mir::Expr::TernaryIf && !e.args.empty() &&
+            !e.args[0].data_only)
+          return true;
+        if ((e.kind == mir::Expr::EAnd || e.kind == mir::Expr::EOr) &&
+            !e.data_only)
+          return true;
         if (e.kind == mir::Expr::FunApp &&
             e.fn_lib == mir::Expr::Lib::UserDefined) {
           const auto found = fun_defs.find(e.name);
-          if (found != fun_defs.end() &&
-              active_functions.insert(e.name).second) {
+          if (found != fun_defs.end() && visited.insert(e.name).second)
             for (const auto& body : found->second->body)
-              if (statement(body, depth + 1)) {
-                active_functions.erase(e.name);
-                return true;
-              }
-            active_functions.erase(e.name);
-          }
+              if (statement(body, depth + 1)) return true;
         }
         for (const auto& argument : e.args)
           if (expression(argument, depth + 1)) return true;
@@ -1849,6 +1787,7 @@ bool region_contains_while(const mir::Stmt& root) const {
   statement = [&](const mir::Stmt& s, unsigned depth) {
     if (depth > 32) return false;
     if (s.kind == mir::Stmt::While) return true;
+    if (s.kind == mir::Stmt::IfElse && !s.cond.data_only) return true;
     for (const mir::Expr* value :
          {&s.init, &s.rhs, &s.target, &s.lower, &s.upper, &s.cond})
       if (expression(*value, depth + 1)) return true;
@@ -1867,39 +1806,15 @@ bool region_contains_while(const mir::Stmt& root) const {
 
 bool region_auto_profitable(
     const mir::Stmt& s,
-    std::optional<std::pair<int64_t, int64_t>> exact_bounds) {
-  if (s.kind != mir::Stmt::For || structured_outer_depth != 1) return false;
-
-  int64_t lo = 0;
-  int64_t hi = -1;
-  if (exact_bounds) {
-    lo = exact_bounds->first;
-    hi = exact_bounds->second;
-  } else {
-    try {
-      lo = eval_int(s.lower);
-      hi = eval_int(s.upper);
-    } catch (const CompileError&) {
-      return false;
-    }
+    std::optional<std::pair<int64_t, int64_t>> exact_bounds) const {
+  if (structured_outer_depth != 1) return false;
+  if (s.kind == mir::Stmt::For) {
+    if (!exact_bounds) return false;
+    if (exact_bounds->second - exact_bounds->first + 1 < 32) return false;
+  } else if (s.kind != mir::Stmt::While) {
+    return false;
   }
-  const uint64_t count =
-      static_cast<uint64_t>(std::max<int64_t>(0, hi - lo + 1));
-  if (count < 32) return false;
-
-  // The first production selector covers the shape that ordinary unrolling
-  // handles especially poorly and ctsem actually exercises: a repeated
-  // counted loop whose transitive body contains runtime iteration. Large
-  // counted-only loops stay legacy until a cost model can prove that the
-  // retained evaluator is also cheaper at execution time.
-  if (!region_contains_while(s)) return false;
-
-  // This saturating source walk is paid once for a materially repeated
-  // outer loop and follows UDF bodies without constructing a graph. It is a
-  // representation hazard gate; the isolated native candidate remains the
-  // semantic proof and may still decline.
-  return region_cost(s, region_auto_operation_threshold) >=
-         region_auto_operation_threshold;
+  return region_runtime_control(s);
 }
 // Positive, deliberately narrow profitability evidence. Tiny scalar runs
 // avoid region dispatch/version bookkeeping and expose the existing scalar
@@ -2044,8 +1959,6 @@ bool try_lower_region(
   };
   if (target_scale != 1.0)
     return refuse("enclosing target scaling needs a compatible region");
-  const int64_t history = region_setting("STANLI_STRUCTURED_HISTORY_BYTES",
-                                         std::numeric_limits<int64_t>::max());
   std::shared_ptr<StructuredLoop> plan;
   std::vector<int> parent_inputs;
   std::vector<std::string> names;
@@ -2053,8 +1966,6 @@ bool try_lower_region(
   std::shared_ptr<ShapeInterner> shapes;
   std::string refusal;
   std::string native_refusal;
-  int64_t native_scratch_bytes = -1;
-  const int64_t physical_memory_bytes = region_physical_memory_bytes();
   // Candidate construction is isolated and native-only. Unsupported bodies
   // abandon the trial and leave the parent graph unchanged.
   {
@@ -2074,17 +1985,23 @@ bool try_lower_region(
       auto p = std::make_shared<StructuredLoop>();
       trial.region_current = &p->root;
       std::map<int, int> imported;
-      const auto import_slot = [&](int parent) {
+      std::map<int, bool> import_active, import_data_only;
+      const auto import_slot = [&](int parent, bool active, bool data_only) {
         if (parent < 0) return;
-        if (!imported.count(parent))
+        if (!imported.count(parent)) {
           imported[parent] = trial.add_slot(g.slots[parent].len, false);
+          import_data_only[parent] = true;
+        }
+        import_active[parent] = import_active[parent] || active;
+        import_data_only[parent] = import_data_only[parent] && data_only;
       };
       // Runtime geometry slots can be anonymous declaration snapshots, so
       // collect them explicitly rather than assuming every imported slot
       // has its own source-level name.
       for (const auto& item : scope) {
-        import_slot(item.second.slot);
-        for (int dim : item.second.runtime_dims) import_slot(dim);
+        import_slot(item.second.slot, item.second.autodiff,
+                    item.second.si.param_free);
+        for (int dim : item.second.runtime_dims) import_slot(dim, false, true);
       }
       for (const auto& in : imported) {
         if (auto range = int_ranges.find(in.first); range != int_ranges.end())
@@ -2159,7 +2076,8 @@ bool try_lower_region(
           continue;
         }
         p->imports.push_back(
-            {in.second, static_cast<int>(candidate_inputs.size()), 0});
+            {in.second, static_cast<int>(candidate_inputs.size()), 0,
+             import_active[in.first], import_data_only[in.first]});
         candidate_inputs.push_back(in.first);
       }
       if (candidate_inputs.size() > 6) {
@@ -2173,31 +2091,31 @@ bool try_lower_region(
         for (size_t i = packed; i < candidate_inputs.size(); ++i)
           p->imports[i].input = static_cast<int>(i - packed + 1);
       }
-      const int64_t remaining_history =
-          std::max<int64_t>(0, history - structured_history_used);
       if (std::any_of(p->body.ops.begin(), p->body.ops.end(),
                       [](const Op& op) { return op.opcode == OP_ISLAND; }))
         fail("structured body requires register-program fallback");
       if (mode == StructuredMode::Auto) {
-        const auto contains_while = [&](const auto& self,
-                                        const RegionNode& node) -> bool {
-          if (node.kind == RegionNode::While) return true;
+        const auto retains_control = [&](const auto& self,
+                                         const RegionNode& node) -> bool {
+          if (node.kind == RegionNode::If || node.kind == RegionNode::While)
+            return true;
           for (const auto& child : node.children)
             if (self(self, child)) return true;
           return false;
         };
-        if (!contains_while(contains_while, p->root))
-          fail("automatic candidate has no retained runtime loop");
+        if (!retains_control(retains_control, p->root))
+          fail("automatic candidate has no retained runtime control");
       }
-      p->prepare(std::numeric_limits<int64_t>::max());
-      p->has_target = p->root.target_capacity != 0;
-      p->target_fragment = p->has_target;
+      const auto has_target = [&](const auto& self,
+                                  const RegionNode& node) -> bool {
+        if (node.kind == RegionNode::Target) return true;
+        for (const auto& child : node.children)
+          if (self(self, child)) return true;
+        return false;
+      };
+      p->has_target = has_target(has_target, p->root);
+      p->prepare();
       candidate_ready = true;
-      native_scratch_bytes = p->scratch_size * 8;
-      p->dynamic_history = native_scratch_bytes > physical_memory_bytes ||
-                           native_scratch_bytes > remaining_history;
-      // Native graph execution retains the body and records only reached
-      // frames when rectangular preallocation would exceed available memory.
       names = std::move(candidate_names);
       results = std::move(candidate_results);
       parent_inputs = std::move(candidate_inputs);
@@ -2227,7 +2145,6 @@ bool try_lower_region(
   // No proof/refusal follows publication. Allocation failure aborts this
   // whole compilation; it never falls through into a partially changed graph.
   *shape_pool = std::move(*shapes);
-  if (!plan->dynamic_history) structured_history_used += plan->scratch_size * 8;
   std::vector<int> inputs = parent_inputs;
   if (inputs.size() > 6) {
     const size_t count = inputs.size() - 5;
@@ -2241,7 +2158,7 @@ bool try_lower_region(
                  inputs.begin() + static_cast<ptrdiff_t>(count));
     inputs.insert(inputs.begin(), packed);
   }
-  int64_t output_size = plan->has_target ? 1 + plan->root.target_capacity : 0;
+  int64_t output_size = plan->has_target ? 1 : 0;
   for (int id : plan->outputs) output_size += plan->body.slots[id].len;
   Val result = emit_raw(OP_LOOP, inputs, output_size, {});
   g.ops.back().udata = plan.get();
@@ -2284,21 +2201,16 @@ bool try_lower_region(
       dl->second.runtime_dims = value.runtime_dims;
   }
   if (plan->has_target) {
-    const int id =
-        emit_raw(
-            OP_SLICE, {result.slot}, 1 + plan->root.target_capacity, {},
-            {checked_immediate(total_output_size, "target fragment offset")})
-            .slot;
-    target_fragments.insert(id);
-    target_terms.push_back(id);
+    bool active = false;
+    for (const auto& in : plan->imports) active |= in.active;
+    target_terms.push_back(
+        emit_raw(OP_INDEX, {result.slot}, 1, {},
+                 {checked_immediate(total_output_size, "target output offset")},
+                 -1, active)
+            .slot);
   }
   if (diagnostics)
-    std::fprintf(stderr,
-                 "stanli_structured selected nodes=%zu kernels=%zu "
-                 "scratch_bytes=%lld%s\n",
-                 plan->node_count, plan->body.ops.size(),
-                 static_cast<long long>(
-                     plan->dynamic_history ? 0 : plan->scratch_size * 8),
-                 plan->dynamic_history ? " dynamic_history" : "");
+    std::fprintf(stderr, "stanli_structured selected nodes=%zu kernels=%zu\n",
+                 plan->node_count, plan->body.ops.size());
   return true;
 }

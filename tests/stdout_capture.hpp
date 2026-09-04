@@ -28,18 +28,19 @@ inline int close_fd(int fd) { return ::close(fd); }
 
 }  // namespace detail
 
-// Process-wide stdout capture for single-threaded tests. Construct only after
-// setup whose output is intentionally excluded, then call finish() before any
-// assertion diagnostic is printed.
+// Process-wide capture of stdout (or another standard stream) for
+// single-threaded tests. Construct only after setup whose output is
+// intentionally excluded, then call finish() before any assertion diagnostic
+// is printed.
 class StdoutCapture {
  public:
-  StdoutCapture() {
-    std::fflush(stdout);
+  explicit StdoutCapture(FILE* stream = stdout) : stream_(stream) {
+    std::fflush(stream_);
     file_ = std::tmpfile();
     if (!file_)
       throw std::runtime_error("tmpfile failed while capturing stdout");
 
-    target_ = detail::file_descriptor(stdout);
+    target_ = detail::file_descriptor(stream_);
     saved_ = detail::duplicate_fd(target_);
     if (target_ < 0 || saved_ < 0 ||
         detail::replace_fd(detail::file_descriptor(file_), target_) < 0) {
@@ -56,14 +57,14 @@ class StdoutCapture {
   StdoutCapture& operator=(const StdoutCapture&) = delete;
 
   ~StdoutCapture() {
-    std::fflush(stdout);
+    std::fflush(stream_);
     restore();
     if (file_) std::fclose(file_);
   }
 
   std::string finish() {
     if (finished_) return text_;
-    std::fflush(stdout);
+    std::fflush(stream_);
     restore();
     std::rewind(file_);
     char buffer[256];
@@ -83,6 +84,7 @@ class StdoutCapture {
     saved_ = -1;
   }
 
+  FILE* stream_ = nullptr;
   FILE* file_ = nullptr;
   int target_ = -1;
   int saved_ = -1;

@@ -806,7 +806,7 @@ set(STANLI_TESTS
   test_lower_view_contract test_lower_array_contract test_data test_e2e
   test_reroll test_profile test_inplace test_pass_safety test_sampling
   test_ode_prog test_mir_program_conformance test_mir_checks
-  test_structured_checks test_structured_loop_production
+  test_structured_checks test_structured_loop
   test_mir_unary_fallback test_constfold test_cse
   test_partition
   test_solve test_cross_path

@@ -45,12 +45,6 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(__APPLE__)
-#include <sys/sysctl.h>
-#elif defined(__linux__)
-#include <unistd.h>
-#endif
-
 namespace stanli {
 namespace {
 
@@ -811,7 +805,6 @@ struct Lowering {
   // order for arrays, so compile-time observation must never reuse them.
   std::map<ObservationKey, DataMap::Entry> observations;
   std::vector<int> target_terms;
-  std::set<int> target_fragments;
   std::vector<int> jac_slots;
   std::map<std::string, const mir::FunDef*> fun_defs;
   // A generic UDF keeps one scalar template type per formal. Locals and its
@@ -2099,7 +2092,7 @@ struct Lowering {
     std::optional<Val> structured;
     if (region_current)
       structured = region_expr(e);
-    else if (structured_enabled() && needs_runtime_value(e))
+    else if (runtime_int_expression(e))
       structured = lower_runtime_scalar(e);
     Val value = structured ? *structured : lower_expr_impl(e);
     if (e.promoted) {
@@ -2155,10 +2148,9 @@ struct Lowering {
         // Indexed node with none left.
         if (e.args.size() == 1) return base;
         if (e.args.size() == 2 && e.args[1].name == "IndexAll") return base;
-        if (structured_enabled() &&
-            std::any_of(
+        if (std::any_of(
                 e.args.begin() + 1, e.args.end(),
-                [&](const mir::Expr& ix) { return needs_runtime_value(ix); }))
+                [&](const mir::Expr& ix) { return runtime_selector(ix); }))
           return region_index(base, {e.args.begin() + 1, e.args.end()}, e.type_,
                               e.unsized);
         if (in_write_array && e.args.size() == 2 &&
@@ -2615,7 +2607,7 @@ struct Lowering {
       case mir::Expr::EOr:
       case mir::Expr::EAnd: {
         if (auto v = fold_const(e)) return *v;
-        if (structured_enabled()) return lower_runtime_ternary(e);
+        if (runtime_only(e)) return lower_runtime_ternary(e);
         fail("boolean operator on parameters unsupported", e.raw);
       }
       default: {
@@ -3715,13 +3707,6 @@ struct Lowering {
     si.rows = value.rows;
     si.cols = value.cols;
     si.kind = value.kind;
-    if (structured_enabled()) {
-      std::set<std::string> active;
-      for (const auto& item : scope)
-        if (!item.second.si.param_free) active.insert(item.first);
-      si.param_free = !expr_effectful(e) && !region_depends(e, active);
-      return {out_slots[0], expression_autodiff(e), si};
-    }
     return {out_slots[0], scalar_autodiff(), si};
   }
 
@@ -4679,11 +4664,15 @@ struct Lowering {
       const mir::Expr& a = actual.expr();
       binds[i].formal_data_only =
           i < f.arg_data_only.size() && f.arg_data_only[i];
-      if (!region_current && a.data_only && a.type_ == "UInt" &&
-          !(structured_enabled() && needs_runtime_value(a))) {
-        binds[i].is_int = true;
-        binds[i].iv = actual.require_constant_int("integer argument");
-      } else {
+      if (!region_current && a.data_only && a.type_ == "UInt") {
+        try {
+          binds[i].iv = actual.require_constant_int("integer argument");
+          binds[i].is_int = true;
+        } catch (const CompileError&) {
+          if (in_write_array || !needs_runtime_value(a)) throw;
+        }
+      }
+      if (!binds[i].is_int) {
         binds[i].v = actual.value();
         if (const DataMap::Entry* en = actual.observation())
           binds[i].data = *en;
@@ -7804,20 +7793,8 @@ struct Lowering {
         if (s.read_transform) {
           lower_read_param(s);
         } else if (s.decl_type.base == "SInt") {
-          if (s.has_init &&
-              ((in_write_array && runtime_int_binding(s.init)) ||
-               (structured_enabled() && needs_runtime_value(s.init)))) {
-            Val v = lower_expr(s.init);
-            SlotInfo expected = view_of(s.decl_type, v.si.param_free);
-            require_binding(v, 1, expected, s.decl_id, s.raw);
-            v.autodiff = false;
-            v.si = expected;
-            if (in_write_array) v.si.param_free = false;
-            scope[s.decl_id] = v;
-            decls[s.decl_id] = DeclView{1, false, expected};
-            int_env.erase(s.decl_id);
-            int_locals.erase(s.decl_id);
-            td.env().erase(s.decl_id);
+          if (s.has_init && in_write_array && runtime_int_binding(s.init)) {
+            bind_runtime_int(s.decl_id, s.init, s.raw);
             return;
           }
           // A fresh scalar-int declaration shadows every representation of
@@ -7836,7 +7813,12 @@ struct Lowering {
           // eval_int, not the interpreter directly: the initializer may be
           // a shape query on a slot-bound value (rows(lscale) inside an
           // inlined function), which only eval_int can answer.
-          if (s.has_init) int_env[s.decl_id] = eval_int(s.init);
+          if (s.has_init) {
+            if (auto value = static_int(s.init))
+              int_env[s.decl_id] = *value;
+            else
+              bind_runtime_int(s.decl_id, s.init, s.raw);
+          }
         } else if (s.decl_type.base.empty() &&
                    s.decl_type.unsized.leaf != mir::UnsizedLeaf::Unknown) {
           // O1 introduces unsized container temporaries for expressions such
@@ -7896,23 +7878,14 @@ struct Lowering {
         return;
       case mir::Stmt::Assignment: {
         if (s.lhs_idx.empty() && int_locals.count(s.lhs)) {
-          if ((in_write_array && runtime_int_binding(s.rhs)) ||
-              (structured_enabled() && needs_runtime_value(s.rhs))) {
-            Val rhs = lower_expr(s.rhs);
-            SlotInfo expected = view_of("UInt");
-            expected.param_free = rhs.si.param_free;
-            require_binding(rhs, 1, expected, s.lhs, s.raw);
-            rhs.autodiff = false;
-            rhs.si = expected;
-            if (in_write_array) rhs.si.param_free = false;
-            scope[s.lhs] = rhs;
-            decls[s.lhs] = DeclView{1, false, expected};
-            int_env.erase(s.lhs);
-            int_locals.erase(s.lhs);
-            td.env().erase(s.lhs);
+          if (in_write_array && runtime_int_binding(s.rhs)) {
+            bind_runtime_int(s.lhs, s.rhs, s.raw);
             return;
           }
-          int_env[s.lhs] = eval_int(s.rhs);
+          if (auto value = static_int(s.rhs))
+            int_env[s.lhs] = *value;
+          else
+            bind_runtime_int(s.lhs, s.rhs, s.raw);
           return;
         }
         if (!s.lhs_idx.empty()) {
@@ -7945,11 +7918,9 @@ struct Lowering {
           const std::vector<int64_t>* dd =
               is_array(prev_v.si) ? &array_shape(prev_v.si).dims : nullptr;
           const Val rhs_v = lower_expr(s.rhs);
-          if (structured_enabled() &&
-              std::any_of(s.lhs_idx.begin(), s.lhs_idx.end(),
-                          [&](const mir::Expr& ix) {
-                            return needs_runtime_value(ix);
-                          })) {
+          if (std::any_of(
+                  s.lhs_idx.begin(), s.lhs_idx.end(),
+                  [&](const mir::Expr& ix) { return runtime_selector(ix); })) {
             Val nv = region_index(prev_v, s.lhs_idx, s.rhs.type_, s.rhs.unsized,
                                   &rhs_v);
             nv.autodiff = prev_v.autodiff;
@@ -8488,11 +8459,17 @@ struct Lowering {
         }
         fail("unsupported statement function " + s.fn_name);
       case mir::Stmt::For: {
-        if (structured_enabled() &&
-            (needs_runtime_value(s.lower) || needs_runtime_value(s.upper))) {
-          if (try_lower_region(s)) return;
+        long lo = 0, hi = 0;
+        try {
+          lo = eval_int(s.lower);
+          hi = eval_int(s.upper);
+        } catch (const CompileError&) {
+          if (in_write_array ||
+              !(needs_runtime_value(s.lower) || needs_runtime_value(s.upper)) ||
+              !try_lower_region(s))
+            throw;
+          return;
         }
-        const long lo = eval_int(s.lower), hi = eval_int(s.upper);
         if (lo > hi) {
           int_env.erase(s.loopvar);
           return;
@@ -8696,31 +8673,6 @@ struct Lowering {
     return terms[0];
   }
 
-  int reduce_target_sources(const std::vector<int>& terms) {
-    auto spec = std::make_shared<TargetReduction>();
-    int64_t packed_len = 0;
-    int packed = -1;
-    for (int id : terms) {
-      const int64_t len = g.slots[id].len;
-      const bool fragment = target_fragments.count(id);
-      if ((!fragment && len != 1) || (fragment && len < 1))
-        fail("invalid target source shape");
-      spec->sources.push_back({packed_len, len - fragment, fragment});
-      if (len > (int64_t{1} << 52) - packed_len)
-        fail("target source capacity overflow");
-      packed_len += len;
-      spec->capacity += len - fragment;
-      packed = packed < 0
-                   ? id
-                   : emit_raw(OP_CONCAT2, {packed, id}, packed_len, {}).slot;
-    }
-    if (packed < 0) return const_slot(0);
-    Val result = emit_raw(OP_TARGET_REDUCE, {packed}, 1, {});
-    g.ops.back().udata = spec.get();
-    g.udata_pool.push_back(std::move(spec));
-    return result.slot;
-  }
-
   // The write_array graph: same unconstrained draw in, every CSV column out.
   // Forward-only, so no target, no jacobian, no adjoints -- but the same
   // lowering, and the same passes, because generated quantities are unrolled
@@ -8809,25 +8761,12 @@ struct Lowering {
   CompiledModel run(const mir::Program& p) {
     const auto total_time = prep.start();
     for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
-    const StructuredMode loop_mode = structured_policy;
-    if (loop_mode == StructuredMode::Prefer ||
-        loop_mode == StructuredMode::Force)
-      for (const auto& s : p.log_prob)
-        structured_target_sites =
-            std::min(region_target_limit,
-                     structured_target_sites + region_target_count(s));
     const auto bind_time = prep.start();
     bind_data(p);
     prep.graph(prep_graph, "bind_data", bind_time, g, out.fills,
                target_terms.size(), out.views.size());
     const auto lower_time = prep.start();
     for (const auto& s : p.log_prob) lower_stmt(s);
-    const bool fragmented_target = !target_fragments.empty();
-    if (fragmented_target) {
-      std::vector<int> ordered = target_terms;
-      ordered.insert(ordered.end(), jac_slots.begin(), jac_slots.end());
-      target_terms = {reduce_target_sources(ordered)};
-    }
     prep.graph(prep_graph, "lower", lower_time, g, out.fills,
                target_terms.size(), out.views.size());
     // Jacobian terms and constrained-parameter views are read straight out
@@ -8933,8 +8872,7 @@ struct Lowering {
                islands);
     const auto reduce_time = prep.start();
     std::vector<int> all = target_terms;
-    if (!fragmented_target)
-      all.insert(all.end(), jac_slots.begin(), jac_slots.end());
+    all.insert(all.end(), jac_slots.begin(), jac_slots.end());
     g.result_slot = reduce_terms(all);
     prep.graph(prep_graph, "reduce", reduce_time, g, out.fills,
                target_terms.size(), out.views.size());

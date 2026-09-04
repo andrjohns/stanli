@@ -440,6 +440,75 @@ right-hand sides use the fallback described in the appendix. CmdStan remains
 faster on the measured ODEs because its right-hand side is inlined native
 code, whereas stanli pays register dispatch on every solver callback.
 
+## Retained loops
+
+Unrolling a loop into the graph works when the body is plain arithmetic: the
+vector passes recover the vector operations and the data-only parts fold away
+at compile time. It stops working when the body carries control that the
+compiler cannot decide from data: a `while`, or an `if` on a parameter. Each
+iteration then becomes its own runtime island, the islands' reverse pass
+snapshots their inputs, and both compile time and gradient time grow much
+faster than the model. ctsem's Kalman loop at 200 rows compiled to 347,000
+operations and took 80 seconds to prepare this way.
+
+For such loops stanli keeps the loop as one graph operation, `OP_LOOP`. Its
+payload is the body as a small tree of control nodes (sequence, if, for,
+while, break, continue) over ordinary graph kernels, compiled once from the
+same lowering that produces the flat graph. The executor walks the tree at
+run time and calls the same kernel functions the flat graph uses, so the
+body can use any kernel the flat graph can.
+
+The selector is deliberately narrow. A top-level `while`, or a top-level
+counted loop of at least 32 trips whose body, including any user function it
+calls, contains a `while` or a branch on a parameter, is retained. A loop the unroller can fold
+or vectorize stays unrolled: retaining a loop costs about 25 nanoseconds of
+bookkeeping per kernel call, which a vector kernel over the same data beats
+by an order of magnitude. `STANLI_STRUCTURED_LOOPS=0` turns retention off and
+`=1` retains every loop, for A/B tests.
+
+### What the tape remembers
+
+Reverse mode needs the values a kernel read and wrote, so a retained loop
+keeps a tape. Deciding what goes on the tape happens at compile time, per
+kernel call in the body:
+
+- A call whose result has no reverse pass and is only read by other such
+  calls, or by a branch or loop condition, writes into one fixed cell and is
+  overwritten on the next visit.
+- A call that feeds a reverse pass appends its inputs' handles, its output
+  and any kernel scratch to a growing arena and pushes a record.
+- `x[i] = v` on a container the loop owns mutates the container in place and
+  logs the overwritten values. The reverse pass undoes the log in order, so
+  earlier reads of the container see the values they read. A container that
+  arrived from outside the loop, or that another name still refers to, is
+  copied once before the first write.
+- A call whose inputs no iteration of the enclosing loop writes runs once per
+  entry of that loop and is reused afterwards.
+
+This is the same information a hand-written tape would keep, and it is what a
+compiled loop body will need: each node's storage is known before the first
+iteration runs.
+
+### Data-only work runs once
+
+Much of a real model's loop body is bookkeeping on data: finding a subject's
+rows, scanning a setup table, deciding which of several matrices to update.
+The unrolled path evaluates all of it at compile time. A retained loop would
+otherwise repeat it on every gradient; on ctsem it was 97% of the kernel
+calls.
+
+The executor therefore records the first evaluation. A subtree whose inputs,
+writes and control depend only on data is replaced, from the second
+evaluation on, by the values that left it. Branch and loop decisions that
+depend only on data are replayed from a trace instead of recomputed, and an
+iteration of a data-controlled loop in which nothing observable happened is
+skipped altogether. Parameter-dependent control still runs every time.
+
+On ctsem with 33 rows, one gradient went from 415 ms to 27 ms and from
+11 million kernel calls to about 300,000; at 400 rows, from 4.4 s to 0.32 s.
+The log density and all 580 gradients are bitwise identical to the previous
+retained executor's.
+
 ## Measured behavior and limits
 
 The 2026-08-25 native benchmark snapshot contains 120 posteriordb models, 119

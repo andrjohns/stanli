@@ -11,8 +11,7 @@ namespace stanli {
 class WaRng;
 
 // Mutable state owned by one bound Executor and one operation. Most kernels
-// need none; retained control uses it when reached history must grow at run
-// time instead of occupying a rectangular worst-case scratch arena.
+// need none; the retained loop keeps its tape here.
 struct KernelState {
   virtual ~KernelState() = default;
 };

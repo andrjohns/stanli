@@ -2,10 +2,10 @@
 #define STANLI_STRUCTURED_LOOP_HPP
 
 #include <stanli/graph.hpp>
+#include <stanli/island.hpp>
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
 #include <vector>
 
 namespace stanli {
@@ -40,20 +40,9 @@ struct DynamicIndexSpec {
   int rhs_input = -1;
 };
 
-// One ordered stream: scalar leaves and counted fragments from retained
-// regions. Fragment element zero is an inactive exact reached-leaf count.
-struct TargetReduction {
-  struct Source {
-    int64_t offset = 0, capacity = 0;
-    bool fragment = false;
-  };
-  std::vector<Source> sources;
-  int64_t capacity = 0;
-};
-
 // Immutable control tree over ordinary graph kernels. A node describes code,
-// never a particular iteration. Numeric versions and executed control live in
-// Executor scratch, independently for every executor/evaluation.
+// never a particular iteration. Versions and executed control live in the
+// bound executor's kernel state.
 struct StructuredLoop {
   struct Node {
     enum Kind {
@@ -65,22 +54,30 @@ struct StructuredLoop {
       While,
       Break,
       Continue,
-      Target
+      Target,
+      Segment
     } kind = Sequence;
-    // Dense immutable call-site identity for compact dynamic reverse records.
-    // This occupies the padding before children on supported 64-bit targets.
-    uint32_t record_site = ~uint32_t{0};
+    enum Storage { Retained, Transient, InPlace } storage = Retained;
+    bool active = false;
+    bool memo = false;
+    // If/For/While whose data-only decisions are recorded once and replayed.
+    bool trace = false;
+    int invariant_loop = -1;
+    int memo_index = -1;
+    uint32_t site = ~uint32_t{0};
+    int64_t workspace = -1;
+    int64_t kernel_scratch = 0;
+    int loop_index = -1;
+    int segment = -1;
+    // Live-out slots of a memo node. The first `memo_fresh` may be held by an
+    // alias, record or target and get a new version per visit; the rest are
+    // only read in place and share one version whose pointer moves.
+    std::vector<int> memo_outs;
+    size_t memo_fresh = 0;
     std::vector<Node> children;
     int op = -1;
     int dst = -1, src = -1;
     int condition = -1, iterator = -1, lower = -1, upper = -1;
-    // Dynamic-history scalar indexed updates may reuse one evaluation-local
-    // primal buffer when prepare() proves that this node immediately installs
-    // its result into this binding cell. -1 keeps the ordinary immutable path.
-    int compact_update_cell = -1;
-    int64_t capacity = 0;
-    int64_t frame_size = 0, target_capacity = 0;
-    int64_t kernel_scratch = 0;
     void (*forward)(KernelCtx&) = nullptr;
     void (*backward)(KernelCtx&) = nullptr;
   };
@@ -88,24 +85,27 @@ struct StructuredLoop {
     int slot = -1;
     int input = -1;
     int64_t offset = 0;
+    bool active = false;
+    bool data_only = false;
   };
 
   Graph body;  // owns all inner idata and udata
   std::vector<std::pair<int, std::vector<double>>> fills;
   std::vector<Import> imports;
   std::vector<int> outputs;
-  bool has_target = false;
-  bool target_fragment = false;
-  bool dynamic_history = false;
+  bool has_target = false;  // one scalar output after `outputs`
   Node root;
-  int64_t initial_size = 0, bindings_offset = 0, history_offset = 0;
-  int64_t primal_size = 0, target_refs_offset = 0, target_work_offset = 0;
-  int64_t adjoint_offset = 0, scratch_size = 0;
-  size_t node_count = 0, record_node_count = 0, compact_update_sites = 0;
+  // Straight-line runs of the body compiled to register programs; a Segment
+  // node's `segment` indexes this.
+  std::vector<Segment> segments;
+  int64_t initial_size = 0;
+  int64_t workspace_size = 0;
+  size_t node_count = 0, site_count = 0, loop_count = 0, memo_count = 0,
+         trace_count = 0;
 
-  // Validate and size without enumerating execution. Throws on malformed
-  // graphs or checked resource limits; builders publish only after success.
-  void prepare(int64_t max_bytes);
+  // Validate, number sites and loops, and decide every KernelCall's storage
+  // class. Throws on malformed trees; builders publish only after success.
+  void prepare();
 };
 
 void structured_loop_forward(KernelCtx& ctx);
