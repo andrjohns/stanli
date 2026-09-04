@@ -27,7 +27,8 @@ sys.path.insert(0, str(REPO / "tools"))
 from verify_refs import (POINTS, QUARANTINED, SCHEMA,  # noqa: E402
                          check_model, load_refs, parse_status, probe_point)
 from cmdstan_ref import _result_line  # noqa: E402
-from verify_sample import evaluate, record_wa  # noqa: E402
+import verify_sample  # noqa: E402
+from verify_sample import evaluate, record_wa, write_refs  # noqa: E402
 
 # A model that exists under tests/stanc3, so model_files resolves real
 # paths without unpacking a posteriordb dataset. The stub never reads
@@ -266,6 +267,41 @@ class SchemaTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as caught:
                 load_refs(path)
             self.assertIn(f"schema {SCHEMA}", str(caught.exception))
+
+
+class WriteRefsTest(unittest.TestCase):
+    """Merging one model's values into the committed file."""
+
+    def setUp(self):
+        import gzip
+        import json
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = pathlib.Path(self.tmp.name) / "refs.json.gz"
+        self.old = {"cmdstan": "a", "stanc3": "old"}
+        self.new = {"cmdstan": "a", "stanc3": "new"}
+        self.path.write_bytes(gzip.compress(json.dumps(
+            {"schema": SCHEMA, "recorded": self.old,
+             "models": {"m1": REF, "m2": REF}}).encode()))
+        patcher = unittest.mock.patch.object(
+            verify_sample, "REFS_PATH", self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def models(self):
+        import gzip
+        import json
+        return json.loads(gzip.decompress(self.path.read_bytes()))["models"]
+
+    def test_a_partial_run_under_drift_is_refused(self):
+        with self.assertRaises(SystemExit):
+            write_refs({"m1": REF}, self.new)
+
+    def test_a_full_rerecord_under_drift_starts_a_fresh_file(self):
+        write_refs({"m1": REF}, self.new, fresh=True)
+        self.assertEqual(sorted(self.models()), ["m1"])
+        write_refs({"m2": REF}, self.new, fresh=True)
+        self.assertEqual(sorted(self.models()), ["m1", "m2"])
 
 
 if __name__ == "__main__":
