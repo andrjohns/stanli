@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixes
+
+The generated reverse pass no longer reads out of bounds when an island
+contains a zero-length range copy.
+
 ### Retained loops store one version per write
 
 The structured loop executor (`STANLI_STRUCTURED_LOOPS`) decides every body

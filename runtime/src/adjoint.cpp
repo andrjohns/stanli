@@ -376,6 +376,10 @@ bool gen_adjoint(IslandProg& p) {
 
     ncode.push_back(I);
 
+    // Nothing is written, and compact_program leaves such an instruction's
+    // `dst` in the numbering it had before compaction.
+    if (wl == 0) continue;
+
     // An output value is needed as this instruction LEFT it, so only a
     // later overwrite can lose it.
     if (spec.has(kProgramSaveOut)) A.vd = save_range(I.dst, wl, i);
