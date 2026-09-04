@@ -618,14 +618,18 @@ static void direct_index_kernel_tests() {
   try {
     dynamic_index->forward(direct);
     check(false, "direct index validates selectors");
-  } catch (const std::out_of_range&) {
+  } catch (const std::out_of_range& error) {
+    check(std::string(error.what()) == "structured index out of range",
+          "direct index selector message");
   }
   lower = 1;
   direct.n_in = 3;
   try {
     dynamic_index->forward(direct);
     check(false, "direct index validates input arity");
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error& error) {
+    check(std::string(error.what()) == "invalid structured index descriptor",
+          "direct index arity message");
   }
   direct.n_in = 4;
   lower = 1;

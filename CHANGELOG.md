@@ -32,6 +32,11 @@ values nothing reads once it exits, so the first gradient of a retained loop
 no longer costs several times the steady-state tape. ctsem at 400 rows peaks
 at 0.95 GB instead of 1.24 GB.
 
+A retained loop's dynamic index kernels resolve their selector once per call
+instead of once per selected element, and their validation no longer carries
+message building in the path that takes no error. ctsem is 14% faster per
+gradient and radon_county's retained loop 20%.
+
 By default a loop is retained when it is an outermost `while`, or an
 outermost `for` of at least 32 iterations whose body contains a `while` or a
 branch chosen by a parameter; every other loop unrolls as before.

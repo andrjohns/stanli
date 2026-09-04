@@ -908,21 +908,37 @@ void int_forward(KernelCtx& c) {
   c.out.data[0] = static_cast<double>(integer(static_cast<double>(v)));
 }
 
+[[noreturn]] __attribute__((noinline)) void index_fault(const char* message) {
+  throw std::logic_error(message);
+}
+
+[[noreturn]] __attribute__((noinline)) void index_fault(const char* what,
+                                                        const char* suffix) {
+  throw std::logic_error(std::string("invalid ") + what + suffix);
+}
+
+[[noreturn]] __attribute__((noinline)) void index_over_capacity(
+    const char* what) {
+  throw std::out_of_range(std::string(what) + " exceeds capacity");
+}
+
+[[noreturn]] __attribute__((noinline)) void index_out_of_range() {
+  throw std::out_of_range("structured index out of range");
+}
+
 const Desc& index_input(const KernelCtx& c, int input, const char* what) {
-  if (input < 0 || input >= c.n_in)
-    throw std::logic_error(std::string("invalid ") + what + " input");
+  if (input < 0 || input >= c.n_in) index_fault(what, " input");
   return c.in[input];
 }
 
 int64_t index_integer(const KernelCtx& c, int input, int64_t offset,
                       int64_t upper, const char* what) {
   const Desc& values = index_input(c, input, what);
-  if (offset < 0 || offset >= values.len)
-    throw std::logic_error(std::string("invalid ") + what + " offset");
+  if (offset < 0 || offset >= values.len) index_fault(what, " offset");
   const double raw = values.data[offset];
   if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 0 ||
       raw > static_cast<double>(upper))
-    throw std::out_of_range(std::string(what) + " exceeds capacity");
+    index_over_capacity(what);
   return static_cast<int64_t>(raw);
 }
 
@@ -946,7 +962,7 @@ int64_t dynamic_axis_count(const DynamicIndexSpec::Axis& axis,
     const Desc& selector =
         index_input(c, axis.selector_input, "dynamic range start");
     if (axis.input_offset < 0 || axis.input_offset >= selector.len)
-      throw std::logic_error("invalid dynamic range start offset");
+      index_fault("invalid dynamic range start offset");
     const double first = selector.data[axis.input_offset];
     if (!std::isfinite(first) || std::trunc(first) != first || first < 1 ||
         first > std::numeric_limits<int32_t>::max())
@@ -960,86 +976,71 @@ int64_t dynamic_axis_count(const DynamicIndexSpec::Axis& axis,
 }
 
 struct IndexRuntime {
+  struct Axis {
+    int64_t extent = 0;
+    int64_t count = 0;
+    int64_t stride = 0;
+    const double* selector = nullptr;
+  };
   // Stan indices are normally low-dimensional. Keep their validation state
-  // inline, while retaining arbitrary-rank support with one contiguous heap
-  // block instead of one allocation for each field.
+  // inline, while retaining arbitrary-rank support with one heap block.
   static constexpr size_t inline_dimensions = 8;
 
-  explicit IndexRuntime(size_t dimensions) : dimensions_(dimensions) {
-    if (dimensions_ > inline_dimensions) {
-      if (dimensions_ > std::numeric_limits<size_t>::max() / 3)
-        throw std::length_error("dynamic index rank exceeds storage limit");
-      heap_storage_.reset(new int64_t[3 * dimensions_]);
-      storage_ = heap_storage_.get();
+  explicit IndexRuntime(size_t dimensions) {
+    if (dimensions > inline_dimensions) {
+      heap_.reset(new Axis[dimensions]);
+      axes = heap_.get();
     } else {
-      storage_ = inline_storage_.data();
+      axes = inline_.data();
     }
   }
   IndexRuntime(const IndexRuntime&) = delete;
   IndexRuntime& operator=(const IndexRuntime&) = delete;
   IndexRuntime(IndexRuntime&& other) noexcept
-      : heap_storage_(std::move(other.heap_storage_)),
-        dimensions_(other.dimensions_),
+      : inline_(other.inline_),
+        heap_(std::move(other.heap_)),
         selected(other.selected) {
-    if (heap_storage_) {
-      storage_ = heap_storage_.get();
-    } else {
-      std::copy_n(other.inline_storage_.data(), 3 * dimensions_,
-                  inline_storage_.data());
-      storage_ = inline_storage_.data();
-    }
+    axes = heap_ ? heap_.get() : inline_.data();
   }
 
-  int64_t& extent(size_t dim) { return storage_[dim]; }
-  int64_t extent(size_t dim) const { return storage_[dim]; }
-  int64_t& count(size_t dim) { return storage_[dimensions_ + dim]; }
-  int64_t count(size_t dim) const { return storage_[dimensions_ + dim]; }
-  int64_t& stride(size_t dim) { return storage_[2 * dimensions_ + dim]; }
-  int64_t stride(size_t dim) const { return storage_[2 * dimensions_ + dim]; }
-
  private:
-  std::array<int64_t, 3 * inline_dimensions> inline_storage_;
-  std::unique_ptr<int64_t[]> heap_storage_;
-  int64_t* storage_ = nullptr;
-  size_t dimensions_;
+  std::array<Axis, inline_dimensions> inline_;
+  std::unique_ptr<Axis[]> heap_;
 
  public:
+  Axis* axes = nullptr;
   int64_t selected = 1;
 };
 
-int64_t selected_position(const DynamicIndexSpec& p, const KernelCtx& c,
+int64_t selected_position(const DynamicIndexSpec& p,
                           const IndexRuntime& runtime, int64_t linear) {
   int64_t result = 0;
   const auto consume = [&](size_t dim, int64_t& q) {
     const auto& axis = p.axes[dim];
-    const int64_t count = runtime.count(dim);
-    const int64_t ordinal = q % count;
-    q /= count;
+    const IndexRuntime::Axis& state = runtime.axes[dim];
+    const int64_t ordinal = q % state.count;
+    q /= state.count;
     double raw;
     switch (axis.kind) {
       case DynamicIndexSpec::Axis::All:
         raw = static_cast<double>(ordinal + 1);
         break;
       case DynamicIndexSpec::Axis::Single:
-        raw = index_input(c, axis.selector_input, "structured selector")
-                  .data[axis.input_offset];
+        raw = state.selector[axis.input_offset];
         break;
       case DynamicIndexSpec::Axis::Multi:
-        raw = index_input(c, axis.selector_input, "structured selector")
-                  .data[axis.input_offset + ordinal];
+        raw = state.selector[axis.input_offset + ordinal];
         break;
       case DynamicIndexSpec::Axis::Range:
-        raw = index_input(c, axis.selector_input, "structured selector")
-                  .data[axis.input_offset] +
-              static_cast<double>(ordinal);
+        raw = state.selector[axis.input_offset] + static_cast<double>(ordinal);
         break;
       default:
-        throw std::logic_error("invalid index selector");
+        index_fault("invalid index selector");
     }
     if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 1 ||
-        raw > static_cast<double>(runtime.extent(dim)))
-      throw std::out_of_range("structured index out of range");
-    result += (static_cast<int64_t>(raw) - 1) * runtime.stride(dim);
+        raw > static_cast<double>(state.extent))
+      index_out_of_range();
+    result += (static_cast<int64_t>(raw) - 1) * state.stride;
   };
   const size_t outer = p.axes.size() - (p.matrix_leaf ? 2 : 0);
   if (p.matrix_leaf) {
@@ -1053,10 +1054,9 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
                             bool update) {
   const IndexInputLayout layout = require_index_input_layout(p, update);
   if (c.n_in != layout.expected || (p.matrix_leaf && p.axes.size() < 2))
-    throw std::logic_error("invalid structured index descriptor");
+    index_fault("invalid structured index descriptor");
   const auto validate_selector_input = [&](int input, const char* what) {
-    if (input < 1 || input >= layout.selector_end)
-      throw std::logic_error(std::string("invalid ") + what + " input");
+    if (input < 1 || input >= layout.selector_end) index_fault(what, " input");
   };
   IndexRuntime runtime(p.axes.size());
   int64_t capacity = 1, logical_size = 1;
@@ -1070,15 +1070,15 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
       validate_selector_input(axis.extent_input,
                               "dynamic index logical extent");
     const int64_t logical_extent = logical_axis_extent(axis, c);
-    runtime.extent(dim) = logical_extent;
+    runtime.axes[dim].extent = logical_extent;
     const int64_t count = dynamic_axis_count(axis, c);
-    runtime.count(dim) = count;
+    runtime.axes[dim].count = count;
     runtime.selected = mul(runtime.selected, count);
     capacity = mul(capacity, axis.extent);
     logical_size = mul(logical_size, logical_extent);
     if (axis.stride < 0 ||
         (axis.kind != DynamicIndexSpec::Axis::All && axis.input_offset < 0))
-      throw std::logic_error("invalid structured index offset");
+      index_fault("invalid structured index offset");
     const int64_t width =
         axis.kind == DynamicIndexSpec::Axis::All     ? 0
         : axis.kind == DynamicIndexSpec::Axis::Multi ? axis.count
@@ -1092,6 +1092,7 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
         axis.kind == DynamicIndexSpec::Axis::All
             ? nullptr
             : &index_input(c, axis.selector_input, "structured selector");
+    runtime.axes[dim].selector = selector ? selector->data : nullptr;
     if ((selector && (axis.input_offset > selector->len ||
                       width > selector->len - axis.input_offset)) ||
         (axis.count_input_offset >= 0 &&
@@ -1103,7 +1104,7 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
                  .len) ||
         (axis.kind == DynamicIndexSpec::Axis::Single && axis.count != 1) ||
         (axis.kind == DynamicIndexSpec::Axis::All && axis.count != axis.extent))
-      throw std::logic_error("invalid structured index shape");
+      index_fault("invalid structured index shape");
     // Validate selectors even when a different axis makes the result empty.
     if (axis.kind == DynamicIndexSpec::Axis::All ||
         (axis.kind == DynamicIndexSpec::Axis::Range && count == 0))
@@ -1117,7 +1118,7 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
                               : raw;
       if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 1 ||
           last > logical_extent)
-        throw std::out_of_range("structured index out of range");
+        index_out_of_range();
     }
   }
   const size_t outer = p.axes.size() - (p.matrix_leaf ? 2 : 0);
@@ -1126,33 +1127,34 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
   if (p.matrix_leaf) {
     if (p.axes[outer].stride != 1 ||
         p.axes[outer + 1].stride != p.axes[outer].extent)
-      throw std::logic_error("invalid structured matrix stride");
-    runtime.stride(outer) = 1;
-    runtime.stride(outer + 1) = runtime.extent(outer);
+      index_fault("invalid structured matrix stride");
+    runtime.axes[outer].stride = 1;
+    runtime.axes[outer + 1].stride = runtime.axes[outer].extent;
     capacity_stride = mul(p.axes[outer].extent, p.axes[outer + 1].extent);
-    logical_stride = mul(runtime.extent(outer), runtime.extent(outer + 1));
+    logical_stride =
+        mul(runtime.axes[outer].extent, runtime.axes[outer + 1].extent);
   }
   for (size_t d = outer; d-- > 0;) {
     if (p.axes[d].stride != capacity_stride)
-      throw std::logic_error("invalid structured array stride");
-    runtime.stride(d) = logical_stride;
+      index_fault("invalid structured array stride");
+    runtime.axes[d].stride = logical_stride;
     capacity_stride = mul(capacity_stride, p.axes[d].extent);
-    logical_stride = mul(logical_stride, runtime.extent(d));
+    logical_stride = mul(logical_stride, runtime.axes[d].extent);
   }
   if (capacity != c.in[0].len || logical_size > capacity ||
       runtime.selected > p.selected_size ||
       (update
            ? (c.out.len != capacity || c.in[layout.rhs].len != p.selected_size)
            : c.out.len != p.selected_size))
-    throw std::logic_error("invalid structured index storage");
+    index_fault("invalid structured index storage");
   return runtime;
 }
 
 template <class F>
-void selected_positions(const DynamicIndexSpec& p, const KernelCtx& c,
-                        const IndexRuntime& runtime, F&& f) {
+void selected_positions(const DynamicIndexSpec& p, const IndexRuntime& runtime,
+                        F&& f) {
   for (int64_t i = 0; i < runtime.selected; ++i)
-    f(i, selected_position(p, c, runtime, i));
+    f(i, selected_position(p, runtime, i));
 }
 int64_t scalar_index_forward(KernelCtx& c) {
   const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);
@@ -1161,7 +1163,7 @@ int64_t scalar_index_forward(KernelCtx& c) {
     throw std::logic_error("invalid compact scalar index shape");
   c.out.data[0] = 0.0;
   if (runtime.selected == 0) return -1;
-  const int64_t position = selected_position(p, c, runtime, 0);
+  const int64_t position = selected_position(p, runtime, 0);
   c.out.data[0] = c.in[0].data[position];
   return position;
 }
@@ -1173,7 +1175,7 @@ void index_forward(KernelCtx& c) {
   }
   const IndexRuntime runtime = validate_index(p, c, false);
   std::fill(c.out.data, c.out.data + c.out.len, 0.0);
-  selected_positions(p, c, runtime, [&](int64_t i, int64_t at) {
+  selected_positions(p, runtime, [&](int64_t i, int64_t at) {
     c.out.data[i] = c.in[0].data[at];
   });
 }
@@ -1181,7 +1183,7 @@ void index_backward(KernelCtx& c) {
   if (!c.in_adj[0].data) return;
   const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);
   const IndexRuntime runtime = validate_index(p, c, false);
-  selected_positions(p, c, runtime, [&](int64_t i, int64_t at) {
+  selected_positions(p, runtime, [&](int64_t i, int64_t at) {
     c.in_adj[0].data[at] += c.out_adj_vec.data[i];
   });
 }
@@ -1192,7 +1194,7 @@ void set_index_forward(KernelCtx& c) {
   std::copy_n(c.in[0].data, c.in[0].len, c.out.data);
   const bool may_repeat = !index_selection_is_ordered_unique(p);
   if (may_repeat) std::fill(c.scratch, c.scratch + c.in[0].len, -1.0);
-  selected_positions(p, c, runtime, [&](int64_t i, int64_t at) {
+  selected_positions(p, runtime, [&](int64_t i, int64_t at) {
     c.out.data[at] = c.in[layout.rhs].data[i];
     if (may_repeat) c.scratch[at] = static_cast<double>(i);
   });
@@ -1206,14 +1208,14 @@ void set_index_backward(KernelCtx& c) {
     const IndexRuntime runtime = validate_index(p, c, true);
     int64_t selected = 0;
     int64_t selected_at =
-        runtime.selected > 0 ? selected_position(p, c, runtime, 0) : -1;
+        runtime.selected > 0 ? selected_position(p, runtime, 0) : -1;
     for (int64_t i = 0; i < c.out.len; ++i) {
       if (selected < runtime.selected && i == selected_at) {
         if (c.in_adj[layout.rhs].data)
           c.in_adj[layout.rhs].data[selected] += c.out_adj_vec.data[i];
         ++selected;
         if (selected < runtime.selected)
-          selected_at = selected_position(p, c, runtime, selected);
+          selected_at = selected_position(p, runtime, selected);
       } else if (c.in_adj[0].data) {
         c.in_adj[0].data[i] += c.out_adj_vec.data[i];
       }
@@ -1650,7 +1652,7 @@ struct Execution {
     const IndexRuntime runtime = validate_index(spec, c, true);
     const double* source = c.in[layout.rhs].data;
     const int64_t undo = static_cast<int64_t>(s.undo.size());
-    selected_positions(spec, c, runtime, [&](int64_t i, int64_t at) {
+    selected_positions(spec, runtime, [&](int64_t i, int64_t at) {
       s.undo.push_back(static_cast<double>(at));
       s.undo.push_back(values[at]);
       values[at] = source[i];
