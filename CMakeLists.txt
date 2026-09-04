@@ -800,6 +800,7 @@ set(STANLI_TESTS
   test_smoke test_executor test_recorder test_densities test_matvec test_eigen
   test_mnc
   test_legacy test_eight_schools test_glm test_nuts test_walnuts test_sexp
+  test_model_adapter
   test_mir test_mir_decode test_transforms test_eltwise test_scalar_binary
   test_lower
   test_lower_views

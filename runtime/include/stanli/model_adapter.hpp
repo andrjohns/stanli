@@ -41,7 +41,7 @@ struct WriteArray {
 class ExecutorModel {
  public:
   explicit ExecutorModel(Executor& ex, const WriteArray* wa = nullptr)
-      : ex_(&ex), grad_(static_cast<size_t>(ex.n_params())), wa_(wa) {}
+      : ex_(&ex), wa_(wa) {}
 
   size_t num_params_r() const { return static_cast<size_t>(ex_->n_params()); }
 
@@ -58,17 +58,24 @@ class ExecutorModel {
     } else {
       static_assert(std::is_same_v<T, stan::math::var>,
                     "adapter supports double and var");
-      for (int64_t i = 0; i < n; ++i) ex_->params_data()[i] = q(i).val();
+      Eigen::Map<Eigen::VectorXd>(ex_->params_data(), n) =
+          stan::math::value_of(q);
+      double* grad = stan::math::ChainableStack::instance_->memalloc_
+                        .alloc_array<double>(n);
       double value;
       try {
-        value = ex_->gradient(grad_.data());
+        value = ex_->gradient(grad);
       } catch (const std::exception&) {
         // Rejected point (domain error in a kernel): -inf with no gradient,
         // which the sampler treats as a divergence.
         return T(-std::numeric_limits<double>::infinity());
       }
-      std::vector<stan::math::var> ops(q.data(), q.data() + n);
-      return stan::math::precomputed_gradients(value, ops, grad_);
+      stan::math::vari** varis = stan::math::ChainableStack::instance_
+                                     ->memalloc_.alloc_array<stan::math::vari*>(n);
+      for (int64_t i = 0; i < n; ++i) varis[i] = q(i).vi_;
+      return stan::math::var(
+          new stan::math::precomputed_gradients_vari(value, (size_t)n, varis,
+                                                     grad));
     }
   }
 
@@ -176,7 +183,6 @@ class ExecutorModel {
 
  private:
   Executor* ex_;
-  mutable std::vector<double> grad_;
   const WriteArray* wa_ = nullptr;
 };
 
