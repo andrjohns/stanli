@@ -833,3 +833,149 @@ re-materialized per evaluation, which is a loss.
 `BlockArena::grow` is `noinline`. Inlined into `allocate` it cost m1 14% and
 ctsem 1%, by displacing the register program interpreter in the same
 translation unit.
+
+## Addendum: the dynamic index kernels, measured
+
+Date: 2026-09-03. Branch `feat/loop-next`.
+
+Sampled profile of a ctsem gradient at 400 rows, after the release above
+(9,059 samples over 12 s of steady-state evaluation):
+
+| | share |
+| --- | --- |
+| `validate_index` | 22.1% |
+| `Execution::run` | 22.7% |
+| `selected_position` | 8.8% |
+| `Execution::forward` | 8.5% |
+| `run_retained` | 5.0% |
+| `index_input` | 4.7% |
+| `run_in_place` | 4.4% |
+| `structured_loop_backward` | 3.2% |
+| `make_version` | 3.1% |
+| Eigen | 2.5% |
+
+The index machinery is 41%, not the 17% the earlier profile suggested, and
+the tree walk 31%. Two things were wrong with the index path, both fixed:
+
+- `selected_position` called `index_input` once per axis per selected element
+  to bounds-check a descriptor index `validate_index` had already checked.
+  The selector pointer now rides in `IndexRuntime`, which became one struct
+  per axis (extent, count, stride, selector) instead of three parallel runs
+  in one block.
+- Every check built its message inline. `index_input` was too large to inline
+  because of the `std::string` concatenation on its throw path, and
+  `validate_index` carried string construction through its whole body. The
+  throws moved to `[[noreturn]] noinline` helpers with the same messages.
+
+Together: ctsem 26.4 -> 22.6 ms per gradient at 33 rows and 307 -> 265 ms at
+400, radon_county retained 1.02 -> 0.82 ms, m2 1.08 -> 0.95 ms, arK 85 -> 76
+us, everything else neutral, all results bitwise identical.
+
+### Flattening nested sequences: measured, not kept
+
+A pass in `classify` that splices a sequence's sequence children into it and
+collapses lone-child sequences dropped ctsem's node visits per gradient from
+22.38M to 21.77M (2.7%) and moved the gradient not at all (265.6 vs 264.8 ms,
+inside the noise). ctsem's tree is already nearly flat after specialization;
+the visits are kernel calls and traced control, not sequence nodes. The pass
+was dropped. It would have to run before `form_segments` to be worth
+anything, and that changes which runs become register programs, which changes
+the last bit of a reduction.
+
+### What is left in validate_index
+
+Stubbing out every check in `validate_index` that depends only on the
+descriptor and the input lengths -- the input layout, the selector-input
+range checks, the shape check, the stride checks, the capacity comparison --
+leaves ctsem at 21.4 ms at 33 rows and 251 ms at 400: 5.3% of a gradient.
+Those checks are static per site, because the loop executor binds one
+`KernelCtx` per site at state construction and the lengths come from the
+plan's slots.
+
+Collecting it needs a split of `validate_index` into a shape check over the
+lengths and a value check, the first run once at `prepare` against a
+length-only context, plus lean kernel entry points chosen per node so the
+flat executor keeps checking. The risk is not the plumbing but the partition:
+a check on the wrong side either runs never or runs always, and the wrong
+side of "never" is a descriptor bug that reaches a kernel. It also moves
+descriptor errors from the first forward to `prepare`. Not done here.
+
+## Addendum: candidate coverage, diagnosed
+
+Date: 2026-09-03.
+
+### The corpus refusals are mode-1 only
+
+Under `STANLI_STRUCTURED_LOOPS=1` the 130-model corpus produces 226 candidate
+refusals over 20 models, concentrated in seven: dogs and its three variants
+(31 each), covid19imperial v2 and v3 (30 each), multi_occupancy (29). Under
+the shipping selector (auto) the same corpus produces **zero** refusals: every
+loop the selector picks lowers. The refusals are an A/B-mode coverage gap,
+not a shipped one.
+
+They are three messages and one cause:
+
+- `prepare_data: unknown variable j (type UInt)` (162): a data expression
+  inside the region names an enclosing loop's iterator. The lowering folds
+  data expressions with the `prepare_data` MIR interpreter, whose unknown
+  variables resolve through `int_env`, the unrolled-loop counter environment.
+  A retained loop's iterator is a runtime slot and is not there.
+- `size expression needs unknown int i` (58, lower.cpp:1108): a declaration
+  inside the region is sized by an expression that needs a loop iterator.
+- `runtime-sized structured declaration ... needs a finite capacity` and
+  `structured slice needs a fixed lower bound and finite capacity` (1 each).
+
+All three are one gap: **a region cell's capacity has to be a compile-time
+constant**, so a local whose size varies per iteration cannot live in one.
+Closing it means capacities that are the maximum over the iteration space
+(which needs a bound the compiler does not have today) or slots with a
+runtime length, and a runtime-int path for data expressions that name an
+iterator. That is a large change with no effect on the default selector.
+
+### ctsem's O1 MIR
+
+`ctsem.stanli.mir` (stanc3 `--O1`) refuses the candidate with `structured
+assignment changes logical shape: inline_whichequals_inline_vecequals_return_
+sym23___sym1104__`: an inlined `which_equal` returns a runtime-sized integer
+array, and `region_assign`'s `same_view` requires the cell and the value to
+have the same logical shape and slot length. Same gap as above.
+
+The second failure is independent of retained loops. With
+`STANLI_STRUCTURED_LOOPS=0` the same MIR fails identically with
+`runtime-control region: integer inline_sdcovsqrt2cov_inline_constraincorsqrt1
+_d_sym28___sym1405__ is not known at compile time`, from the island region
+compiler in lower.cpp:3510. Fixing the candidate would not make ctsem's O1
+MIR compile; the O1-budget fallback to O0 MIR is what makes the model work
+and it stays necessary until that one is fixed too.
+
+## Addendum: write_array and forward-only regions
+
+Date: 2026-09-03. Status: assessed, not implemented.
+
+ctsem's `write_array` falls back to the MIR interpreter per draw with
+`runtime-control region: right-hand side needs too many registers` -- the
+island region compiler, not the loop. `try_lower_region` never runs there:
+`in_write_array` returns false at its first line, and four more guards in the
+region helpers (`lower_structured_loop.inc:1054, 1057, 1080, 1092`) turn off
+the runtime-value path, the runtime scalar form, the runtime-value rescue in
+call lowering, and `param_free` inside write_array.
+
+A forward-only region is the same tree with no tape: every `Import.active` is
+false, `has_target` is false, no adjoint is ever reserved and
+`structured_loop_backward` is never called, so the executor needs nothing new.
+The memo and trace machinery is a good fit for write_array, which runs the
+same data-only work once per draw.
+
+What is not free:
+
+- The four helper guards exist because write_array treats every value as
+  parameter-dependent (`si.param_free = false` at 1092) and refuses the
+  runtime-value path. Each has to be re-derived for a region rather than
+  removed.
+- ctsem's transformed parameters are assigned inside the Kalman loop, and
+  some of them are the runtime-sized locals the addendum above describes. The
+  region would refuse them for the same reason the log_prob candidate refuses
+  ctsem's O1 MIR.
+
+So the write_array path depends on the runtime-sized-cell work, and is worth
+starting only after it. Left for that change.
