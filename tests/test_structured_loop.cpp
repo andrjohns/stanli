@@ -618,14 +618,18 @@ static void direct_index_kernel_tests() {
   try {
     dynamic_index->forward(direct);
     check(false, "direct index validates selectors");
-  } catch (const std::out_of_range&) {
+  } catch (const std::out_of_range& error) {
+    check(std::string(error.what()) == "structured index out of range",
+          "direct index selector message");
   }
   lower = 1;
   direct.n_in = 3;
   try {
     dynamic_index->forward(direct);
     check(false, "direct index validates input arity");
-  } catch (const std::logic_error&) {
+  } catch (const std::logic_error& error) {
+    check(std::string(error.what()) == "invalid structured index descriptor",
+          "direct index arity message");
   }
   direct.n_in = 4;
   lower = 1;
@@ -3921,10 +3925,16 @@ static std::vector<double> sparse_rows(int rows, std::vector<int> positive) {
   return table;
 }
 
+static size_t reported_field(const std::string& diagnostics,
+                             const std::string& name) {
+  const size_t at = diagnostics.find(name);
+  return at == std::string::npos
+             ? std::numeric_limits<size_t>::max()
+             : std::stoul(diagnostics.substr(at + name.size()));
+}
+
 static size_t reported_visits(const std::string& diagnostics) {
-  const size_t at = diagnostics.find("visits=");
-  return at == std::string::npos ? std::numeric_limits<size_t>::max()
-                                 : std::stoul(diagnostics.substr(at + 7));
+  return reported_field(diagnostics, "visits=");
 }
 
 // Replays under STANLI_STRUCTURED_LOOP_DIAGNOSTICS and returns the node
@@ -3941,6 +3951,59 @@ static Executor diagnosed_executor(Graph graph) {
   Executor executor(std::move(graph));
   test_unsetenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS");
   return executor;
+}
+
+// A data-only scan whose values leave nothing behind runs once, during the
+// recording evaluation, and is skipped afterwards. What it allocated has no
+// reader once it exits.
+static void memo_release_tests() {
+  auto plan = std::make_shared<StructuredLoop>();
+  const int theta = plan->body.add_slot(1, false);
+  const int one = scalar(*plan, 1);
+  const int rows = scalar(*plan, 200);
+  const int columns = scalar(*plan, 50);
+  const int row = plan->body.add_slot(1, false);
+  const int column = plan->body.add_slot(1, false);
+  const int seen = plan->body.add_slot(1, false);
+  const int acc = plan->body.add_slot(1, false);
+  plan->fills.push_back({acc, {0}});
+  const int next = plan->body.add_slot(1, false);
+  plan->imports = {{theta, 0, 0, true, false}};
+  const int half = scalar(*plan, 100);
+  const int guard = plan->body.add_slot(1, false);
+  Node scan = counted(one, columns, column, sequence({alias(seen, column)}));
+  Node compare = call(*plan, OP_COMPARE, {row, half}, guard);
+  plan->body.ops[static_cast<size_t>(compare.op)].variant = 2;
+  plan->root = counted(
+      one, rows, row,
+      sequence({std::move(scan), std::move(compare),
+                branch(guard,
+                       sequence({call(*plan, OP_ADD, {acc, theta}, next),
+                                 alias(acc, next)}),
+                       sequence({}))}));
+  plan->outputs = {acc};
+  prepare_kernels(*plan);
+  check(plan->memo_count == 1, "the data-only scan is one memo node");
+  check(plan->root.children[0].children[0].memo_keep.size() == 1,
+        "the guard the traced branch reads survives the scan");
+
+  Executor executor = diagnosed_executor(outer(plan, {1, 1}));
+  const Evaluation first = evaluate(executor, .25, 0);
+  close(first.value, 25, "scan recording value");
+  close(first.gradient[0], 100, "scan recording gradient");
+  Evaluation second;
+  std::string diagnostics;
+  {
+    stanli_test::StdoutCapture captured(stderr);
+    second = evaluate(executor, .5, 0);
+    diagnostics = captured.finish();
+  }
+  close(second.value, 50, "scan replayed value");
+  close(second.gradient[0], 100, "scan replayed gradient");
+  check(reported_field(diagnostics, "record_versions=") < 500,
+        "the recording evaluation keeps one scan of versions");
+  check(reported_field(diagnostics, "record_arena=") < 500,
+        "the recording evaluation keeps one scan of storage");
 }
 
 static void for_trace_tests() {
@@ -4456,6 +4519,7 @@ int main() {
   memo_tests();
   trace_tests();
   for_trace_tests();
+  memo_release_tests();
   test_unsetenv("STANLI_STRUCTURED_LOOPS");
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
   if (failures == 0) std::printf("test_structured_loop OK\n");

@@ -60,6 +60,9 @@ struct StructuredLoop {
     enum Storage { Retained, Transient, InPlace } storage = Retained;
     bool active = false;
     bool memo = false;
+    // A memo node whose values are read by nothing once it exits, so the
+    // recording evaluation gives its storage back.
+    bool memo_silent = false;
     // If/For/While whose data-only decisions are recorded once and replayed.
     bool trace = false;
     int invariant_loop = -1;
@@ -74,6 +77,8 @@ struct StructuredLoop {
     // only read in place and share one version whose pointer moves.
     std::vector<int> memo_outs;
     size_t memo_fresh = 0;
+    // Silent nodes only: slots a traced reader still reads while recording.
+    std::vector<int> memo_keep;
     std::vector<Node> children;
     int op = -1;
     int dst = -1, src = -1;

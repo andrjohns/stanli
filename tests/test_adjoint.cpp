@@ -720,6 +720,29 @@ static void test_ranged() {
   }
 }
 
+// compact_program renumbers `dst` only when the instruction writes something,
+// so a zero-length range copy keeps a destination from the old numbering.
+static void test_zero_length_output() {
+  IslandProg p;
+  p.n_regs = 3;
+  p.ins = {IslandProg::LiveIn{0, 1}, IslandProg::LiveIn{1, 1}};
+  p.out_regs = {2};
+  p.code.push_back(Program::Instr{Program::MOVR, 5000, 0, 0, 0, 0});
+  p.code.push_back(Program::Instr{Program::MUL, 2, 0, 1, 0, 0});
+
+  expect("zero-length output adjoint generated", gen_adjoint(p));
+  bool in_range = true;
+  for (const AdjInstr& A : p.adj.code)
+    if (A.dst < 0 || A.dst >= p.adj.n_regs) in_range = false;
+  expect("zero-length output keeps adjoint registers in range", in_range);
+
+  std::vector<double> out_vals;
+  const std::vector<double> got =
+      native_adjoints(p, {1.25, 3.5}, {1.0}, &out_vals);
+  expect("zero-length output gradient",
+         got.size() == 2 && got[0] == 3.5 && got[1] == 1.25);
+}
+
 // The double interpreter has a stack-backed SOFTMAX(3) result.  Compare it
 // directly with the owning Stan Math expression it replaces, including every
 // legal overlap between the three-lane source and destination ranges.  Full
@@ -1438,6 +1461,7 @@ int main() {
   test_ranged_saveout_partial_later_write_refuses();
   test_accumulate_into_one_register();
   test_ranged();
+  test_zero_length_output();
   test_softmax3_activation();
   test_softmax3_double_exact();
   test_in_place_ranges();

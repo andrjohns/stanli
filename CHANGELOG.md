@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixes
+
+The generated reverse pass no longer reads out of bounds when an island
+contains a zero-length range copy.
+
 ### Retained loops store one version per write
 
 The structured loop executor (`STANLI_STRUCTURED_LOOPS`) decides every body
@@ -21,6 +26,16 @@ observable happened are skipped. On ctsem one gradient at 400 rows fell from
 kernels run as one register program with a generated reverse pass, so a
 scalar recurrence costs one tape record per iteration instead of one per
 kernel (`STANLI_NO_STRUCTURED_SEGMENTS=1` keeps every kernel its own node).
+
+The recording evaluation hands back the storage of a data-only subtree whose
+values nothing reads once it exits, so the first gradient of a retained loop
+no longer costs several times the steady-state tape. ctsem at 400 rows peaks
+at 0.95 GB instead of 1.24 GB.
+
+A retained loop's dynamic index kernels resolve their selector once per call
+instead of once per selected element, and their validation no longer carries
+message building in the path that takes no error. ctsem is 14% faster per
+gradient and radon_county's retained loop 20%.
 
 By default a loop is retained when it is an outermost `while`, or an
 outermost `for` of at least 32 iterations whose body contains a `while` or a

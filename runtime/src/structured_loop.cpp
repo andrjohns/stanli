@@ -98,11 +98,13 @@ void prepare_node(StructuredLoop& p, Node& n, unsigned depth,
   if (n.storage != Node::InPlace) n.storage = Node::Retained;
   n.active = false;
   n.memo = false;
+  n.memo_silent = false;
   n.trace = false;
   n.invariant_loop = -1;
   n.memo_index = -1;
   n.memo_outs.clear();
   n.memo_fresh = 0;
+  n.memo_keep.clear();
   n.site = ~uint32_t{0};
   n.workspace = -1;
   n.loop_index = -1;
@@ -491,6 +493,12 @@ struct Memoizer {
       for (int s : written)
         if (uses.output[s] || outside(s, inside) > traced[s])
           n.memo_outs.push_back(s);
+      // A traced reader takes the recorded decision on replay but still reads
+      // the value while recording, so a silent node hands those slots on.
+      n.memo_silent = n.memo_outs.empty();
+      if (n.memo_silent)
+        for (int s : written)
+          if (traced[s]) n.memo_keep.push_back(s);
       return;
     }
     for (auto& c : n.children) number(c);
@@ -900,21 +908,37 @@ void int_forward(KernelCtx& c) {
   c.out.data[0] = static_cast<double>(integer(static_cast<double>(v)));
 }
 
+[[noreturn]] __attribute__((noinline)) void index_fault(const char* message) {
+  throw std::logic_error(message);
+}
+
+[[noreturn]] __attribute__((noinline)) void index_fault(const char* what,
+                                                        const char* suffix) {
+  throw std::logic_error(std::string("invalid ") + what + suffix);
+}
+
+[[noreturn]] __attribute__((noinline)) void index_over_capacity(
+    const char* what) {
+  throw std::out_of_range(std::string(what) + " exceeds capacity");
+}
+
+[[noreturn]] __attribute__((noinline)) void index_out_of_range() {
+  throw std::out_of_range("structured index out of range");
+}
+
 const Desc& index_input(const KernelCtx& c, int input, const char* what) {
-  if (input < 0 || input >= c.n_in)
-    throw std::logic_error(std::string("invalid ") + what + " input");
+  if (input < 0 || input >= c.n_in) index_fault(what, " input");
   return c.in[input];
 }
 
 int64_t index_integer(const KernelCtx& c, int input, int64_t offset,
                       int64_t upper, const char* what) {
   const Desc& values = index_input(c, input, what);
-  if (offset < 0 || offset >= values.len)
-    throw std::logic_error(std::string("invalid ") + what + " offset");
+  if (offset < 0 || offset >= values.len) index_fault(what, " offset");
   const double raw = values.data[offset];
   if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 0 ||
       raw > static_cast<double>(upper))
-    throw std::out_of_range(std::string(what) + " exceeds capacity");
+    index_over_capacity(what);
   return static_cast<int64_t>(raw);
 }
 
@@ -938,7 +962,7 @@ int64_t dynamic_axis_count(const DynamicIndexSpec::Axis& axis,
     const Desc& selector =
         index_input(c, axis.selector_input, "dynamic range start");
     if (axis.input_offset < 0 || axis.input_offset >= selector.len)
-      throw std::logic_error("invalid dynamic range start offset");
+      index_fault("invalid dynamic range start offset");
     const double first = selector.data[axis.input_offset];
     if (!std::isfinite(first) || std::trunc(first) != first || first < 1 ||
         first > std::numeric_limits<int32_t>::max())
@@ -952,86 +976,71 @@ int64_t dynamic_axis_count(const DynamicIndexSpec::Axis& axis,
 }
 
 struct IndexRuntime {
+  struct Axis {
+    int64_t extent = 0;
+    int64_t count = 0;
+    int64_t stride = 0;
+    const double* selector = nullptr;
+  };
   // Stan indices are normally low-dimensional. Keep their validation state
-  // inline, while retaining arbitrary-rank support with one contiguous heap
-  // block instead of one allocation for each field.
+  // inline, while retaining arbitrary-rank support with one heap block.
   static constexpr size_t inline_dimensions = 8;
 
-  explicit IndexRuntime(size_t dimensions) : dimensions_(dimensions) {
-    if (dimensions_ > inline_dimensions) {
-      if (dimensions_ > std::numeric_limits<size_t>::max() / 3)
-        throw std::length_error("dynamic index rank exceeds storage limit");
-      heap_storage_.reset(new int64_t[3 * dimensions_]);
-      storage_ = heap_storage_.get();
+  explicit IndexRuntime(size_t dimensions) {
+    if (dimensions > inline_dimensions) {
+      heap_.reset(new Axis[dimensions]);
+      axes = heap_.get();
     } else {
-      storage_ = inline_storage_.data();
+      axes = inline_.data();
     }
   }
   IndexRuntime(const IndexRuntime&) = delete;
   IndexRuntime& operator=(const IndexRuntime&) = delete;
   IndexRuntime(IndexRuntime&& other) noexcept
-      : heap_storage_(std::move(other.heap_storage_)),
-        dimensions_(other.dimensions_),
+      : inline_(other.inline_),
+        heap_(std::move(other.heap_)),
         selected(other.selected) {
-    if (heap_storage_) {
-      storage_ = heap_storage_.get();
-    } else {
-      std::copy_n(other.inline_storage_.data(), 3 * dimensions_,
-                  inline_storage_.data());
-      storage_ = inline_storage_.data();
-    }
+    axes = heap_ ? heap_.get() : inline_.data();
   }
 
-  int64_t& extent(size_t dim) { return storage_[dim]; }
-  int64_t extent(size_t dim) const { return storage_[dim]; }
-  int64_t& count(size_t dim) { return storage_[dimensions_ + dim]; }
-  int64_t count(size_t dim) const { return storage_[dimensions_ + dim]; }
-  int64_t& stride(size_t dim) { return storage_[2 * dimensions_ + dim]; }
-  int64_t stride(size_t dim) const { return storage_[2 * dimensions_ + dim]; }
-
  private:
-  std::array<int64_t, 3 * inline_dimensions> inline_storage_;
-  std::unique_ptr<int64_t[]> heap_storage_;
-  int64_t* storage_ = nullptr;
-  size_t dimensions_;
+  std::array<Axis, inline_dimensions> inline_;
+  std::unique_ptr<Axis[]> heap_;
 
  public:
+  Axis* axes = nullptr;
   int64_t selected = 1;
 };
 
-int64_t selected_position(const DynamicIndexSpec& p, const KernelCtx& c,
+int64_t selected_position(const DynamicIndexSpec& p,
                           const IndexRuntime& runtime, int64_t linear) {
   int64_t result = 0;
   const auto consume = [&](size_t dim, int64_t& q) {
     const auto& axis = p.axes[dim];
-    const int64_t count = runtime.count(dim);
-    const int64_t ordinal = q % count;
-    q /= count;
+    const IndexRuntime::Axis& state = runtime.axes[dim];
+    const int64_t ordinal = q % state.count;
+    q /= state.count;
     double raw;
     switch (axis.kind) {
       case DynamicIndexSpec::Axis::All:
         raw = static_cast<double>(ordinal + 1);
         break;
       case DynamicIndexSpec::Axis::Single:
-        raw = index_input(c, axis.selector_input, "structured selector")
-                  .data[axis.input_offset];
+        raw = state.selector[axis.input_offset];
         break;
       case DynamicIndexSpec::Axis::Multi:
-        raw = index_input(c, axis.selector_input, "structured selector")
-                  .data[axis.input_offset + ordinal];
+        raw = state.selector[axis.input_offset + ordinal];
         break;
       case DynamicIndexSpec::Axis::Range:
-        raw = index_input(c, axis.selector_input, "structured selector")
-                  .data[axis.input_offset] +
-              static_cast<double>(ordinal);
+        raw = state.selector[axis.input_offset] + static_cast<double>(ordinal);
         break;
       default:
-        throw std::logic_error("invalid index selector");
+        index_fault("invalid index selector");
     }
     if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 1 ||
-        raw > static_cast<double>(runtime.extent(dim)))
-      throw std::out_of_range("structured index out of range");
-    result += (static_cast<int64_t>(raw) - 1) * runtime.stride(dim);
+        raw > static_cast<double>(state.extent))
+      index_out_of_range();
+    result += (static_cast<int64_t>(raw) - 1) * state.stride;
   };
   const size_t outer = p.axes.size() - (p.matrix_leaf ? 2 : 0);
   if (p.matrix_leaf) {
@@ -1045,10 +1054,9 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
                             bool update) {
   const IndexInputLayout layout = require_index_input_layout(p, update);
   if (c.n_in != layout.expected || (p.matrix_leaf && p.axes.size() < 2))
-    throw std::logic_error("invalid structured index descriptor");
+    index_fault("invalid structured index descriptor");
   const auto validate_selector_input = [&](int input, const char* what) {
-    if (input < 1 || input >= layout.selector_end)
-      throw std::logic_error(std::string("invalid ") + what + " input");
+    if (input < 1 || input >= layout.selector_end) index_fault(what, " input");
   };
   IndexRuntime runtime(p.axes.size());
   int64_t capacity = 1, logical_size = 1;
@@ -1062,15 +1070,15 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
       validate_selector_input(axis.extent_input,
                               "dynamic index logical extent");
     const int64_t logical_extent = logical_axis_extent(axis, c);
-    runtime.extent(dim) = logical_extent;
+    runtime.axes[dim].extent = logical_extent;
     const int64_t count = dynamic_axis_count(axis, c);
-    runtime.count(dim) = count;
+    runtime.axes[dim].count = count;
     runtime.selected = mul(runtime.selected, count);
     capacity = mul(capacity, axis.extent);
     logical_size = mul(logical_size, logical_extent);
     if (axis.stride < 0 ||
         (axis.kind != DynamicIndexSpec::Axis::All && axis.input_offset < 0))
-      throw std::logic_error("invalid structured index offset");
+      index_fault("invalid structured index offset");
     const int64_t width =
         axis.kind == DynamicIndexSpec::Axis::All     ? 0
         : axis.kind == DynamicIndexSpec::Axis::Multi ? axis.count
@@ -1084,6 +1092,7 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
         axis.kind == DynamicIndexSpec::Axis::All
             ? nullptr
             : &index_input(c, axis.selector_input, "structured selector");
+    runtime.axes[dim].selector = selector ? selector->data : nullptr;
     if ((selector && (axis.input_offset > selector->len ||
                       width > selector->len - axis.input_offset)) ||
         (axis.count_input_offset >= 0 &&
@@ -1095,7 +1104,7 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
                  .len) ||
         (axis.kind == DynamicIndexSpec::Axis::Single && axis.count != 1) ||
         (axis.kind == DynamicIndexSpec::Axis::All && axis.count != axis.extent))
-      throw std::logic_error("invalid structured index shape");
+      index_fault("invalid structured index shape");
     // Validate selectors even when a different axis makes the result empty.
     if (axis.kind == DynamicIndexSpec::Axis::All ||
         (axis.kind == DynamicIndexSpec::Axis::Range && count == 0))
@@ -1109,7 +1118,7 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
                               : raw;
       if (!std::isfinite(raw) || std::trunc(raw) != raw || raw < 1 ||
           last > logical_extent)
-        throw std::out_of_range("structured index out of range");
+        index_out_of_range();
     }
   }
   const size_t outer = p.axes.size() - (p.matrix_leaf ? 2 : 0);
@@ -1118,33 +1127,34 @@ IndexRuntime validate_index(const DynamicIndexSpec& p, const KernelCtx& c,
   if (p.matrix_leaf) {
     if (p.axes[outer].stride != 1 ||
         p.axes[outer + 1].stride != p.axes[outer].extent)
-      throw std::logic_error("invalid structured matrix stride");
-    runtime.stride(outer) = 1;
-    runtime.stride(outer + 1) = runtime.extent(outer);
+      index_fault("invalid structured matrix stride");
+    runtime.axes[outer].stride = 1;
+    runtime.axes[outer + 1].stride = runtime.axes[outer].extent;
     capacity_stride = mul(p.axes[outer].extent, p.axes[outer + 1].extent);
-    logical_stride = mul(runtime.extent(outer), runtime.extent(outer + 1));
+    logical_stride =
+        mul(runtime.axes[outer].extent, runtime.axes[outer + 1].extent);
   }
   for (size_t d = outer; d-- > 0;) {
     if (p.axes[d].stride != capacity_stride)
-      throw std::logic_error("invalid structured array stride");
-    runtime.stride(d) = logical_stride;
+      index_fault("invalid structured array stride");
+    runtime.axes[d].stride = logical_stride;
     capacity_stride = mul(capacity_stride, p.axes[d].extent);
-    logical_stride = mul(logical_stride, runtime.extent(d));
+    logical_stride = mul(logical_stride, runtime.axes[d].extent);
   }
   if (capacity != c.in[0].len || logical_size > capacity ||
       runtime.selected > p.selected_size ||
       (update
            ? (c.out.len != capacity || c.in[layout.rhs].len != p.selected_size)
            : c.out.len != p.selected_size))
-    throw std::logic_error("invalid structured index storage");
+    index_fault("invalid structured index storage");
   return runtime;
 }
 
 template <class F>
-void selected_positions(const DynamicIndexSpec& p, const KernelCtx& c,
-                        const IndexRuntime& runtime, F&& f) {
+void selected_positions(const DynamicIndexSpec& p, const IndexRuntime& runtime,
+                        F&& f) {
   for (int64_t i = 0; i < runtime.selected; ++i)
-    f(i, selected_position(p, c, runtime, i));
+    f(i, selected_position(p, runtime, i));
 }
 int64_t scalar_index_forward(KernelCtx& c) {
   const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);
@@ -1153,7 +1163,7 @@ int64_t scalar_index_forward(KernelCtx& c) {
     throw std::logic_error("invalid compact scalar index shape");
   c.out.data[0] = 0.0;
   if (runtime.selected == 0) return -1;
-  const int64_t position = selected_position(p, c, runtime, 0);
+  const int64_t position = selected_position(p, runtime, 0);
   c.out.data[0] = c.in[0].data[position];
   return position;
 }
@@ -1165,7 +1175,7 @@ void index_forward(KernelCtx& c) {
   }
   const IndexRuntime runtime = validate_index(p, c, false);
   std::fill(c.out.data, c.out.data + c.out.len, 0.0);
-  selected_positions(p, c, runtime, [&](int64_t i, int64_t at) {
+  selected_positions(p, runtime, [&](int64_t i, int64_t at) {
     c.out.data[i] = c.in[0].data[at];
   });
 }
@@ -1173,7 +1183,7 @@ void index_backward(KernelCtx& c) {
   if (!c.in_adj[0].data) return;
   const auto& p = *static_cast<const DynamicIndexSpec*>(c.udata);
   const IndexRuntime runtime = validate_index(p, c, false);
-  selected_positions(p, c, runtime, [&](int64_t i, int64_t at) {
+  selected_positions(p, runtime, [&](int64_t i, int64_t at) {
     c.in_adj[0].data[at] += c.out_adj_vec.data[i];
   });
 }
@@ -1184,7 +1194,7 @@ void set_index_forward(KernelCtx& c) {
   std::copy_n(c.in[0].data, c.in[0].len, c.out.data);
   const bool may_repeat = !index_selection_is_ordered_unique(p);
   if (may_repeat) std::fill(c.scratch, c.scratch + c.in[0].len, -1.0);
-  selected_positions(p, c, runtime, [&](int64_t i, int64_t at) {
+  selected_positions(p, runtime, [&](int64_t i, int64_t at) {
     c.out.data[at] = c.in[layout.rhs].data[i];
     if (may_repeat) c.scratch[at] = static_cast<double>(i);
   });
@@ -1198,14 +1208,14 @@ void set_index_backward(KernelCtx& c) {
     const IndexRuntime runtime = validate_index(p, c, true);
     int64_t selected = 0;
     int64_t selected_at =
-        runtime.selected > 0 ? selected_position(p, c, runtime, 0) : -1;
+        runtime.selected > 0 ? selected_position(p, runtime, 0) : -1;
     for (int64_t i = 0; i < c.out.len; ++i) {
       if (selected < runtime.selected && i == selected_at) {
         if (c.in_adj[layout.rhs].data)
           c.in_adj[layout.rhs].data[selected] += c.out_adj_vec.data[i];
         ++selected;
         if (selected < runtime.selected)
-          selected_at = selected_position(p, c, runtime, selected);
+          selected_at = selected_position(p, runtime, selected);
       } else if (c.in_adj[0].data) {
         c.in_adj[0].data[i] += c.out_adj_vec.data[i];
       }
@@ -1232,11 +1242,17 @@ struct BlockArena {
   struct Block {
     std::unique_ptr<double[]> data;
     size_t capacity = 0;
+  };
+  struct Mark {
+    size_t block = 0;
     size_t used = 0;
+    size_t live = 0;
   };
   static constexpr size_t min_block = size_t{1} << 16;
   std::vector<Block> blocks;
-  size_t total = 0;
+  double* next = nullptr;
+  double* limit = nullptr;
+  size_t cursor = 0, closed = 0;
 
   static Block make(size_t capacity) {
     Block block;
@@ -1253,47 +1269,77 @@ struct BlockArena {
         static_cast<uint64_t>(count) > std::numeric_limits<size_t>::max() / 2)
       throw std::length_error("structured loop storage overflow");
     const size_t n = static_cast<size_t>(count);
-    if (blocks.empty() || n > blocks.back().capacity - blocks.back().used) {
-      const size_t grown = blocks.empty() ? 0 : blocks.back().capacity * 2;
-      const size_t capacity = std::max({n, min_block, grown});
-      blocks.push_back(make(capacity));
-      total += capacity;
-    }
-    Block& block = blocks.back();
-    double* result = block.data.get() + block.used;
-    block.used += n;
+    if (n > static_cast<size_t>(limit - next)) grow(n);
+    double* result = next;
+    next += n;
     return result;
   }
-  size_t used() const {
-    size_t n = 0;
-    for (const auto& block : blocks) n += block.used;
-    return n;
+  // Blocks past the cursor stay allocated: freeing them on a rewind would
+  // make the next one cost a fresh block twice the size.
+  __attribute__((noinline)) void grow(size_t n) {
+    if (blocks.empty()) {
+      blocks.push_back(make(std::max(n, min_block)));
+      cursor = 0;
+    } else {
+      closed += used_here();
+      if (cursor + 1 < blocks.size() && n <= blocks[cursor + 1].capacity) {
+        ++cursor;
+      } else {
+        blocks.resize(cursor + 1);
+        blocks.push_back(
+            make(std::max({n, min_block, blocks[cursor].capacity * 2})));
+        cursor = blocks.size() - 1;
+      }
+    }
+    open(0);
+  }
+  void open(size_t at) {
+    next = blocks[cursor].data.get() + at;
+    limit = blocks[cursor].data.get() + blocks[cursor].capacity;
+  }
+  size_t used_here() const {
+    return blocks.empty()
+               ? 0
+               : static_cast<size_t>(next - blocks[cursor].data.get());
+  }
+  size_t used() const { return closed + used_here(); }
+  Mark mark() const { return Mark{cursor, used_here(), used()}; }
+  void rewind(const Mark& at) {
+    cursor = at.block;
+    if (!blocks.empty()) open(at.used);
+    closed = at.live - at.used;
   }
   // One block sized for the evaluation just finished, so a steady-state
   // evaluation never pays block growth and never keeps the first
   // evaluation's larger recording footprint.
   void clear() {
-    const size_t want = std::max(min_block, used() + used() / 8);
-    if (blocks.size() != 1 || blocks.back().capacity > 2 * want ||
-        blocks.back().capacity < want) {
+    const size_t high = used();
+    const size_t want = std::max(min_block, high + high / 8);
+    if (blocks.size() != 1 || blocks[0].capacity > 2 * want ||
+        blocks[0].capacity < want) {
       blocks.clear();
       blocks.push_back(make(want));
-      total = want;
     }
-    blocks.back().used = 0;
+    cursor = closed = 0;
+    open(0);
   }
 };
 
 template <class T>
-void right_size(std::vector<T>& v) {
-  if (v.empty()) return;
-  const size_t want = v.size() + v.size() / 8;
+void right_size(std::vector<T>& v, size_t used) {
+  if (used == 0) return;
+  const size_t want = used + used / 8;
   if (v.capacity() > 2 * want || v.capacity() < want) {
     std::vector<T> fresh;
     fresh.reserve(want);
     v.swap(fresh);
   }
   v.clear();
+}
+
+template <class T>
+void right_size(std::vector<T>& v) {
+  right_size(v, v.size());
 }
 
 struct Version {
@@ -1336,7 +1382,14 @@ struct LoopState : KernelState {
   std::vector<int64_t> memo_entries, memo_stride, memo_ordinal;
   std::vector<const Node*> memo_nodes;
   std::vector<int64_t> memo_shared_base, memo_shared;
+  std::vector<std::vector<uint32_t>> memo_invariant;
+  std::vector<char> memo_release;
+  std::vector<double> keep_store;
+  std::vector<int64_t> keep_version, keep_offset;
+  std::vector<int64_t> keep_store_base, keep_version_base;
   std::vector<int64_t> trace;
+  size_t version_peak = 0;
+  size_t record_arena = 0, record_versions = 0;
   size_t trace_pos = 0;
   uint64_t effects = 0;
   size_t memo_restores = 0, visits = 0;
@@ -1361,8 +1414,12 @@ struct LoopState : KernelState {
         memo_stride(plan.memo_count, 0),
         memo_ordinal(plan.memo_count, 0),
         memo_nodes(plan.memo_count, nullptr),
-        memo_shared_base(plan.memo_count, 0) {
-    collect(plan.root);
+        memo_shared_base(plan.memo_count, 0),
+        memo_invariant(plan.memo_count),
+        memo_release(plan.memo_count, 0),
+        keep_store_base(plan.memo_count, 0),
+        keep_version_base(plan.memo_count, 0) {
+    collect(plan.root, -1);
     int64_t shared = 0;
     for (size_t m = 0; m < memo_nodes.size(); ++m) {
       const Node* n = memo_nodes[m];
@@ -1394,29 +1451,61 @@ struct LoopState : KernelState {
     }
   }
 
-  void collect(const Node& n) {
+  // A subtree that leaves no value behind can give its storage back when it
+  // exits, unless a call inside it put something on the tape.
+  static bool releasable(const Node& n, bool& allocates) {
+    if (n.kind == Node::KernelCall) {
+      if (n.active) return false;
+      if (n.storage == Node::Retained) allocates = true;
+    }
+    if (n.kind == Node::For && n.storage != Node::Transient) allocates = true;
+    for (const auto& c : n.children)
+      if (!releasable(c, allocates)) return false;
+    return true;
+  }
+
+  void collect(const Node& n, int memo) {
     if (n.kind == Node::KernelCall) {
       if (n.site >= sites.size())
         throw std::logic_error("structured loop site numbering is stale");
       sites[n.site] = &n;
+      if (memo >= 0 && n.invariant_loop >= 0 && n.storage != Node::Transient)
+        memo_invariant[static_cast<size_t>(memo)].push_back(n.site);
     }
     if (n.memo) {
       if (n.memo_index < 0 ||
           static_cast<size_t>(n.memo_index) >= memo_stride.size())
         throw std::logic_error("structured loop memo numbering is stale");
+      if (n.memo_silent) {
+        bool allocates = false;
+        const size_t m = static_cast<size_t>(n.memo_index);
+        memo_release[m] = releasable(n, allocates) && allocates;
+        if (memo_release[m]) {
+          keep_store_base[m] = static_cast<int64_t>(keep_store.size());
+          keep_version_base[m] = static_cast<int64_t>(keep_version.size());
+          for (int slot : n.memo_keep) {
+            keep_version.push_back(-1);
+            keep_offset.push_back(static_cast<int64_t>(keep_store.size()));
+            keep_store.resize(keep_store.size() +
+                              static_cast<size_t>(p.body.slots[slot].len));
+          }
+        }
+      }
       memo_nodes[static_cast<size_t>(n.memo_index)] = &n;
       int64_t& stride = memo_stride[static_cast<size_t>(n.memo_index)];
       for (int slot : n.memo_outs) stride = add(stride, p.body.slots[slot].len);
     }
     if (n.kind == Node::For && n.storage == Node::Transient)
       transient_loops.push_back(&n);
-    for (const auto& c : n.children) collect(c);
+    for (const auto& c : n.children) collect(c, n.memo ? n.memo_index : memo);
   }
 
   void release() {
     arena.clear();
-    right_size(versions);
-    right_size(owner);
+    version_peak = std::max(version_peak, versions.size());
+    right_size(versions, version_peak);
+    right_size(owner, version_peak);
+    version_peak = 0;
     right_size(handles);
     right_size(undo);
     right_size(records);
@@ -1455,6 +1544,34 @@ struct Execution {
     s.owner.push_back(-1);
     return static_cast<int64_t>(s.versions.size()) - 1;
   }
+  struct Snapshot {
+    BlockArena::Mark arena;
+    size_t versions = 0;
+  };
+  Snapshot snapshot() const {
+    return Snapshot{s.arena.mark(), s.versions.size()};
+  }
+  // The kept slots move to fixed cells, the way a Transient result does: the
+  // reader takes the value before this node runs again.
+  void rewind(const Snapshot& at, const Node& n) {
+    const size_t m = static_cast<size_t>(n.memo_index);
+    s.record_arena = std::max(s.record_arena, s.arena.used());
+    double* store = s.keep_store.data() + s.keep_store_base[m];
+    for (int slot : n.memo_keep) {
+      const int64_t len = p.body.slots[slot].len;
+      std::copy_n(value(slot), len, store);
+      store += len;
+    }
+    s.arena.rewind(at.arena);
+    s.version_peak = std::max(s.version_peak, s.versions.size());
+    s.versions.resize(at.versions);
+    s.owner.resize(at.versions);
+    const int64_t* kept = s.keep_version.data() + s.keep_version_base[m];
+    for (size_t k = 0; k < n.memo_keep.size(); ++k)
+      s.bindings[n.memo_keep[k]] = kept[k];
+    for (uint32_t site : s.memo_invariant[m]) s.node_generation[site] = -1;
+  }
+
   int64_t reserve_adjoint(int64_t len) {
     const int64_t at = s.adjoint_size;
     s.adjoint_size = add(s.adjoint_size, len);
@@ -1535,7 +1652,7 @@ struct Execution {
     const IndexRuntime runtime = validate_index(spec, c, true);
     const double* source = c.in[layout.rhs].data;
     const int64_t undo = static_cast<int64_t>(s.undo.size());
-    selected_positions(spec, c, runtime, [&](int64_t i, int64_t at) {
+    selected_positions(spec, runtime, [&](int64_t i, int64_t at) {
       s.undo.push_back(static_cast<double>(at));
       s.undo.push_back(values[at]);
       values[at] = source[i];
@@ -1561,14 +1678,25 @@ struct Execution {
     s.bindings[n.iterator] = make_version(cell, -1);
   }
 
-  Flow forward(const Node& n) {
-    if (!n.memo) return run(n);
-    if (n.memo_outs.empty()) {
-      if (s.memo_ready) return Normal;
-      const uint64_t effects = s.effects;
+  __attribute__((noinline)) Flow record_silent(const Node& n) {
+    const uint64_t effects = s.effects;
+    if (!s.memo_release[static_cast<size_t>(n.memo_index)]) {
       const Flow flow = run(n);
       s.effects = effects;
       return flow;
+    }
+    const Snapshot at = snapshot();
+    const Flow flow = run(n);
+    s.effects = effects;
+    rewind(at, n);
+    return flow;
+  }
+
+  Flow forward(const Node& n) {
+    if (!n.memo) return run(n);
+    if (n.memo_silent) {
+      if (s.memo_ready) return Normal;
+      return record_silent(n);
     }
     ++s.effects;
     const size_t m = static_cast<size_t>(n.memo_index);
@@ -1913,6 +2041,9 @@ void structured_loop_forward(KernelCtx& ctx) {
   for (const Node* n : s.transient_loops)
     s.loop_version[n->loop_index] =
         e.make_version(s.workspace.data() + n->workspace, -1);
+  for (size_t k = 0; k < s.keep_version.size(); ++k)
+    s.keep_version[k] =
+        e.make_version(s.keep_store.data() + s.keep_offset[k], -1);
   std::fill(s.node_generation.begin(), s.node_generation.end(), -1);
   std::fill(s.loop_generation.begin(), s.loop_generation.end(), 0);
   std::fill(s.memo_ordinal.begin(), s.memo_ordinal.end(), 0);
@@ -1957,10 +2088,13 @@ void structured_loop_forward(KernelCtx& ctx) {
     }
     ctx.out.data[pos++] = count ? s.target_work[0] : 0.0;
   }
+  if (!replaying) {
+    s.record_arena = std::max(s.record_arena, s.arena.used());
+    s.record_versions = std::max(s.version_peak, s.versions.size());
+  }
   if (s.report_tape && (replaying || p.memo_count == 0)) {
     s.report_tape = false;
-    size_t arena_used = 0;
-    for (const auto& block : s.arena.blocks) arena_used += block.used;
+    const size_t arena_used = s.arena.used();
     size_t kernel_records = 0, copies = 0, updates = 0, memo_tape = 0,
            segment_records = 0;
     for (const auto& r : s.records) {
@@ -1975,13 +2109,14 @@ void structured_loop_forward(KernelCtx& ctx) {
                  "handles=%zu kernel_records=%zu updates=%zu undo=%zu "
                  "copies=%zu targets=%zu workspace=%zu memo_nodes=%zu "
                  "memo_restores=%zu memo_tape=%zu traces=%zu trace=%zu "
-                 "visits=%zu segments=%zu segment_records=%zu\n",
+                 "visits=%zu segments=%zu segment_records=%zu "
+                 "record_arena=%zu record_versions=%zu\n",
                  arena_used, static_cast<long long>(s.adjoint_size),
                  s.versions.size(), s.handles.size(), kernel_records, updates,
                  s.undo.size() / 2, copies, s.target_refs.size(),
                  s.workspace.size(), p.memo_count, s.memo_restores, memo_tape,
                  p.trace_count, s.trace.size(), s.visits, p.segments.size(),
-                 segment_records);
+                 segment_records, s.record_arena, s.record_versions);
   }
   s.memo_ready = true;
   s.reverse_ready = true;
