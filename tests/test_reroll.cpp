@@ -66,6 +66,19 @@ static void test_scalar_density_traits() {
          !has_op_trait(OP_EXP, op_trait::kRerollDensity));
 }
 
+static void test_scalar_math_widenable_traits() {
+#define EXPECT_UNARY_WIDENABLE(code, fn, value, delta, topology) \
+  expect(#code " has widenable trait",                           \
+         has_op_trait(code, op_trait::kRerollWidenable));
+  STANLI_SCALAR_UNARY_LIST(EXPECT_UNARY_WIDENABLE)
+#undef EXPECT_UNARY_WIDENABLE
+#define EXPECT_BINARY_WIDENABLE(code, fn, name) \
+  expect(#code " has widenable trait",          \
+         has_op_trait(code, op_trait::kRerollWidenable));
+  STANLI_SCALAR_BINARY_LIST(EXPECT_BINARY_WIDENABLE)
+#undef EXPECT_BINARY_WIDENABLE
+}
+
 // radon shape: mu = vector intermediate written by an op; per lane
 // {INDEX(mu,n); NORMAL(y_const_n, idx, sigma)}, lp -> target term.
 // y consts deliberately share slots (dedup pool) between lanes 1 and 5.
@@ -1635,6 +1648,7 @@ static void test_bail_message_ops() {
 
 int main() {
   test_scalar_density_traits();
+  test_scalar_math_widenable_traits();
   test_radon_shape();
   test_ark_shape();
   test_bail_recurrence();

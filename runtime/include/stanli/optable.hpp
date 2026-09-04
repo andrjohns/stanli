@@ -779,8 +779,13 @@ constexpr uint8_t op_traits(uint16_t opcode) {
     case OP_SQUARE:
     case OP_LOG1M:
     case OP_TANHV:
-    case OP_LOG_INV_LOGIT:
-    case OP_LOG1M_INV_LOGIT:
+#define STANLI_SCALAR_UNARY_WIDENABLE(code, fn, value, delta, topology) \
+  case code:
+      STANLI_SCALAR_UNARY_LIST(STANLI_SCALAR_UNARY_WIDENABLE)
+#undef STANLI_SCALAR_UNARY_WIDENABLE
+#define STANLI_SCALAR_BINARY_WIDENABLE(code, fn, name) case code:
+      STANLI_SCALAR_BINARY_LIST(STANLI_SCALAR_BINARY_WIDENABLE)
+#undef STANLI_SCALAR_BINARY_WIDENABLE
       return op_trait::kRerollWidenable;
 
     // Backward routes adjoints without rereading input OR output values. This
