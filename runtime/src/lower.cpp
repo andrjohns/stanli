@@ -8735,6 +8735,127 @@ struct Lowering {
   // Forward-only, so no target, no jacobian, no adjoints -- but the same
   // lowering, and the same passes, because generated quantities are unrolled
   // over the data exactly like the model block is.
+  struct PassPlan {
+    bool constfold;
+    bool partition;
+    bool elide_stores;
+    bool cse;
+    bool island;
+  };
+
+  // Shared tail of both lowerings: inplace/store-forward/reroll always run;
+  // the rest is gated by plan so write_array can skip the passes that assume
+  // a scalar log-density result. Ordering constraints between the stages
+  // that do run are noted where each stage starts.
+  void run_passes(const std::vector<int>& roots, const PassPlan& plan) {
+    const auto trace = [&](const char* stage, PrepTrace::Time from,
+                           PrepTrace::Extra extra = PrepTrace::Extra::None,
+                           int64_t a = 0, int64_t b = 0, bool deep = false,
+                           int64_t params = 0, int64_t c = 0, int64_t d = 0,
+                           const detail::RerollDispositionStats* disp =
+                               nullptr) {
+      prep.graph(prep_graph, stage, from, g, out.fills, target_terms.size(),
+                 out.views.size(), extra, a, b, deep, params, c, d, disp);
+    };
+
+    // Target terms have no consuming op yet either: reduce_terms (log_prob)
+    // or the arena reads (write_array) see them only after the passes run.
+    std::vector<int> update_roots = roots;
+    update_roots.insert(update_roots.end(), target_terms.begin(),
+                        target_terms.end());
+    const auto inplace_time = prep.start();
+    const int inplace =
+        make_inplace_updates(g, update_roots);  // off under STANLI_NO_INPLACE
+    trace("inplace", inplace_time, PrepTrace::Extra::Rewrites, inplace);
+    // Deleting the write/read-back pairs first is what leaves a plain
+    // arithmetic lane for reroll to vectorize.
+    const auto forward_time = prep.start();
+    const int forwarded = forward_stores_to_loads(g, update_roots);
+    trace("store_forward", forward_time, PrepTrace::Extra::Removed, forwarded);
+    if (plan.constfold) {
+      // After the update chains collapse, so a data-only chain is one slot
+      // rather than N; before reroll, so the lanes it sees have data
+      // operands.
+      const auto constfold_time = prep.start();
+      const ConstFoldStats constfolded = const_fold(g, out.fills, update_roots);
+      trace("constfold", constfold_time, PrepTrace::Extra::ConstFold,
+            constfolded.ops_removed, constfolded.slots_folded);
+    }
+    const auto reroll_time = prep.start();
+    RerollStats rerolled;
+    detail::RerollDispositionStats reroll_dispositions;
+    if (prep.enabled()) {
+      detail::ProfiledRerollStats profiled =
+          detail::reroll_profiled(g, out.fills, target_terms, roots);
+      rerolled = profiled.work;
+      reroll_dispositions = profiled.dispositions;
+    } else {
+      rerolled = reroll(g, out.fills, target_terms, roots);  // STANLI_NO_REROLL
+    }
+    trace("reroll", reroll_time, PrepTrace::Extra::Reroll, rerolled.regions,
+          rerolled.list_steps, false, 0, rerolled.candidate_steps,
+          rerolled.row_steps, &reroll_dispositions);
+    // Re-roll can replace many element writes with copying slice stores, and
+    // may have replaced target terms with vector reductions: rebuild the
+    // implicit-root set before giving those new ops the same last-use proof
+    // as the scalar stores.
+    std::vector<int> post_reroll_roots = roots;
+    post_reroll_roots.insert(post_reroll_roots.end(), target_terms.begin(),
+                             target_terms.end());
+    const auto post_reroll_inplace_time = prep.start();
+    const int post_reroll_inplace =
+        rerolled.regions ? make_inplace_updates(g, post_reroll_roots) : 0;
+    trace("post_reroll_inplace", post_reroll_inplace_time,
+          PrepTrace::Extra::Rewrites, post_reroll_inplace);
+    std::vector<int> current_roots = post_reroll_roots;
+    if (plan.partition) {
+      // After re-roll, which keeps first crack at the contiguous shapes it
+      // already handles, and before CSE, which would merge ops shared
+      // between lanes and leave the lanes no longer whole.
+      const auto partition_time = prep.start();
+      const PartitionStats parted =
+          partition_lanes(g, out.fills, target_terms, roots);
+      trace("partition", partition_time, PrepTrace::Extra::Partition,
+            parted.groups, parted.lanes, false, 0, parted.declined,
+            parted.list_steps);
+      // Same proof the slice stores re-roll makes get: rebuilt from the
+      // terms partition just replaced.
+      std::vector<int> post_partition_roots = roots;
+      post_partition_roots.insert(post_partition_roots.end(),
+                                  target_terms.begin(), target_terms.end());
+      const auto post_partition_inplace_time = prep.start();
+      const int post_partition_inplace =
+          parted.groups ? make_inplace_updates(g, post_partition_roots) : 0;
+      trace("post_partition_inplace", post_partition_inplace_time,
+            PrepTrace::Extra::Rewrites, post_partition_inplace);
+      current_roots = post_partition_roots;
+    }
+    if (plan.elide_stores) {
+      // After every pass that emits a slice store, and before islands,
+      // whose bodies name outer slots in a payload this rename cannot
+      // reach.
+      const auto elide_time = prep.start();
+      const int elided = elide_full_extent_stores(g, current_roots);
+      trace("elide_stores", elide_time, PrepTrace::Extra::Removed, elided);
+    }
+    if (plan.cse) {
+      // After reroll, whose lane matching needs the repeated ops it hoists
+      // to still be there, and before islands, so they compile the smaller
+      // residue.
+      const auto cse_time = prep.start();
+      const CseStats cse_st = cse(g, out.fills, target_terms, roots);
+      trace("cse", cse_time, PrepTrace::Extra::Removed, cse_st.ops_removed);
+    }
+    if (plan.island) {
+      // LAST, after every other pass has had first crack: compile whatever
+      // scalar residue survives (recurrences the re-roll can never widen)
+      // into island ops. Off under STANLI_NO_ISLAND.
+      const auto island_time = prep.start();
+      const int islands = carve_islands(g, out.fills, target_terms, roots);
+      trace("island", island_time, PrepTrace::Extra::Regions, islands);
+    }
+  }
+
   CompiledModel::WriteArray run_write_array(const mir::Program& p) {
     const auto total_time = prep.start();
     for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
@@ -8759,40 +8880,9 @@ struct Lowering {
     prep.graph(prep_graph, "lower", lower_time, g, out.fills,
                target_terms.size(), out.views.size(),
                PrepTrace::Extra::Truncated, !wa.truncated.empty());
-    const auto inplace_time = prep.start();
-    const int inplace = make_inplace_updates(g, roots);
-    prep.graph(prep_graph, "inplace", inplace_time, g, out.fills,
-               target_terms.size(), out.views.size(),
-               PrepTrace::Extra::Rewrites, inplace);
-    const auto forward_time = prep.start();
-    const int forwarded = forward_stores_to_loads(g, roots);
-    prep.graph(prep_graph, "store_forward", forward_time, g, out.fills,
-               target_terms.size(), out.views.size(), PrepTrace::Extra::Removed,
-               forwarded);
-    const auto reroll_time = prep.start();
-    RerollStats rerolled;
-    detail::RerollDispositionStats reroll_dispositions;
-    if (prep.enabled()) {
-      detail::ProfiledRerollStats profiled =
-          detail::reroll_profiled(g, out.fills, target_terms, roots);
-      rerolled = profiled.work;
-      reroll_dispositions = profiled.dispositions;
-    } else {
-      rerolled = reroll(g, out.fills, target_terms, roots);
-    }
-    prep.graph(prep_graph, "reroll", reroll_time, g, out.fills,
-               target_terms.size(), out.views.size(), PrepTrace::Extra::Reroll,
-               rerolled.regions, rerolled.list_steps, false, 0,
-               rerolled.candidate_steps, rerolled.row_steps,
-               &reroll_dispositions);
-    // Re-roll can replace many element writes with copying slice stores.
-    // Give those new ops the same last-use proof as the scalar stores.
-    const auto post_reroll_inplace_time = prep.start();
-    const int post_reroll_inplace =
-        rerolled.regions ? make_inplace_updates(g, roots) : 0;
-    prep.graph(prep_graph, "post_reroll_inplace", post_reroll_inplace_time, g,
-               out.fills, target_terms.size(), out.views.size(),
-               PrepTrace::Extra::Rewrites, post_reroll_inplace);
+
+    run_passes(roots, PassPlan{false, false, false, false, false});
+
     const auto finalize_time = prep.start();
     // Nothing reads a result here, but forward() asserts a scalar result
     // slot, so point it at one.
@@ -8831,103 +8921,9 @@ struct Lowering {
     // of the arena, so no op consumes them and the pass cannot infer them.
     std::vector<int> roots = jac_slots;
     for (const auto& v : out.views) roots.push_back(v.slot);
-    // Target terms have no consuming op yet either: reduce_terms builds
-    // their ADD_N tree below, after the passes have run.
-    std::vector<int> update_roots = roots;
-    update_roots.insert(update_roots.end(), target_terms.begin(),
-                        target_terms.end());
-    const auto inplace_time = prep.start();
-    const int inplace =
-        make_inplace_updates(g, update_roots);  // off under STANLI_NO_INPLACE
-    prep.graph(prep_graph, "inplace", inplace_time, g, out.fills,
-               target_terms.size(), out.views.size(),
-               PrepTrace::Extra::Rewrites, inplace);
-    // Deleting the write/read-back pairs first is what leaves a plain
-    // arithmetic lane for reroll to vectorize.
-    const auto forward_time = prep.start();
-    const int forwarded = forward_stores_to_loads(g, update_roots);
-    prep.graph(prep_graph, "store_forward", forward_time, g, out.fills,
-               target_terms.size(), out.views.size(), PrepTrace::Extra::Removed,
-               forwarded);
-    // After the update chains collapse, so a data-only chain is one slot
-    // rather than N; before reroll, so the lanes it sees have data operands.
-    const auto constfold_time = prep.start();
-    const ConstFoldStats constfolded = const_fold(g, out.fills, update_roots);
-    prep.graph(prep_graph, "constfold", constfold_time, g, out.fills,
-               target_terms.size(), out.views.size(),
-               PrepTrace::Extra::ConstFold, constfolded.ops_removed,
-               constfolded.slots_folded);
-    const auto reroll_time = prep.start();
-    RerollStats rerolled;
-    detail::RerollDispositionStats reroll_dispositions;
-    if (prep.enabled()) {
-      detail::ProfiledRerollStats profiled =
-          detail::reroll_profiled(g, out.fills, target_terms, roots);
-      rerolled = profiled.work;
-      reroll_dispositions = profiled.dispositions;
-    } else {
-      rerolled = reroll(g, out.fills, target_terms, roots);  // STANLI_NO_REROLL
-    }
-    prep.graph(prep_graph, "reroll", reroll_time, g, out.fills,
-               target_terms.size(), out.views.size(), PrepTrace::Extra::Reroll,
-               rerolled.regions, rerolled.list_steps, false, 0,
-               rerolled.candidate_steps, rerolled.row_steps,
-               &reroll_dispositions);
-    // Target terms may have been replaced by vector reductions, so rebuild
-    // the implicit-root set before considering the slice stores reroll made.
-    std::vector<int> post_reroll_roots = roots;
-    post_reroll_roots.insert(post_reroll_roots.end(), target_terms.begin(),
-                             target_terms.end());
-    const auto post_reroll_inplace_time = prep.start();
-    const int post_reroll_inplace =
-        rerolled.regions ? make_inplace_updates(g, post_reroll_roots) : 0;
-    prep.graph(prep_graph, "post_reroll_inplace", post_reroll_inplace_time, g,
-               out.fills, target_terms.size(), out.views.size(),
-               PrepTrace::Extra::Rewrites, post_reroll_inplace);
-    // After re-roll, which keeps first crack at the contiguous shapes it
-    // already handles, and before CSE, which would merge ops shared between
-    // lanes and leave the lanes no longer whole.
-    const auto partition_time = prep.start();
-    const PartitionStats parted =
-        partition_lanes(g, out.fills, target_terms, roots);
-    prep.graph(prep_graph, "partition", partition_time, g, out.fills,
-               target_terms.size(), out.views.size(),
-               PrepTrace::Extra::Partition, parted.groups, parted.lanes, false,
-               0, parted.declined, parted.list_steps);
-    // Same proof the slice stores re-roll makes get: rebuilt from the terms
-    // partition just replaced.
-    std::vector<int> post_partition_roots = roots;
-    post_partition_roots.insert(post_partition_roots.end(),
-                                target_terms.begin(), target_terms.end());
-    const auto post_partition_inplace_time = prep.start();
-    const int post_partition_inplace =
-        parted.groups ? make_inplace_updates(g, post_partition_roots) : 0;
-    prep.graph(prep_graph, "post_partition_inplace",
-               post_partition_inplace_time, g, out.fills, target_terms.size(),
-               out.views.size(), PrepTrace::Extra::Rewrites,
-               post_partition_inplace);
-    // After every pass that emits a slice store, and before islands, whose
-    // bodies name outer slots in a payload this rename cannot reach.
-    const auto elide_time = prep.start();
-    const int elided = elide_full_extent_stores(g, post_partition_roots);
-    prep.graph(prep_graph, "elide_stores", elide_time, g, out.fills,
-               target_terms.size(), out.views.size(), PrepTrace::Extra::Removed,
-               elided);
-    // After reroll, whose lane matching needs the repeated ops it hoists to
-    // still be there, and before islands, so they compile the smaller
-    // residue.
-    const auto cse_time = prep.start();
-    const CseStats cse_st = cse(g, out.fills, target_terms, roots);
-    prep.graph(prep_graph, "cse", cse_time, g, out.fills, target_terms.size(),
-               out.views.size(), PrepTrace::Extra::Removed, cse_st.ops_removed);
-    // LAST, after every other pass has had first crack: compile whatever
-    // scalar residue survives (recurrences the re-roll can never widen)
-    // into island ops. Off under STANLI_NO_ISLAND.
-    const auto island_time = prep.start();
-    const int islands = carve_islands(g, out.fills, target_terms, roots);
-    prep.graph(prep_graph, "island", island_time, g, out.fills,
-               target_terms.size(), out.views.size(), PrepTrace::Extra::Regions,
-               islands);
+
+    run_passes(roots, PassPlan{true, true, true, true, true});
+
     const auto reduce_time = prep.start();
     std::vector<int> all = target_terms;
     all.insert(all.end(), jac_slots.begin(), jac_slots.end());
