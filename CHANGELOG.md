@@ -27,6 +27,11 @@ kernels run as one register program with a generated reverse pass, so a
 scalar recurrence costs one tape record per iteration instead of one per
 kernel (`STANLI_NO_STRUCTURED_SEGMENTS=1` keeps every kernel its own node).
 
+The recording evaluation hands back the storage of a data-only subtree whose
+values nothing reads once it exits, so the first gradient of a retained loop
+no longer costs several times the steady-state tape. ctsem at 400 rows peaks
+at 0.95 GB instead of 1.24 GB.
+
 By default a loop is retained when it is an outermost `while`, or an
 outermost `for` of at least 32 iterations whose body contains a `while` or a
 branch chosen by a parameter; every other loop unrolls as before.

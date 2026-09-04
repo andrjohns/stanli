@@ -98,11 +98,13 @@ void prepare_node(StructuredLoop& p, Node& n, unsigned depth,
   if (n.storage != Node::InPlace) n.storage = Node::Retained;
   n.active = false;
   n.memo = false;
+  n.memo_silent = false;
   n.trace = false;
   n.invariant_loop = -1;
   n.memo_index = -1;
   n.memo_outs.clear();
   n.memo_fresh = 0;
+  n.memo_keep.clear();
   n.site = ~uint32_t{0};
   n.workspace = -1;
   n.loop_index = -1;
@@ -491,6 +493,12 @@ struct Memoizer {
       for (int s : written)
         if (uses.output[s] || outside(s, inside) > traced[s])
           n.memo_outs.push_back(s);
+      // A traced reader takes the recorded decision on replay but still reads
+      // the value while recording, so a silent node hands those slots on.
+      n.memo_silent = n.memo_outs.empty();
+      if (n.memo_silent)
+        for (int s : written)
+          if (traced[s]) n.memo_keep.push_back(s);
       return;
     }
     for (auto& c : n.children) number(c);
@@ -1232,11 +1240,17 @@ struct BlockArena {
   struct Block {
     std::unique_ptr<double[]> data;
     size_t capacity = 0;
+  };
+  struct Mark {
+    size_t block = 0;
     size_t used = 0;
+    size_t live = 0;
   };
   static constexpr size_t min_block = size_t{1} << 16;
   std::vector<Block> blocks;
-  size_t total = 0;
+  double* next = nullptr;
+  double* limit = nullptr;
+  size_t cursor = 0, closed = 0;
 
   static Block make(size_t capacity) {
     Block block;
@@ -1253,47 +1267,77 @@ struct BlockArena {
         static_cast<uint64_t>(count) > std::numeric_limits<size_t>::max() / 2)
       throw std::length_error("structured loop storage overflow");
     const size_t n = static_cast<size_t>(count);
-    if (blocks.empty() || n > blocks.back().capacity - blocks.back().used) {
-      const size_t grown = blocks.empty() ? 0 : blocks.back().capacity * 2;
-      const size_t capacity = std::max({n, min_block, grown});
-      blocks.push_back(make(capacity));
-      total += capacity;
-    }
-    Block& block = blocks.back();
-    double* result = block.data.get() + block.used;
-    block.used += n;
+    if (n > static_cast<size_t>(limit - next)) grow(n);
+    double* result = next;
+    next += n;
     return result;
   }
-  size_t used() const {
-    size_t n = 0;
-    for (const auto& block : blocks) n += block.used;
-    return n;
+  // Blocks past the cursor stay allocated: freeing them on a rewind would
+  // make the next one cost a fresh block twice the size.
+  __attribute__((noinline)) void grow(size_t n) {
+    if (blocks.empty()) {
+      blocks.push_back(make(std::max(n, min_block)));
+      cursor = 0;
+    } else {
+      closed += used_here();
+      if (cursor + 1 < blocks.size() && n <= blocks[cursor + 1].capacity) {
+        ++cursor;
+      } else {
+        blocks.resize(cursor + 1);
+        blocks.push_back(
+            make(std::max({n, min_block, blocks[cursor].capacity * 2})));
+        cursor = blocks.size() - 1;
+      }
+    }
+    open(0);
+  }
+  void open(size_t at) {
+    next = blocks[cursor].data.get() + at;
+    limit = blocks[cursor].data.get() + blocks[cursor].capacity;
+  }
+  size_t used_here() const {
+    return blocks.empty()
+               ? 0
+               : static_cast<size_t>(next - blocks[cursor].data.get());
+  }
+  size_t used() const { return closed + used_here(); }
+  Mark mark() const { return Mark{cursor, used_here(), used()}; }
+  void rewind(const Mark& at) {
+    cursor = at.block;
+    if (!blocks.empty()) open(at.used);
+    closed = at.live - at.used;
   }
   // One block sized for the evaluation just finished, so a steady-state
   // evaluation never pays block growth and never keeps the first
   // evaluation's larger recording footprint.
   void clear() {
-    const size_t want = std::max(min_block, used() + used() / 8);
-    if (blocks.size() != 1 || blocks.back().capacity > 2 * want ||
-        blocks.back().capacity < want) {
+    const size_t high = used();
+    const size_t want = std::max(min_block, high + high / 8);
+    if (blocks.size() != 1 || blocks[0].capacity > 2 * want ||
+        blocks[0].capacity < want) {
       blocks.clear();
       blocks.push_back(make(want));
-      total = want;
     }
-    blocks.back().used = 0;
+    cursor = closed = 0;
+    open(0);
   }
 };
 
 template <class T>
-void right_size(std::vector<T>& v) {
-  if (v.empty()) return;
-  const size_t want = v.size() + v.size() / 8;
+void right_size(std::vector<T>& v, size_t used) {
+  if (used == 0) return;
+  const size_t want = used + used / 8;
   if (v.capacity() > 2 * want || v.capacity() < want) {
     std::vector<T> fresh;
     fresh.reserve(want);
     v.swap(fresh);
   }
   v.clear();
+}
+
+template <class T>
+void right_size(std::vector<T>& v) {
+  right_size(v, v.size());
 }
 
 struct Version {
@@ -1336,7 +1380,14 @@ struct LoopState : KernelState {
   std::vector<int64_t> memo_entries, memo_stride, memo_ordinal;
   std::vector<const Node*> memo_nodes;
   std::vector<int64_t> memo_shared_base, memo_shared;
+  std::vector<std::vector<uint32_t>> memo_invariant;
+  std::vector<char> memo_release;
+  std::vector<double> keep_store;
+  std::vector<int64_t> keep_version, keep_offset;
+  std::vector<int64_t> keep_store_base, keep_version_base;
   std::vector<int64_t> trace;
+  size_t version_peak = 0;
+  size_t record_arena = 0, record_versions = 0;
   size_t trace_pos = 0;
   uint64_t effects = 0;
   size_t memo_restores = 0, visits = 0;
@@ -1361,8 +1412,12 @@ struct LoopState : KernelState {
         memo_stride(plan.memo_count, 0),
         memo_ordinal(plan.memo_count, 0),
         memo_nodes(plan.memo_count, nullptr),
-        memo_shared_base(plan.memo_count, 0) {
-    collect(plan.root);
+        memo_shared_base(plan.memo_count, 0),
+        memo_invariant(plan.memo_count),
+        memo_release(plan.memo_count, 0),
+        keep_store_base(plan.memo_count, 0),
+        keep_version_base(plan.memo_count, 0) {
+    collect(plan.root, -1);
     int64_t shared = 0;
     for (size_t m = 0; m < memo_nodes.size(); ++m) {
       const Node* n = memo_nodes[m];
@@ -1394,29 +1449,61 @@ struct LoopState : KernelState {
     }
   }
 
-  void collect(const Node& n) {
+  // A subtree that leaves no value behind can give its storage back when it
+  // exits, unless a call inside it put something on the tape.
+  static bool releasable(const Node& n, bool& allocates) {
+    if (n.kind == Node::KernelCall) {
+      if (n.active) return false;
+      if (n.storage == Node::Retained) allocates = true;
+    }
+    if (n.kind == Node::For && n.storage != Node::Transient) allocates = true;
+    for (const auto& c : n.children)
+      if (!releasable(c, allocates)) return false;
+    return true;
+  }
+
+  void collect(const Node& n, int memo) {
     if (n.kind == Node::KernelCall) {
       if (n.site >= sites.size())
         throw std::logic_error("structured loop site numbering is stale");
       sites[n.site] = &n;
+      if (memo >= 0 && n.invariant_loop >= 0 && n.storage != Node::Transient)
+        memo_invariant[static_cast<size_t>(memo)].push_back(n.site);
     }
     if (n.memo) {
       if (n.memo_index < 0 ||
           static_cast<size_t>(n.memo_index) >= memo_stride.size())
         throw std::logic_error("structured loop memo numbering is stale");
+      if (n.memo_silent) {
+        bool allocates = false;
+        const size_t m = static_cast<size_t>(n.memo_index);
+        memo_release[m] = releasable(n, allocates) && allocates;
+        if (memo_release[m]) {
+          keep_store_base[m] = static_cast<int64_t>(keep_store.size());
+          keep_version_base[m] = static_cast<int64_t>(keep_version.size());
+          for (int slot : n.memo_keep) {
+            keep_version.push_back(-1);
+            keep_offset.push_back(static_cast<int64_t>(keep_store.size()));
+            keep_store.resize(keep_store.size() +
+                              static_cast<size_t>(p.body.slots[slot].len));
+          }
+        }
+      }
       memo_nodes[static_cast<size_t>(n.memo_index)] = &n;
       int64_t& stride = memo_stride[static_cast<size_t>(n.memo_index)];
       for (int slot : n.memo_outs) stride = add(stride, p.body.slots[slot].len);
     }
     if (n.kind == Node::For && n.storage == Node::Transient)
       transient_loops.push_back(&n);
-    for (const auto& c : n.children) collect(c);
+    for (const auto& c : n.children) collect(c, n.memo ? n.memo_index : memo);
   }
 
   void release() {
     arena.clear();
-    right_size(versions);
-    right_size(owner);
+    version_peak = std::max(version_peak, versions.size());
+    right_size(versions, version_peak);
+    right_size(owner, version_peak);
+    version_peak = 0;
     right_size(handles);
     right_size(undo);
     right_size(records);
@@ -1455,6 +1542,34 @@ struct Execution {
     s.owner.push_back(-1);
     return static_cast<int64_t>(s.versions.size()) - 1;
   }
+  struct Snapshot {
+    BlockArena::Mark arena;
+    size_t versions = 0;
+  };
+  Snapshot snapshot() const {
+    return Snapshot{s.arena.mark(), s.versions.size()};
+  }
+  // The kept slots move to fixed cells, the way a Transient result does: the
+  // reader takes the value before this node runs again.
+  void rewind(const Snapshot& at, const Node& n) {
+    const size_t m = static_cast<size_t>(n.memo_index);
+    s.record_arena = std::max(s.record_arena, s.arena.used());
+    double* store = s.keep_store.data() + s.keep_store_base[m];
+    for (int slot : n.memo_keep) {
+      const int64_t len = p.body.slots[slot].len;
+      std::copy_n(value(slot), len, store);
+      store += len;
+    }
+    s.arena.rewind(at.arena);
+    s.version_peak = std::max(s.version_peak, s.versions.size());
+    s.versions.resize(at.versions);
+    s.owner.resize(at.versions);
+    const int64_t* kept = s.keep_version.data() + s.keep_version_base[m];
+    for (size_t k = 0; k < n.memo_keep.size(); ++k)
+      s.bindings[n.memo_keep[k]] = kept[k];
+    for (uint32_t site : s.memo_invariant[m]) s.node_generation[site] = -1;
+  }
+
   int64_t reserve_adjoint(int64_t len) {
     const int64_t at = s.adjoint_size;
     s.adjoint_size = add(s.adjoint_size, len);
@@ -1561,14 +1676,25 @@ struct Execution {
     s.bindings[n.iterator] = make_version(cell, -1);
   }
 
-  Flow forward(const Node& n) {
-    if (!n.memo) return run(n);
-    if (n.memo_outs.empty()) {
-      if (s.memo_ready) return Normal;
-      const uint64_t effects = s.effects;
+  __attribute__((noinline)) Flow record_silent(const Node& n) {
+    const uint64_t effects = s.effects;
+    if (!s.memo_release[static_cast<size_t>(n.memo_index)]) {
       const Flow flow = run(n);
       s.effects = effects;
       return flow;
+    }
+    const Snapshot at = snapshot();
+    const Flow flow = run(n);
+    s.effects = effects;
+    rewind(at, n);
+    return flow;
+  }
+
+  Flow forward(const Node& n) {
+    if (!n.memo) return run(n);
+    if (n.memo_silent) {
+      if (s.memo_ready) return Normal;
+      return record_silent(n);
     }
     ++s.effects;
     const size_t m = static_cast<size_t>(n.memo_index);
@@ -1913,6 +2039,9 @@ void structured_loop_forward(KernelCtx& ctx) {
   for (const Node* n : s.transient_loops)
     s.loop_version[n->loop_index] =
         e.make_version(s.workspace.data() + n->workspace, -1);
+  for (size_t k = 0; k < s.keep_version.size(); ++k)
+    s.keep_version[k] =
+        e.make_version(s.keep_store.data() + s.keep_offset[k], -1);
   std::fill(s.node_generation.begin(), s.node_generation.end(), -1);
   std::fill(s.loop_generation.begin(), s.loop_generation.end(), 0);
   std::fill(s.memo_ordinal.begin(), s.memo_ordinal.end(), 0);
@@ -1957,10 +2086,13 @@ void structured_loop_forward(KernelCtx& ctx) {
     }
     ctx.out.data[pos++] = count ? s.target_work[0] : 0.0;
   }
+  if (!replaying) {
+    s.record_arena = std::max(s.record_arena, s.arena.used());
+    s.record_versions = std::max(s.version_peak, s.versions.size());
+  }
   if (s.report_tape && (replaying || p.memo_count == 0)) {
     s.report_tape = false;
-    size_t arena_used = 0;
-    for (const auto& block : s.arena.blocks) arena_used += block.used;
+    const size_t arena_used = s.arena.used();
     size_t kernel_records = 0, copies = 0, updates = 0, memo_tape = 0,
            segment_records = 0;
     for (const auto& r : s.records) {
@@ -1975,13 +2107,14 @@ void structured_loop_forward(KernelCtx& ctx) {
                  "handles=%zu kernel_records=%zu updates=%zu undo=%zu "
                  "copies=%zu targets=%zu workspace=%zu memo_nodes=%zu "
                  "memo_restores=%zu memo_tape=%zu traces=%zu trace=%zu "
-                 "visits=%zu segments=%zu segment_records=%zu\n",
+                 "visits=%zu segments=%zu segment_records=%zu "
+                 "record_arena=%zu record_versions=%zu\n",
                  arena_used, static_cast<long long>(s.adjoint_size),
                  s.versions.size(), s.handles.size(), kernel_records, updates,
                  s.undo.size() / 2, copies, s.target_refs.size(),
                  s.workspace.size(), p.memo_count, s.memo_restores, memo_tape,
                  p.trace_count, s.trace.size(), s.visits, p.segments.size(),
-                 segment_records);
+                 segment_records, s.record_arena, s.record_versions);
   }
   s.memo_ready = true;
   s.reverse_ready = true;

@@ -785,3 +785,51 @@ few ns, so about 15 ns per iteration against the flat executor's 40. That
 gain applies to loops that are flat, which today excludes ctsem (nested
 loops), the corpus recurrences with in-place element updates (hmm, garch,
 arma) and any body with an active loop-invariant kernel.
+
+## Addendum: the recording evaluation gives silent subtrees their storage back
+
+Date: 2026-09-03. Branch `feat/loop-next`.
+
+Measured on ctsem N=400 before the change: the recording evaluation allocates
+21.8M arena doubles and 15.8M versions against the replayed evaluation's 10.2M
+and 5.3M. The whole difference is inside memo nodes, and 10.2M of it is one
+iterator cell plus one version per iteration of a data-only `for` whose
+iterator some kernel reads by name. Peak RSS is 1.24 GB against a 0.53 GB
+steady-state tape.
+
+A memo node with no live-outs is skipped entirely on replay, so what it
+allocates while recording has no reader once it exits. Such a node
+(`Node::memo_silent`) takes an arena mark and a version count at entry and
+rewinds to them at exit. `BlockArena` keeps a cursor and the blocks past it,
+so a rewind never frees a block the next visit would have to buy back.
+
+Two things make the release safe:
+
+- A traced `If` or `For` reads its condition or bounds while recording even
+  though replay takes the decision from the trace, and `number()` discounts
+  exactly those reads when it decides live-outs. Those slots
+  (`Node::memo_keep`) move to fixed cells in the state with one version each
+  made per evaluation, the way a Transient result does: the reader takes the
+  value before the node runs again. Copying them into fresh arena versions
+  instead was measured and costs more than the release recovers -- 11.0M kept
+  versions against 10.2M freed.
+- A node whose subtree contains an active call puts records, handles and
+  adjoints on the tape that point into the region; those nodes are not
+  released. Cached results of loop-invariant calls inside a released node have
+  their generation invalidated.
+
+Result on ctsem: recording arena 21.8M -> 11.5M doubles, versions 15.8M ->
+5.6M. Peak RSS at N=400 1.24 GB -> 0.95 GB, at N=33 168 MB -> 142 MB.
+Gradient time 307.4 -> 306.0 ms at N=400 and 26.34 -> 26.13 ms at N=33; lp and
+gradients are bitwise identical at two points and the 130-model census is
+unchanged. The tape diagnostic gained `record_arena` and `record_versions`,
+the recording evaluation's peaks.
+
+Not done: releasing memo nodes that do have live-outs. Their live-outs are
+already copied to the memo tape, so a release would have to re-materialize
+them; measured, that is 1.18M versions freed against 1.97M tape doubles
+re-materialized per evaluation, which is a loss.
+
+`BlockArena::grow` is `noinline`. Inlined into `allocate` it cost m1 14% and
+ctsem 1%, by displacing the register program interpreter in the same
+translation unit.
