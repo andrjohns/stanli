@@ -371,10 +371,13 @@ let () =
     compile ~passes:(passes true) side_effect_loop in
   require
     (count_log_prob_fors side_effect_on > 0)
-    "pass-on rewrote a side-effecting loop";
+    "pass-on removed a side-effecting loop";
   require
-    (String.equal (encode side_effect_off) (encode side_effect_on))
-    "pass-on changed a side-effecting loop";
+    (not (log_prob_has_vector_density side_effect_off))
+    "pass-off vectorized the density beside a side effect";
+  require
+    (log_prob_has_vector_density side_effect_on)
+    "pass-on left the density beside a side effect in the loop";
 
   let distribute code =
     let mir = compile_upstream_o0 code in
