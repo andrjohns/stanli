@@ -1064,6 +1064,26 @@ comparison). After these changes per-op cost is dominated by loading
 the context, not the dispatch, so the remaining lever is fewer ops,
 which is what the passes above are.
 
+## Gather backward run compression (`elementwise.cpp`, reassociation, 10 ULP budget)
+
+`OP_GATHER`'s backward scatter-adds `out_adj[k]` into `in_adj[idata[k]]` one
+element at a time. Re-profiled 2026-09-04 on three gather-heavy radon models,
+it was 47.0% of `radon_county_intercept`'s gradient (43.8% of total time),
+39.6% of `radon_hierarchical_intercept_noncentered`'s, and 39.9% of
+`radon_hierarchical_intercept_centered`'s, almost all in the backward half.
+The kernel now scans for runs of consecutive equal indices (`county_idx`-style
+data is grouped, not necessarily fully sorted) and accumulates each run into a
+local before one store, cutting memory read-modify-writes to `in_adj` from one
+per element to one per run. Indices that never repeat consecutively fall back
+to the original per-element behavior bit for bit.
+
+Measured on `radon_county_intercept`: `OP_GATHER` backward went from
+79,546,392 ns to 11,322,356 ns per 2000-gradient batch (7.0x), taking the
+opcode's share of the gradient from 47.0% to 16.3% and the per-gradient median
+from 96,152.6 ns to 55,009.8 ns (1.75x). The other two models' `OP_GATHER`
+share fell from 39.6-39.9% to 12.7%. Drift is reassociation-class, bounded at
+10 ULP; the full corpus stayed at 130/130 models within 1e-09 of CmdStan.
+
 ## Unblocked: reduction reassociation (surveyed 2026-08-25, unblocked 2026-09-04)
 
 The candidates below change summation order rather than any elementwise
@@ -1081,11 +1101,6 @@ Softmax backward as a packet dot product (`adjoint.cpp`). Declined
 backward at gradient time. The reassociated dot also fails the 10 ULP budget
 by construction: `adj_i = p_i (oa_i - d)` cancels when `oa_i` is close to
 `d`, so a 1e-16 relative change in `d` became 23 to 128 ULP in the tests.
-
-Gather backward via segmented reduction (`elementwise.cpp`). The ascending
-scatter-add matches var edge order; a rowwise sum over a presorted index
-(indices are lowering-time constants) was 37% of
-`radon_county_intercept`'s backward.
 
 Per-lane scalar density binding (`densities_impl.hpp`). N scalar recorder
 calls with a `sink_scope` each, where one vectorized call would do. Density

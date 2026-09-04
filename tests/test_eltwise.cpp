@@ -222,6 +222,110 @@ static void test_expression_layout_policy() {
   stan::math::recover_memory();
 }
 
+static int64_t ulps(double a, double b) {
+  if (a == b || (std::isnan(a) && std::isnan(b))) return 0;
+  int64_t ia, ib;
+  std::memcpy(&ia, &a, sizeof ia);
+  std::memcpy(&ib, &b, sizeof ib);
+  if ((ia < 0) != (ib < 0)) return INT64_MAX;
+  const int64_t d = ia - ib;
+  return d < 0 ? -d : d;
+}
+
+// dot(src[idata], weights) plus, for a parameter source, a second term that
+// seeds a nonzero adjoint before the gather's backward runs.
+static std::vector<double> run_gather_dot(const std::vector<int>& idx,
+                                          const std::vector<double>& weights,
+                                          int64_t j, bool param_source) {
+  using namespace stanli;
+  Graph g;
+  const int src = g.add_slot(j, param_source);
+  const int weight = g.add_slot((int64_t)weights.size(), false);
+  const int gathered = g.add_slot((int64_t)idx.size(), false);
+  g.idata_pool.push_back(idx);
+  Op gop;
+  gop.opcode = OP_GATHER;
+  gop.out = gathered;
+  gop.in[0] = src;
+  gop.n_in = 1;
+  gop.idata = g.idata_pool.back().data();
+  gop.n_idata = (int64_t)g.idata_pool.back().size();
+  g.ops.push_back(gop);
+  const int dotv = g.add_slot(1, false);
+  g.add_op(OP_DOT, {gathered, weight}, dotv);
+  int lp = -1, offsets = -1;
+  if (param_source) {
+    offsets = g.add_slot(j, false);
+    const int shifted = g.add_slot(j, false);
+    const int seed_sum = g.add_slot(1, false);
+    g.add_op(OP_ADD, {src, offsets}, shifted);
+    g.add_op(OP_SUM_VEC, {shifted}, seed_sum);
+    lp = g.add_slot(1, false);
+    g.add_op(OP_ADD_N, {dotv, seed_sum}, lp);
+  } else {
+    const int extra = g.add_slot(1, true);
+    lp = g.add_slot(1, false);
+    g.add_op(OP_ADD, {dotv, extra}, lp);
+  }
+  g.result_slot = lp;
+
+  Executor ex(std::move(g));
+  double* wp = ex.value_ptr(weight);
+  std::copy(weights.begin(), weights.end(), wp);
+  if (param_source) {
+    double* op = ex.value_ptr(offsets);
+    for (int64_t i = 0; i < j; ++i) op[i] = 0.0;
+  } else {
+    double* sp = ex.value_ptr(src);
+    for (int64_t i = 0; i < j; ++i) sp[i] = 0.5 + 0.1 * (double)i;
+  }
+  std::vector<double> grad((size_t)ex.n_params());
+  for (int64_t i = 0; i < ex.n_params(); ++i)
+    ex.params_data()[i] = 0.1 + 0.05 * (double)i;
+  ex.gradient(grad.data());
+  return grad;
+}
+
+static void test_gather_bwd_repeated_indices() {
+  const int64_t J = 5;
+  const std::vector<double> weights_sorted = {
+      1.3, -0.7, 2.1, 0.4, -1.9, 0.05, 3.3, -2.2, 0.11, 1.0, -0.65};
+  const std::vector<int> idx_sorted = {0, 0, 0, 1, 1, 2, 3, 3, 3, 3, 4};
+  const std::vector<double> weights_unsorted = {
+      0.9, -1.1, 2.3, -0.4, 1.7, -2.9, 0.65, -0.15, 1.05, -0.8};
+  const std::vector<int> idx_unsorted = {2, 0, 3, 0, 1, 3, 2, 0, 4, 1};
+
+  auto check = [](const char* tag, const std::vector<int>& idx,
+                   const std::vector<double>& weights, int64_t j,
+                   int budget) {
+    const std::vector<double> got = run_gather_dot(idx, weights, j, true);
+    std::vector<double> want(j, 1.0);
+    for (size_t k = 0; k < idx.size(); ++k) want[idx[k]] += weights[k];
+    for (int64_t i = 0; i < j; ++i) {
+      const int64_t d = ulps(got[i], want[i]);
+      if (d > budget) {
+        ++failures;
+        std::printf("FAIL %s g%lld got %.17g want %.17g (%lld ulps)\n", tag,
+                    (long long)i, got[i], want[i], (long long)d);
+      }
+    }
+  };
+  check("gather sorted runs", idx_sorted, weights_sorted, J, 10);
+  check("gather unsorted dup", idx_unsorted, weights_unsorted, J, 0);
+}
+
+static void test_gather_bwd_null_in_adj() {
+  const int64_t J = 3;
+  const std::vector<int> idx = {0, 1, 1, 2};
+  const std::vector<double> weights = {1.5, -0.5, 2.0, 0.25};
+  const std::vector<double> got = run_gather_dot(idx, weights, J, false);
+  if (got.size() != 1 || got[0] != 1.0) {
+    ++failures;
+    std::printf("FAIL gather null in_adj no-op grad0 got %.17g want 1\n",
+                got.empty() ? 0.0 : got[0]);
+  }
+}
+
 int main() {
   using namespace stanli;
   test_expression_layout_policy();
@@ -364,6 +468,9 @@ int main() {
   // DOT
   check_case("dot", OP_DOT, 1, {A, B},
              [](auto& v) { return stan::math::dot_product(v[0], v[1]); });
+
+  test_gather_bwd_repeated_indices();
+  test_gather_bwd_null_in_adj();
 
   // Reductions must preserve Stan Math's scalar/owning-Eigen grouping in the
   // value sweep and its exact reverse expression. Short examples do not cross

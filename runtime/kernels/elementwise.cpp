@@ -327,16 +327,26 @@ void slice_strided_bwd(KernelCtx& ctx) {
     ctx.in_adj[0].data[start + i * stride] += ctx.out_adj_vec.data[i];
 }
 
-// OP_GATHER: out[k] = in[idata[k]] (0-based indices); adjoints scatter-add
-// in ascending k, matching the var path's edge order (duplicates included).
+// OP_GATHER: out[k] = in[idata[k]] (0-based indices).
 void gather_fwd(KernelCtx& ctx) {
   for (int64_t k = 0; k < ctx.out.len; ++k)
     ctx.out.data[k] = ctx.in[0].data[ctx.idata[k]];
 }
 void gather_bwd(KernelCtx& ctx) {
   if (!ctx.in_adj[0].data) return;
-  for (int64_t k = 0; k < ctx.out.len; ++k)
-    ctx.in_adj[0].data[ctx.idata[k]] += ctx.out_adj_vec.data[k];
+  double* in_adj = ctx.in_adj[0].data;
+  const double* out_adj = ctx.out_adj_vec.data;
+  const int* idata = ctx.idata;
+  const int64_t n = ctx.out.len;
+  int64_t k = 0;
+  while (k < n) {
+    const int idx = idata[k];
+    double sum = out_adj[k];
+    int64_t j = k + 1;
+    while (j < n && idata[j] == idx) sum += out_adj[j++];
+    in_adj[idx] += sum;
+    k = j;
+  }
 }
 
 // OP_CONCAT2: out = [in[0]; in[1]] (contiguous; serves append_row of
