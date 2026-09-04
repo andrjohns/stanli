@@ -1122,6 +1122,17 @@ And Eigen's vectorized `pow` is 5x slower than scalar `std::pow` on Apple
 libm, with the `exp(k log x)` form costing 8 ULP, so the `POW` share of the
 `dogs` models stays where it is.
 
+## Constant folding and CSE on write_array (`lower.cpp`)
+
+`run_write_array` used to stop after inplace, store-forward, and reroll, so
+every data-only chain and duplicated GLM term from generated quantities
+stayed in the graph (`covid19imperial_v2`: 595,563 ops). It now runs
+constfold and CSE as well: 376,848 ops, per-draw write_array 7.22 ms to
+3.37 ms; `hmm_gaussian` 1.20 ms to 0.61 ms. Compile cost is about 95 ms on
+`covid19imperial_v2`, paid back within three draws. 29 of 120 corpus models
+shrink, none grow, and the replay is unchanged. Partition, elide_stores, and
+islands stay off: write_array has no target reduction to feed them.
+
 ## How we check all of this
 
 Every pass changes the graph, and a wrong graph produces wrong numbers

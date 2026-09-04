@@ -8732,9 +8732,10 @@ struct Lowering {
   }
 
   // The write_array graph: same unconstrained draw in, every CSV column out.
-  // Forward-only, so no target, no jacobian, no adjoints -- but the same
-  // lowering, and the same passes, because generated quantities are unrolled
-  // over the data exactly like the model block is.
+  // Forward-only, so no target, no jacobian, no adjoints, and no per-lane
+  // partitioning or islands -- reroll, constfold, and CSE still apply,
+  // because generated quantities are unrolled over the data exactly like
+  // the model block is.
   struct PassPlan {
     bool constfold;
     bool partition;
@@ -8881,7 +8882,7 @@ struct Lowering {
                target_terms.size(), out.views.size(),
                PrepTrace::Extra::Truncated, !wa.truncated.empty());
 
-    run_passes(roots, PassPlan{false, false, false, false, false});
+    run_passes(roots, PassPlan{true, false, false, true, false});
 
     const auto finalize_time = prep.start();
     // Nothing reads a result here, but forward() asserts a scalar result
