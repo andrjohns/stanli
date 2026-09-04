@@ -162,6 +162,10 @@ static Graph outer(std::shared_ptr<StructuredLoop> plan,
   graph.ops.push_back(op);
   graph.udata_pool.push_back(std::move(plan));
   graph.result_slot = output;
+  if (output_len != 1) {
+    graph.result_slot = graph.add_slot(1, false);
+    graph.add_op(OP_INDEX, {output}, graph.result_slot, {0});
+  }
   return graph;
 }
 
