@@ -352,6 +352,15 @@ KernelCtx call_fwd_ctx(const Program::Call& call, double* reg);
 // call unbound, so malformed or unavailable opcodes fail closed.
 bool bind_call(Program::Call& call);
 
+// A kernel's scratch_size takes an Op/Slot pair, not a call site, so a
+// caller assembling a Program::Call by hand has to reconstruct that shape
+// first. Null `scratch_size` means zero.
+int64_t kernel_call_scratch(int64_t (*scratch_size)(const Op&, const Slot*),
+                            uint16_t opcode, uint8_t variant, int8_t n_in,
+                            const int32_t* in_len, int32_t out_len,
+                            const int* idata, int64_t n_idata,
+                            const void* udata);
+
 // Replay a graph-kernel call on a var register file. The kernel still owns its
 // value and pullback; this adapter only gathers/scatters the non-contiguous
 // vari pointers used by a runtime-control program.

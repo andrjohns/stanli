@@ -1723,27 +1723,13 @@ struct ProgramCompiler {
 
     const Kernel* kernel = find_kernel(opcode);
     if (kernel == nullptr) bail(name + ": graph kernel is unavailable");
-    if (kernel->scratch_size != nullptr) {
-      Op op;
-      op.opcode = opcode;
-      op.variant = variant;
-      op.n_in = call.n_in;
-      op.out = call.n_in;
-      op.idata = call.idata.data();
-      op.n_idata = (int64_t)call.idata.size();
-      op.udata = call.udata_owner.get();
-      std::vector<Slot> slots(args.size() + 1);
-      for (size_t k = 0; k < args.size(); ++k) {
-        op.in[k] = (int)k;
-        slots[k].len = args[k].len;
-      }
-      slots.back().len = out.len;
-      const int64_t scratch = kernel->scratch_size(op, slots.data());
-      if (scratch < 0 || scratch > kMaxRegs)
-        bail(name + ": kernel needs excessive scratch storage");
-      call.scratch_len = (int32_t)scratch;
-      call.scratch = scratch ? alloc((int)scratch) : 0;
-    }
+    const int64_t scratch = kernel_call_scratch(
+        kernel->scratch_size, opcode, variant, call.n_in, call.in_len, out.len,
+        call.idata.data(), (int64_t)call.idata.size(), call.udata_owner.get());
+    if (scratch < 0 || scratch > kMaxRegs)
+      bail(name + ": kernel needs excessive scratch storage");
+    call.scratch_len = (int32_t)scratch;
+    call.scratch = scratch ? alloc((int)scratch) : 0;
     if (!bind_call(call)) bail(name + ": graph kernel is unavailable");
     p.calls.push_back(std::move(call));
     p.code.push_back(Program::Instr{Program::CALL, 0, (int)p.calls.size() - 1});

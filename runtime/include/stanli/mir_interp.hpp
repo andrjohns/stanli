@@ -24,10 +24,12 @@
 #include <stanli/container_shape.hpp>
 #include <stanli/data.hpp>
 #include <stanli/extrema_grouping.hpp>
+#include <stanli/kernel_bridge.hpp>
 #include <stanli/mir_message.hpp>
 #include <stanli/mir.hpp>
-#include <stanli/optable.hpp>  // STANLI_SCALAR_UNARY_LIST
+#include <stanli/optable.hpp>
 #include <stanli/program.hpp>
+#include <stanli/regular_builtin.hpp>
 #include <stanli/structured_check.hpp>
 
 #include <stan/math.hpp>
@@ -1379,6 +1381,56 @@ class MirInterp {
       return is_scalar(a) || is_scalar(b) ||
              (a.dims == b.dims && a.r.size() == b.r.size());
     };
+    std::string regular_name = e.name;
+    if (regular_name == "fabs")
+      regular_name = "abs";
+    else if (regular_name == "binomial_coefficient_log")
+      regular_name = "lchoose";
+    if (const auto spec =
+            resolve_regular_builtin(regular_name, e.args.size())) {
+      const bool matrix_divisor =
+          e.name == "Divide__" && e.args.at(1).type_ == "UMatrix";
+      const bool int_preserving =
+          e.type_ == "UInt" &&
+          ((spec->kind == RegularKind::Binary &&
+            (spec->opcode == OP_ADD || spec->opcode == OP_SUB ||
+             spec->opcode == OP_DIV)) ||
+           (spec->kind == RegularKind::Unary && spec->opcode == OP_NEG));
+      if (!matrix_divisor && !int_preserving) {
+        if (spec->kind == RegularKind::Unary) {
+          Value a = eval(e.args[0]);
+          Value o;
+          o.dims = a.dims;
+          o.r.resize(a.r.size());
+          const std::vector<const std::vector<T>*> in{&a.r};
+          call_kernel<T>(spec->opcode, 0, 0x3f, {}, in, o.r);
+          return o;
+        }
+        Value a = eval(e.args[0]), b = eval(e.args[1]);
+        if (spec->kind == RegularKind::Binary && !shapes_match(a, b))
+          fail(e.name + ": incompatible shapes", e.raw);
+        Value o;
+        uint8_t mask = 0x3f;
+        if (spec->kind == RegularKind::Binary) {
+          const bool bigger_b = is_scalar(a) && !is_scalar(b);
+          o.dims = bigger_b ? b.dims : a.dims;
+          o.r.resize(bigger_b ? b.r.size() : a.r.size());
+        } else {
+          const bool int_first = spec->kind == RegularKind::BinaryIntFirst;
+          const Value& re = int_first ? b : a;
+          const Value& iv = int_first ? a : b;
+          if (!is_scalar(re) && !is_scalar(iv) && re.r.size() != iv.r.size())
+            fail(e.name + ": arguments must match in size", e.raw);
+          const bool re_scalar = is_scalar(re);
+          o.dims = re_scalar ? iv.dims : re.dims;
+          o.r.resize(re_scalar ? iv.r.size() : re.r.size());
+          mask = int_first ? 0x2 : 0x1;
+        }
+        const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+        call_kernel<T>(spec->opcode, 0, mask, {}, in, o.r);
+        return o;
+      }
+    }
     // Elementwise with scalar broadcasting; results of real math are real
     // even on int inputs, and binary int results stay int only when both
     // sides are int scalars.
@@ -1397,40 +1449,6 @@ class MirInterp {
       }
       return o;
     };
-    // Two-argument scalar math with one int argument (bessel_first_kind
-    // and friends): bin's broadcast and shape rules, but the int side
-    // reaches stan-math as an int, which is what those overloads take.
-    // `int_first` says which position holds it. No layout correction like
-    // the graph kernel's -- every container here is column-major, arrays
-    // included, so a matrix and an int array of the same dims already pair
-    // element for element, which is the pairing stan-math makes.
-    auto bin_int = [&](bool int_first, auto f) {
-      Value a = eval(e.args[0]), b = eval(e.args[1]);
-      if (!shapes_match(a, b)) fail(e.name + ": incompatible shapes", e.raw);
-      const Value& re = int_first ? b : a;
-      const Value& iv = int_first ? a : b;
-      Value o;
-      const size_t n = broadcast_size(a, b);
-      o.r.resize(n);
-      o.dims = broadcast_dims(a, b);
-      const bool rs = re.r.size() == 1, is = iv.r.size() == 1;
-      for (size_t i = 0; i < n; ++i) {
-        const size_t k = is ? 0 : i;
-        const int q = iv.is_int && k < iv.i.size()
-                          ? iv.i[k]
-                          : (int)std::llround(val(iv.r[k]));
-        o.r[i] = f(re.r[rs ? 0 : i], q);
-      }
-      // Only falling_factorial and rising_factorial have an int,int
-      // overload that answers int; everywhere else two int arguments still
-      // make a real, so stanc's own result type decides rather than the
-      // arguments.
-      if (e.type_ == "UInt" && n == 1) {
-        o.is_int = true;
-        o.i = {(int)val(o.r[0])};
-      }
-      return o;
-    };
     auto un = [&](auto f) {
       Value a = eval(e.args[0]);
       Value o;
@@ -1446,16 +1464,14 @@ class MirInterp {
         return T(f(val(x), val(y)) ? 1.0 : 0.0);
       });
     };
-    // add/subtract/multiply/elt_multiply/divide/elt_divide are the named
-    // spellings of the binary operators, and they are taught here beside
-    // the operators rather than in a table of their own: the graph
-    // lowering knows them too, and teaching only one side is what let a
-    // vectorized log_sum_exp answer transformed data with the wrong value
-    // and no exception.
-    if (e.name == "Plus__" || e.name == "add")
-      return bin([](const T& x, const T& y) { return x + y; });
-    if (e.name == "Minus__" || e.name == "subtract")
-      return bin([](const T& x, const T& y) { return x - y; });
+    if ((e.name == "Plus__" || e.name == "Minus__") && e.type_ == "UInt") {
+      const long x = as_int(e.args[0]), y = as_int(e.args[1]);
+      const long q = e.name == "Plus__" ? x + y : x - y;
+      r.is_int = true;
+      r.i = {(int)q};
+      r.r = {T((double)q)};
+      return r;
+    }
     if (e.name == "Times__" || e.name == "multiply") {
       // Times on shaped operands is linear algebra, not elementwise; only
       // a scalar operand (either side) scales elementwise.
@@ -1529,8 +1545,6 @@ class MirInterp {
       }
       return r;
     }
-    if (e.name == "EltTimes__" || e.name == "elt_multiply")
-      return bin([](const T& x, const T& y) { return x * y; });
     // `A \ v` and `rv / A` are linear solves. stanc spells them with the
     // ordinary division operators, so the divisor's type is what tells a
     // solve from elementwise division by a scalar; `./` is never a solve.
@@ -1657,9 +1671,6 @@ class MirInterp {
       r.r = {T((double)q)};
       return r;
     }
-    if (e.name == "Divide__" || e.name == "EltDivide__" || e.name == "divide" ||
-        e.name == "elt_divide")
-      return bin([](const T& x, const T& y) { return x / y; });
     // `%` and `%/%`. Both operands are int by stanc's typing, so these are
     // C++ integer operators -- truncated toward zero -- and not fmod and
     // real division rounded afterwards, which disagree on negatives.
@@ -1680,97 +1691,6 @@ class MirInterp {
       r.r = {T((double)q)};
       return r;
     }
-    if (e.name == "Pow__" || e.name == "EltPow__" || e.name == "pow")
-      return bin([](const T& x, const T& y) { return stan::math::pow(x, y); });
-    if (e.name == "fmax")
-      return bin([](const T& x, const T& y) { return stan::math::fmax(x, y); });
-    if (e.name == "fmin")
-      return bin([](const T& x, const T& y) { return stan::math::fmin(x, y); });
-    if (e.name == "atan2")
-      return bin(
-          [](const T& x, const T& y) { return stan::math::atan2(x, y); });
-    if (e.name == "beta" && e.args.size() == 2)
-      return bin([](const T& x, const T& y) { return stan::math::beta(x, y); });
-    if (e.name == "fdim")
-      return bin([](const T& x, const T& y) { return stan::math::fdim(x, y); });
-    if (e.name == "fmod")
-      return bin([](const T& x, const T& y) { return stan::math::fmod(x, y); });
-    if (e.name == "gamma_p")
-      return bin(
-          [](const T& x, const T& y) { return stan::math::gamma_p(x, y); });
-    if (e.name == "gamma_q")
-      return bin(
-          [](const T& x, const T& y) { return stan::math::gamma_q(x, y); });
-    if (e.name == "hypot")
-      return bin(
-          [](const T& x, const T& y) { return stan::math::hypot(x, y); });
-    if (e.name == "lbeta")
-      return bin(
-          [](const T& x, const T& y) { return stan::math::lbeta(x, y); });
-    if (e.name == "lchoose" || e.name == "binomial_coefficient_log")
-      return bin([](const T& x, const T& y) {
-        return stan::math::binomial_coefficient_log(x, y);
-      });
-    if (e.name == "log_falling_factorial")
-      return bin([](const T& x, const T& y) {
-        return stan::math::log_falling_factorial(x, y);
-      });
-    if (e.name == "log_inv_logit_diff")
-      return bin([](const T& x, const T& y) {
-        return stan::math::log_inv_logit_diff(x, y);
-      });
-    if (e.name == "log_modified_bessel_first_kind")
-      return bin([](const T& x, const T& y) {
-        return stan::math::log_modified_bessel_first_kind(x, y);
-      });
-    if (e.name == "log_rising_factorial")
-      return bin([](const T& x, const T& y) {
-        return stan::math::log_rising_factorial(x, y);
-      });
-    if (e.name == "owens_t")
-      return bin(
-          [](const T& x, const T& y) { return stan::math::owens_t(x, y); });
-    if (e.name == "bessel_first_kind")
-      return bin_int(true, [](const T& x, int k) {
-        return stan::math::bessel_first_kind(k, x);
-      });
-    if (e.name == "bessel_second_kind")
-      return bin_int(true, [](const T& x, int k) {
-        return stan::math::bessel_second_kind(k, x);
-      });
-    if (e.name == "modified_bessel_first_kind")
-      return bin_int(true, [](const T& x, int k) {
-        return stan::math::modified_bessel_first_kind(k, x);
-      });
-    if (e.name == "modified_bessel_second_kind")
-      return bin_int(true, [](const T& x, int k) {
-        return stan::math::modified_bessel_second_kind(k, x);
-      });
-    if (e.name == "binary_log_loss")
-      return bin_int(true, [](const T& x, int k) {
-        return stan::math::binary_log_loss(k, x);
-      });
-    if (e.name == "lmgamma")
-      return bin_int(
-          true, [](const T& x, int k) { return stan::math::lmgamma(k, x); });
-    if (e.name == "falling_factorial")
-      return bin_int(false, [](const T& x, int k) {
-        return stan::math::falling_factorial(x, k);
-      });
-    if (e.name == "rising_factorial")
-      return bin_int(false, [](const T& x, int k) {
-        return stan::math::rising_factorial(x, k);
-      });
-    if (e.name == "ldexp")
-      return bin_int(false,
-                     [](const T& x, int k) { return stan::math::ldexp(x, k); });
-    // --O1 partial evaluation rewrites `x * log(y)` to lmultiply(x, y);
-    // multiply_log computes exactly x * log(y), so the value is bitwise
-    // what the unoptimized form produced.
-    if (e.name == "lmultiply" || e.name == "multiply_log")
-      return bin([](const T& x, const T& y) {
-        return stan::math::multiply_log(x, y);
-      });
     // fma from --O1 partial evaluation (`c + a*b`) or written explicitly:
     // fused like stan-math's, elementwise with scalar broadcast.
     if (e.name == "fma" && e.args.size() == 3) {
@@ -1898,44 +1818,16 @@ class MirInterp {
         o.r = serialized_container_order(o.r, o.dims, outer_rank);
       return o;
     }
-    // minus and plus are the named spellings of the unary operators, so
-    // they are the same identity and the same negation over the same
-    // shapes. The graph lowering knows them too; teaching only one side is
-    // what let a vectorized log_sum_exp leave elements uninitialized here.
-    if (e.name == "PMinus__" || (e.name == "minus" && e.args.size() == 1))
-      return un([](const T& x) { return -x; });
+    if ((e.name == "PMinus__" || e.name == "minus") && e.args.size() == 1 &&
+        e.type_ == "UInt") {
+      const long x = as_int(e.args[0]);
+      r.is_int = true;
+      r.i = {(int)(-x)};
+      r.r = {T((double)(-x))};
+      return r;
+    }
     if (e.name == "PPlus__" || (e.name == "plus" && e.args.size() == 1))
       return un([](const T& x) { return x; });
-    if (e.name == "exp")
-      return un([](const T& x) { return stan::math::exp(x); });
-    if (e.name == "log")
-      return un([](const T& x) { return stan::math::log(x); });
-    if (e.name == "sqrt")
-      return un([](const T& x) { return stan::math::sqrt(x); });
-    if (e.name == "ceil")
-      return un([](const T& x) { return stan::math::ceil(x); });
-    if (e.name == "square")
-      return un([](const T& x) { return stan::math::square(x); });
-    if (e.name == "inv_logit")
-      return un([](const T& x) { return stan::math::inv_logit(x); });
-    if (e.name == "logit")
-      return un([](const T& x) { return stan::math::logit(x); });
-    if (e.name == "log1m")
-      return un([](const T& x) { return stan::math::log1m(x); });
-    if (e.name == "tanh")
-      return un([](const T& x) { return stan::math::tanh(x); });
-    if (e.name == "cumulative_sum") {
-      Value a = eval(e.args[0]);
-      Value o;
-      o.dims =
-          a.dims.empty() ? std::vector<int64_t>{(int64_t)a.r.size()} : a.dims;
-      T s = T(0.0);
-      for (const T& x : a.r) {
-        s += x;
-        o.r.push_back(s);
-      }
-      return o;
-    }
     if (e.name == "quad_form_diag" && e.args.size() == 2) {
       // diag(v) * M * diag(v): elementwise row and column scaling.
       Value m = eval(e.args[0]);
@@ -2117,8 +2009,6 @@ class MirInterp {
         }
       return o;
     }
-    if (e.name == "fabs")
-      return un([](const T& x) { return stan::math::fabs(x); });
     if (e.name == "mean") {
       Value a = eval(e.args[0]);
       T m = T(0.0);
@@ -2472,31 +2362,10 @@ class MirInterp {
         }
       return r;
     }
-    // Two arguments is the elementwise form, which Stan vectorizes over
-    // every container shape with scalar broadcast, so it belongs with the
-    // binaries above; only one-argument log_sum_exp is a reduction, and
-    // log_diff_exp has no reduction form at all.
-    if (e.name == "log_sum_exp" && e.args.size() == 2)
-      return bin(
-          [](const T& x, const T& y) { return stan::math::log_sum_exp(x, y); });
-    if (e.name == "log_diff_exp" && e.args.size() == 2)
-      return bin([](const T& x, const T& y) {
-        return stan::math::log_diff_exp(x, y);
-      });
     if (e.name == "log_sum_exp") {
       Value a = eval(e.args[0]);
       r.r = {lse(a.r)};
       return r;
-    }
-    if (e.name == "softmax" || e.name == "log_softmax") {
-      Value a = eval(e.args[0]);
-      const T m = lse(a.r);
-      Value o;
-      o.dims =
-          a.dims.empty() ? std::vector<int64_t>{(int64_t)a.r.size()} : a.dims;
-      for (const T& x : a.r)
-        o.r.push_back(e.name == "softmax" ? stan::math::exp(x - m) : x - m);
-      return o;
     }
     if ((e.name == "diag_pre_multiply" || e.name == "diag_post_multiply") &&
         e.args.size() == 2) {
@@ -2922,44 +2791,6 @@ class MirInterp {
     // the hmm Viterbi recursions, log-likelihood columns). Elementwise
     // with scalar broadcasting, summed, which is stan-math's vectorized
     // semantics.
-    // Scalar unaries from the shared list, so transformed data and
-    // generated quantities accept exactly what the log-density path does.
-    // Evaluate the table's value formula on doubles on every route. An ODE
-    // fallback instantiates this on var; one arena callback node applies the
-    // same ordered pullback without selecting a second implementation. Keep
-    // `x`, `y`, and the callback's `seed` visible to that shared expression.
-#define STANLI_INTERP_UNARY(code, ufn, VAL, DELTA, TOPOLOGY)              \
-  if (e.name == #ufn && e.args.size() == 1) {                             \
-    return un([](const T& arg) {                                          \
-      const double x = val(arg);                                          \
-      const double y = VAL;                                               \
-      if constexpr (std::is_same_v<T, double>) {                          \
-        return y;                                                         \
-      } else {                                                            \
-        if (!unary_has_pullback(TOPOLOGY, x)) return T(y);                \
-        return stan::math::make_callback_var(y, [arg](auto& vi) mutable { \
-          const double x = stan::math::value_of(arg);                     \
-          const double y = vi.val();                                      \
-          const double seed = vi.adj();                                   \
-          arg.adj() += (DELTA);                                           \
-        });                                                               \
-      }                                                                   \
-    });                                                                   \
-  }
-    STANLI_SCALAR_UNARY_LIST(STANLI_INTERP_UNARY)
-#undef STANLI_INTERP_UNARY
-
-    // The two unaries the shared list cannot generate. std_normal_qf is
-    // stanc3's alias for inv_Phi (Lower_expr.ml maps it onto
-    // stan::math::inv_Phi), and trigamma's derivative is the derivative of
-    // AS121's recurrence rather than a formula, so both take Math's own
-    // overload: on doubles that is the prim call, on var it is the tape the
-    // graph kernel replays.
-    if (e.name == "std_normal_qf" && e.args.size() == 1)
-      return un([](const T& x) { return stan::math::inv_Phi(x); });
-    if (e.name == "trigamma" && e.args.size() == 1)
-      return un([](const T& x) { return stan::math::trigamma(x); });
-
     // Categorical arguments are containers as a whole, not elementwise
     // broadcasts. Preserve scalar-vs-array outcome overloads and the
     // caller's propto instantiation exactly as the graph kernel does.

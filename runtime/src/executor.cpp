@@ -109,6 +109,29 @@ bool bind_call(Program::Call& call) {
   return true;
 }
 
+int64_t kernel_call_scratch(int64_t (*scratch_size)(const Op&, const Slot*),
+                            uint16_t opcode, uint8_t variant, int8_t n_in,
+                            const int32_t* in_len, int32_t out_len,
+                            const int* idata, int64_t n_idata,
+                            const void* udata) {
+  if (scratch_size == nullptr) return 0;
+  Op op;
+  op.opcode = opcode;
+  op.variant = variant;
+  op.n_in = n_in;
+  op.out = n_in;
+  op.idata = idata;
+  op.n_idata = n_idata;
+  op.udata = udata;
+  std::vector<Slot> slots((size_t)n_in + 1);
+  for (int k = 0; k < n_in; ++k) {
+    op.in[k] = k;
+    slots[(size_t)k].len = in_len[k];
+  }
+  slots.back().len = out_len;
+  return scratch_size(op, slots.data());
+}
+
 void run_call_var(const Program::Call& call, stan::math::var* reg) {
   using ArenaDoubles = stan::arena_t<std::vector<double>>;
   using ArenaVaris = stan::arena_t<std::vector<stan::math::vari*>>;
@@ -159,45 +182,55 @@ void run_call_var(const Program::Call& call, stan::math::var* reg) {
     output_varis[(size_t)i] = reg[(size_t)(call.out + i)].vi_;
   }
 
-  const Program::Call* site = &call;
-  stan::math::reverse_pass_callback([site, values, adjoints, input_varis,
+  const KernelFn backward = call.backward;
+  const uint8_t variant = call.variant;
+  const uint8_t input_adjoint_mask = call.input_adjoint_mask;
+  const int8_t n_in = call.n_in;
+  std::array<int32_t, 6> in_len{};
+  for (int k = 0; k < n_in; ++k) in_len[(size_t)k] = call.in_len[k];
+  const int32_t out_len = call.out_len;
+  const stan::arena_t<std::vector<int>> idata(call.idata.begin(),
+                                              call.idata.end());
+  const void* const udata = call.udata_owner.get();
+  stan::math::reverse_pass_callback([backward, variant, input_adjoint_mask,
+                                     n_in, in_len, out_len, idata, udata,
+                                     values, adjoints, input_varis,
                                      output_varis, in_offset, out_offset,
                                      scratch_offset]() mutable {
     std::fill(adjoints.begin(), adjoints.end(), 0.0);
     KernelCtx reverse;
     double* const value_base = values.empty() ? nullptr : values.data();
     double* const adjoint_base = adjoints.empty() ? nullptr : adjoints.data();
-    reverse.n_in = site->n_in;
-    for (int k = 0; k < site->n_in; ++k) {
+    reverse.n_in = n_in;
+    for (int k = 0; k < n_in; ++k) {
       reverse.in[k] =
           Desc{value_base ? value_base + in_offset[(size_t)k] : nullptr,
-               site->in_len[k]};
+               in_len[(size_t)k]};
       reverse.in_adj[k] =
-          (site->input_adjoint_mask & (uint8_t)(1u << k))
+          (input_adjoint_mask & (uint8_t)(1u << k))
               ? Desc{adjoint_base ? adjoint_base + in_offset[(size_t)k]
                                   : nullptr,
-                     site->in_len[k]}
-              : Desc{nullptr, site->in_len[k]};
+                     in_len[(size_t)k]}
+              : Desc{nullptr, in_len[(size_t)k]};
     }
-    reverse.out =
-        Desc{value_base ? value_base + out_offset : nullptr, site->out_len};
-    reverse.variant = site->variant;
+    reverse.out = Desc{value_base ? value_base + out_offset : nullptr, out_len};
+    reverse.variant = variant;
     reverse.scratch = value_base ? value_base + scratch_offset : nullptr;
-    reverse.idata = site->idata.data();
-    reverse.n_idata = (int64_t)site->idata.size();
-    reverse.udata = site->udata_owner.get();
-    for (int i = 0; i < site->out_len; ++i)
+    reverse.idata = idata.data();
+    reverse.n_idata = (int64_t)idata.size();
+    reverse.udata = udata;
+    for (int i = 0; i < out_len; ++i)
       adjoints[(size_t)(out_offset + i)] = output_varis[(size_t)i]->adj_;
     reverse.out_adj_vec =
-        Desc{adjoint_base ? adjoint_base + out_offset : nullptr, site->out_len};
-    reverse.out_adj = site->out_len == 1 ? output_varis[0]->adj_ : 0.0;
-    site->backward(reverse);
+        Desc{adjoint_base ? adjoint_base + out_offset : nullptr, out_len};
+    reverse.out_adj = out_len == 1 ? output_varis[0]->adj_ : 0.0;
+    backward(reverse);
 
     size_t vari_at = input_varis.size();
-    for (int k = site->n_in; k-- > 0;) {
-      vari_at -= (size_t)site->in_len[k];
-      if (!(site->input_adjoint_mask & (uint8_t)(1u << k))) continue;
-      for (int i = site->in_len[k]; i-- > 0;)
+    for (int k = n_in; k-- > 0;) {
+      vari_at -= (size_t)in_len[(size_t)k];
+      if (!(input_adjoint_mask & (uint8_t)(1u << k))) continue;
+      for (int i = in_len[(size_t)k]; i-- > 0;)
         input_varis[vari_at + (size_t)i]->adj_ +=
             adjoints[(size_t)(in_offset[(size_t)k] + i)];
     }
