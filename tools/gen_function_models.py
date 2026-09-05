@@ -154,7 +154,7 @@ def render():
     manifest["focused_coverage"] = focused
     manifest["scope"] = {
         "overloads": "At least one supported signature per name, not every overload.",
-        "gp_exp_quad_cov": "Coordinates are data; scale and length-scale are active.",
+        "gp covariance": "Coordinates are data; scale and length-scale are active.",
         "map_rect": (
             "The integrated probe covers empty jobs; "
             "tests/fixtures/map_rect_region.stan covers nonempty serial "

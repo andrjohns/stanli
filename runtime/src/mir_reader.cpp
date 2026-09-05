@@ -233,7 +233,8 @@ void validate_funapp_arity(const Expr& e) {
     require_arity(e, 2, 3);
     return;
   }
-  if (e.name == "gp_exp_quad_cov") {
+  if (named(e, {"gp_exp_quad_cov", "gp_matern32_cov", "gp_matern52_cov",
+                "gp_exponential_cov"})) {
     require_arity(e, 3, 4);
     return;
   }

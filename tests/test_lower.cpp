@@ -3167,6 +3167,41 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // The Matern and exponential covariances over array[N] vector[D]
+  // coordinates, with active coordinates, scale and length scale.
+  {
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/gpmatern.tmir.sexp"), DataMap());
+    check(lm.n_unconstrained == 8, "gpmatern 8 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[8] = {0.3, -0.7, 1.1, -0.2, 0.4, 0.9, -0.15, 0.25};
+    for (int k = 0; k < 8; ++k) lex.params_data()[k] = q[k];
+    double grad[8];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> qv(8);
+    for (int k = 0; k < 8; ++k) qv(k) = q[k];
+    var jac = 0.0;
+    std::vector<Eigen::Matrix<var, -1, 1>> pts(3, Eigen::Matrix<var, -1, 1>(2));
+    for (int n = 0; n < 3; ++n)
+      for (int d = 0; d < 2; ++d) pts[n](d) = qv(n * 2 + d);
+    var alpha = stan::math::lb_constrain<true>(qv(6), 0.0, jac);
+    var rho = stan::math::lb_constrain<true>(qv(7), 0.0, jac);
+    Eigen::Matrix<var, -1, -1> a = stan::math::gp_matern32_cov(pts, alpha, rho);
+    Eigen::Matrix<var, -1, -1> b = stan::math::gp_matern52_cov(pts, alpha, rho);
+    Eigen::Matrix<var, -1, -1> c =
+        stan::math::gp_exponential_cov(pts, alpha, rho);
+    var acc = stan::math::sum(a) + 2 * stan::math::sum(b) +
+              3 * stan::math::sum(c) + a(0, 1) * b(1, 2) * c(0, 2) + jac;
+    acc.grad();
+    expect_ulp("gpmatern lp", lp, acc.val());
+    for (int k = 0; k < 8; ++k)
+      expect_ulp("gpmatern g" + std::to_string(k), grad[k], qv(k).adj());
+    stan::math::recover_memory();
+  }
+
   // is_inf / is_nan on data-time scalars and the nullary math constants
   // (negative_infinity / positive_infinity / not_a_number, which stanc
   // will not fold) all reduce to integer constants: the finite reads give

@@ -43,6 +43,9 @@ Lowering::BuiltinDispatch Lowering::resolve_builtin(const mir::Expr& e) {
           {"to_array_1d", BuiltinFamily::Matrix},
           {"rep_matrix", BuiltinFamily::Matrix},
           {"gp_exp_quad_cov", BuiltinFamily::Matrix},
+          {"gp_matern32_cov", BuiltinFamily::Matrix},
+          {"gp_matern52_cov", BuiltinFamily::Matrix},
+          {"gp_exponential_cov", BuiltinFamily::Matrix},
           {"diag_matrix", BuiltinFamily::Matrix},
           {"cholesky_decompose", BuiltinFamily::Matrix},
           {"matrix_exp", BuiltinFamily::Matrix},
@@ -2080,7 +2083,8 @@ std::optional<Lowering::Val> Lowering::lower_matrix_fn(const mir::Expr& e,
     }
     fail("rep_matrix arity", e.raw);
   }
-  if (e.name == "gp_exp_quad_cov" && e.args.size() == 3) {
+  if (const std::optional<GpCov> gp = gp_cov_family(e.name);
+      gp && e.args.size() == 3) {
     Val x = actuals.at(0).value();
     Val alpha = actuals.at(1).value();
     Val rho = actuals.at(2).value();
@@ -2093,9 +2097,9 @@ std::optional<Lowering::Val> Lowering::lower_matrix_fn(const mir::Expr& e,
       D = array_shape(x.si).dims[1];
     const int64_t N = g.slots[x.slot].len / D;
     SlotInfo si = matrix_view(N, N);
-    return with_layout(emit_value(OP_GP_EXP_QUAD_COV, {x, alpha, rho}, N * N,
-                                  si, {(int)N, (int)D}),
-                       owning_layout(si));
+    Val v = emit_value(OP_GP_COV, {x, alpha, rho}, N * N, si, {(int)N, (int)D});
+    g.ops.back().variant = static_cast<uint8_t>(*gp);
+    return with_layout(v, owning_layout(si));
   }
   if (e.name == "diag_matrix" && e.args.size() == 1) {
     Val v = actuals.at(0).value();

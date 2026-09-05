@@ -64,9 +64,10 @@ void nary_bwd(KernelCtx& ctx, F&& f) {
   }
 }
 
-// ---- gp_exp_quad_cov(x, alpha, rho) ---------------------------------------
+// ---- gp_*_cov(x, alpha, rho) ----------------------------------------------
 // in = {x (data, N*D), alpha, rho}; idata = {N, D}; out = N*N column-major.
 // x as array[N] real is D == 1; array[N] vector[D] flattens array-major.
+// The variant selects the covariance function.
 std::vector<VecD> gp_points(const KernelCtx& ctx) {
   const int64_t N = ctx.idata[0], D = ctx.idata[1];
   std::vector<VecD> pts(N, VecD(D));
@@ -74,11 +75,24 @@ std::vector<VecD> gp_points(const KernelCtx& ctx) {
     for (int64_t d = 0; d < D; ++d) pts[n](d) = ctx.in[0].data[n * D + d];
   return pts;
 }
+template <typename P, typename S>
+auto gp_cov_call(uint8_t variant, const P& pts, const S& sigma,
+                 const S& length_scale) {
+  switch (variant) {
+    case kGpMatern32:
+      return stan::math::gp_matern32_cov(pts, sigma, length_scale);
+    case kGpMatern52:
+      return stan::math::gp_matern52_cov(pts, sigma, length_scale);
+    case kGpExponential:
+      return stan::math::gp_exponential_cov(pts, sigma, length_scale);
+    default:
+      return stan::math::gp_exp_quad_cov(pts, sigma, length_scale);
+  }
+}
 void gp_cov_fwd(KernelCtx& ctx) {
   const int64_t N = ctx.idata[0];
   auto pts = gp_points(ctx);
-  MatD c =
-      stan::math::gp_exp_quad_cov(pts, ctx.in[1].data[0], ctx.in[2].data[0]);
+  MatD c = gp_cov_call(ctx.variant, pts, ctx.in[1].data[0], ctx.in[2].data[0]);
   MapM(ctx.out.data, N, N) = c;
 }
 void gp_cov_bwd(KernelCtx& ctx) {
@@ -86,11 +100,12 @@ void gp_cov_bwd(KernelCtx& ctx) {
   // adjoints flow back too. nary_bwd copies back whatever input carries an
   // adjoint slot, so a data x simply contributes nothing here.
   const int64_t N = ctx.idata[0], D = ctx.idata[1];
+  const uint8_t variant = ctx.variant;
   nary_bwd(ctx, [&](std::vector<VarV>& xs) {
     std::vector<VarV> pts(N, VarV(D));
     for (int64_t n = 0; n < N; ++n)
       for (int64_t d = 0; d < D; ++d) pts[n](d) = xs[0](n * D + d);
-    return stan::math::gp_exp_quad_cov(pts, xs[1](0), xs[2](0));
+    return gp_cov_call(variant, pts, xs[1](0), xs[2](0));
   });
 }
 
@@ -1490,7 +1505,7 @@ STANLI_TAIL_INT_CDF_LIST(STANLI_TAIL_INT_CDF_KERNEL)
 }  // namespace
 
 void register_matrix_kernels() {
-  register_kernel(OP_GP_EXP_QUAD_COV, Kernel{gp_cov_fwd, gp_cov_bwd, nullptr});
+  register_kernel(OP_GP_COV, Kernel{gp_cov_fwd, gp_cov_bwd, nullptr});
   register_kernel(OP_WISHART_LPDF, Kernel{wish_fwd, wish_bwd, nullptr});
   register_kernel(OP_INV_WISHART_LPDF, Kernel{iwish_fwd, iwish_bwd, nullptr});
   register_kernel(OP_WISHART_CHOL_LPDF, Kernel{wishc_fwd, wishc_bwd, nullptr});

@@ -2009,6 +2009,32 @@ class MirInterp {
         }
       return o;
     }
+    if (const std::optional<GpCov> gp = gp_cov_family(e.name);
+        gp && e.args.size() == 3) {
+      Value x = eval(e.args[0]);
+      const T sigma = eval(e.args[1]).r.at(0);
+      const T length_scale = eval(e.args[2]).r.at(0);
+      const int64_t N = x.dims.size() == 2 ? x.dims[0] : (int64_t)x.r.size();
+      const int64_t D = x.dims.size() == 2 ? x.dims[1] : 1;
+      using Vec = Eigen::Matrix<T, Eigen::Dynamic, 1>;
+      std::vector<Vec> pts((size_t)N, Vec((Eigen::Index)D));
+      for (int64_t n = 0; n < N; ++n)
+        for (int64_t d = 0; d < D; ++d)
+          pts[(size_t)n]((Eigen::Index)d) = x.r.at((size_t)(n + N * d));
+      Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> c;
+      if (*gp == kGpMatern32)
+        c = stan::math::gp_matern32_cov(pts, sigma, length_scale);
+      else if (*gp == kGpMatern52)
+        c = stan::math::gp_matern52_cov(pts, sigma, length_scale);
+      else
+        c = stan::math::gp_exponential_cov(pts, sigma, length_scale);
+      Value o;
+      o.dims = {N, N};
+      o.r.resize((size_t)(N * N));
+      for (int64_t j = 0; j < N; ++j)
+        for (int64_t i = 0; i < N; ++i) o.r[(size_t)(j * N + i)] = c(i, j);
+      return o;
+    }
     if (e.name == "mean") {
       Value a = eval(e.args[0]);
       T m = T(0.0);
