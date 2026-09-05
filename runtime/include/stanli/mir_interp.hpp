@@ -2833,19 +2833,62 @@ class MirInterp {
       return r;
     }
 
-    // The continuous scalar ones come from the shared list, so this can
-    // never be narrower than what the register-machine compiler accepts
-    // -- the compiled path falls back here when compilation fails, and a
-    // narrower fallback turns a slow path into an error. The discrete
-    // ones are the interpreter's alone: the register file has nowhere to
-    // put an integer outcome.
+    {
+      struct DiscreteSpec {
+        uint16_t opcode;
+        int n_real;
+        bool two_int_groups;
+      };
+      static const std::map<std::string, DiscreteSpec> kDiscrete = {
+          {"bernoulli_lpmf", {OP_BERNOULLI_LPMF, 1, false}},
+          {"bernoulli_logit_lpmf", {OP_BERNOULLI_LOGIT_LPMF, 1, false}},
+          {"poisson_lpmf", {OP_POISSON_LPMF, 1, false}},
+          {"poisson_log_lpmf", {OP_POISSON_LOG_LPMF, 1, false}},
+          {"neg_binomial_2_lpmf", {OP_NEG_BINOMIAL_2_LPMF, 2, false}},
+          {"neg_binomial_2_log_lpmf", {OP_NEG_BINOMIAL_2_LOG_LPMF, 2, false}},
+          {"binomial_lpmf", {OP_BINOMIAL_LPMF, 1, true}},
+          {"binomial_logit_lpmf", {OP_BINOMIAL_LOGIT_LPMF, 1, true}},
+      };
+      const auto spec = kDiscrete.find(e.name);
+      if (spec != kDiscrete.end()) {
+        const int n_int = spec->second.two_int_groups ? 2 : 1;
+        if (e.args.size() != (size_t)(n_int + spec->second.n_real))
+          fail(e.name + ": wrong arity in the interpreter", e.raw);
+        std::vector<Value> av;
+        av.reserve(e.args.size());
+        for (const auto& a : e.args) av.push_back(eval(a));
+        const auto int_group = [&](const Value& a) {
+          std::vector<int> vals;
+          if (a.is_int && a.i.size() == a.r.size()) {
+            vals.assign(a.i.begin(), a.i.end());
+          } else {
+            vals.reserve(a.r.size());
+            for (const T& x : a.r) vals.push_back((int)val(x));
+          }
+          return vals;
+        };
+        std::vector<int> idata;
+        if (spec->second.two_int_groups) {
+          for (size_t k = 0; k < 2; ++k) {
+            const std::vector<int> vals = int_group(av[k]);
+            idata.push_back(is_scalar(av[k]) ? -1 : (int)vals.size());
+            idata.insert(idata.end(), vals.begin(), vals.end());
+          }
+        } else {
+          idata = int_group(av[0]);
+        }
+        std::vector<const std::vector<T>*> in;
+        for (size_t k = (size_t)n_int; k < av.size(); ++k)
+          in.push_back(&av[k].r);
+        Value o;
+        o.r.resize(1);
+        call_kernel<T>(spec->second.opcode, 0, 0x3f, idata, in, o.r);
+        return o;
+      }
+    }
     const int shared_id = program_density_id_by_name(e.name);
-    if (shared_id >= 0 || e.name == "bernoulli_lpmf" ||
-        e.name == "binomial_lpmf" || e.name == "poisson_lpmf" ||
-        e.name == "poisson_log_lpmf" || e.name == "bernoulli_logit_lpmf" ||
-        e.name == "binomial_logit_lpmf" || e.name == "hypergeometric_lpmf" ||
-        e.name == "discrete_range_lpmf" || e.name == "neg_binomial_2_lpmf" ||
-        e.name == "neg_binomial_2_log_lpmf") {
+    if (shared_id >= 0 || e.name == "hypergeometric_lpmf" ||
+        e.name == "discrete_range_lpmf") {
       if (shared_id >= 0 &&
           e.args.size() != (size_t)program_density_arity(shared_id))
         fail(e.name + " takes " +
@@ -2878,31 +2921,11 @@ class MirInterp {
           acc += program_density<T>(shared_id, argbuf);
           continue;
         }
-        if (e.name == "bernoulli_lpmf")
-          acc += stan::math::bernoulli_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "bernoulli_logit_lpmf")
-          acc += stan::math::bernoulli_logit_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "binomial_lpmf")
-          acc += stan::math::binomial_lpmf(ic(0, i), ic(1, i), sc(2, i));
-        else if (e.name == "binomial_logit_lpmf")
-          acc += stan::math::binomial_logit_lpmf(ic(0, i), ic(1, i), sc(2, i));
-        else if (e.name == "poisson_lpmf")
-          acc += stan::math::poisson_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "poisson_log_lpmf")
-          acc += stan::math::poisson_log_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "hypergeometric_lpmf")
+        if (e.name == "hypergeometric_lpmf")
           acc += stan::math::hypergeometric_lpmf(ic(0, i), ic(1, i), ic(2, i),
                                                  ic(3, i));
         else if (e.name == "discrete_range_lpmf")
           acc += stan::math::discrete_range_lpmf(ic(0, i), ic(1, i), ic(2, i));
-        else if (e.name == "neg_binomial_2_lpmf")
-          acc += stan::math::neg_binomial_2_lpmf(ic(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "neg_binomial_2_log_lpmf")
-          acc +=
-              stan::math::neg_binomial_2_log_lpmf(ic(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "student_t_lpdf")
-          acc += stan::math::student_t_lpdf(sc(0, i), sc(1, i), sc(2, i),
-                                            sc(3, i));
         else
           fail("unsupported density " + e.name, e.raw);
       }

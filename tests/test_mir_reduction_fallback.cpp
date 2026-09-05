@@ -177,6 +177,32 @@ void check(const std::string& name, std::vector<Arg> args, Expected expected) {
   }
 }
 
+// idata is the outcome (lpmf1) or outcome-and-trials (lpmf2) int group(s).
+auto lpmf1(uint16_t opcode) {
+  return [opcode](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    auto r = out_like(a, {}, 1);
+    std::vector<const std::vector<T>*> in;
+    for (size_t k = 1; k < a.size(); ++k) in.push_back(&a[k].r);
+    const std::vector<int> idata(a[0].i.begin(), a[0].i.end());
+    stanli::call_kernel<T>(opcode, 0, 0x3f, idata, in, r.r);
+    return r;
+  };
+}
+auto lpmf2(uint16_t opcode) {
+  return [opcode](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    auto r = out_like(a, {}, 1);
+    std::vector<int> idata{(int)a[0].i.size()};
+    idata.insert(idata.end(), a[0].i.begin(), a[0].i.end());
+    idata.push_back((int)a[1].i.size());
+    idata.insert(idata.end(), a[1].i.begin(), a[1].i.end());
+    const std::vector<const std::vector<T>*> in{&a[2].r};
+    stanli::call_kernel<T>(opcode, 0, 0x3f, idata, in, r.r);
+    return r;
+  };
+}
+
 }  // namespace
 
 int main() {
@@ -298,6 +324,35 @@ int main() {
     return kernel(a, 3, OP_GP_EXP_QUAD_COV, 0, {(int)n, 1}, {n, n},
                   (size_t)(n * n));
   });
+
+  check("bernoulli_lpmf",
+        {ints({0, 1, 1, 0, 1}), real({0.3, 0.6, 0.7, 0.4, 0.5})},
+        lpmf1(OP_BERNOULLI_LPMF));
+  check("bernoulli_logit_lpmf",
+        {ints({0, 1, 1, 0, 1}), real({0.2, -0.5, 1.1, -0.3, 0.7})},
+        lpmf1(OP_BERNOULLI_LOGIT_LPMF));
+  check("poisson_lpmf",
+        {ints({0, 2, 1, 3, 0}), real({1.2, 0.5, 2.0, 0.8, 1.5})},
+        lpmf1(OP_POISSON_LPMF));
+  check("poisson_log_lpmf",
+        {ints({0, 2, 1, 3, 0}), real({0.1, -0.2, 0.3, 0.05, -0.1})},
+        lpmf1(OP_POISSON_LOG_LPMF));
+  check("neg_binomial_2_lpmf",
+        {ints({0, 2, 1, 3, 0}), real({1.1, 0.7, 2.0, 0.9, 1.3}),
+         real({2.0, 1.5, 3.0, 1.0, 2.5})},
+        lpmf1(OP_NEG_BINOMIAL_2_LPMF));
+  check("neg_binomial_2_log_lpmf",
+        {ints({0, 2, 1, 3, 0}), real({0.2, -0.1, 0.4, 0.1, -0.2}),
+         real({2.0, 1.5, 3.0, 1.0, 2.5})},
+        lpmf1(OP_NEG_BINOMIAL_2_LOG_LPMF));
+  check("binomial_lpmf",
+        {ints({1, 0, 2, 1, 3}), ints({3, 2, 4, 2, 5}),
+         real({0.3, 0.4, 0.5, 0.6, 0.35})},
+        lpmf2(OP_BINOMIAL_LPMF));
+  check("binomial_logit_lpmf",
+        {ints({1, 0, 2, 1, 3}), ints({3, 2, 4, 2, 5}),
+         real({-0.2, 0.1, 0.4, 0.3, -0.1})},
+        lpmf2(OP_BINOMIAL_LOGIT_LPMF));
 
   if (failures == 0)
     std::printf("test_mir_reduction_fallback: all cases passed\n");
