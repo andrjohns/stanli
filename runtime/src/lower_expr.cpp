@@ -70,8 +70,18 @@ void Lowering::propagate_int_update(const Val& out_v, const Val& base,
                                     const Val& rhs, int64_t start,
                                     int64_t stride) {
   // A write of an observed value into an observed base stays observed:
-  // splice the element into a copy of the base's entry.
-  if (const DataMap::Entry* be = observation(base)) {
+  // splice the element into a copy of the base's entry. Graph slots store
+  // arrays outer-major while DataMap entries keep first-index-fast order,
+  // so splicing graph offsets is only sound where the two flat orders
+  // coincide: scalars, vectors, matrices (column-major on both sides), and
+  // one-dimensional flat arrays. Deeper and Eigen-leaf arrays drop the
+  // observation instead of recording cells under the wrong order; their
+  // reads then evaluate against the graph value itself.
+  const bool splice_orders_agree =
+      !is_array(base.si) || (array_shape(base.si).dims.size() == 1 &&
+                             array_shape(base.si).leaf == ViewKind::Flat);
+  if (const DataMap::Entry* be =
+          splice_orders_agree ? observation(base) : nullptr) {
     const DataMap::Entry* re = observation(rhs);
     const int64_t rl = g.slots[rhs.slot].len;
     if ((rl == 0 || re) && g.slots[out_v.slot].len == g.slots[base.slot].len) {

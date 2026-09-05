@@ -461,79 +461,6 @@ class MirInterp {
           }
           return;
         }
-        // General scatter write with at least one integer-array selector.
-        // MirInterp storage is first-index-fast, so enumerate the last axis
-        // outside and the first axis inside, matching eval_indexed and the
-        // RHS's logical order. Repeated indices deliberately retain Stan's
-        // last-write-wins behavior. Validate the complete selection before
-        // mutating the destination so a malformed index remains atomic.
-        bool has_multi = false;
-        for (const auto& index : st.lhs_idx)
-          has_multi = has_multi || index.name == "IndexMulti";
-        if (has_multi && st.lhs_idx.size() <= en->dims.size()) {
-          std::vector<std::vector<int64_t>> selected(en->dims.size());
-          std::vector<int64_t> out_dims;
-          for (size_t d = 0; d < en->dims.size(); ++d) {
-            const int64_t extent = en->dims[d];
-            const mir::Expr* index =
-                d < st.lhs_idx.size() ? &st.lhs_idx[d] : nullptr;
-            if (!index || index->name == "IndexAll") {
-              selected[d].reserve((size_t)extent);
-              for (int64_t k = 0; k < extent; ++k) selected[d].push_back(k);
-              out_dims.push_back(extent);
-            } else if (index->name == "IndexSingle") {
-              const long one = as_int(index->args[0]);
-              if (one < 1 || one > extent)
-                fail("multi-index assignment index out of bounds", st.raw);
-              selected[d].push_back(one - 1);
-            } else if (index->name == "IndexBetween") {
-              const long lo = as_int(index->args[0]);
-              const long hi = as_int(index->args[1]);
-              if (hi >= lo && (lo < 1 || hi > extent))
-                fail("multi-index assignment range out of bounds", st.raw);
-              for (long k = lo; k <= hi; ++k) selected[d].push_back(k - 1);
-              out_dims.push_back(hi >= lo ? hi - lo + 1 : 0);
-            } else if (index->name == "IndexMulti") {
-              const Value positions = eval(index->args[0]);
-              if (!positions.is_int)
-                fail("multi-index assignment needs an int index array", st.raw);
-              selected[d].reserve(positions.i.size());
-              for (int one : positions.i) {
-                if (one < 1 || one > extent)
-                  fail("multi-index assignment index out of bounds", st.raw);
-                selected[d].push_back(one - 1);
-              }
-              out_dims.push_back((int64_t)positions.i.size());
-            } else {
-              fail("unsupported multi-index assignment selector", st.raw);
-            }
-          }
-          std::vector<int64_t> stride(en->dims.size(), 1);
-          for (size_t d = 1; d < en->dims.size(); ++d)
-            stride[d] = stride[d - 1] * en->dims[d - 1];
-          std::vector<size_t> destinations;
-          std::function<void(int64_t, int64_t)> gather = [&](int64_t d,
-                                                             int64_t offset) {
-            if (d < 0) {
-              destinations.push_back((size_t)offset);
-              return;
-            }
-            for (int64_t position : selected[(size_t)d])
-              gather(d - 1, offset + position * stride[(size_t)d]);
-          };
-          gather((int64_t)en->dims.size() - 1, 0);
-          if (v.r.size() != destinations.size() ||
-              (!out_dims.empty() && v.dims != out_dims))
-            fail("multi-index assignment size mismatch", st.raw);
-          for (size_t k = 0; k < destinations.size(); ++k) {
-            const size_t dst = destinations[k];
-            en->r.at(dst) = v.r[k];
-            if (en->is_int)
-              en->i.at(dst) =
-                  v.is_int && k < v.i.size() ? v.i[k] : (int)val(v.r[k]);
-          }
-          return;
-        }
         // General all-Single N-D element write.
         if (st.lhs_idx.size() == en->dims.size()) {
           bool all_single = true;
@@ -625,6 +552,79 @@ class MirInterp {
                       : static_cast<int>(val(v.r.at(static_cast<size_t>(k))));
           }
           return;
+        }
+        // General mixed-selection write through the shared index geometry:
+        // any static combination of Single, All, Between, Upfrom, and Multi
+        // selectors. The map enumerates destination cells in the
+        // interpreter's first-index-fast storage, matching eval_indexed and
+        // the RHS's logical order, so repeated indices deliberately retain
+        // Stan's last-write-wins behavior. Validate the complete selection
+        // before mutating the destination so a malformed index remains
+        // atomic.
+        if (!en->dims.empty() && st.lhs_idx.size() <= en->dims.size()) {
+          std::vector<std::vector<int64_t>> selected(st.lhs_idx.size());
+          std::vector<bool> drops(st.lhs_idx.size(), false);
+          bool supported = true;
+          for (size_t d = 0; supported && d < st.lhs_idx.size(); ++d) {
+            const int64_t extent = en->dims[d];
+            const mir::Expr& index = st.lhs_idx[d];
+            if (index.name == "IndexAll") {
+              selected[d].reserve((size_t)extent);
+              for (int64_t k = 0; k < extent; ++k) selected[d].push_back(k);
+            } else if (index.name == "IndexSingle") {
+              const long one = as_int(index.args[0]);
+              if (one < 1 || one > extent)
+                fail("multi-index assignment index out of bounds", st.raw);
+              selected[d].push_back(one - 1);
+              drops[d] = true;
+            } else if (index.name == "IndexBetween" ||
+                       index.name == "IndexUpfrom") {
+              const long lo = as_int(index.args[0]);
+              const long hi =
+                  index.name == "IndexBetween" ? as_int(index.args[1]) : extent;
+              if (hi >= lo && (lo < 1 || hi > extent))
+                fail("multi-index assignment range out of bounds", st.raw);
+              for (long k = lo; k <= hi; ++k) selected[d].push_back(k - 1);
+            } else if (index.name == "IndexMulti") {
+              const Value positions = eval(index.args[0]);
+              if (!positions.is_int)
+                fail("multi-index assignment needs an int index array", st.raw);
+              selected[d].reserve(positions.i.size());
+              for (int one : positions.i) {
+                if (one < 1 || one > extent)
+                  fail("multi-index assignment index out of bounds", st.raw);
+                selected[d].push_back(one - 1);
+              }
+            } else {
+              supported = false;
+            }
+          }
+          if (supported) {
+            BuiltinIndexMap map;
+            try {
+              map = builtin_index_map(en->dims, 0, selected, drops,
+                                      SliceStorageOrder::FirstIndexFast);
+            } catch (const std::invalid_argument& error) {
+              fail(std::string("multi-index assignment: ") + error.what(),
+                   st.raw);
+            }
+            if ((int64_t)v.r.size() != map.count ||
+                (!map.dimensions.empty() && v.dims != map.dimensions))
+              fail("multi-index assignment size mismatch", st.raw);
+            for (int64_t k = 0; k < map.count; ++k) {
+              const size_t dst = static_cast<size_t>(
+                  map.kind == BuiltinSliceMap::Kind::Contiguous ? map.offset + k
+                  : map.kind == BuiltinSliceMap::Kind::Strided
+                      ? map.offset + k * map.stride
+                      : map.gather[(size_t)k]);
+              en->r.at(dst) = v.r[(size_t)k];
+              if (en->is_int)
+                en->i.at(dst) = v.is_int && (size_t)k < v.i.size()
+                                    ? v.i[(size_t)k]
+                                    : (int)val(v.r[(size_t)k]);
+            }
+            return;
+          }
         }
         {
           std::string what = "unsupported indexed assignment: dims=" +
