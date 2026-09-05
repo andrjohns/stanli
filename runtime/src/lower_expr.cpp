@@ -242,7 +242,7 @@ long Lowering::eval_int(const mir::Expr& e) {
       return eval_int(e.args[0]) != 0 && eval_int(e.args[1]) != 0;
     }
     case mir::Expr::Promotion:
-      fail("malformed promoted size expression", e.raw);
+      if (e.args.size() != 1) fail("malformed promoted size expression", e.raw);
       return eval_int(e.args[0]);
     case mir::Expr::FunApp:
       if (const FunctionSpec* function = function_spec(e);
