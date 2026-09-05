@@ -8,14 +8,13 @@ namespace stanli {
 namespace {
 
 struct FunctionRegistryIndex {
-  std::unordered_multimap<std::string_view, const FunctionSpec*> by_name;
+  std::unordered_map<std::string_view, std::vector<const FunctionSpec*>>
+      by_name;
   std::array<std::vector<const FunctionSpec*>, 2> by_family;
 
   FunctionRegistryIndex() {
-    const auto& entries = function_specs();
-    by_name.reserve(entries.size());
-    for (const FunctionSpec& spec : entries) {
-      by_name.emplace(spec.name, &spec);
+    for (const FunctionSpec& spec : function_specs()) {
+      by_name[spec.name].push_back(&spec);
       by_family[spec.family() == FunctionFamily::Builtin ? 0 : 1].push_back(
           &spec);
     }
@@ -25,6 +24,13 @@ struct FunctionRegistryIndex {
 const FunctionRegistryIndex& function_registry_index() {
   static const FunctionRegistryIndex index;
   return index;
+}
+
+const std::vector<const FunctionSpec*>& overloads(std::string_view name) {
+  static const std::vector<const FunctionSpec*> none;
+  const auto& by_name = function_registry_index().by_name;
+  const auto found = by_name.find(name);
+  return found == by_name.end() ? none : found->second;
 }
 
 size_t family_index(FunctionFamily family) {
@@ -760,33 +766,26 @@ const std::vector<FunctionSpec>& function_specs() {
 }
 
 bool function_registered(std::string_view name) {
-  return function_registry_index().by_name.find(name) !=
-         function_registry_index().by_name.end();
+  return !overloads(name).empty();
 }
 
 bool function_arity_registered(std::string_view name, size_t arity) {
-  const auto matches = function_registry_index().by_name.equal_range(name);
-  for (auto found = matches.first; found != matches.second; ++found)
-    if (found->second->arity() == arity) return true;
+  for (const FunctionSpec* spec : overloads(name))
+    if (spec->arity() == arity) return true;
   return false;
 }
 
 const FunctionSpec* function_spec(std::string_view name, size_t arity,
                                   FunctionFamily family) {
-  const auto matches = function_registry_index().by_name.equal_range(name);
-  for (auto found = matches.first; found != matches.second; ++found) {
-    const FunctionSpec* candidate = found->second;
-    if (candidate->family() == family && candidate->arity() == arity)
-      return candidate;
-  }
+  for (const FunctionSpec* spec : overloads(name))
+    if (spec->family() == family && spec->arity() == arity) return spec;
   return nullptr;
 }
 
 const FunctionSpec* function_spec(std::string_view name,
                                   FunctionFamily family) {
-  const auto matches = function_registry_index().by_name.equal_range(name);
-  for (auto found = matches.first; found != matches.second; ++found)
-    if (found->second->family() == family) return found->second;
+  for (const FunctionSpec* spec : overloads(name))
+    if (spec->family() == family) return spec;
   return nullptr;
 }
 
@@ -797,12 +796,11 @@ const std::vector<const FunctionSpec*>& function_specs(FunctionFamily family) {
 const FunctionSpec* function_spec(std::string_view name, size_t arity,
                                   uint64_t integer_arguments,
                                   FunctionArgumentKind result_kind) {
-  const auto matches = function_registry_index().by_name.equal_range(name);
   const FunctionSpec* best = nullptr;
   size_t best_promotions = 0;
   bool best_result_matches = false;
-  for (auto found = matches.first; found != matches.second; ++found) {
-    const FunctionSpec* candidate = found->second;
+  bool ambiguous = false;
+  for (const FunctionSpec* candidate : overloads(name)) {
     if (!candidate->accepts(arity, integer_arguments)) continue;
     size_t promotions = 0;
     for (size_t index = 0; index < arity; ++index)
@@ -816,12 +814,15 @@ const FunctionSpec* function_spec(std::string_view name, size_t arity,
       best = candidate;
       best_promotions = promotions;
       best_result_matches = result_matches;
+      ambiguous = false;
     } else if (promotions == best_promotions &&
                result_matches == best_result_matches) {
-      throw std::logic_error("ambiguous function registry overload: " +
-                             std::string(name));
+      ambiguous = true;
     }
   }
+  if (ambiguous)
+    throw std::logic_error("ambiguous function registry overload: " +
+                           std::string(name));
   return best;
 }
 

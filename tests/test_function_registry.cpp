@@ -180,5 +180,12 @@ int main() {
     std::printf("FAIL integer division by zero was not refused\n");
     return 1;
   }
+  const FunctionSpec* head_ints =
+      function_spec("head", 2, uint64_t{3}, FunctionArgumentKind::Integer);
+  if (head_ints == nullptr ||
+      head_ints->argument_kind(0) != FunctionArgumentKind::Integer) {
+    std::printf("FAIL exact integer overload lost to a promoted one\n");
+    return 1;
+  }
   std::printf("OK\n");
 }
