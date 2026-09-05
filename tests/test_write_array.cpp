@@ -4549,8 +4549,8 @@ void test_gq_reduction_lowering_guards() {
     expect_invalid_range(4, 4, "size mismatch",
                          "range assignment RHS width mismatch");
 
-    // A single range index on a matrix denotes rows, not a contiguous flat
-    // slice.  This first tranche has no strided multi-row write opcode.
+    // A single range index on a 2-D value selects rows; 4:5 is outside the
+    // base's two rows, so the write falls closed to WaInterp.
     std::string matrix_rows = range_base;
     const size_t lhs_z = matrix_rows.rfind("(LVariable z)", tail_range);
     if (lhs_z == std::string::npos) {
@@ -4559,8 +4559,8 @@ void test_gq_reduction_lowering_guards() {
     } else {
       matrix_rows.replace(lhs_z, std::string("(LVariable z)").size(),
                           "(LVariable partial_matrix)");
-      expect_reduction_interp(matrix_rows, "one-dimensional flat value",
-                              "matrix row-range assignment stays interpreted");
+      expect_reduction_interp(matrix_rows, "out of bounds",
+                              "out-of-bounds row-range assignment falls back");
     }
   }
 }
