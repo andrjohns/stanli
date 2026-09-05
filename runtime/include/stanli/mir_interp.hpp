@@ -2867,6 +2867,30 @@ class MirInterp {
       return r;
     }
 
+    if ((e.name == "lkj_corr_cholesky_lpdf" || e.name == "lkj_corr_lpdf") &&
+        e.args.size() == 2) {
+      Value m = eval(e.args[0]), shape = eval(e.args[1]);
+      if (m.dims.size() != 2 || m.dims[0] != m.dims[1] ||
+          (int64_t)m.r.size() != m.dims[0] * m.dims[1])
+        fail(e.name + ": first argument is not a square matrix", e.raw);
+      if (shape.r.size() != 1)
+        fail(e.name + ": shape parameter is not a scalar", e.raw);
+      const Eigen::Index width = (Eigen::Index)m.dims[0];
+      Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> M(width, width);
+      for (Eigen::Index j = 0; j < width; ++j)
+        for (Eigen::Index i = 0; i < width; ++i)
+          M(i, j) = m.r[(size_t)(j * width + i)];
+      const bool propto = e.fn_propto && propto_ctx_;
+      const T& eta = shape.r[0];
+      if (e.name == "lkj_corr_cholesky_lpdf")
+        r.r = {propto ? stan::math::lkj_corr_cholesky_lpdf<true>(M, eta)
+                      : stan::math::lkj_corr_cholesky_lpdf<false>(M, eta)};
+      else
+        r.r = {propto ? stan::math::lkj_corr_lpdf<true>(M, eta)
+                      : stan::math::lkj_corr_lpdf<false>(M, eta)};
+      return r;
+    }
+
     {
       struct DiscreteSpec {
         uint16_t opcode;

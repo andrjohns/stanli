@@ -13,6 +13,12 @@ per-draw interpreter, which then refused `lkj_corr_cholesky_lpdf` and left
 `stanli_run` writing no CSV at all. A model with a `logistic_normal` response
 sizes a transformed data array the same way and did not compile.
 
+The per-draw interpreter carries `lkj_corr_cholesky_lpdf` and `lkj_corr_lpdf`,
+which the write_array graph already had. It is the fallback for any section
+the graph cannot express, so a model that writes an LKJ density in
+transformed parameters or generated quantities no longer depends on the
+graph covering everything else in the section.
+
 The GLM densities take a per-row vector intercept. `bernoulli_logit_glm_lpmf`,
 `poisson_log_glm_lpmf` and `neg_binomial_2_log_glm_lpmf` refused one, and
 `binomial_logit_glm_lpmf` read only its first element while its backward wrote

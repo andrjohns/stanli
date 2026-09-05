@@ -4775,6 +4775,61 @@ void test_choose_index_gq() {
     }
 }
 
+// The LKJ densities on the per-draw path. lkj_corr_cholesky is what brms
+// puts on every correlated group-level effect, so the interpreter meets it
+// whenever the rest of the section sends the graph home.
+void test_interpreted_lkj() {
+  using namespace stanli;
+  DataMap data = DataMap::from_json_file("tests/fixtures/gqlkj.json");
+  const std::string text = slurp("tests/fixtures/gqlkj.tmir.sexp");
+  test_setenv("STANLI_WA_FORCE_INTERP", "1");
+  CompiledModel cm = compile_model(text, data);
+  test_unsetenv("STANLI_WA_FORCE_INTERP");
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL gqlkj: expected an attached interpreter\n");
+    return;
+  }
+  const double q[4] = {0.3, -0.6, 0.45, std::log(1.4)};
+  Executor pex(cm.graph);
+  cm.bind(pex);
+  std::copy(q, q + 4, pex.params_data());
+  pex.run_forward_only();
+  WaRng rng(19);
+  const std::vector<double> row =
+      cm.write_array->interp->eval(cm.constrained_env(pex), rng);
+  const std::vector<std::string> names =
+      CompiledModel::csv_names(cm.write_array->interp->columns());
+  const auto column = [&](const std::string& name) {
+    for (size_t i = 0; i < names.size(); ++i)
+      if (names[i] == name) return row.at(i);
+    ++failures;
+    std::printf("FAIL gqlkj: no column %s\n", name.c_str());
+    return 0.0;
+  };
+  Eigen::MatrixXd L(3, 3);
+  for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r)
+      L(r, c) =
+          column("L." + std::to_string(r + 1) + "." + std::to_string(c + 1));
+  Eigen::MatrixXd R(3, 3);
+  for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r)
+      R(r, c) =
+          column("R." + std::to_string(r + 1) + "." + std::to_string(c + 1));
+  const double eta = column("eta");
+  const double want_chol = stan::math::lkj_corr_cholesky_lpdf<false>(L, eta);
+  const double want_corr = stan::math::lkj_corr_lpdf<false>(R, eta);
+  const auto expect_close = [&](const char* what, double got, double want) {
+    if (std::abs(got - want) > 1e-13 * std::max(1.0, std::abs(want))) {
+      ++failures;
+      std::printf("FAIL gqlkj %s: got %.17g want %.17g\n", what, got, want);
+    }
+  };
+  expect_close("lkj_corr_cholesky_lpdf", column("lchol"), want_chol);
+  expect_close("lkj_corr_lpdf", column("lcorr"), want_corr);
+}
+
 void test_runtime_control_write_array() {
   using namespace stanli;
 
@@ -4934,6 +4989,7 @@ int main() {
   test_interpreted_gq_gp_covariances();
   test_compiled_multiply_lower_tri();
   test_choose_index_gq();
+  test_interpreted_lkj();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();
