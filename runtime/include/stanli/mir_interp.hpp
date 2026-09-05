@@ -436,123 +436,6 @@ class MirInterp {
           }
           return;
         }
-        // Contiguous subrange write into a 1-D value: x[a:b] = rhs.
-        if (st.lhs_idx.size() == 1 &&
-            (st.lhs_idx[0].name == "IndexBetween" ||
-             st.lhs_idx[0].name == "IndexUpfrom") &&
-            en->dims.size() == 1) {
-          const long a = as_int(st.lhs_idx[0].args[0]);
-          const long b = st.lhs_idx[0].name == "IndexBetween"
-                             ? as_int(st.lhs_idx[0].args[1])
-                             : en->dims[0];
-          const int64_t n = b >= a ? b - a + 1 : 0;
-          if (n > 0 && (a < 1 || b > en->dims[0] || b > (long)en->r.size()))
-            fail("range assignment index out of bounds", st.raw);
-          if ((int64_t)v.r.size() != n)
-            fail("range assignment size mismatch", st.raw);
-          for (int64_t k = 0; k < n; ++k) {
-            const size_t dst = static_cast<size_t>(a - 1 + k);
-            en->r.at(dst) = v.r.at(static_cast<size_t>(k));
-            if (en->is_int)
-              en->i.at(dst) =
-                  v.is_int && static_cast<size_t>(k) < v.i.size()
-                      ? v.i[static_cast<size_t>(k)]
-                      : static_cast<int>(val(v.r.at(static_cast<size_t>(k))));
-          }
-          return;
-        }
-        // General all-Single N-D element write.
-        if (st.lhs_idx.size() == en->dims.size()) {
-          bool all_single = true;
-          for (const auto& ix : st.lhs_idx)
-            if (ix.name != "IndexSingle") all_single = false;
-          if (all_single) {
-            int64_t flatpos = 0, stride = 1;
-            for (size_t d = 0; d < en->dims.size(); ++d) {
-              flatpos += (as_int(st.lhs_idx[d].args[0]) - 1) * stride;
-              stride *= en->dims[d];
-            }
-            en->r.at(flatpos) = v.r.at(0);
-            if (en->is_int)
-              en->i.at(flatpos) =
-                  v.is_int && !v.i.empty() ? v.i[0] : (int)val(v.r.at(0));
-            return;
-          }
-        }
-        // Explicit row write X[i, :] = row_vector / array.
-        if (st.lhs_idx.size() == 2 && st.lhs_idx[0].name == "IndexSingle" &&
-            st.lhs_idx[1].name == "IndexAll" && en->dims.size() == 2) {
-          const long i = as_int(st.lhs_idx[0].args[0]);
-          const int64_t R = en->dims[0], C = en->dims[1];
-          if (i < 1 || i > R)
-            fail("matrix row assignment index out of bounds", st.raw);
-          if ((int64_t)v.r.size() != C)
-            fail("matrix row assignment size mismatch", st.raw);
-          for (int64_t j = 0; j < C; ++j) {
-            const size_t dst = (size_t)(j * R + i - 1);
-            en->r.at(dst) = v.r.at((size_t)j);
-            if (en->is_int)
-              en->i.at(dst) = v.is_int && (size_t)j < v.i.size()
-                                  ? v.i[(size_t)j]
-                                  : (int)val(v.r.at((size_t)j));
-          }
-          return;
-        }
-        // Column write Xc[:, j] = vector.
-        if (st.lhs_idx.size() == 2 && st.lhs_idx[0].name == "IndexAll" &&
-            st.lhs_idx[1].name == "IndexSingle" && en->dims.size() == 2) {
-          const long j = as_int(st.lhs_idx[1].args[0]);
-          const int64_t R = en->dims[0];
-          for (int64_t i = 0; i < R; ++i) en->r.at((j - 1) * R + i) = v.r.at(i);
-          return;
-        }
-        // Column-segment write X[a:b, j] = vector.
-        if (st.lhs_idx.size() == 2 && st.lhs_idx[0].name == "IndexBetween" &&
-            st.lhs_idx[1].name == "IndexSingle" && en->dims.size() == 2) {
-          const long a = as_int(st.lhs_idx[0].args[0]);
-          const long b = as_int(st.lhs_idx[0].args[1]);
-          const long j = as_int(st.lhs_idx[1].args[0]);
-          const int64_t R = en->dims[0];
-          const int64_t n = b >= a ? b - a + 1 : 0;
-          if (j < 1 || j > en->dims[1] || (n > 0 && (a < 1 || b > R)))
-            fail("matrix range assignment index out of bounds", st.raw);
-          if ((int64_t)v.r.size() != n)
-            fail("matrix range assignment size mismatch", st.raw);
-          for (int64_t k = 0; k < n; ++k) {
-            const size_t dst = static_cast<size_t>((j - 1) * R + (a - 1) + k);
-            en->r.at(dst) = v.r.at(static_cast<size_t>(k));
-            if (en->is_int)
-              en->i.at(dst) =
-                  v.is_int && static_cast<size_t>(k) < v.i.size()
-                      ? v.i[static_cast<size_t>(k)]
-                      : static_cast<int>(val(v.r.at(static_cast<size_t>(k))));
-          }
-          return;
-        }
-        // Row-segment write X[i, a:b] = row_vector / array.  The selected
-        // elements are strided in first-index-fast storage.
-        if (st.lhs_idx.size() == 2 && st.lhs_idx[0].name == "IndexSingle" &&
-            st.lhs_idx[1].name == "IndexBetween" && en->dims.size() == 2) {
-          const long i = as_int(st.lhs_idx[0].args[0]);
-          const long a = as_int(st.lhs_idx[1].args[0]);
-          const long b = as_int(st.lhs_idx[1].args[1]);
-          const int64_t R = en->dims[0];
-          const int64_t n = b >= a ? b - a + 1 : 0;
-          if (i < 1 || i > R || (n > 0 && (a < 1 || b > en->dims[1])))
-            fail("matrix range assignment index out of bounds", st.raw);
-          if ((int64_t)v.r.size() != n)
-            fail("matrix range assignment size mismatch", st.raw);
-          for (int64_t k = 0; k < n; ++k) {
-            const size_t dst = static_cast<size_t>((a - 1 + k) * R + (i - 1));
-            en->r.at(dst) = v.r.at(static_cast<size_t>(k));
-            if (en->is_int)
-              en->i.at(dst) =
-                  v.is_int && static_cast<size_t>(k) < v.i.size()
-                      ? v.i[static_cast<size_t>(k)]
-                      : static_cast<int>(val(v.r.at(static_cast<size_t>(k))));
-          }
-          return;
-        }
         // General mixed-selection write through the shared index geometry:
         // any static combination of Single, All, Between, Upfrom, and Multi
         // selectors. The map enumerates destination cells in the
@@ -1484,6 +1367,7 @@ class MirInterp {
       base_ptr = &base_storage;
     }
     const Value& base = *base_ptr;
+    if (e.args.size() == 1) return base;
     if (e.args.size() == 2 && e.args[1].name == "IndexSingle" &&
         base.dims.size() <= 1) {
       const long ix = as_int(e.args[1].args[0]);

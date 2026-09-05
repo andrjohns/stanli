@@ -173,6 +173,10 @@ whose gradients were right had been producing an empty CSV from
 `stanli_run` unnoticed. Both are fixed above, and one of the new models
 is refused today: `s2_com_poisson` is listed in `KNOWN_GAPS`.
 
+The interpreter accepts whole-value index nodes and column writes into
+integer arrays produced by loop vectorization; before this stanli_run failed
+on eight corpus models that stanli_check passed.
+
 ## 0.11.1
 
 ### Fixes
