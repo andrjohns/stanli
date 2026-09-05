@@ -258,11 +258,12 @@ layout.
 The same vector-layout policy covers `dirichlet_lpdf` when either argument is
 an array of vectors, and the ordered-logistic/probit densities when cutpoints
 are supplied as one vector per observation.
-An automatically generated source fixture instantiates all 3,003 density
-signatures reported by the pinned `stanc --dump-stan-math-signatures` (70
-functions after excluding Wiener and Gaussian-DLM), executes them in
-transformed data, ordinary autodiff, parameter-dependent runtime control, and
-generated quantities, and is checked for dump drift by CTest.
+Generated source fixtures instantiate all 12,095 density signatures the
+pinned `stanc --dump-stan-math-signatures` reports for the 173 registered
+probability functions (the eight `wiener_lpdf` signatures are excluded),
+execute them in transformed data, ordinary autodiff, parameter-dependent
+runtime control, and generated quantities, and are checked for dump drift by
+CTest.
 The explicitly unsupported probability functions listed above remain outside
 that registry.
 
