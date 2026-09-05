@@ -126,7 +126,7 @@ bool callable(const Graph& g, const Op& op) {
 // compilation; anything unexpected there aborts the island (compile
 // returns false) and the run is left alone.
 bool in_vocab(const Graph& g, const Op& op) {
-  if (op.out2 >= 0) return false;
+  if (op.out2 >= 0 || op.dyn_lengths) return false;
   switch (op.opcode) {
     case OP_ADD:
     case OP_SUB:
@@ -800,7 +800,8 @@ int carve_islands(Graph& g,
 }
 
 bool segment_supports(const Graph& g, const Op& op) {
-  if (is_effectful_op(op.opcode) || !in_vocab(g, op)) return false;
+  if (is_effectful_op(op.opcode) || op.dyn_lengths || !in_vocab(g, op))
+    return false;
   // A vector unary without a range instruction splits the run instead of
   // refusing it.
   const int unary = unary_code(op.opcode);

@@ -91,7 +91,6 @@ namespace stanli {
   X(OP_COMPARE)                       \
   X(OP_INT_ARITH)                     \
   X(OP_REP_VEC_DYNAMIC)               \
-  X(OP_SUM_VEC_DYNAMIC)               \
   X(OP_INDEX_DYNAMIC)                 \
   X(OP_SET_INDEX_DYNAMIC)             \
   X(OP_MATRIX_EXP_DYNAMIC)            \

@@ -561,6 +561,7 @@ struct Segmenter {
         (n.invariant_loop >= 0 && n.active))
       return false;
     const Op& op = p.body.ops[n.op];
+    if (op.dyn_lengths) return false;
     for (int k = 0; k < op.n_in; ++k)
       if (length(p, op.in[k]) > input_cap) return false;
     const Kernel* k = find_kernel(op.opcode);
@@ -1438,6 +1439,9 @@ struct LoopState : KernelState {
       c.idata = op.idata;
       c.n_idata = op.n_idata;
       c.udata = op.udata;
+      c.dyn_capacity = op.dyn_capacity;
+      c.dyn_extent_in = op.dyn_extent_in;
+      c.dyn_lengths = op.dyn_lengths;
       for (int k = 0; k < op.n_in; ++k) {
         const int64_t len = p.body.slots[op.in[k]].len;
         c.in[k] = Desc{nullptr, len};
@@ -1580,18 +1584,19 @@ struct Execution {
 
   void bind_inputs(const Op& op, KernelCtx& c) const {
     for (int k = 0; k < op.n_in; ++k) c.in[k].data = value(op.in[k]);
+    if (c.dyn_lengths) apply_dynamic_length(c);
   }
 
   void run_transient(const Node& n, const Op& op, KernelCtx& c) {
-    bind_inputs(op, c);
     double* w = s.workspace.data() + n.workspace;
     c.out.data = w;
-    w += c.out.len;
+    w += p.body.slots[op.out].len;
     if (op.out2 >= 0) {
       c.out2.data = w;
       w += c.out2.len;
     }
     c.scratch = w;
+    bind_inputs(op, c);
     n.forward(c);
     s.bindings[op.out] = s.node_version[n.site];
     if (op.out2 >= 0) s.bindings[op.out2] = s.node_version2[n.site];
@@ -1604,13 +1609,14 @@ struct Execution {
       for (int k = 0; k < op.n_in; ++k)
         s.handles.push_back(s.bindings[op.in[k]]);
     }
-    bind_inputs(op, c);
-    const int64_t out_len = c.out.len, out2_len = op.out2 >= 0 ? c.out2.len : 0;
+    const int64_t out_len = p.body.slots[op.out].len,
+                  out2_len = op.out2 >= 0 ? c.out2.len : 0;
     double* block =
         s.arena.allocate(add(add(out_len, out2_len), n.kernel_scratch));
     c.out.data = block;
     if (op.out2 >= 0) c.out2.data = block + out_len;
     c.scratch = block + out_len + out2_len;
+    bind_inputs(op, c);
     n.forward(c);
     const int64_t out =
         make_version(block, n.active ? reserve_adjoint(out_len) : -1);
@@ -1906,14 +1912,15 @@ struct Execution {
           double* block = s.versions[static_cast<size_t>(r.out)].value;
           c.out.data = block;
           c.out_adj_vec.data = adj(r.out);
-          if (c.out.len == 1) c.out_adj = c.out_adj_vec.data[0];
-          block += c.out.len;
+          block += p.body.slots[op.out].len;
           if (op.out2 >= 0) {
             c.out2.data = block;
             c.out2_adj = *adj(r.out + 1);
             block += c.out2.len;
           }
           c.scratch = block;
+          if (c.dyn_lengths) apply_dynamic_length(c);
+          if (c.out.len == 1) c.out_adj = c.out_adj_vec.data[0];
           n.backward(c);
           break;
         }

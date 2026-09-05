@@ -3127,6 +3127,55 @@ static void direct_index_lowering_tests() {
                     "direct-index legacy gradient parity");
 }
 
+static DataMap runtime_slice_data(int op) {
+  DataMap data;
+  data.set_int("N", 5);
+  data.set_int_array("nobs", {3, 1, 2});
+  data.set_int("op", op);
+  return data;
+}
+
+// A slice whose upper bound is a loop-carried integer keeps the declared
+// capacity as its storage, so every consumer of one has to be told where the
+// live values stop. The flat model spells the same arithmetic over a
+// compile-time trip count, where the extents fold.
+static void runtime_slice_tests() {
+  static const char* const names[] = {"",
+                                      "log_sum_exp",
+                                      "extrema",
+                                      "num_elements",
+                                      "sum and prod",
+                                      "normal_lpdf",
+                                      "elementwise product",
+                                      "dot product",
+                                      "moments",
+                                      "reduction of an elementwise result"};
+  for (int op = 1; op <= 9; ++op) {
+    const auto loop =
+        compile_fixture("dynslice", runtime_slice_data(op), Mode::Auto);
+    const auto flat =
+        compile_fixture("dynsliceflat", runtime_slice_data(op), Mode::Auto);
+    check(retained(loop) != nullptr, "runtime slice model runs the loop");
+    check(retained(flat) == nullptr, "flat runtime slice model has no loop");
+    Executor a(loop.graph), b(flat.graph);
+    loop.bind(a);
+    flat.bind(b);
+    std::vector<double> ga(5), gb(5);
+    for (int i = 0; i < 5; ++i)
+      a.params_data()[i] = b.params_data()[i] = 0.4 * i - 0.9;
+    const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
+    if (va != vb) {
+      std::printf("  %s: %.17g != %.17g\n", names[op], va, vb);
+      check(false, "runtime slice value");
+    }
+    for (size_t i = 0; i < ga.size(); ++i)
+      if (!near(ga[i], gb[i])) {
+        std::printf("  %s g%zu: %.17g != %.17g\n", names[op], i, ga[i], gb[i]);
+        check(false, "runtime slice gradient");
+      }
+  }
+}
+
 static std::atomic<int> memo_int_calls{0};
 static std::atomic<int> memo_compare_calls{0};
 static std::atomic<int> memo_index_calls{0};
@@ -4516,6 +4565,7 @@ int main() {
   automatic_policy_tests();
   prefer_parent_tests();
   direct_index_lowering_tests();
+  runtime_slice_tests();
   memo_tests();
   trace_tests();
   for_trace_tests();

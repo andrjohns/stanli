@@ -5,8 +5,12 @@
 #define STANLI_KERNEL_TYPES_HPP
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace stanli {
+
+// Bit 6 of a dynamic-length mask names the output; bits 0..5 name inputs.
+inline constexpr uint8_t kDynamicLengthOutput = 1u << 6;
 
 class WaRng;
 
@@ -52,6 +56,12 @@ struct Op {
   // Opaque per-op payload for kernels that need compile-time structure the
   // integer immediates cannot carry (ODEs, messages, declaration checks).
   const void* udata = nullptr;
+  // Operands that are logical views into a fixed capacity. dyn_extent_in
+  // names the input holding the live length; dyn_lengths names the operands
+  // it applies to. Storage stays at dyn_capacity throughout.
+  int64_t dyn_capacity = 0;
+  int8_t dyn_extent_in = -1;
+  uint8_t dyn_lengths = 0;
 };
 
 // Per-call view handed to kernels. Assembled by the executor; kernels never
@@ -73,7 +83,36 @@ struct KernelCtx {
   double out_adj = 0;            // scalar-output ops
   Desc out_adj_vec{nullptr, 0};  // vector-output ops
   double out2_adj = 0;           // adjoint of the second output
+  int64_t dyn_capacity = 0;
+  int8_t dyn_extent_in = -1;
+  uint8_t dyn_lengths = 0;
+  void (*dyn_inner)(KernelCtx&) = nullptr;
 };
+
+// Rewrite the lengths of the operands that are views, so a kernel reading its
+// work from Desc::len sees where the live values stop.
+inline void apply_dynamic_length(KernelCtx& c) {
+  const double raw = c.in[c.dyn_extent_in].data[0];
+  const int64_t live = static_cast<int64_t>(raw);
+  if (!(raw >= 0) || raw > static_cast<double>(c.dyn_capacity) ||
+      static_cast<double>(live) != raw)
+    throw std::domain_error("logical extent exceeds graph capacity");
+  for (int k = 0; k < 6; ++k)
+    if (c.dyn_lengths & (1u << k)) {
+      c.in[k].len = live;
+      c.in_adj[k].len = live;
+    }
+  if (c.dyn_lengths & kDynamicLengthOutput) {
+    c.out.len = live;
+    c.out_adj_vec.len = live;
+  }
+  c.n_in = c.dyn_extent_in;
+}
+
+inline void dynamic_length_forward(KernelCtx& c) {
+  apply_dynamic_length(c);
+  c.dyn_inner(c);
+}
 
 }  // namespace stanli
 

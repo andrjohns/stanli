@@ -949,6 +949,13 @@ Lowering::Val Lowering::lower_funapp(const mir::Expr& e) {
       return constant((double)eval_int(e));
     } catch (const CompileError&) {
     }
+    const Val& a = actuals.at(0).value();
+    if (has_runtime_shape(a) && (e.name == "size" || e.name == "num_elements" ||
+                                 e.name == "rows" || e.name == "FnLength")) {
+      Val extent{one_runtime_extent(a, e.name), false, view_of("UInt")};
+      extent.si.param_free = true;
+      return with_layout(extent, ExpressionLayout::scalar());
+    }
   }
   if (auto v = fold_const(e)) return *v;
   fail("unsupported function " + e.name);
@@ -1173,6 +1180,9 @@ std::optional<Lowering::Val> Lowering::lower_density_fn(
     SlotInfo result_si{0, 0, true};
     bool result_autodiff = false;
     uint8_t variant = spec.activity_mask < 0 ? 0 : (uint8_t)spec.activity_mask;
+    int extent = -1;
+    uint8_t dyn_lengths = 0;
+    int64_t dyn_capacity = 0;
     for (size_t i = spec.integer_args; i < e.args.size(); ++i) {
       const Val arg = actuals.at(i).value();
       shapes[i - spec.integer_args] = arg.si;
@@ -1181,6 +1191,14 @@ std::optional<Lowering::Val> Lowering::lower_density_fn(
       result_autodiff = result_autodiff || arg.autodiff;
       if (spec.activity_mask < 0 && !actuals.at(i).expr().data_only)
         variant |= (uint8_t)(1u << (i - spec.integer_args));
+      if (!has_runtime_shape(arg)) continue;
+      const int slot = one_runtime_extent(arg, e.name);
+      if ((extent >= 0 && extent != slot) ||
+          (dyn_capacity != 0 && dyn_capacity != g.slots[arg.slot].len))
+        fail(e.name + ": operands have different runtime extents", e.raw);
+      extent = slot;
+      dyn_capacity = g.slots[arg.slot].len;
+      dyn_lengths |= (uint8_t)(1u << (i - spec.integer_args));
     }
     // A scalar outcome against vectorized real arguments: replicate it to
     // the lane count. The kernels map the whole integer group as one
@@ -1323,9 +1341,19 @@ std::optional<Lowering::Val> Lowering::lower_density_fn(
         idata.push_back((int)locations);
       }
     }
+    if (extent >= 0) {
+      if (!idata.empty() || spec.shape != DensityShape::Plain)
+        fail(e.name + ": no form over a runtime-length operand", e.raw);
+      ins.push_back(extent);
+    }
     Val dv =
         emit_raw(spec.opcode, ins, 1, result_si, idata, -1, result_autodiff);
     dv.layout = ExpressionLayout::scalar();
+    if (extent >= 0) {
+      g.ops.back().dyn_capacity = dyn_capacity;
+      g.ops.back().dyn_extent_in = (int8_t)(ins.size() - 1);
+      g.ops.back().dyn_lengths = dyn_lengths;
+    }
     // GLM ops used to be the one density shape that got no variant at
     // all, so their kernels hardcoded propto=false and poisson_log_glm's
     // lp landed sum(log(y!)) -- 10.45 on a six-row test -- away from
@@ -1794,14 +1822,6 @@ std::optional<Lowering::Val> Lowering::lower_eltwise_fn(
       fail(e.name + ": reduction needs exactly one argument", e.raw);
     actuals.require_arity(1);
     Val a = actuals.at(0).value();
-    if (e.name == "sum" && has_runtime_shape(a)) {
-      const int extent_slot = one_runtime_extent(a, "sum");
-      Val extent{extent_slot, false, view_of("UInt"),
-                 ExpressionLayout::scalar()};
-      extent.si.param_free = true;
-      return with_layout(emit_value(OP_SUM_VEC_DYNAMIC, {a, extent}, 1),
-                         ExpressionLayout::scalar());
-    }
     return with_layout(
         emit_value(e.name == "sum" ? OP_SUM_VEC : OP_LOG_SUM_EXP, {a}, 1),
         ExpressionLayout::scalar());
