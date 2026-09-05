@@ -482,7 +482,7 @@ def check_point(model, stan, dj, check_bin, point, pt, timeout, no_wa,
     the same asymmetry as one engine throwing, read from the other side.
     """
     cmd = [str(check_bin), str(stan), str(dj), "--point", str(point)]
-    want_wa = "wa" in pt and not no_wa
+    want_wa = "values" in pt and not no_wa
     if want_wa:
         cmd.append("--wa-values")
     try:
@@ -535,10 +535,19 @@ def check_point(model, stan, dj, check_bin, point, pt, timeout, no_wa,
         # The write_array reference: column names must match exactly, and
         # the values (constrained parameters, transformed parameters and
         # generated quantities at the same point) share the model's gate.
+        #
+        # A row is demanded even where the reference holds none. The
+        # recorder drops the `wa` block whenever the two engines disagreed
+        # about it, stanli's included, so a model whose write_array fails
+        # outright records no reference and used to be replayed as if it
+        # had no section at all. Every model has a row: the constrained
+        # parameters are one.
         wa = parse_wa(proc.stdout)
         if wa is None:
             return ("WA_FAIL", worst, worst_ulp, n,
                     f"point {point}: no or failed write_array output")
+        if "wa" not in pt:
+            return ("OK", worst, worst_ulp, n, "")
         names, vals = wa
         if names != pt["wa"]["names"]:
             return ("WA_NAMES_FAIL", worst, worst_ulp, n,

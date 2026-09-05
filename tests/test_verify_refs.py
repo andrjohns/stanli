@@ -42,14 +42,22 @@ VALUES = {"values": ["-3.5", "1", "-2"], "status": "VERIFIED",
 REF = {"primary": 0, "points": {str(p): VALUES for p in POINTS}}
 
 
-def stub(tmp, body):
-    """A stanli_check that runs `body` with $point set to --point's value."""
+def stub(tmp, body, wa=True):
+    """A stanli_check that runs `body` with $point set to --point's value.
+
+    A real one answers --wa-values with a write_array row and the replay
+    demands one, so the stub emits a row too. Cases about the row itself
+    pass wa=False and write their own.
+    """
     path = pathlib.Path(tmp) / "stanli_check_stub.sh"
-    path.write_text("#!/bin/sh\npoint=0\n"
+    row = ('if [ -n "$wa" ]; then echo "WANAMES a"; echo "WAVALS 1"; fi\n'
+           if wa else "")
+    path.write_text("#!/bin/sh\npoint=0\nwa=\n"
                     'while [ $# -gt 0 ]; do\n'
                     '  [ "$1" = --point ] && point=$2\n'
+                    '  [ "$1" = --wa-values ] && wa=1\n'
                     '  shift\n'
-                    "done\n" + body + "\n")
+                    "done\n" + row + body + "\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
 
@@ -135,10 +143,10 @@ class CheckModelPointsTest(unittest.TestCase):
 
     REF = REF
 
-    def run_check(self, body, ref=None, model=MODEL):
+    def run_check(self, body, ref=None, model=MODEL, wa=True):
         with tempfile.TemporaryDirectory() as tmp:
             return check_model(model, ref or self.REF,
-                               REPO / "nonexistent-pdb", stub(tmp, body),
+                               REPO / "nonexistent-pdb", stub(tmp, body, wa),
                                pathlib.Path(tmp), 60, 1e-9)
 
     def test_agreeing_at_every_point_passes(self):
@@ -221,6 +229,25 @@ class CheckModelPointsTest(unittest.TestCase):
             'echo "OK -3.5 1 -2"', ref)
         self.assertEqual(status, "POINT_NOT_REJECTED")
         self.assertIn("point 1", detail)
+
+    def test_a_missing_write_array_row_fails_without_a_reference(self):
+        # The recorder skips the `wa` block when stanli produced no row, so
+        # a model whose write_array is broken records no reference for it.
+        # Presence is still demanded: every model has a row.
+        _, status, _, _, _, detail, _ = self.run_check(
+            'if [ "$point" = 1 ]; then echo "OK -3.5 1 -2"; else '
+            'echo "WANAMES a"; echo "WAVALS 1"; echo "OK -3.5 1 -2"; fi',
+            wa=False)
+        self.assertEqual(status, "WA_FAIL")
+        self.assertIn("point 1", detail)
+
+    def test_a_failed_write_array_row_fails_without_a_reference(self):
+        _, status, _, _, _, detail, _ = self.run_check(
+            'if [ "$point" = 2 ]; then echo "WANAMES FAIL unsupported"; '
+            'echo "WAVALS FAIL"; else echo "WANAMES a"; echo "WAVALS 1"; fi\n'
+            'echo "OK -3.5 1 -2"', wa=False)
+        self.assertEqual(status, "WA_FAIL")
+        self.assertIn("point 2", detail)
 
     def test_a_quarantined_point_is_announced_and_not_compared(self):
         # The reference is recorded and deliberately not enforced. The

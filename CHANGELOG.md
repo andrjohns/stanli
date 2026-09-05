@@ -19,6 +19,13 @@ the graph cannot express, so a model that writes an LKJ density in
 transformed parameters or generated quantities no longer depends on the
 graph covering everything else in the section.
 
+The corpus replay fails a model that produces no write_array row. The
+recorder drops the reference for a row the two engines disagreed about, so a
+model whose write_array failed outright recorded none and was then replayed
+as if it had no section to check. Every model has a row, so presence is
+demanded whether or not the reference carries one. Both models that lost
+their generated quantities to `choose` passed the gate this way.
+
 The GLM densities take a per-row vector intercept. `bernoulli_logit_glm_lpmf`,
 `poisson_log_glm_lpmf` and `neg_binomial_2_log_glm_lpmf` refused one, and
 `binomial_logit_glm_lpmf` read only its first element while its backward wrote
