@@ -808,6 +808,17 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
         runtime_count = upper.slot;
       }
       output_runtime_dim = runtime_count;
+    } else if (ix->name == "IndexUpfrom" && ix->args.size() == 1) {
+      const auto lo = region_range(ix->args[0]);
+      if (!lo || lo->lo != lo->hi)
+        fail("structured slice needs a fixed lower bound and finite capacity");
+      axis.kind = DynamicIndexSpec::Axis::Range;
+      axis.count = std::max<int64_t>(0, dims[d] - lo->lo + 1);
+      Val lower = lower_expr(ix->args[0]);
+      index_offsets.push_back(index_width);
+      indices.push_back(lower);
+      ++index_width;
+      output_runtime_dim = -1;
     } else
       fail("unsupported structured index selector");
     const int base_runtime_dim =

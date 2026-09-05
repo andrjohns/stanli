@@ -690,6 +690,8 @@ def main():
                     help="comma-separated models to exclude (the wasm32 "
                          "build cannot fit nn_rbm1bJ100's compile in 4GB)")
     ap.add_argument("--timeout", type=float, default=300)
+    ap.add_argument("--per-model", action="store_true",
+                    help="print each model's worst deviation and ULP")
     ap.add_argument("--filter", default="", metavar="SUBSTR",
                     help="with --wa-report, select model names containing this")
     args = ap.parse_intermixed_args()
@@ -739,6 +741,8 @@ def main():
                 failures.append((model, status, detail))
                 print(f"{status} {model} {detail}")
                 continue
+            if args.per_model:
+                print(f"{model}\t{rel:.2e}\t{ulp}")
             if rel > worst_overall[1]:
                 worst_overall = (model, rel, ulp)
 

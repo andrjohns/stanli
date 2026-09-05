@@ -304,6 +304,10 @@ set(STANLI_RUNTIME_SOURCES
   runtime/src/mir_decode.cpp
   runtime/src/portable_mir_v2_reader.cpp
   runtime/src/lower.cpp
+  runtime/src/lower_expr.cpp
+  runtime/src/lower_stmt.cpp
+  runtime/src/lower_funapp.cpp
+  runtime/src/lower_higher_order.cpp
   runtime/src/structured_loop.cpp
   runtime/src/init_interp.cpp
   runtime/src/unconstrain.cpp
@@ -800,6 +804,7 @@ set(STANLI_TESTS
   test_smoke test_executor test_recorder test_densities test_matvec test_eigen
   test_mnc
   test_legacy test_eight_schools test_glm test_nuts test_walnuts test_sexp
+  test_model_adapter
   test_mir test_mir_decode test_transforms test_eltwise test_scalar_binary
   test_lower
   test_lower_views
@@ -807,7 +812,7 @@ set(STANLI_TESTS
   test_reroll test_profile test_inplace test_pass_safety test_sampling
   test_ode_prog test_mir_program_conformance test_mir_checks
   test_structured_checks test_structured_loop
-  test_mir_unary_fallback test_constfold test_cse
+  test_mir_unary_fallback test_mir_binary_fallback test_constfold test_cse
   test_partition
   test_solve test_cross_path
   test_write_array test_pool test_bridgestan test_mixture test_island
@@ -815,7 +820,7 @@ set(STANLI_TESTS
   test_odevariadic test_algebra test_estimate test_brmsmono
   test_reduce_sum
   test_structured_arrays test_pathfinder test_unconstrain
-  test_init_interp)
+  test_init_interp test_constrain_structured)
 foreach(STANLI_TEST IN LISTS STANLI_TESTS)
   stanli_add_test(${STANLI_TEST})
 endforeach()

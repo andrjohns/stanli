@@ -853,6 +853,25 @@ activity masks, vectorized observations, and non-propto calls keep the generic
 Stan Math replay. On `gp_regr` the density falls from 2.48 to 0.70 us and the
 whole gradient from 6.05 to 4.20 us (1.44x internally, 1.12x CmdStan).
 
+## Matvec through Eigen gemv (`elementwise.cpp`, `lower.cpp`)
+
+`OP_MATVEC` used to be a hand-written loop that summed each output element
+over columns in ascending order, matching Stan Math's `Matrix<var>` multiply
+bitwise. On `prophet` (1169x25 and 1169x34) that was 82-83% of the bare
+gradient.
+
+The kernel is now `Eigen::Map` forward and transpose-backward gemv. A
+2026-09-04 --bare A/B (2000 iterations, four matched runs each) moved
+`prophet`'s gradient from 115.5M to 74.3M ns (1.56x; the op itself 97.3M to
+55.7M ns, 1.75x), `accel_splines`'s from 13.4M to 10.4M ns (1.28x; the op
+7.2M to 3.9M ns, 1.85x), and `accel_gp`'s from 13.6M to 11.3M ns (1.21x; the
+op 5.0M to 2.6M ns, 1.90x).
+
+Every affected corpus model's worst ULP against the CmdStan references went
+down (`accel_gp` 12 to 2, `accel_splines` 119 to 3, `prophet` 11520 to 256),
+since CmdStan runs the same Eigen gemv. Against the previous kernel the
+change is 1-4 ULP per element, inside the 10 ULP reassociation budget.
+
 ## Compiled ODE right-hand sides (`ode_prog.cpp`, report fallbacks: `STANLI_DEBUG_ODE=1`)
 
 An ODE model passes a user function (the right-hand side) to a solver
@@ -1045,32 +1064,43 @@ comparison). After these changes per-op cost is dominated by loading
 the context, not the dispatch, so the remaining lever is fewer ops,
 which is what the passes above are.
 
-## Deferred: reduction reassociation (surveyed 2026-08-25)
+## Gather backward run compression (`elementwise.cpp`, reassociation, 10 ULP budget)
+
+`OP_GATHER`'s backward scatter-adds `out_adj[k]` into `in_adj[idata[k]]` one
+element at a time. Re-profiled 2026-09-04 on three gather-heavy radon models,
+it was 47.0% of `radon_county_intercept`'s gradient (43.8% of total time),
+39.6% of `radon_hierarchical_intercept_noncentered`'s, and 39.9% of
+`radon_hierarchical_intercept_centered`'s, almost all in the backward half.
+The kernel now scans for runs of consecutive equal indices (`county_idx`-style
+data is grouped, not necessarily fully sorted) and accumulates each run into a
+local before one store, cutting memory read-modify-writes to `in_adj` from one
+per element to one per run. Indices that never repeat consecutively fall back
+to the original per-element behavior bit for bit.
+
+Measured on `radon_county_intercept`: `OP_GATHER` backward went from
+79,546,392 ns to 11,322,356 ns per 2000-gradient batch (7.0x), taking the
+opcode's share of the gradient from 47.0% to 16.3% and the per-gradient median
+from 96,152.6 ns to 55,009.8 ns (1.75x). The other two models' `OP_GATHER`
+share fell from 39.6-39.9% to 12.7%. Drift is reassociation-class, bounded at
+10 ULP; the full corpus stayed at 130/130 models within 1e-09 of CmdStan.
+
+## Unblocked: reduction reassociation (surveyed 2026-08-25, unblocked 2026-09-04)
 
 The candidates below change summation order rather than any elementwise
 result. Each was measured or profiled during the 2026-08-25 precision survey
-and deferred as a policy choice: the corpus reference gate passes either way,
-but models listed as bitwise against CmdStan in
-[`docs/corpus-status.md`](../../docs/corpus-status.md) would move into the
-small-ULP bands. Re-profile before implementing any of them, since profile
-share is a ceiling on the win and the `pow` entry below shows how a large
-share can still yield nothing.
+and is unblocked under the 10 ULP budget for reassociation-class changes.
+Implementations must state that budget in the commit message and update
+[`docs/corpus-status.md`](../../docs/corpus-status.md) and the conformance
+baseline in the same commit. Re-profile before implementing any of them, since
+profile share is a ceiling on the win and the `pow` entry below shows how a
+large share can still yield nothing.
 
-Softmax backward as a packet dot product (`adjoint.cpp`). The fold is written
-by hand because Stan Math reduces var expressions, which have no packet
-access. `Map(p).dot(Map(oa))` measured 5.86x on the reduction alone.
-`OP_SOFTMAX` is 37% of `gpcm_latent_reg_irt`'s gradient and most of that is
-backward. Drift is reorder-class, about 1e-15 relative on realistic lengths.
-
-Matvec through Eigen gemv (`elementwise.cpp`, `lower.cpp`). The scalar loop
-preserves Stan Math's multiply order at a cost the file comment puts at 82% of
-`prophet`'s gradient. Every matrix model pays something. Drift is 1-2 ULP per
-element against the current form.
-
-Gather backward via segmented reduction (`elementwise.cpp`). The ascending
-scatter-add matches var edge order; a rowwise sum over a presorted index
-(indices are lowering-time constants) was 37% of
-`radon_county_intercept`'s backward.
+Softmax backward as a packet dot product (`adjoint.cpp`). Declined
+2026-09-04. The 37% share once measured on `gpcm_latent_reg_irt` predates the
+`OP_CATEGORICAL_LOGIT_GLM_LPMF` fusion; no corpus model now reaches a softmax
+backward at gradient time. The reassociated dot also fails the 10 ULP budget
+by construction: `adj_i = p_i (oa_i - d)` cancels when `oa_i` is close to
+`d`, so a 1e-16 relative change in `d` became 23 to 128 ULP in the tests.
 
 Per-lane scalar density binding (`densities_impl.hpp`). N scalar recorder
 calls with a `sink_scope` each, where one vectorized call would do. Density
@@ -1091,6 +1121,25 @@ perturbs 101 of 120 models at reduction-class magnitudes, so the `off` in
 And Eigen's vectorized `pow` is 5x slower than scalar `std::pow` on Apple
 libm, with the `exp(k log x)` form costing 8 ULP, so the `POW` share of the
 `dogs` models stays where it is.
+
+## Constant folding and CSE on write_array (`lower.cpp`)
+
+`run_write_array` used to stop after inplace, store-forward, and reroll, so
+every data-only chain and duplicated GLM term from generated quantities
+stayed in the graph (`covid19imperial_v2`: 595,563 ops). It now runs
+constfold and CSE as well: 376,848 ops, per-draw write_array 7.22 ms to
+3.37 ms; `hmm_gaussian` 1.20 ms to 0.61 ms. Compile cost is about 95 ms on
+`covid19imperial_v2`, paid back within three draws. 29 of 120 corpus models
+shrink, none grow, and the replay is unchanged. Partition, elide_stores, and
+islands stay off: write_array has no target reduction to feed them.
+
+## Data JSON parsing (`data.cpp`), declined 2026-09-04
+
+`nn_rbm1bJ100` spends 1.95 s of its 2.8 s preparation in `json::parse` of a
+183 MB `mnist.json` (94 MB/s, which is nlohmann's DOM speed; the copy into
+`DataMap` is under 5%). A SAX walk would save at most half of that on the one
+corpus model with data this size and costs a second numeric parser, so the
+DOM parse stays.
 
 ## How we check all of this
 

@@ -42,35 +42,35 @@
   "status": "VERIFIED"
  },
  "Mb_model": {
-  "max_rel": 1.2076379071657548e-14,
-  "max_ulp": 68,
+  "max_rel": 4.902979332892736e-14,
+  "max_ulp": 332,
   "n_values": 4,
   "point": 0,
   "status": "VERIFIED"
  },
  "Mh_model": {
-  "max_rel": 2.493692530572302e-15,
-  "max_ulp": 19,
+  "max_rel": 5.455659971327208e-15,
+  "max_ulp": 42,
   "n_values": 389,
   "point": 0,
   "status": "VERIFIED"
  },
  "Mt_model": {
-  "max_rel": 1.70457561034682e-15,
-  "max_ulp": 10,
+  "max_rel": 1.8311649127568902e-14,
+  "max_ulp": 106,
   "n_values": 5,
   "point": 0,
   "status": "VERIFIED"
  },
  "Mtbh_model": {
-  "max_rel": 1.2171903248037838e-15,
+  "max_rel": 9.737522598430272e-16,
   "max_ulp": 23,
   "n_values": 155,
   "point": 0,
   "status": "VERIFIED"
  },
  "Mth_model": {
-  "max_rel": 2.3779393215585117e-15,
+  "max_rel": 3.3757660043739106e-15,
   "max_ulp": 96,
   "n_values": 395,
   "point": 0,
@@ -112,22 +112,22 @@
   "status": "VERIFIED"
  },
  "Survey_model": {
-  "max_rel": 0.0,
-  "max_ulp": 0,
+  "max_rel": 7.479933887518652e-15,
+  "max_ulp": 54,
   "n_values": 2,
   "point": 0,
   "status": "VERIFIED"
  },
  "accel_gp": {
-  "max_rel": 1.5835454903163073e-15,
-  "max_ulp": 11,
+  "max_rel": 3.359958339680482e-16,
+  "max_ulp": 2,
   "n_values": 67,
   "point": 0,
   "status": "VERIFIED"
  },
  "accel_splines": {
-  "max_rel": 6.6058269965196814e-15,
-  "max_ulp": 119,
+  "max_rel": 3.134143956281508e-16,
+  "max_ulp": 2,
   "n_values": 83,
   "point": 0,
   "status": "VERIFIED"
@@ -203,15 +203,15 @@
   "status": "VERIFIED"
  },
  "dogs": {
-  "max_rel": 4.7822341576360636e-15,
-  "max_ulp": 27,
+  "max_rel": 5.313593508484538e-16,
+  "max_ulp": 3,
   "n_values": 4,
   "point": 0,
   "status": "VERIFIED"
  },
  "dogs_hierarchical": {
-  "max_rel": 1.3822793456779697e-16,
-  "max_ulp": 1,
+  "max_rel": 1.2330319082347544e-15,
+  "max_ulp": 9,
   "n_values": 3,
   "point": 0,
   "status": "VERIFIED"
@@ -273,29 +273,29 @@
   "status": "VERIFIED"
  },
  "gp_pois_regr": {
-  "max_rel": 0.0,
-  "max_ulp": 0,
+  "max_rel": 3.8531828980372123e-16,
+  "max_ulp": 2,
   "n_values": 14,
   "point": 0,
   "status": "VERIFIED"
  },
  "gp_regr": {
-  "max_rel": 0.0,
-  "max_ulp": 0,
+  "max_rel": 1.1745933528454522e-16,
+  "max_ulp": 1,
   "n_values": 4,
   "point": 0,
   "status": "VERIFIED"
  },
  "gpcm_latent_reg_irt": {
-  "max_rel": 1.5416751405847987e-14,
-  "max_ulp": 992,
+  "max_rel": 2.5579538487363607e-13,
+  "max_ulp": 4608,
   "n_values": 531,
   "point": 0,
   "status": "VERIFIED"
  },
  "grsm_latent_reg_irt": {
-  "max_rel": 1.2708353893627528e-15,
-  "max_ulp": 11,
+  "max_rel": 1.2221152555609624e-14,
+  "max_ulp": 81,
   "n_values": 409,
   "point": 0,
   "status": "VERIFIED"
@@ -308,43 +308,43 @@
   "status": "VERIFIED"
  },
  "hierarchical_gp": {
-  "max_rel": 6.974072107791946e-16,
+  "max_rel": 8.896518338859208e-16,
   "max_ulp": 88,
   "n_values": 934,
   "point": 0,
   "status": "VERIFIED"
  },
  "hmm_drive_0": {
-  "max_rel": 1.179284751926406e-16,
-  "max_ulp": 1,
+  "max_rel": 6.236460078923892e-16,
+  "max_ulp": 3,
   "n_values": 7,
   "point": 0,
   "status": "VERIFIED"
  },
  "hmm_drive_1": {
-  "max_rel": 1.4354415423243967e-16,
-  "max_ulp": 1,
+  "max_rel": 1.0333849093193881e-15,
+  "max_ulp": 8,
   "n_values": 7,
   "point": 0,
   "status": "VERIFIED"
  },
  "hmm_example": {
-  "max_rel": 0.0,
-  "max_ulp": 0,
+  "max_rel": 4.596390643981648e-16,
+  "max_ulp": 4,
   "n_values": 5,
   "point": 0,
   "status": "VERIFIED"
  },
  "hmm_gaussian": {
-  "max_rel": 0.0,
-  "max_ulp": 0,
+  "max_rel": 7.024094266527988e-15,
+  "max_ulp": 36,
   "n_values": 15,
   "point": 0,
   "status": "VERIFIED"
  },
  "iohmm_reg": {
-  "max_rel": 2.220446049250313e-14,
-  "max_ulp": 292,
+  "max_rel": 2.3092638912203256e-14,
+  "max_ulp": 2768,
   "n_values": 30,
   "point": 0,
   "status": "VERIFIED"
@@ -420,22 +420,22 @@
   "status": "VERIFIED"
  },
  "kronecker_gp": {
-  "max_rel": 0.00712566332105925,
-  "max_ulp": 49679536742171,
+  "max_rel": 0.006304085484644689,
+  "max_ulp": 38085473626606,
   "n_values": 439,
   "point": 0,
   "status": "MISMATCH"
  },
  "ldaK2": {
-  "max_rel": 9.550489752710598e-15,
-  "max_ulp": 57,
+  "max_rel": 6.772479743086274e-14,
+  "max_ulp": 452,
   "n_values": 8,
   "point": 0,
   "status": "VERIFIED"
  },
  "ldaK5": {
-  "max_rel": 1.773009765728503e-15,
-  "max_ulp": 15,
+  "max_rel": 7.054357098468245e-13,
+  "max_ulp": 10698848,
   "n_values": 7715,
   "point": 0,
   "status": "VERIFIED"
@@ -484,7 +484,7 @@
  },
  "logistic_regression_rhs": {
   "max_rel": 2.584610084899681e-15,
-  "max_ulp": 1024,
+  "max_ulp": 2048,
   "n_values": 3076,
   "point": 0,
   "status": "VERIFIED"
@@ -525,8 +525,8 @@
   "status": "VERIFIED"
  },
  "losscurve_sislob": {
-  "max_rel": 1.5850478288274995e-16,
-  "max_ulp": 1,
+  "max_rel": 4.787365553566138e-16,
+  "max_ulp": 4,
   "n_values": 16,
   "point": 0,
   "status": "VERIFIED"
@@ -553,8 +553,8 @@
   "status": "VERIFIED"
  },
  "lsat_model": {
-  "max_rel": 1.297383578817877e-16,
-  "max_ulp": 1,
+  "max_rel": 2.6879834118388763e-15,
+  "max_ulp": 96,
   "n_values": 1007,
   "point": 0,
   "status": "VERIFIED"
@@ -582,7 +582,7 @@
  },
  "multi_occupancy": {
   "max_rel": 4.833372437940825e-15,
-  "max_ulp": 29,
+  "max_ulp": 36,
   "n_values": 107,
   "point": 0,
   "status": "VERIFIED"
@@ -630,14 +630,14 @@
   "status": "VERIFIED"
  },
  "normal_mixture_k": {
-  "max_rel": 1.0954537776412756e-14,
-  "max_ulp": 57,
+  "max_rel": 1.20570220474292e-13,
+  "max_ulp": 1086,
   "n_values": 15,
   "point": 0,
   "status": "VERIFIED"
  },
  "one_comp_mm_elim_abs": {
-  "max_rel": 6.772360450213455e-15,
+  "max_rel": 6.8833827526759706e-15,
   "max_ulp": 256,
   "n_values": 5,
   "point": 0,
@@ -658,15 +658,15 @@
   "status": "VERIFIED"
  },
  "prophet": {
-  "max_rel": 9.854536416142326e-15,
-  "max_ulp": 46,
+  "max_rel": 3.7744626923520895e-15,
+  "max_ulp": 21,
   "n_values": 63,
   "point": 0,
   "status": "VERIFIED"
  },
  "radon_county": {
-  "max_rel": 2.7755575615628914e-17,
-  "max_ulp": 368,
+  "max_rel": 5.551115123125783e-17,
+  "max_ulp": 60,
   "n_values": 390,
   "point": 0,
   "status": "VERIFIED"
@@ -812,7 +812,7 @@
   "status": "VERIFIED"
  },
  "state_space_stochastic_level_stochastic_seasonal": {
-  "max_rel": 8.651030440464789e-16,
+  "max_rel": 5.767353626976527e-16,
   "max_ulp": 12,
   "n_values": 390,
   "point": 0,

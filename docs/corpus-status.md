@@ -3,7 +3,7 @@
 Evaluating: 119/120
 Differentially verified against CmdStan: 118/120
 
-A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Models that evaluate but are not verified are listed separately and are not counted.
+A model counts as passing only when tools/verify_sample.py matches CmdStan's log_prob and full gradient at the shared deterministic point. Accuracy below is the worst deviation over lp and every gradient component: relative, and in ULPs (0 = bitwise identical to CmdStan). Bitwise counts are reported for information; the numeric policy gate is the ULP budget. Models that evaluate but are not verified are listed separately and are not counted.
 
 | model | values compared | max rel diff | max ULP |
 | --- | ---: | ---: | ---: |
@@ -13,19 +13,19 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `GLM_Binomial_model` | 4 | 0 (bitwise) | 0 |
 | `GLM_Poisson_model` | 5 | 2.2e-16 | 1 |
 | `M0_model` | 3 | 1.1e-14 | 62 |
-| `Mb_model` | 4 | 1.2e-14 | 68 |
-| `Mh_model` | 389 | 2.5e-15 | 19 |
-| `Mt_model` | 5 | 1.7e-15 | 10 |
-| `Mtbh_model` | 155 | 1.2e-15 | 23 |
-| `Mth_model` | 395 | 2.4e-15 | 96 |
+| `Mb_model` | 4 | 4.9e-14 | 332 |
+| `Mh_model` | 389 | 5.5e-15 | 42 |
+| `Mt_model` | 5 | 1.8e-14 | 106 |
+| `Mtbh_model` | 155 | 9.7e-16 | 23 |
+| `Mth_model` | 395 | 3.4e-15 | 96 |
 | `Rate_1_model` | 2 | 0 (bitwise) | 0 |
 | `Rate_2_model` | 3 | 0 (bitwise) | 0 |
 | `Rate_3_model` | 2 | 0 (bitwise) | 0 |
 | `Rate_4_model` | 3 | 1.3e-16 | 1 |
 | `Rate_5_model` | 2 | 0 (bitwise) | 0 |
-| `Survey_model` | 2 | 0 (bitwise) | 0 |
-| `accel_gp` | 67 | 1.6e-15 | 11 |
-| `accel_splines` | 83 | 6.6e-15 | 119 |
+| `Survey_model` | 2 | 7.5e-15 | 54 |
+| `accel_gp` | 67 | 3.4e-16 | 2 |
+| `accel_splines` | 83 | 3.1e-16 | 2 |
 | `arK` | 8 | 9.6e-16 | 5 |
 | `arma11` | 5 | 0 (bitwise) | 0 |
 | `blr` | 7 | 1.8e-16 | 1 |
@@ -34,8 +34,8 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `covid19imperial_v2` | 52 | 8.2e-16 | 7 |
 | `covid19imperial_v3` | 52 | 8.2e-16 | 7 |
 | `diamonds` | 27 | 2.6e-12 | 16248 |
-| `dogs` | 4 | 4.8e-15 | 27 |
-| `dogs_hierarchical` | 3 | 1.4e-16 | 1 |
+| `dogs` | 4 | 5.3e-16 | 3 |
+| `dogs_hierarchical` | 3 | 1.2e-15 | 9 |
 | `dogs_log` | 3 | 0 (bitwise) | 0 |
 | `dogs_nonhierarchical` | 66 | 6.9e-16 | 4 |
 | `dugongs_model` | 5 | 1.9e-16 | 1 |
@@ -44,17 +44,17 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `eight_schools_noncentered` | 11 | 0 (bitwise) | 0 |
 | `election88_full` | 91 | 9.8e-15 | 81 |
 | `garch11` | 5 | 1.6e-15 | 8 |
-| `gp_pois_regr` | 14 | 0 (bitwise) | 0 |
-| `gp_regr` | 4 | 0 (bitwise) | 0 |
-| `gpcm_latent_reg_irt` | 531 | 1.5e-14 | 992 |
-| `grsm_latent_reg_irt` | 409 | 1.3e-15 | 11 |
+| `gp_pois_regr` | 14 | 3.9e-16 | 2 |
+| `gp_regr` | 4 | 1.2e-16 | 1 |
+| `gpcm_latent_reg_irt` | 531 | 2.6e-13 | 4608 |
+| `grsm_latent_reg_irt` | 409 | 1.2e-14 | 81 |
 | `hier_2pl` | 670 | 0 (bitwise) | 0 |
-| `hierarchical_gp` | 934 | 7.0e-16 | 88 |
-| `hmm_drive_0` | 7 | 1.2e-16 | 1 |
-| `hmm_drive_1` | 7 | 1.4e-16 | 1 |
-| `hmm_example` | 5 | 0 (bitwise) | 0 |
-| `hmm_gaussian` | 15 | 0 (bitwise) | 0 |
-| `iohmm_reg` | 30 | 2.2e-14 | 292 |
+| `hierarchical_gp` | 934 | 8.9e-16 | 88 |
+| `hmm_drive_0` | 7 | 6.2e-16 | 3 |
+| `hmm_drive_1` | 7 | 1.0e-15 | 8 |
+| `hmm_example` | 5 | 4.6e-16 | 4 |
+| `hmm_gaussian` | 15 | 7.0e-15 | 36 |
+| `iohmm_reg` | 30 | 2.3e-14 | 2768 |
 | `irt_2pl` | 145 | 0 (bitwise) | 0 |
 | `kidscore_interaction` | 6 | 0 (bitwise) | 0 |
 | `kidscore_interaction_c` | 6 | 4.7e-14 | 330 |
@@ -65,37 +65,37 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `kidscore_momhsiq` | 5 | 1.4e-16 | 1 |
 | `kidscore_momiq` | 4 | 0 (bitwise) | 0 |
 | `kilpisjarvi` | 4 | 0 (bitwise) | 0 |
-| `ldaK2` | 8 | 9.6e-15 | 57 |
-| `ldaK5` | 7715 | 1.8e-15 | 15 |
+| `ldaK2` | 8 | 6.8e-14 | 452 |
+| `ldaK5` | 7715 | 7.1e-13 | 10698848 |
 | `log10earn_height` | 4 | 0 (bitwise) | 0 |
 | `logearn_height` | 4 | 4.3e-16 | 2 |
 | `logearn_height_male` | 5 | 0 (bitwise) | 0 |
 | `logearn_interaction` | 6 | 2.6e-16 | 2 |
 | `logearn_interaction_z` | 6 | 1.1e-15 | 9 |
 | `logearn_logheight_male` | 5 | 2.1e-16 | 1 |
-| `logistic_regression_rhs` | 3076 | 2.6e-15 | 1024 |
+| `logistic_regression_rhs` | 3076 | 2.6e-15 | 2048 |
 | `logmesquite` | 9 | 3.9e-16 | 3 |
 | `logmesquite_logva` | 6 | 1.3e-16 | 1 |
 | `logmesquite_logvas` | 9 | 2.0e-16 | 1 |
 | `logmesquite_logvash` | 8 | 3.4e-16 | 2 |
 | `logmesquite_logvolume` | 4 | 1.7e-16 | 1 |
-| `losscurve_sislob` | 16 | 1.6e-16 | 1 |
+| `losscurve_sislob` | 16 | 4.8e-16 | 4 |
 | `lotka_volterra` | 9 | 4.3e-15 | 22 |
 | `low_dim_gauss_mix` | 6 | 0 (bitwise) | 0 |
 | `low_dim_gauss_mix_collapse` | 6 | 0 (bitwise) | 0 |
-| `lsat_model` | 1007 | 1.3e-16 | 1 |
+| `lsat_model` | 1007 | 2.7e-15 | 96 |
 | `mesquite` | 9 | 0 (bitwise) | 0 |
-| `multi_occupancy` | 107 | 4.8e-15 | 29 |
+| `multi_occupancy` | 107 | 4.8e-15 | 36 |
 | `nes` | 11 | 0 (bitwise) | 0 |
 | `nes_logit_model` | 3 | 0 (bitwise) | 0 |
 | `nn_rbm1bJ10` | 7952 | 4.6e-16 | 3 |
 | `nn_rbm1bJ100` | 79412 | 1.1e-13 | 735 |
 | `normal_mixture` | 4 | 0 (bitwise) | 0 |
-| `normal_mixture_k` | 15 | 1.1e-14 | 57 |
-| `one_comp_mm_elim_abs` | 5 | 6.8e-15 | 256 |
+| `normal_mixture_k` | 15 | 1.2e-13 | 1086 |
+| `one_comp_mm_elim_abs` | 5 | 6.9e-15 | 256 |
 | `pilots` | 19 | 1.4e-16 | 2 |
-| `prophet` | 63 | 9.9e-15 | 46 |
-| `radon_county` | 390 | 2.8e-17 | 368 |
+| `prophet` | 63 | 3.8e-15 | 21 |
+| `radon_county` | 390 | 5.6e-17 | 60 |
 | `radon_county_intercept` | 389 | 1.8e-14 | 136 |
 | `radon_hierarchical_intercept_centered` | 392 | 8.5e-14 | 407 |
 | `radon_hierarchical_intercept_noncentered` | 392 | 1.6e-14 | 96 |
@@ -114,7 +114,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `seeds_stanified_model` | 27 | 0 (bitwise) | 0 |
 | `sesame_one_pred_a` | 4 | 0 (bitwise) | 0 |
 | `soil_incubation` | 7 | 1.6e-13 | 1241 |
-| `state_space_stochastic_level_stochastic_seasonal` | 390 | 8.7e-16 | 12 |
+| `state_space_stochastic_level_stochastic_seasonal` | 390 | 5.8e-16 | 12 |
 | `surgical_model` | 15 | 0 (bitwise) | 0 |
 | `wells_daae_c_model` | 7 | 8.6e-15 | 55 |
 | `wells_dae_c_model` | 6 | 9.2e-14 | 446 |
@@ -133,12 +133,22 @@ The oracle also records CmdStan's write_array at the same point: every CSV colum
 | model | write_array values compared |
 | --- | ---: |
 | `2pl_latent_reg_irt` | 549 |
+| `GLMM1_model` | 2395 |
 | `GLMM_Poisson_model` | 125 |
 | `GLM_Binomial_model` | 83 |
 | `GLM_Poisson_model` | 84 |
+| `M0_model` | 4 |
+| `Mb_model` | 1596 |
+| `Mh_model` | 1159 |
+| `Mt_model` | 7 |
+| `Mtbh_model` | 1912 |
+| `Mth_model` | 5044 |
 | `Rate_1_model` | 1 |
 | `Rate_2_model` | 3 |
 | `Rate_3_model` | 1 |
+| `Rate_4_model` | 4 |
+| `Rate_5_model` | 3 |
+| `Survey_model` | 1002 |
 | `accel_gp` | 72 |
 | `accel_splines` | 160 |
 | `arK` | 7 |
@@ -146,9 +156,13 @@ The oracle also records CmdStan's write_array at the same point: every CSV colum
 | `blr` | 6 |
 | `bones_model` | 13 |
 | `bym2_offset_only` | 9610 |
+| `covid19imperial_v2` | 8457 |
+| `covid19imperial_v3` | 8457 |
 | `diamonds` | 27 |
 | `dogs` | 2253 |
+| `dogs_hierarchical` | 752 |
 | `dogs_log` | 2252 |
+| `dogs_nonhierarchical` | 946 |
 | `dugongs_model` | 6 |
 | `earn_height` | 3 |
 | `eight_schools_centered` | 10 |
@@ -160,10 +174,12 @@ The oracle also records CmdStan's write_array at the same point: every CSV colum
 | `gpcm_latent_reg_irt` | 550 |
 | `grsm_latent_reg_irt` | 418 |
 | `hier_2pl` | 804 |
+| `hierarchical_gp` | 3279 |
 | `hmm_drive_0` | 429 |
 | `hmm_drive_1` | 429 |
 | `hmm_example` | 111 |
 | `hmm_gaussian` | 9519 |
+| `iohmm_reg` | 18031 |
 | `irt_2pl` | 144 |
 | `kidscore_interaction` | 5 |
 | `kidscore_interaction_c` | 5 |
@@ -189,16 +205,19 @@ The oracle also records CmdStan's write_array at the same point: every CSV colum
 | `logmesquite_logvash` | 7 |
 | `logmesquite_logvolume` | 3 |
 | `losscurve_sislob` | 384 |
+| `lotka_volterra` | 90 |
 | `low_dim_gauss_mix` | 5 |
 | `low_dim_gauss_mix_collapse` | 5 |
 | `lsat_model` | 1012 |
 | `mesquite` | 8 |
+| `multi_occupancy` | 312 |
 | `nes` | 10 |
 | `nes_logit_model` | 2 |
 | `nn_rbm1bJ10` | 7951 |
 | `nn_rbm1bJ100` | 79411 |
 | `normal_mixture` | 3 |
 | `normal_mixture_k` | 15 |
+| `one_comp_mm_elim_abs` | 44 |
 | `pilots` | 58 |
 | `prophet` | 62 |
 | `radon_county` | 389 |
@@ -219,6 +238,7 @@ The oracle also records CmdStan's write_array at the same point: every CSV colum
 | `seeds_model` | 27 |
 | `seeds_stanified_model` | 26 |
 | `sesame_one_pred_a` | 3 |
+| `soil_incubation` | 31 |
 | `state_space_stochastic_level_stochastic_seasonal` | 581 |
 | `surgical_model` | 28 |
 | `wells_daae_c_model` | 6 |
@@ -239,7 +259,7 @@ CmdStan and stanli both reject every shared evaluation point for these models: t
 
 ## Evaluate but not verified
 
-- `kronecker_gp`: max rel diff 7.1e-03
+- `kronecker_gp`: max rel diff 6.3e-03
   - lp matches CmdStan to 1e-13 and 436/438 gradients match; the two that flow through eigenvectors_sym differ by 0.7%. The covariance at this data has 8 of 29 eigenvalue gaps below 1e-12 (smallest 6.5e-17), and eigenvector derivatives scale as 1/(lambda_i - lambda_j), so last-bit differences in the input are amplified by ~1e16. Every component op (eigen decomposition, transpose, matrix product, the whole chain with one operand held constant) matches CmdStan bitwise in isolation.
 
 ## Failures

@@ -7,4 +7,4 @@ model {
 }
 
 // STANLI-LIT: PASS
-// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: unsupported index expression: base=a [IndexBetween] [IndexMulti] type=UArray
+// STANLI-LIT-EXPECT: COMPILE_FAIL stanli compile: unsupported index expression: base=a [IndexAll] [IndexMulti] type=UArray

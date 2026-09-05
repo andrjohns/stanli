@@ -1,10 +1,10 @@
 diff --git a/src/analysis_and_optimization/Partial_evaluator.ml b/src/analysis_and_optimization/Partial_evaluator.ml
-index c96d066e2..2b646f0a1 100644
+index 630e97b00..21a8e0118 100644
 --- a/src/analysis_and_optimization/Partial_evaluator.ml
 +++ b/src/analysis_and_optimization/Partial_evaluator.ml
 @@ -4,6 +4,15 @@ open Std
  open Middle
-
+ 
  exception Rejected of Location_span.t * string
 +exception Integer_overflow
 +
@@ -15,7 +15,7 @@ index c96d066e2..2b646f0a1 100644
 +  if Int64.compare value int32_min < 0 || Int64.compare value int32_max > 0 then
 +    raise Integer_overflow;
 +  value
-
+ 
  let rec is_int query Expr.{pattern; _} =
    match pattern with
 @@ -14,11 +23,11 @@ let rec is_int query Expr.{pattern; _} =
@@ -36,7 +36,7 @@ index c96d066e2..2b646f0a1 100644
              [@coverage off]) )
 @@ -35,21 +44,22 @@ let apply_prefix_operator_real (op : string) i =
              [@coverage off]) )
-
+ 
  let apply_operator_int (op : string) i1 i2 =
 +  let bool b = if b then 1L else 0L in
    Expr.Pattern.Lit
@@ -70,7 +70,7 @@ index c96d066e2..2b646f0a1 100644
          | s ->
              Common.ICE.internal_errorf "Not an int operator: %s" [s]
              [@coverage off]) )
-@@ -981,7 +991,7 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
+@@ -977,7 +987,7 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
                  | op, [{pattern= Lit (Int, i); _}] -> (
                      match op with
                      | "PPlus__" | "PMinus__" | "PNot__" ->
@@ -79,7 +79,7 @@ index c96d066e2..2b646f0a1 100644
                      | _ -> FunApp (kind, l))
                  | op, [{pattern= Lit (Real, r); _}] -> (
                      match op with
-@@ -990,7 +1000,7 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
+@@ -986,7 +996,7 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
                      | _ -> FunApp (kind, l))
                  | ( ("Divide__" | "IntDivide__" | "Modulo__")
                    , [{meta= {type_= UInt; _}; _}; {pattern= Lit (Int, i2); _}] )
@@ -88,7 +88,7 @@ index c96d066e2..2b646f0a1 100644
                      raise (Rejected (e.meta.loc, "Integer division by zero"))
                  | op, [{pattern= Lit (Int, i1); _}; {pattern= Lit (Int, i2); _}]
                    -> (
-@@ -999,8 +1009,8 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
+@@ -995,8 +1005,8 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
                       |"IntDivide__" | "Modulo__" | "Or__" | "And__"
                       |"Equals__" | "NEquals__" | "Less__" | "Leq__"
                       |"Greater__" | "Geq__" ->
@@ -99,27 +99,27 @@ index c96d066e2..2b646f0a1 100644
                      | _ -> FunApp (kind, l))
                  | ( op
                    , [{pattern= Lit (Real, i1); _}; {pattern= Lit (Real, i2); _}]
-@@ -1139,7 +1149,10 @@ let rec simplify_indices_expr expr =
-       |> Expr.Pattern.map simplify_indices_expr in
-     {expr with pattern})
-
--let try_eval_expr expr = try eval_expr expr with Rejected _ -> expr
-+let try_eval_expr expr =
-+  try eval_expr expr with
+@@ -1061,7 +1071,9 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
+           Indexed (eval_expr e, List.map ~f:(Index.map eval_expr) l)) }
+ 
+ and try_eval_expr ?(preserve_stability = false) expr =
+-  try eval_expr ~preserve_stability expr with Rejected _ -> expr
++  try eval_expr ~preserve_stability expr with
 +  | Rejected _ -> expr
 +  | Integer_overflow -> expr
-
- let rec eval_stmt s =
-   try
-@@ -1149,8 +1162,10 @@ let rec eval_stmt s =
-           Pattern.map
-             (Fun.compose eval_expr simplify_indices_expr)
-             eval_stmt s.pattern }
+ 
+ let rec simplify_index_expr pattern =
+   Expr.(
+@@ -1259,9 +1271,11 @@ let rec eval_stmt info Stmt.{pattern; meta} =
+         let info, els = eval_stmt info els in
+         (erase_stmt info thn, IfElse (cond, thn, Some els) |> swrap)
+     | other -> (info, Stmt.Pattern.map expr Fun.id other |> swrap)
 -  with Rejected (loc, m) ->
 +  with
 +  | Rejected (loc, m) ->
-     { Stmt.pattern= NRFunApp (CompilerInternal FnReject, [Expr.Helpers.str m])
-     ; meta= loc }
-+  | Integer_overflow -> s
-
- let eval_prog p : Program.Typed.t = Program.map try_eval_expr eval_stmt Fun.id p
+     ( info
+     , { pattern= NRFunApp (CompilerInternal FnReject, [Expr.Helpers.str m])
+       ; meta= loc } )
++  | Integer_overflow -> (erase_stmt info {pattern; meta}, {pattern; meta})
+ 
+ let eval_stmt s = eval_stmt empty_sizes s |> snd

@@ -591,6 +591,8 @@ runs in CI on every push, and
 [`tools/wasm_check.sh`](../tools/wasm_check.sh) drives the same replay
 through the WASM build. A change that claims to be a pure refactor
 should leave the replay's worst-deviation line exactly as it found it.
+For kernel changes, see the numeric parity policy in [`TESTING.md`](../TESTING.md):
+within 2 ULP by default, up to 10 ULP for reassociation-class optimizations.
 
 If the change touches raw pointers, an `Eigen::Map` over a buffer
 somebody else sized, or the island register file, run the suite with

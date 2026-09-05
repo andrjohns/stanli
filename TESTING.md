@@ -32,21 +32,26 @@ compares the shipped, optimized graph with CmdStan; a separate A/B test
 compares that graph with versions in which selected optimizations are
 disabled.
 
-The numerical criterion depends on the comparison. Unit tests for individual
-operations and the cross-path tests use bitwise equality by default. A small
-number of operations have a documented allowance of at most 2 ULP (units in
-the last place) because equivalent floating-point evaluation orders can
-differ in their final bits. Most corpus points use a 1e-9 gate on the scaled
-error `|a-b| / max(|a|, |b|, 1)`. Three documented `kronecker_gp` points use
-limits based on their measured deviations, and points rejected by CmdStan
-require matching rejection behavior. The sections below give the details and
-known exceptions.
+The numerical criterion depends on the comparison. Agreement with CmdStan is
+measured in ULPs; the default policy is within 2 ULP. Bitwise agreement is not
+a gate; a change that moves a model from bitwise to a small ULP band is
+accepted. Reassociation-class kernel changes (reductions, matvec, gather
+backward, softmax backward) may reach 10 ULP only when the change states that
+budget in its commit message and updates the baseline in the same commit.
+Anything beyond 10 ULP is a bug. Unit tests for individual operations and
+the cross-path tests (stanli's own paths against each other) still use
+bitwise equality; a kernel change that widens one of them records the new
+limit at the assertion. Most corpus
+points use a 1e-9 gate on scaled error `|a-b| / max(|a|, |b|, 1)`. Three
+documented `kronecker_gp` points use limits based on measured deviations, and
+points rejected by CmdStan require matching rejection behavior. The sections
+below give the details and known exceptions.
 
 ## Overview of the checks
 
 | check | question | acceptance rule | schedule |
 | --- | --- | --- | --- |
-| unit tests for numerical operations | Does one numerical operation or graph transformation agree with stan-math? | Bitwise by default; a documented 2 ULP limit for selected paths | every pull request |
+| unit tests for numerical operations | Does one numerical operation or graph transformation agree with stan-math? | Bitwise by default; a recorded limit of at most 2 ULP (10 for reassociation) where a kernel reorders arithmetic | every pull request |
 | compiler producer parity | Do native OCaml, js_of_ocaml, and the Windows executable emit identical compact-v2 bytes while the stock rollback paths remain usable? | Byte-for-byte identity on seven successful models; JS API/error/warning/rollback checks; Windows provenance, executable-format, and final-newline checks | every pull request |
 | MIR wire cost | Is the compact-v2 decoder materially faster and the wire materially smaller than legacy MIR? | On Eight Schools, median decode time and raw bytes must each be at most half the legacy value | every pull request |
 | corpus comparison | Are 119 posteriordb models and 11 compiler-derived fixtures consistent with recorded CmdStan behavior at three fixed inputs? | Scaled error of 1e-9 for most points; documented limits for three `kronecker_gp` points; rejection parity | every pull request |
@@ -66,9 +71,7 @@ known exceptions.
 ## MIR loop-vectorization measurement
 
 [`harnesses/vectorize_ab.py`](harnesses/vectorize_ab.py) measures one source
-MIR pass against an explicit pass-off oracle. It selects upstream
-`vectorize_loops` by default; `--candidate-pass
-distribute-same-lane-density-loops` selects the Stanli-owned loop rewrite.
+MIR pass against an explicit pass-off oracle: upstream `vectorize_loops`.
 The test-only OCaml probe compiles each source once with the candidate off and
 once with it on; every later check consumes those exact portable MIR files
 through `stanli_check --mir`. All other source-pass choices are explicit and
@@ -191,34 +194,33 @@ separate question.
 [`docs/corpus-status.md`](docs/corpus-status.md) publishes the worst
 deviation for each posteriordb model as both scaled error and ULPs. A ULP is
 one step between adjacent representable floating-point numbers at a given
-magnitude. At their primary recorded point, 41 verified posteriordb models
-have 0 ULP difference: their log density and every gradient component are
-bit-identical to CmdStan. Eight additional language fixtures have 0 ULP
-difference in [`docs/verification.json`](docs/verification.json).
+magnitude. Close agreement is expected because stanli and CmdStan both call
+stan-math and use the same floating-point compiler flags. Evaluation order
+still matters: floating-point addition is not associative, so `(a+b)+c` can
+differ from `a+(b+c)` in the last bit.
 
-Close agreement is expected because stanli and CmdStan both call stan-math
-and use the same floating-point compiler flags. stanli's native kernels also
-follow stan-math's reverse-mode expressions. Evaluation order still matters:
-floating-point addition is not associative, so `(a+b)+c` can differ from
-`a+(b+c)` in the last bit. For this reason, kernels preserve the reference
-summation order where practical. The contract in
-[`docs/hacking.md`](docs/hacking.md) gives a concrete example: reordering a
-matrix-vector sum remains within the corpus's 1e-9 scaled-error gate but changes
-the result by 1 ULP, which [`tests/test_matvec.cpp`](tests/test_matvec.cpp)
-detects.
+The policy is: agreement within 2 ULP by default. Reassociation-class kernel
+changes (reductions, matvec, gather backward, softmax backward) may use a 10
+ULP budget when the change is measured and that budget is stated in the commit
+message. Bitwise agreement is reported for information but is not a gate; if a
+change improves performance by moving a model from bitwise to a small ULP band,
+that is an accepted trade. At their primary recorded point, 41 verified
+posteriordb models have 0 ULP difference with CmdStan. Eight additional language
+fixtures have 0 ULP difference in [`docs/verification.json`](docs/verification.json).
 
-Kernel paths with an explicit ULP allowance are documented at their call
-sites. For example, the elementwise `log` kernel uses Eigen's packet
-implementation, which can differ from the system math library by 1 ULP on
-some inputs. The corresponding packet `exp` path is not used because its
-accumulated effect moves
-`kronecker_gp` outside its measured reference gate
+Kernels preserve the reference summation order where practical to stay within
+the 2 ULP budget. The contract in [`docs/hacking.md`](docs/hacking.md) gives a
+concrete example: reordering a matrix-vector sum remains within the corpus's
+1e-9 scaled-error gate but changes the result by 1 ULP, which
+[`tests/test_matvec.cpp`](tests/test_matvec.cpp) detects. Kernel paths with
+an explicit ULP allowance are documented at their call sites. For example, the
+elementwise `log` kernel uses Eigen's packet implementation, which can differ
+from the system math library by 1 ULP on some inputs. The corresponding packet
+`exp` path is not used because its accumulated effect moves `kronecker_gp`
+outside its measured reference gate
 ([`runtime/kernels/eltwise_expr.cpp`](runtime/kernels/eltwise_expr.cpp),
-line 333). Several other Eigen expressions have documented differences of
-1-2 ULP because they reassociate arithmetic.
-
-Any non-bitwise limit is tied to a measured difference and a documented
-mechanism.
+line 333). Several other Eigen expressions have documented differences of 1-2
+ULP because they reassociate arithmetic.
 
 ## Unit tests for numerical operations
 
@@ -300,7 +302,9 @@ expression where pristine stanc3's host-width-dependent folds disagree. A
 focused worker harness proves the preferred custom
 import and the missing-artifact fallback import. The tested JavaScript
 artifacts are the ones consumed by the Pages and npm jobs. The manylinux gate
-then decodes the same typed-producer output directly with `bench_mir_decode`.
+then decodes the same typed-producer output directly with `bench_mir_decode`,
+produced by the probe with `vectorize_loops` off since `stanc --O1` has no
+switch for it.
 For Eight Schools, compact v2 must take no more than half the legacy decoder's
 median time across 51 repetitions and no more than half its raw bytes. Gzip and
 complete preparation timings remain descriptive measurements in the uploaded
@@ -727,14 +731,11 @@ cross-path comparison of transformed data.
 
 Reduction order is not frozen across releases. Fusion and packet
 arithmetic change the order of some reductions, so gradients can differ
-from an earlier release in their last bits. Releases that do this carry a
-compatibility note in [`CHANGELOG.md`](CHANGELOG.md) with the worst
-measured deviation against the untransformed graph. The environment switches
-can then be used to identify the transformation responsible for a difference.
-
-A small number of ULP relaxations are deliberate, each recorded at the
-call site: the packet `log` path, and several reassociating Eigen
-expressions at 1-2 ULP.
+from an earlier release in their last bits, within the 2 ULP default budget
+or the 10 ULP reassociation budget. Releases that do this carry a
+compatibility note in [`CHANGELOG.md`](CHANGELOG.md) with the worst measured
+deviation against the untransformed graph. The environment switches can then
+be used to identify the transformation responsible for a difference.
 
 Some less-common multivariate and multinomial densities produce gradients
 that match CmdStan but report `lp__` with a parameter-independent offset.

@@ -34,6 +34,9 @@ int main() {
     s.buf[0] = gy_copy;
     s.buf[1] = &gmu_copy;
     s.buf[2] = &gsig_copy;
+    s.len[0] = N;
+    s.len[1] = 1;
+    s.len[2] = 1;
     stanli::active_sink() = &s;
     Eigen::Matrix<rvar, -1, 1> ry(N);
     for (int i = 0; i < N; ++i) ry(i) = rvar(ys[i]);
@@ -49,6 +52,9 @@ int main() {
     s.buf[0] = gy_map;
     s.buf[1] = &gmu_map;
     s.buf[2] = &gsig_map;
+    s.len[0] = N;
+    s.len[1] = 1;
+    s.len[2] = 1;
     stanli::active_sink() = &s;
     auto ry = stanli::as_rvar(stanli::Desc{ys.data(), N});
     stan::math::normal_lpdf<false>(ry, rvar(0.25), rvar(1.4));
@@ -64,6 +70,50 @@ int main() {
     expect_eq("copied d/dy", gy_copy[i], vy(i).adj());
     expect_eq("mapped d/dy", gy_map[i], vy(i).adj());
   }
+
+  // Recorder path 3: null buf[0] on a vector rvar edge.
+  double gmu_null = 0, gsig_null = 0;
+  {
+    stanli::sink s;
+    s.buf[0] = nullptr;
+    s.buf[1] = &gmu_null;
+    s.buf[2] = &gsig_null;
+    s.len[0] = N;
+    s.len[1] = 1;
+    s.len[2] = 1;
+    stanli::active_sink() = &s;
+    Eigen::Matrix<rvar, -1, 1> ry3(N);
+    for (int i = 0; i < N; ++i) ry3(i) = rvar(ys[i]);
+    stan::math::normal_lpdf<false>(ry3, rvar(0.25), rvar(1.4));
+    stanli::active_sink() = nullptr;
+    expect_eq("null-buf value", s.value, vlp.val());
+  }
+  expect_eq("null-buf d/dmu", gmu_null, vmu.adj());
+  expect_eq("null-buf d/dsigma", gsig_null, vsig.adj());
+
+  // Recorder path 4: len[0] mismatched with the operand size.
+  double gy_mismatch[5] = {111, 222, 333, 999, 888};
+  double gmu_mm = 0, gsig_mm = 0;
+  {
+    stanli::sink s;
+    s.buf[0] = gy_mismatch;
+    s.buf[1] = &gmu_mm;
+    s.buf[2] = &gsig_mm;
+    s.len[0] = 3;
+    s.len[1] = 1;
+    s.len[2] = 1;
+    stanli::active_sink() = &s;
+    Eigen::Matrix<rvar, -1, 1> ry4(N);
+    for (int i = 0; i < N; ++i) ry4(i) = rvar(ys[i]);
+    stan::math::normal_lpdf<false>(ry4, rvar(0.25), rvar(1.4));
+    stanli::active_sink() = nullptr;
+    expect_eq("mismatch value", s.value, vlp.val());
+  }
+  expect_eq("mismatch d/dmu", gmu_mm, vmu.adj());
+  expect_eq("mismatch d/dsigma", gsig_mm, vsig.adj());
+  expect_eq("mismatch canary[3]", gy_mismatch[3], 999.0);
+  expect_eq("mismatch canary[4]", gy_mismatch[4], 888.0);
+
   stan::math::recover_memory();
 
   // gamma_lpdf with a data outcome: only alpha/beta partials.
@@ -78,6 +128,8 @@ int main() {
     s.buf[0] = nullptr;
     s.buf[1] = &ga;
     s.buf[2] = &gb;
+    s.len[1] = 1;
+    s.len[2] = 1;
     stanli::active_sink() = &s;
     stan::math::gamma_lpdf<false>(ymap, rvar(2.5), rvar(1.3));
     stanli::active_sink() = nullptr;

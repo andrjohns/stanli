@@ -725,6 +725,7 @@ constexpr uint8_t kRerollAnyDensity = kRerollDensity | kRerollIdataDensity;
 constexpr uint8_t kRerollWidenable = 1 << 2;
 // Backward reads adjoints/scratch only, never input or output value buffers.
 constexpr uint8_t kBackwardValueFree = 1 << 3;
+constexpr uint8_t kVariantGrouped = 1 << 4;
 }  // namespace op_trait
 
 constexpr uint8_t op_traits(uint16_t opcode) {
@@ -779,8 +780,13 @@ constexpr uint8_t op_traits(uint16_t opcode) {
     case OP_SQUARE:
     case OP_LOG1M:
     case OP_TANHV:
-    case OP_LOG_INV_LOGIT:
-    case OP_LOG1M_INV_LOGIT:
+#define STANLI_SCALAR_UNARY_WIDENABLE(code, fn, value, delta, topology) \
+  case code:
+      STANLI_SCALAR_UNARY_LIST(STANLI_SCALAR_UNARY_WIDENABLE)
+#undef STANLI_SCALAR_UNARY_WIDENABLE
+#define STANLI_SCALAR_BINARY_WIDENABLE(code, fn, name) case code:
+      STANLI_SCALAR_BINARY_LIST(STANLI_SCALAR_BINARY_WIDENABLE)
+#undef STANLI_SCALAR_BINARY_WIDENABLE
       return op_trait::kRerollWidenable;
 
     // Backward routes adjoints without rereading input OR output values. This
@@ -800,6 +806,10 @@ constexpr uint8_t op_traits(uint16_t opcode) {
     case OP_LOG_SUM_EXP_ROWS:
     case OP_SUM_ROWS:
       return op_trait::kBackwardValueFree;
+
+    case OP_PROD_VEC:
+    case OP_EXTREMA_VEC:
+      return op_trait::kVariantGrouped;
     default:
       return 0;
   }

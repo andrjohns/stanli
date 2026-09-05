@@ -419,7 +419,8 @@ int64_t constrain_scratch(const Op& op, const Slot* slots) {
 }
 
 // Every transform below has the same execution protocol: prim forward, then
-// a nested REV replay seeded by constrained-value and jacobian adjoints.
+// a nested REV replay seeded by constrained-value and jacobian adjoints,
+// except simplex and the two ordered kinds, whose pullbacks are closed form.
 // idata starts with the outer batch count and one leaf's raw width; keeping
 // both explicit makes an empty outer batch a plain zero-iteration loop. The
 // kind is compile-time data, so registration still installs direct function
@@ -506,9 +507,58 @@ void structured_fwd(KernelCtx& ctx) {
       const auto x = apply_structured<K>(y, lp, ctx);
       for (int64_t i = 0; i < inner_con; ++i)
         ctx.out.data[b * inner_con + i] = x.data()[i];
+      if constexpr (K == StructuredKind::Ordered) {
+        double* exp_x = ctx.scratch + b * inner_raw;
+        for (int64_t n = 1; n < inner_raw; ++n) exp_x[n - 1] = std::exp(y(n));
+      } else if constexpr (K == StructuredKind::PositiveOrdered) {
+        double* exp_x = ctx.scratch + b * inner_raw;
+        for (int64_t n = 0; n < inner_raw; ++n) exp_x[n] = std::exp(y(n));
+      }
     }
   }
   ctx.out2.data[0] = lp;
+}
+
+template <StructuredKind K>
+void simplex_bwd_batch(KernelCtx& ctx, int64_t b, int64_t inner_raw,
+                       int64_t inner_con) {
+  const double* res = ctx.out.data + b * inner_con;
+  const double* seed = ctx.out_adj_vec.data + b * inner_con;
+  double* y_adj = ctx.in_adj[0].data + b * inner_raw;
+  double dot = 0.0;
+  for (int64_t i = 0; i < inner_con; ++i) dot += seed[i] * res[i];
+  const double c = dot + (double)inner_con * ctx.out2_adj;
+  const auto z_adj = [&](int64_t i) {
+    return -res[i] * c + (res[i] * seed[i] + ctx.out2_adj);
+  };
+  double sum_u_adj = 0.0;
+  for (int64_t i = 0; i < inner_raw; ++i) {
+    const double n = (double)(i + 1);
+    sum_u_adj += z_adj(i);
+    const double v_adj = -z_adj(i + 1) * n;
+    y_adj[i] += (v_adj + sum_u_adj) / std::sqrt(n * (n + 1));
+  }
+}
+
+template <StructuredKind K>
+void ordered_bwd_batch(KernelCtx& ctx, int64_t b, int64_t inner_raw,
+                       int64_t inner_con) {
+  const double* exp_x = ctx.scratch + b * inner_raw;
+  const double* seed = ctx.out_adj_vec.data + b * inner_con;
+  double* x_adj = ctx.in_adj[0].data + b * inner_raw;
+  double rolling = 0.0;
+  if constexpr (K == StructuredKind::Ordered) {
+    for (int64_t n = inner_raw - 1; n > 0; --n) {
+      rolling += seed[n];
+      x_adj[n] += exp_x[n - 1] * rolling + ctx.out2_adj;
+    }
+    if (inner_raw > 0) x_adj[0] += rolling + seed[0];
+  } else {
+    for (int64_t n = inner_raw - 1; n >= 0; --n) {
+      rolling += seed[n];
+      x_adj[n] += exp_x[n] * rolling + ctx.out2_adj;
+    }
+  }
 }
 
 template <StructuredKind K>
@@ -516,6 +566,17 @@ void structured_bwd(KernelCtx& ctx) {
   if (ctx.in_adj[0].data == nullptr) return;
   const int64_t nb = ctx.idata[0], inner_raw = ctx.idata[1];
   const int64_t inner_con = structured_output_width<K>(ctx);
+  if constexpr (K == StructuredKind::Simplex) {
+    for (int64_t b = 0; b < nb; ++b)
+      simplex_bwd_batch<K>(ctx, b, inner_raw, inner_con);
+    return;
+  }
+  if constexpr (K == StructuredKind::Ordered ||
+                K == StructuredKind::PositiveOrdered) {
+    for (int64_t b = 0; b < nb; ++b)
+      ordered_bwd_batch<K>(ctx, b, inner_raw, inner_con);
+    return;
+  }
   using stan::math::var;
   for (int64_t b = 0; b < nb; ++b) {
     stan::math::nested_rev_autodiff nested;
@@ -561,8 +622,10 @@ void structured_bwd(KernelCtx& ctx) {
 
 template <StructuredKind K>
 void register_structured(uint16_t opcode) {
-  register_kernel(opcode,
-                  Kernel{structured_fwd<K>, structured_bwd<K>, nullptr});
+  constexpr bool kNeedsScratch =
+      K == StructuredKind::Ordered || K == StructuredKind::PositiveOrdered;
+  register_kernel(opcode, Kernel{structured_fwd<K>, structured_bwd<K>,
+                                 kNeedsScratch ? constrain_scratch : nullptr});
 }
 
 // offset_multiplier_constrain(x, mu, sigma, lp):

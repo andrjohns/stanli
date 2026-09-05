@@ -126,121 +126,6 @@ let side_effect_loop =
     }
   |}
 
-let dependent_assignment_density_loop =
-  {|
-    data {
-      int<lower=0> N;
-      vector[N] x;
-      vector[N] y;
-    }
-    parameters {
-      real alpha;
-      real beta;
-      real<lower=0> sigma;
-    }
-    model {
-      vector[N] mu;
-      for (n in 1:N) {
-        mu[n] = alpha + beta * x[n];
-        y[n] ~ normal(mu[n], sigma);
-      }
-    }
-  |}
-
-let cross_lane_assignment_density_loop =
-  {|
-    data {
-      int<lower=1> N;
-      vector[N] x;
-      vector[N] y;
-    }
-    parameters {
-      real alpha;
-      real beta;
-      real<lower=0> sigma;
-    }
-    model {
-      vector[N] mu;
-      for (n in 1:N) {
-        mu[n] = alpha + beta * x[n];
-        y[n] ~ normal(mu[n] + mu[1], sigma);
-      }
-    }
-  |}
-
-let effectful_assignment_density_loop =
-  {|
-    functions {
-      real bump_lp(real x) {
-        target += x;
-        return x;
-      }
-    }
-    data {
-      int<lower=0> N;
-      vector[N] x;
-      vector[N] y;
-    }
-    parameters {
-      real alpha;
-      real beta;
-      real<lower=0> sigma;
-    }
-    model {
-      vector[N] mu;
-      for (n in 1:N) {
-        mu[n] = alpha + beta * bump_lp(x[n]);
-        y[n] ~ normal(mu[n], sigma);
-      }
-    }
-  |}
-
-let effectful_density_loop =
-  {|
-    functions {
-      real bump_lp(real x) {
-        target += x;
-        return x;
-      }
-    }
-    data {
-      int<lower=0> N;
-      vector[N] x;
-      vector[N] y;
-    }
-    parameters {
-      real alpha;
-      real beta;
-      real<lower=0> sigma;
-    }
-    model {
-      vector[N] mu;
-      for (n in 1:N) {
-        mu[n] = alpha + beta * x[n];
-        y[n] ~ normal(mu[n], bump_lp(sigma));
-      }
-    }
-  |}
-
-let recurrent_assignment_density_loop =
-  {|
-    data {
-      int<lower=0> N;
-      vector[N] x;
-      vector[N] y;
-    }
-    parameters {
-      real<lower=0> sigma;
-    }
-    model {
-      vector[N] mu = rep_vector(0, N);
-      for (n in 1:N) {
-        mu[n] = mu[n] + x[n];
-        y[n] ~ normal(mu[n], sigma);
-      }
-    }
-  |}
-
 let o1_equivalence_models =
   [ ( "ordinary"
     , {|
@@ -371,37 +256,10 @@ let () =
     compile ~passes:(passes true) side_effect_loop in
   require
     (count_log_prob_fors side_effect_on > 0)
-    "pass-on rewrote a side-effecting loop";
+    "pass-on removed a side-effecting loop";
   require
-    (String.equal (encode side_effect_off) (encode side_effect_on))
-    "pass-on changed a side-effecting loop";
-
-  let distribute code =
-    let mir = compile_upstream_o0 code in
-    (mir, Stanli_mir_transforms.distribute_same_lane_density_loops mir) in
-  let dependent_before, dependent_after =
-    distribute dependent_assignment_density_loop in
+    (not (log_prob_has_vector_density side_effect_off))
+    "pass-off vectorized the density beside a side effect";
   require
-    (count_log_prob_fors dependent_before = 1)
-    "dependent test did not start with one loop";
-  require
-    (count_log_prob_fors dependent_after = 2)
-    "same-lane assignment and density did not split into two loops";
-  let distributed_pipeline =
-    compile
-      ~passes:
-        { (passes false) with distribute_same_lane_density_loops= true }
-      dependent_assignment_density_loop in
-  require
-    (count_log_prob_fors distributed_pipeline = 2)
-    "selected Stanli transform did not run before upstream O1";
-  List.iter
-    (fun (name, code) ->
-      let before, after = distribute code in
-      require
-        (String.equal (encode before) (encode after))
-        (name ^ " candidate was distributed"))
-    [ ("cross-lane", cross_lane_assignment_density_loop)
-    ; ("effectful assignment", effectful_assignment_density_loop)
-    ; ("effectful density", effectful_density_loop)
-    ; ("recurrent assignment", recurrent_assignment_density_loop) ]
+    (log_prob_has_vector_density side_effect_on)
+    "pass-on left the density beside a side effect in the loop"

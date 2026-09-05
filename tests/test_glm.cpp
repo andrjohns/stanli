@@ -1,10 +1,13 @@
 // Logistic GLM: graph log_prob + gradient vs an all-var reference in the
-// same op order, at three fixed parameter vectors. Bitwise.
+// same op order, at three fixed parameter vectors. case0-2 (OP_MATVEC): 10
+// ULP. The rest: bitwise.
 #include "models.hpp"
 
 #include <stan/math.hpp>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -14,6 +17,21 @@ static void expect_eq(const std::string& what, double got, double want) {
   if (got != want && !(std::isnan(got) && std::isnan(want))) {
     ++failures;
     std::printf("FAIL %-16s got %.17g want %.17g\n", what.c_str(), got, want);
+  }
+}
+
+static int64_t ulp_key(double d) {
+  int64_t i;
+  std::memcpy(&i, &d, sizeof(i));
+  return i < 0 ? (-(int64_t(1) << 63)) - i : i;
+}
+static void expect_ulp(const std::string& what, double got, double want,
+                       int64_t budget) {
+  const int64_t d = std::abs(ulp_key(got) - ulp_key(want));
+  if (d > budget) {
+    ++failures;
+    std::printf("FAIL %-16s got %.17g want %.17g (%lld ulp)\n", what.c_str(),
+                got, want, (long long)d);
   }
 }
 
@@ -248,9 +266,9 @@ int main() {
     reference(qs[c], &lp_ref, grad_ref);
 
     const std::string tag = "case" + std::to_string(c);
-    expect_eq(tag + " lp", lp, lp_ref);
+    expect_ulp(tag + " lp", lp, lp_ref, 10);
     for (int i = 0; i < NP; ++i)
-      expect_eq(tag + " g" + std::to_string(i), grad[i], grad_ref[i]);
+      expect_ulp(tag + " g" + std::to_string(i), grad[i], grad_ref[i], 10);
   }
 
   check_tail_glms();

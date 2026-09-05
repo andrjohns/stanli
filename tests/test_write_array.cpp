@@ -1501,8 +1501,37 @@ void test_categorical_rng_lowering_guards() {
   std::string logit = base;
   logit.replace(call + std::string("(FunApp (StanLib ").size(),
                 std::string("categorical_rng").size(), "categorical_logit_rng");
-  expect_interp(logit, "unsupported function categorical_logit_rng",
-                "categorical-logit stays interpreted");
+  DataMap logit_data;
+  logit_data.set_int("K", 4);
+  CompiledModel logit_cm = compile_model(logit, logit_data);
+  if (!logit_cm.write_array || logit_cm.write_array->interp ||
+      !logit_cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf("FAIL categorical_logit_rng did not lower natively: %s\n",
+                logit_cm.write_array ? logit_cm.write_array->truncated.c_str()
+                                     : "no write_array");
+    return;
+  }
+
+  Executor logit_graph(std::move(logit_cm.write_array->graph));
+  logit_cm.write_array->bind(logit_graph);
+  const std::vector<double> theta{-1.0, 0.5, 2.0, 0.0};
+  for (size_t i = 0; i < theta.size(); ++i)
+    logit_graph.params_data()[i] = theta[i];
+
+  WaRng graph_rng(17), ref_rng(17);
+  logit_graph.run_forward_only(EvalState{&graph_rng});
+  const CompiledModel::ParamView* draw_column = nullptr;
+  for (const auto& column : logit_cm.write_array->columns)
+    if (column.name == "draw") draw_column = &column;
+  const int want = stan::math::categorical_rng(
+      stan::math::softmax(categorical_theta(theta)), ref_rng.gen());
+  if (draw_column == nullptr ||
+      logit_graph.value_ptr(draw_column->slot)[draw_column->storage_index(0)] !=
+          want) {
+    ++failures;
+    std::printf("FAIL categorical_logit_rng draw mismatch vs softmax\n");
+  }
 }
 
 static stanli::DataMap categorical_data(int k) {
@@ -4388,9 +4417,30 @@ void test_gq_reduction_lowering_guards() {
   // reversed ranges are harmless empty updates.  Mutate its later 4:5 write
   // to pin both sides of the bounds check and a width mismatch; every case
   // must fail closed to WaInterp, which then reports the same invalid write.
-  const size_t tail_range = base.rfind("((Between");
-  const size_t tail_lo = base.find("(Lit Int 4)", tail_range);
-  const size_t tail_hi = base.find("(Lit Int 5)", tail_lo);
+  // z[4:5] is now spelled Upfrom(4); restore the explicit Between(4, 5).
+  std::string range_base = base;
+  {
+    const std::string upfrom =
+        "((Upfrom\n"
+        "         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) "
+        "(adlevel DataOnly))))))";
+    const std::string between =
+        "((Between\n"
+        "         ((pattern (Lit Int 4)) (meta ((type_ UInt) (loc <opaque>) "
+        "(adlevel DataOnly))))\n"
+        "         ((pattern (Lit Int 5)) (meta ((type_ UInt) (loc <opaque>) "
+        "(adlevel DataOnly))))))";
+    const size_t at = range_base.find(upfrom);
+    if (at == std::string::npos) {
+      ++failures;
+      std::printf("FAIL reductions guard cannot find the z Upfrom write\n");
+    } else {
+      range_base.replace(at, upfrom.size(), between);
+    }
+  }
+  const size_t tail_range = range_base.rfind("((Between");
+  const size_t tail_lo = range_base.find("(Lit Int 4)", tail_range);
+  const size_t tail_hi = range_base.find("(Lit Int 5)", tail_lo);
   if (tail_range == std::string::npos || tail_lo == std::string::npos ||
       tail_hi == std::string::npos) {
     ++failures;
@@ -4398,7 +4448,7 @@ void test_gq_reduction_lowering_guards() {
   } else {
     const auto expect_invalid_range = [&](long lo, long hi, const char* reason,
                                           const char* what) {
-      std::string mutated = base;
+      std::string mutated = range_base;
       mutated.replace(tail_hi, std::string("(Lit Int 5)").size(),
                       "(Lit Int " + std::to_string(hi) + ")");
       mutated.replace(tail_lo, std::string("(Lit Int 4)").size(),
@@ -4419,7 +4469,7 @@ void test_gq_reduction_lowering_guards() {
 
     // A single range index on a matrix denotes rows, not a contiguous flat
     // slice.  This first tranche has no strided multi-row write opcode.
-    std::string matrix_rows = base;
+    std::string matrix_rows = range_base;
     const size_t lhs_z = matrix_rows.rfind("(LVariable z)", tail_range);
     if (lhs_z == std::string::npos) {
       ++failures;

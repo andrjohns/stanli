@@ -126,7 +126,7 @@ def write_results(results):
     out.write_text(json.dumps(prev, indent=1, sort_keys=True) + "\n")
 
 
-def write_refs(refs, recorded):
+def write_refs(refs, recorded, fresh=False):
     """Merge the raw CmdStan values into the committed reference file.
 
     tools/verify_refs.py replays these without CmdStan installed, which is
@@ -138,6 +138,8 @@ def write_refs(refs, recorded):
     the provenance is one block for the whole file, and stamping this
     run's revisions onto values another CmdStan produced would make the
     file say something false about the models this run did not touch.
+    A --from-refs run (fresh) re-records every model, so its first write
+    under drift replaces the file instead.
     """
     blob = {"schema": SCHEMA, "recorded": recorded, "models": {}}
     if REFS_PATH.exists():
@@ -145,6 +147,8 @@ def write_refs(refs, recorded):
         if prev.get("schema") == SCHEMA:
             drift = [k for k, v in recorded.items()
                      if prev["recorded"].get(k) != v]
+            if drift and fresh:
+                prev["models"] = {}
             if drift and set(prev["models"]) - set(refs):
                 raise SystemExit(
                     f"docs/corpus-refs.json.gz was recorded against a "
@@ -373,7 +377,7 @@ def main():
             # Incremental, under a lock: a later hang keeps the rest, and
             # two workers must not read-modify-write the same file.
             with WRITE_LOCK:
-                write_refs({model: entry}, recorded)
+                write_refs({model: entry}, recorded, fresh=args.from_refs)
                 write_results({model: result})
 
     print(f"\n{n_pass}/{len(models)} models verified against CmdStan at "
