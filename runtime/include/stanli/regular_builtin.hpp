@@ -95,6 +95,38 @@ inline std::optional<RegularSpec> resolve_regular_builtin(std::string_view name,
   return std::nullopt;
 }
 
+// The hand-written integer-outcome densities, which predate
+// STANLI_INT_DENSITY_LIST and are not the shape it generates (binomial
+// carries two integer groups). Their outcome rides in idata rather than on
+// an argument, so a caller that is not the graph lowering still reaches them
+// as a kernel call: the MIR interpreter and the register program both do.
+struct DiscreteDensitySpec {
+  uint16_t opcode;
+  int n_real;
+  bool two_int_groups;
+};
+
+inline std::optional<DiscreteDensitySpec> resolve_discrete_density(
+    std::string_view name) {
+  struct Named {
+    std::string_view name;
+    DiscreteDensitySpec spec;
+  };
+  static constexpr Named kDiscrete[] = {
+      {"bernoulli_lpmf", {OP_BERNOULLI_LPMF, 1, false}},
+      {"bernoulli_logit_lpmf", {OP_BERNOULLI_LOGIT_LPMF, 1, false}},
+      {"poisson_lpmf", {OP_POISSON_LPMF, 1, false}},
+      {"poisson_log_lpmf", {OP_POISSON_LOG_LPMF, 1, false}},
+      {"neg_binomial_2_lpmf", {OP_NEG_BINOMIAL_2_LPMF, 2, false}},
+      {"neg_binomial_2_log_lpmf", {OP_NEG_BINOMIAL_2_LOG_LPMF, 2, false}},
+      {"binomial_lpmf", {OP_BINOMIAL_LPMF, 1, true}},
+      {"binomial_logit_lpmf", {OP_BINOMIAL_LOGIT_LPMF, 1, true}},
+  };
+  for (const Named& candidate : kDiscrete)
+    if (candidate.name == name) return candidate.spec;
+  return std::nullopt;
+}
+
 }  // namespace stanli
 
 #endif

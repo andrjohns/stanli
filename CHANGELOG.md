@@ -34,6 +34,19 @@ as if it had no section to check. Every model has a row, so presence is
 demanded whether or not the reference carries one. Both models that lost
 their generated quantities to `choose` passed the gate this way.
 
+A runtime-control region can hold the integer-outcome densities. A region is
+what a model compiles to where its control flow depends on a parameter, and
+its density vocabulary was the shared scalar list, which holds the continuous
+densities only, so `target += poisson_log_lpmf(y | eta)` under an `if` or a
+`while` on a parameter was a compile error for a line the flat path handles
+everywhere else. `poisson_lpmf`, `poisson_log_lpmf`, `bernoulli_lpmf`,
+`bernoulli_logit_lpmf`, `binomial_lpmf`, `binomial_logit_lpmf`,
+`neg_binomial_2_lpmf` and `neg_binomial_2_log_lpmf` now reach the same graph
+kernel the flat path calls, so the region's value and gradient are that
+kernel's to the bit. The outcome, and the number of trials for the binomials,
+must be an integer the region knows when it compiles. The GLM forms are
+unchanged: their data matrix is a different argument shape.
+
 The GLM densities take a per-row vector intercept. `bernoulli_logit_glm_lpmf`,
 `poisson_log_glm_lpmf` and `neg_binomial_2_log_glm_lpmf` refused one, and
 `binomial_logit_glm_lpmf` read only its first element while its backward wrote

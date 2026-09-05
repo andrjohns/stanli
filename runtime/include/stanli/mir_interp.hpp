@@ -2892,25 +2892,10 @@ class MirInterp {
     }
 
     {
-      struct DiscreteSpec {
-        uint16_t opcode;
-        int n_real;
-        bool two_int_groups;
-      };
-      static const std::map<std::string, DiscreteSpec> kDiscrete = {
-          {"bernoulli_lpmf", {OP_BERNOULLI_LPMF, 1, false}},
-          {"bernoulli_logit_lpmf", {OP_BERNOULLI_LOGIT_LPMF, 1, false}},
-          {"poisson_lpmf", {OP_POISSON_LPMF, 1, false}},
-          {"poisson_log_lpmf", {OP_POISSON_LOG_LPMF, 1, false}},
-          {"neg_binomial_2_lpmf", {OP_NEG_BINOMIAL_2_LPMF, 2, false}},
-          {"neg_binomial_2_log_lpmf", {OP_NEG_BINOMIAL_2_LOG_LPMF, 2, false}},
-          {"binomial_lpmf", {OP_BINOMIAL_LPMF, 1, true}},
-          {"binomial_logit_lpmf", {OP_BINOMIAL_LOGIT_LPMF, 1, true}},
-      };
-      const auto spec = kDiscrete.find(e.name);
-      if (spec != kDiscrete.end()) {
-        const int n_int = spec->second.two_int_groups ? 2 : 1;
-        if (e.args.size() != (size_t)(n_int + spec->second.n_real))
+      const auto spec = resolve_discrete_density(e.name);
+      if (spec) {
+        const int n_int = spec->two_int_groups ? 2 : 1;
+        if (e.args.size() != (size_t)(n_int + spec->n_real))
           fail(e.name + ": wrong arity in the interpreter", e.raw);
         std::vector<Value> av;
         av.reserve(e.args.size());
@@ -2926,7 +2911,7 @@ class MirInterp {
           return vals;
         };
         std::vector<int> idata;
-        if (spec->second.two_int_groups) {
+        if (spec->two_int_groups) {
           for (size_t k = 0; k < 2; ++k) {
             const std::vector<int> vals = int_group(av[k]);
             idata.push_back(is_scalar(av[k]) ? -1 : (int)vals.size());
@@ -2940,7 +2925,7 @@ class MirInterp {
           in.push_back(&av[k].r);
         Value o;
         o.r.resize(1);
-        call_kernel<T>(spec->second.opcode, 0, 0x3f, idata, in, o.r);
+        call_kernel<T>(spec->opcode, 0, 0x3f, idata, in, o.r);
         return o;
       }
     }

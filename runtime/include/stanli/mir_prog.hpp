@@ -1697,6 +1697,20 @@ struct ProgramCompiler {
     return out;
   }
 
+  // A `~` statement lowers to the same density call with propto set, and
+  // which constants it drops depends on which arguments are autodiff -- a
+  // distinction the program cannot make, since it binds every argument the
+  // same way. Getting this wrong is invisible in the gradient and shows up
+  // only in lp, so refuse rather than approximate. (Measured, before this
+  // check: lp off by exactly log(2*pi)/2 on a normal.)
+  void refuse_propto(const mir::Expr& e) {
+    if (!e.fn_propto) return;
+    bail("`~` inside a runtime-control region (write it as `target += " +
+         e.name +
+         "(...)`, which keeps every constant and is what the region can "
+         "reproduce)");
+  }
+
   // One adapter from register ranges to the graph kernel ABI. Regular
   // builtins, RNGs, and retained higher-order algorithms all use the same
   // binding, scratch sizing, ownership, and reverse-mode contract.
@@ -2553,20 +2567,7 @@ struct ProgramCompiler {
       const int dc = program_density_id_by_name(e.name);
       const int arity = program_density_arity(dc);
       if (arity) {
-        // A `~` statement lowers to the same call with propto set, and
-        // which constants it drops depends on which arguments are
-        // autodiff -- a distinction the program cannot make, since it
-        // binds every argument the same way. Getting this wrong is
-        // invisible in the gradient and shows up only in lp, so refuse
-        // rather than approximate. (Measured, before this check: lp off
-        // by exactly log(2*pi)/2 on a normal.)
-        if (e.fn_propto)
-          bail(
-              "`~` inside a runtime-control region (write it as "
-              "`target += " +
-              e.name +
-              "(...)`, which keeps every "
-              "constant and is what the region can reproduce)");
+        refuse_propto(e);
         if ((int)e.args.size() != arity)
           bail(e.name + " takes " + std::to_string(arity) + " arguments here");
         Range argv[kMaxDensityArgs];
@@ -2633,6 +2634,34 @@ struct ProgramCompiler {
         p.code.push_back(Program::Instr{Program::DENSITY, r, a0, a1, a2, dc});
         return {r, 1};
       }
+    }
+    // The integer-outcome densities, whose outcome is idata rather than an
+    // argument register: one CALL on the graph kernel the interpreter and
+    // the graph lowering already share.
+    if (const auto discrete = resolve_discrete_density(e.name)) {
+      refuse_propto(e);
+      const int n_int = discrete->two_int_groups ? 2 : 1;
+      if ((int)e.args.size() != n_int + discrete->n_real)
+        bail(e.name + " takes " + std::to_string(n_int + discrete->n_real) +
+             " arguments here");
+      std::vector<int> idata;
+      for (int k = 0; k < n_int; ++k) {
+        if (e.args[(size_t)k].type_ != "UInt")
+          bail(e.name + " needs a scalar integer outcome here");
+        // A two-group layout spells a language-level scalar -1, the way
+        // lower_funapp.cpp writes it: stan-math broadcasts a scalar, where
+        // a length-1 vector would be a size error against a longer group.
+        if (discrete->two_int_groups) idata.push_back(-1);
+        idata.push_back((int)cint(e.args[(size_t)k]));
+      }
+      std::vector<Range> args;
+      args.reserve((size_t)discrete->n_real);
+      for (size_t k = (size_t)n_int; k < e.args.size(); ++k) {
+        args.push_back(expr(e.args[k]));
+        if (!is_scalar(args.back())) bail(e.name + " on a container");
+      }
+      return kernel_call(discrete->opcode, args, Range{0, 1}, 0, 0x3f,
+                         std::move(idata), {}, e.name);
     }
     if (e.name == "fma" && e.args.size() == 3) {
       // Fused, elementwise with scalar broadcast, mirroring OP_FMA.

@@ -356,7 +356,8 @@ void expect_observation(const std::string& case_name, const char* path,
 void run_observation_case(const std::string& name, const char* semantics,
                           std::vector<FunDef> functions, double t,
                           Observation want,
-                          const char* required_refusal = nullptr) {
+                          const char* required_refusal = nullptr,
+                          bool required_acceptance = false) {
   std::map<std::string, const FunDef*> table;
   for (const FunDef& f : functions) table[f.name] = &f;
   const FunDef& entry = functions.front();
@@ -367,6 +368,11 @@ void run_observation_case(const std::string& name, const char* semantics,
   if (program.compile.kind == OutcomeKind::Refused)
     std::printf("NOTE %-24s Program %s; exercised MirInterp fallback\n",
                 name.c_str(), describe(program.compile).c_str());
+  if (required_acceptance && program.compile.kind != OutcomeKind::Accepted) {
+    ++failures;
+    std::printf("FAIL %-24s expected the Program to compile this; got %s\n",
+                name.c_str(), describe(program.compile).c_str());
+  }
   if (required_refusal &&
       (program.compile.kind != OutcomeKind::Refused ||
        program.compile.detail.find(required_refusal) == std::string::npos ||
@@ -394,6 +400,15 @@ void run_case(const std::string& name, const char* semantics,
       name, semantics, std::move(functions), t,
       observed_values(std::move(expected), std::move(expected_stdout)),
       required_refusal);
+}
+
+// The same, for what the register program is required to compile rather than
+// allowed to decline: a refusal here is a failure, not a fallback.
+void run_program_case(const std::string& name, const char* semantics,
+                      std::vector<FunDef> functions, double t,
+                      std::vector<double> expected) {
+  run_observation_case(name, semantics, std::move(functions), t,
+                       observed_values(std::move(expected)), nullptr, true);
 }
 
 void run_domain_error_case(const std::string& name, const char* semantics,
@@ -537,6 +552,37 @@ void test_nullary_constants() {
         std::numeric_limits<double>::quiet_NaN());
   check("FnNegInf", fun("FnNegInf", {}, "UReal", Expr::Lib::Internal),
         -std::numeric_limits<double>::infinity());
+}
+
+void test_discrete_densities() {
+  // The integer-outcome densities. Their outcome rides in idata rather than
+  // on an argument register, so both routes reach the graph kernel and the
+  // oracle is Stan Math's own propto-OFF value.
+  const Expr rate = var("t", "UReal");
+  const auto check = [&](const std::string& name, std::vector<Expr> args,
+                         double expected) {
+    FunDef entry = rhs_function(
+        name + "_rhs",
+        {return_value(make_array({fun(name, std::move(args), "UReal")}))});
+    run_program_case(name, "an integer outcome reaches the same kernel",
+                     {std::move(entry)}, 0.25, {expected});
+  };
+  check("poisson_lpmf", {lit_int(3), rate},
+        stan::math::poisson_lpmf<false>(3, 0.25));
+  check("poisson_log_lpmf", {lit_int(3), rate},
+        stan::math::poisson_log_lpmf<false>(3, 0.25));
+  check("bernoulli_lpmf", {lit_int(1), rate},
+        stan::math::bernoulli_lpmf<false>(1, 0.25));
+  check("bernoulli_logit_lpmf", {lit_int(1), rate},
+        stan::math::bernoulli_logit_lpmf<false>(1, 0.25));
+  check("binomial_lpmf", {lit_int(1), lit_int(2), rate},
+        stan::math::binomial_lpmf<false>(1, 2, 0.25));
+  check("binomial_logit_lpmf", {lit_int(1), lit_int(2), rate},
+        stan::math::binomial_logit_lpmf<false>(1, 2, 0.25));
+  check("neg_binomial_2_lpmf", {lit_int(3), rate, lit_real(1.25)},
+        stan::math::neg_binomial_2_lpmf<false>(3, 0.25, 1.25));
+  check("neg_binomial_2_log_lpmf", {lit_int(3), rate, lit_real(1.25)},
+        stan::math::neg_binomial_2_log_lpmf<false>(3, 0.25, 1.25));
 }
 
 void test_full_span_ode_vector() {
@@ -867,6 +913,7 @@ int main() {
   test_short_circuit_and_requires_rhs();
   test_uninitialized_real();
   test_nullary_constants();
+  test_discrete_densities();
   test_full_span_ode_vector();
   test_full_span_program_views();
   test_program_extrema();
