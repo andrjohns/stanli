@@ -3237,7 +3237,8 @@ static void runtime_slice_tests() {
 // buffer with its live count beside it, so the selector operand itself is not
 // a runtime-length value. The packing route has to agree with the direct one.
 static void runtime_index_tests() {
-  static const char* const names[] = {"", "gather"};
+  static const char* const names[] = {"", "gather", "matrix slice shape",
+                                      "array slice size"};
   std::vector<double> point(14);
   for (size_t i = 0; i < point.size(); ++i) point[i] = 0.15 * double(i) - 0.8;
   for (int packed = 0; packed < 2; ++packed) {
@@ -3245,7 +3246,7 @@ static void runtime_index_tests() {
       test_setenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS", "1");
     else
       test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
-    for (int op = 1; op <= 1; ++op) {
+    for (int op = 1; op <= 3; ++op) {
       const auto loop =
           compile_fixture("dynindex", runtime_slice_data(op), Mode::Auto);
       const auto flat =
@@ -3274,6 +3275,15 @@ static void runtime_index_tests() {
     }
   }
   test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+
+  std::string leaf_width;
+  try {
+    (void)compile_fixture("dynindex", runtime_slice_data(7), Mode::Force);
+  } catch (const CompileError& e) {
+    leaf_width = e.what();
+  }
+  check(leaf_width.find("num_elements") != std::string::npos,
+        "num_elements declines a rank-2 runtime view");
 }
 
 static std::atomic<int> memo_int_calls{0};

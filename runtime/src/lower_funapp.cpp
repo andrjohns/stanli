@@ -933,11 +933,18 @@ Lowering::Val Lowering::lower_funapp(const mir::Expr& e) {
     } catch (const CompileError&) {
     }
     const Val& a = actuals.at(0).value();
-    if (has_runtime_shape(a) && (e.name == "size" || e.name == "num_elements" ||
-                                 e.name == "rows" || e.name == "FnLength")) {
-      Val extent{one_runtime_extent(a, e.name), false, view_of("UInt")};
-      extent.si.param_free = true;
-      return with_layout(extent, ExpressionLayout::scalar());
+    if (has_runtime_shape(a) &&
+        (e.name == "size" || e.name == "num_elements" || e.name == "rows" ||
+         e.name == "cols" || e.name == "FnLength")) {
+      if (e.name == "num_elements" && a.runtime_dims.size() != 1)
+        fail("num_elements: a runtime view of this rank has no single extent",
+             e.raw);
+      const size_t axis = e.name == "cols" ? 1 : 0;
+      if (axis < a.runtime_dims.size() && a.runtime_dims[axis] >= 0) {
+        Val extent{a.runtime_dims[axis], false, view_of("UInt")};
+        extent.si.param_free = true;
+        return with_layout(extent, ExpressionLayout::scalar());
+      }
     }
   }
   if (auto v = fold_const(e)) return *v;
