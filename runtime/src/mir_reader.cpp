@@ -77,20 +77,16 @@ void validate_funapp_arity(const Expr& e) {
     return;
   }
 
-  if (named(e, {"LDivide__", "Modulo__", "multiply", "binomial_coefficient_log",
-                "diag_pre_multiply", "diag_post_multiply", "quad_form_diag",
-                "mdivide_left", "mdivide_right", "mdivide_left_spd",
-                "mdivide_right_spd", "mdivide_left_tri_low",
-                "mdivide_right_tri_low"})) {
+  if (named(e, {"Modulo__", "diag_pre_multiply", "diag_post_multiply",
+                "quad_form_diag"})) {
     require_arity(e, 2);
     return;
   }
-  if (named(e, {"PPlus__", "plus", "fabs", "prod", "categorical_rng",
-                "tcrossprod"})) {
+  if (named(e, {"PPlus__", "plus", "prod", "categorical_rng", "tcrossprod"})) {
     require_arity(e, 1);
     return;
   }
-  if (named(e, {"min", "max", "log_sum_exp"})) {
+  if (named(e, {"min", "max"})) {
     require_arity(e, 1, 2);
     return;
   }

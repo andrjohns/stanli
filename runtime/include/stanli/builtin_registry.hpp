@@ -49,7 +49,21 @@ enum class BuiltinShapePolicy : uint8_t {
   // the caller. The descriptor carries the ScalarRng family; every backend
   // routes the call to its stream-owning handler rather than a pure kernel.
   Rng,
+  // Shaped multiplication (Times__/multiply): the shared resolver
+  // classifies the scalar-scale/matvec/GEMM/outer/inner forms from operand
+  // geometry alone, validates the inner dimension, and reports the result
+  // shape with the m/k/n extents the product kernels take as idata. Each
+  // backend chooses its own materialization.
+  Product,
+  // The linear solves (mdivide_* and their operator spellings): the
+  // descriptor carries the divisor side, the factorization kind, and the
+  // graph opcode; the shared resolver validates the square divisor and
+  // conformable dividend and reports the result shape.
+  Solve,
 };
+
+// Which factorization a Solve descriptor's kernel applies to the divisor.
+enum class BuiltinSolveKind : uint8_t { None, Plain, Spd, TriLow };
 
 // Which predicate a Predicate descriptor evaluates. The operator spellings
 // (Equals__, PNot__, ...) and the logical_* library names register the same
@@ -202,6 +216,10 @@ struct BuiltinSpec {
   // Rng: which scalar family this descriptor draws (valid only under the
   // Rng policy; the field's default is meaningless elsewhere).
   ScalarRng rng = ScalarRng::PoissonLog;
+  // Solve: which side the divisor sits on and which factorization applies;
+  // the opcode field carries the solve kernel.
+  bool solve_left = false;
+  BuiltinSolveKind solve = BuiltinSolveKind::None;
 };
 
 inline bool builtin_argument_is_integer(const BuiltinSpec& spec, size_t i) {
@@ -332,6 +350,39 @@ struct BuiltinMatrixMap {
 };
 BuiltinMatrixMap builtin_matrix_map(
     const BuiltinSpec& spec, const std::vector<BuiltinArgumentShape>& shapes);
+
+// One shaped multiplication classified from operand geometry alone,
+// covering exactly Stan's multiply signatures: a scalar on either side
+// scales the other operand elementwise; otherwise matrix*vector (MatVec),
+// matrix*matrix and row_vector*matrix (Gemm), vector*row_vector (Outer),
+// and row_vector*vector (Inner). m/k/n are the GEMM extents -- the result
+// is m-by-n from m-by-k times k-by-n, with a vector operand one column and
+// a row_vector one row -- and stay zero for ScalarScale. Inner-dimension
+// mismatches and unsupported operand pairs throw std::invalid_argument.
+struct BuiltinProductMap {
+  enum class Kind : uint8_t { ScalarScale, MatVec, Gemm, Outer, Inner };
+  Kind kind = Kind::ScalarScale;
+  int64_t m = 0;
+  int64_t k = 0;
+  int64_t n = 0;
+  BuiltinArgumentShape result;
+};
+BuiltinProductMap builtin_product_map(const BuiltinArgumentShape& a,
+                                      const BuiltinArgumentShape& b);
+
+// One Solve descriptor validated: the divisor (left operand for
+// solve_left, right otherwise) must be a square matrix and the dividend
+// conformable on the divisor's side; the result takes the dividend's
+// shape. `order` is the divisor extent and `columns` the number of
+// dividend columns the kernel sweeps (1 for a vector or row_vector).
+struct BuiltinSolveMap {
+  int64_t order = 0;
+  int64_t columns = 0;
+  BuiltinArgumentShape result;
+};
+BuiltinSolveMap builtin_solve_map(const BuiltinSpec& spec,
+                                  const BuiltinArgumentShape& a,
+                                  const BuiltinArgumentShape& b);
 
 // Answer one ShapeQuery descriptor from a value's logical geometry: Dims
 // returns every extent (array extents before leaf extents, empty for a

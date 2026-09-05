@@ -1051,55 +1051,32 @@ std::optional<Lowering::Val> Lowering::lower_eltwise_fn(
   // factorisations -- an LLT of a symmetric positive definite matrix, and
   // a triangular solve that never reads the upper triangle -- so they are
   // different results, not faster routes to the same one.
-  struct NamedSolve {
-    const char* name;
-    bool left;
-    uint16_t opcode;
-  };
-  static constexpr NamedSolve kNamedSolves[] = {
-      {"mdivide_left", true, OP_MDIVIDE_LEFT},
-      {"mdivide_right", false, OP_MDIVIDE_RIGHT},
-      {"mdivide_left_spd", true, OP_MDIVIDE_LEFT_SPD},
-      {"mdivide_right_spd", false, OP_MDIVIDE_RIGHT_SPD},
-      {"mdivide_left_tri_low", true, OP_MDIVIDE_LEFT_TRI_LOW},
-      {"mdivide_right_tri_low", false, OP_MDIVIDE_RIGHT_TRI_LOW},
-  };
-  const NamedSolve* named_solve = nullptr;
-  if (e.args.size() == 2)
-    for (const NamedSolve& candidate : kNamedSolves)
-      if (e.name == candidate.name) named_solve = &candidate;
-  if (named_solve != nullptr || e.name == "LDivide__" ||
-      (e.name == "Divide__" && e.args.at(1).type_ == "UMatrix")) {
-    const bool left =
-        named_solve != nullptr ? named_solve->left : e.name == "LDivide__";
-    const uint16_t opcode = named_solve != nullptr
-                                ? named_solve->opcode
-                                : (left ? OP_MDIVIDE_LEFT : OP_MDIVIDE_RIGHT);
+  const BuiltinSpec* solve =
+      shaped_builtin_spec(e.name, e.args.size(), BuiltinShapePolicy::Solve);
+  if (solve == nullptr && e.name == "Divide__" && e.args.size() == 2 &&
+      e.args.at(1).type_ == "UMatrix")
+    solve = shaped_builtin_spec("mdivide_right", 2, BuiltinShapePolicy::Solve);
+  if (solve != nullptr) {
     actuals.require_arity(2);
     Val a = actuals.at(0).value();
     Val b = actuals.at(1).value();
+    const bool left = solve->solve_left;
     const Val& divisor = left ? a : b;
     const Val& dividend = left ? b : a;
     // rows <= 0 is a matrix view whose shape the lowering never resolved;
     // the kernel would map n x n over the slot and read past it.
-    if (!is_matrix(divisor.si) || divisor.si.rows != divisor.si.cols ||
-        divisor.si.rows <= 0)
+    if (!is_matrix(divisor.si) || divisor.si.rows <= 0)
       fail(e.name + ": divisor is not a square matrix of known size", e.raw);
-    const int64_t n = divisor.si.rows;
-    // A non-matrix dividend is the vector its side implies -- a column
-    // under `\`, a row under `/` -- the same rule Times__ follows. Either
-    // way the shared extent is n and the result has the dividend's shape.
+    BuiltinSolveMap map;
+    try {
+      map = builtin_solve_map(*solve, builtin_argument_shape(e.args[0], a),
+                              builtin_argument_shape(e.args[1], b));
+    } catch (const std::invalid_argument& error) {
+      fail(e.name + ": " + error.what(), e.raw);
+    }
     const bool dm = is_matrix(dividend.si);
-    if (!dm && !is_vector(dividend.si) && !is_row_vector(dividend.si))
-      fail(e.name + ": dividend is not a matrix or vector", e.raw);
-    const int64_t shared = dm ? (left ? dividend.si.rows : dividend.si.cols)
-                              : g.slots[dividend.slot].len;
-    if (shared != n)
-      fail(e.name + ": inner dimension mismatch (" + std::to_string(n) + "x" +
-               std::to_string(n) + " against " + std::to_string(shared) + ")",
-           e.raw);
-    const int64_t k = dm ? (left ? dividend.si.cols : dividend.si.rows) : 1;
-    Val v = emit_value(opcode, {a, b}, n * k, dividend.si, {(int)n, (int)k});
+    Val v = emit_value(solve->opcode, {a, b}, map.order * map.columns,
+                       dividend.si, {(int)map.order, (int)map.columns});
     // The kernel solves through the operand types CmdStan's generated code
     // would have used, because stan-math answers differently for each: bit
     // 0 says the result is var, bit 1 says the dividend is a vector rather
@@ -1110,80 +1087,62 @@ std::optional<Lowering::Val> Lowering::lower_eltwise_fn(
                   (divisor.autodiff ? 4u : 0u) | (dividend.autodiff ? 8u : 0u));
     return with_layout(v, owning_layout(dividend.si));
   }
-  // multiply is the named spelling of `*`, including its linear algebra:
-  // the branches below pick matvec, GEMM, outer and inner products off
-  // the operand views and the result type, which the alias shares.
+  // multiply is the named spelling of `*`, including its linear algebra.
+  // The shared product resolver classifies the scalar/matvec/GEMM/outer/
+  // inner forms and validates the inner dimension; this lowering keeps the
+  // kernel choices -- a data matrix against a true vector view stays on the
+  // fused matvec kernel, everything else shaped goes through GEMM -- and
+  // the established layout rules.
   if (e.name == "Times__" || (e.name == "multiply" && e.args.size() == 2)) {
     actuals.require_arity(2);
     Val a = actuals.at(0).value();
     Val b = actuals.at(1).value();
-    // Scalar on either side is an elementwise scale, whatever shape the
-    // other operand carries.
-    const bool a_scalar = is_scalar(a);
-    const bool b_scalar = is_scalar(b);
-    if (a_scalar || b_scalar) {
-      const Val& shaped = a_scalar ? b : a;
-      SlotInfo si = shaped.si;
-      si.param_free = a.si.param_free && b.si.param_free;
-      const int64_t n = a_scalar ? g.slots[b.slot].len : g.slots[a.slot].len;
-      return with_layout(emit_value(OP_MUL, {a, b}, n, si),
-                         elementwise_layout({a, b}));
-    }
-    if (is_matrix(a.si)) {
-      if (a.si.param_free && is_vector(b.si)) {
-        if (g.slots[b.slot].len != a.si.cols)
-          fail(e.name + ": inner dimension mismatch", e.raw);
-        return with_layout(
-            emit_value(OP_MATVEC, {a, b}, a.si.rows, view_of("UVector"),
-                       {(int)a.si.rows, (int)a.si.cols}),
-            owning_layout(view_of("UVector")));
+    BuiltinProductMap map;
+    try {
+      map = builtin_product_map(builtin_argument_shape(e.args[0], a),
+                                builtin_argument_shape(e.args[1], b));
+    } catch (const std::invalid_argument& error) {
+      // Two orientation-free flat views (inlined UDF locals) keep the
+      // elementwise broadcast they always lowered to.
+      if (a.si.kind == ViewKind::Flat && b.si.kind == ViewKind::Flat) {
+        const int64_t len = std::max(g.slots[a.slot].len, g.slots[b.slot].len);
+        return with_layout(emit_value(OP_MUL, {a, b}, len),
+                           elementwise_layout({a, b}));
       }
-      // General product; a vector operand is one column.
-      const int64_t cb = is_matrix(b.si) ? b.si.cols : 1;
-      const int64_t rb = is_matrix(b.si) ? b.si.rows : g.slots[b.slot].len;
-      if (rb != a.si.cols)
-        fail(e.name + ": inner dimension mismatch (" +
-                 std::to_string(a.si.rows) + "x" + std::to_string(a.si.cols) +
-                 " times " + std::to_string(rb) + "x" + std::to_string(cb) +
-                 ")",
-             e.raw);
-      SlotInfo si =
-          e.type_ == "UMatrix"
-              ? matrix_view(a.si.rows, cb)
-              : (cb == 1 ? view_of("UVector") : matrix_view(a.si.rows, cb));
-      Val v = emit_value(OP_GEMM, {a, b}, a.si.rows * cb, si,
-                         {(int)a.si.rows, (int)a.si.cols, (int)cb});
-      return with_layout(v, owning_layout(si));
+      fail(e.name + ": " + error.what(), e.raw);
     }
-    // vector * row_vector with a matrix result is an outer product.
-    if (is_vector(a.si) && is_row_vector(b.si) && e.type_ == "UMatrix") {
-      const int64_t nr = g.slots[a.slot].len, nc = g.slots[b.slot].len;
-      SlotInfo si = matrix_view(nr, nc);
-      return with_layout(
-          emit_value(OP_GEMM, {a, b}, nr * nc, si, {(int)nr, 1, (int)nc}),
-          owning_layout(si));
+    switch (map.kind) {
+      case BuiltinProductMap::Kind::ScalarScale: {
+        const Val& shaped = is_scalar(a) ? b : a;
+        SlotInfo si = shaped.si;
+        si.param_free = a.si.param_free && b.si.param_free;
+        return with_layout(
+            emit_value(OP_MUL, {a, b}, g.slots[shaped.slot].len, si),
+            elementwise_layout({a, b}));
+      }
+      case BuiltinProductMap::Kind::MatVec:
+        if (a.si.param_free && b.si.kind == ViewKind::Vector)
+          return with_layout(
+              emit_value(OP_MATVEC, {a, b}, map.m, view_of("UVector"),
+                         {(int)map.m, (int)map.k}),
+              owning_layout(view_of("UVector")));
+        return with_layout(
+            emit_value(OP_GEMM, {a, b}, map.m, view_of("UVector"),
+                       {(int)map.m, (int)map.k, 1}),
+            owning_layout(view_of("UVector")));
+      case BuiltinProductMap::Kind::Gemm:
+      case BuiltinProductMap::Kind::Outer: {
+        SlotInfo si = map.result.container == FunctionContainerKind::RowVector
+                          ? view_of("URowVector")
+                          : matrix_view(map.m, map.n);
+        return with_layout(emit_value(OP_GEMM, {a, b}, map.m * map.n, si,
+                                      {(int)map.m, (int)map.k, (int)map.n}),
+                           owning_layout(si));
+      }
+      case BuiltinProductMap::Kind::Inner:
+        return with_layout(emit_value(OP_DOT, {a, b}, 1),
+                           ExpressionLayout::scalar());
     }
-    if (is_row_vector(a.si) && is_matrix(b.si)) {
-      const int64_t k = g.slots[a.slot].len;
-      if (k != b.si.rows) fail(e.name + ": inner dimension mismatch", e.raw);
-      return with_layout(
-          emit_value(OP_GEMM, {a, b}, b.si.cols, view_of("URowVector"),
-                     {1, (int)k, (int)b.si.cols}),
-          owning_layout(view_of("URowVector")));
-    }
-    // row_vector * vector with scalar result type is an inner product.
-    if (is_row_vector(a.si) && is_vector(b.si) &&
-        (e.type_ == "UReal" || e.type_ == "UInt")) {
-      if (g.slots[a.slot].len != g.slots[b.slot].len)
-        fail(e.name + ": inner dimension mismatch", e.raw);
-      return with_layout(emit_value(OP_DOT, {a, b}, 1),
-                         ExpressionLayout::scalar());
-    }
-    if (a.si.kind != ViewKind::Flat || b.si.kind != ViewKind::Flat)
-      fail(e.name + ": unsupported container product", e.raw);
-    const int64_t len = std::max(g.slots[a.slot].len, g.slots[b.slot].len);
-    return with_layout(emit_value(OP_MUL, {a, b}, len),
-                       elementwise_layout({a, b}));
   }
   // fma from --O1 partial evaluation (`c + a*b`) or written explicitly:
   // fused (std::fma), elementwise with scalar broadcast on any argument.

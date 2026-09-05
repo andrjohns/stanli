@@ -98,6 +98,30 @@ constexpr BuiltinSpec grouped_dot_builtin(BuiltinSlice axis, uint8_t arity) {
   return spec;
 }
 
+constexpr BuiltinSpec product_builtin() {
+  return BuiltinSpec{OP_NONE_,
+                     2,
+                     {BuiltinArgumentKind::Real, BuiltinArgumentKind::Real},
+                     FunctionArgumentKind::Real,
+                     BuiltinShapePolicy::Product,
+                     BuiltinCompatibilityPolicy::LogicalShape,
+                     0x3};
+}
+
+constexpr BuiltinSpec solve_builtin(uint16_t opcode, bool left,
+                                    BuiltinSolveKind kind) {
+  BuiltinSpec spec{opcode,
+                   2,
+                   {BuiltinArgumentKind::Real, BuiltinArgumentKind::Real},
+                   FunctionArgumentKind::Real,
+                   BuiltinShapePolicy::Solve,
+                   BuiltinCompatibilityPolicy::LogicalShape,
+                   0x3};
+  spec.solve_left = left;
+  spec.solve = kind;
+  return spec;
+}
+
 constexpr BuiltinSpec matrix_builtin(BuiltinMatrixOp op, uint16_t opcode,
                                      uint8_t arity) {
   BuiltinSpec spec{opcode,
@@ -347,6 +371,7 @@ const std::vector<FunctionSpec>& function_specs() {
     builtin("add", integer_binary_builtin(OP_ADD));
     builtin("subtract", integer_binary_builtin(OP_SUB));
     builtin("divide", integer_binary_builtin(OP_DIV));
+    builtin("multiply", integer_binary_builtin(OP_MUL));
     builtin("elt_multiply", integer_binary_builtin(OP_MUL));
     builtin("elt_divide", integer_binary_builtin(OP_DIV));
 #define STANLI_BUILTIN_REAL_BINARY(code, fn_name, fn) \
@@ -415,6 +440,26 @@ const std::vector<FunctionSpec>& function_specs() {
     // lowerings (tcrossprod, diag_pre/post_multiply, quad_form_diag), the
     // solves the division operators share, and gp_exp_quad_cov's
     // array-argument inference stay on their specialized paths.
+    // Shaped multiplication and the linear solves. Times__ also carries the
+    // integer scalar overload registered above; the operator spellings and
+    // the library names share one descriptor each, like the predicates.
+    builtin("Times__", product_builtin());
+    builtin("multiply", product_builtin());
+    builtin("mdivide_left",
+            solve_builtin(OP_MDIVIDE_LEFT, true, BuiltinSolveKind::Plain));
+    builtin("mdivide_right",
+            solve_builtin(OP_MDIVIDE_RIGHT, false, BuiltinSolveKind::Plain));
+    builtin("mdivide_left_spd",
+            solve_builtin(OP_MDIVIDE_LEFT_SPD, true, BuiltinSolveKind::Spd));
+    builtin("mdivide_right_spd",
+            solve_builtin(OP_MDIVIDE_RIGHT_SPD, false, BuiltinSolveKind::Spd));
+    builtin("mdivide_left_tri_low", solve_builtin(OP_MDIVIDE_LEFT_TRI_LOW, true,
+                                                  BuiltinSolveKind::TriLow));
+    builtin("mdivide_right_tri_low",
+            solve_builtin(OP_MDIVIDE_RIGHT_TRI_LOW, false,
+                          BuiltinSolveKind::TriLow));
+    builtin("LDivide__",
+            solve_builtin(OP_MDIVIDE_LEFT, true, BuiltinSolveKind::Plain));
     builtin("cholesky_decompose",
             matrix_builtin(BuiltinMatrixOp::CholeskyDecompose, OP_CHOLESKY, 1));
     builtin("matrix_exp",

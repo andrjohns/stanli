@@ -259,6 +259,9 @@ BuiltinLayout builtin_layout(
   }
   if (spec.shape == BuiltinShapePolicy::Constructor)
     throw std::logic_error("constructor builtins have no lane layout");
+  if (spec.shape == BuiltinShapePolicy::Product ||
+      spec.shape == BuiltinShapePolicy::Solve)
+    throw std::logic_error("product and solve builtins have their own maps");
   if (spec.arity == 1) return layout;
   if (spec.arity != 2) throw std::invalid_argument("unsupported builtin arity");
 
@@ -1045,6 +1048,129 @@ BuiltinMatrixMap builtin_matrix_map(
       break;
   }
   throw std::invalid_argument("descriptor is not a matrix operation");
+}
+
+BuiltinProductMap builtin_product_map(const BuiltinArgumentShape& a,
+                                      const BuiltinArgumentShape& b) {
+  using Kind = FunctionContainerKind;
+  const auto shaped = [](FunctionContainerKind container,
+                         std::vector<int64_t> dimensions, int64_t size) {
+    return make_function_shape(FunctionArgumentKind::Real, container,
+                               FunctionContainerKind::Scalar,
+                               std::move(dimensions), size);
+  };
+  const auto mismatch = [](int64_t ra, int64_t ca, int64_t rb, int64_t cb) {
+    throw std::invalid_argument("inner dimension mismatch (" +
+                                std::to_string(ra) + "x" + std::to_string(ca) +
+                                " times " + std::to_string(rb) + "x" +
+                                std::to_string(cb) + ")");
+  };
+  BuiltinProductMap map;
+  if (a.container == Kind::Scalar || b.container == Kind::Scalar) {
+    map.kind = BuiltinProductMap::Kind::ScalarScale;
+    map.result = a.container == Kind::Scalar ? b : a;
+    return map;
+  }
+  if (a.container == Kind::Matrix && b.container == Kind::Vector) {
+    if (a.dimensions[1] != b.storage_size)
+      mismatch(a.dimensions[0], a.dimensions[1], b.storage_size, 1);
+    map.kind = BuiltinProductMap::Kind::MatVec;
+    map.m = a.dimensions[0];
+    map.k = a.dimensions[1];
+    map.n = 1;
+    map.result = shaped(Kind::Vector, {map.m}, map.m);
+    return map;
+  }
+  if (a.container == Kind::Matrix && b.container == Kind::Matrix) {
+    if (a.dimensions[1] != b.dimensions[0])
+      mismatch(a.dimensions[0], a.dimensions[1], b.dimensions[0],
+               b.dimensions[1]);
+    map.kind = BuiltinProductMap::Kind::Gemm;
+    map.m = a.dimensions[0];
+    map.k = a.dimensions[1];
+    map.n = b.dimensions[1];
+    map.result = shaped(Kind::Matrix, {map.m, map.n},
+                        checked_slice_product(map.m, map.n));
+    return map;
+  }
+  if (a.container == Kind::RowVector && b.container == Kind::Matrix) {
+    if (a.storage_size != b.dimensions[0])
+      mismatch(1, a.storage_size, b.dimensions[0], b.dimensions[1]);
+    map.kind = BuiltinProductMap::Kind::Gemm;
+    map.m = 1;
+    map.k = a.storage_size;
+    map.n = b.dimensions[1];
+    map.result = shaped(Kind::RowVector, {map.n}, map.n);
+    return map;
+  }
+  if (a.container == Kind::Vector && b.container == Kind::RowVector) {
+    map.kind = BuiltinProductMap::Kind::Outer;
+    map.m = a.storage_size;
+    map.k = 1;
+    map.n = b.storage_size;
+    map.result = shaped(Kind::Matrix, {map.m, map.n},
+                        checked_slice_product(map.m, map.n));
+    return map;
+  }
+  if (a.container == Kind::RowVector && b.container == Kind::Vector) {
+    if (a.storage_size != b.storage_size)
+      mismatch(1, a.storage_size, b.storage_size, 1);
+    map.kind = BuiltinProductMap::Kind::Inner;
+    map.m = 1;
+    map.k = a.storage_size;
+    map.n = 1;
+    map.result = shaped(Kind::Scalar, {}, 1);
+    return map;
+  }
+  throw std::invalid_argument(
+      "needs scalar, vector, row_vector, or matrix operands");
+}
+
+BuiltinSolveMap builtin_solve_map(const BuiltinSpec& spec,
+                                  const BuiltinArgumentShape& a,
+                                  const BuiltinArgumentShape& b) {
+  using Kind = FunctionContainerKind;
+  if (spec.shape != BuiltinShapePolicy::Solve ||
+      spec.solve == BuiltinSolveKind::None)
+    throw std::invalid_argument("descriptor is not a solve");
+  const BuiltinArgumentShape& divisor = spec.solve_left ? a : b;
+  const BuiltinArgumentShape& dividend = spec.solve_left ? b : a;
+  if (divisor.container != Kind::Matrix ||
+      divisor.dimensions[0] != divisor.dimensions[1])
+    throw std::invalid_argument("requires a square matrix divisor");
+  BuiltinSolveMap map;
+  map.order = divisor.dimensions[0];
+  if (spec.solve_left) {
+    // divisor \ dividend: the dividend is a vector or matrix with `order`
+    // rows and keeps its shape.
+    if (dividend.container == Kind::Vector) {
+      if (dividend.storage_size != map.order)
+        throw std::invalid_argument("right-hand side size mismatch");
+      map.columns = 1;
+    } else if (dividend.container == Kind::Matrix) {
+      if (dividend.dimensions[0] != map.order)
+        throw std::invalid_argument("right-hand side size mismatch");
+      map.columns = dividend.dimensions[1];
+    } else {
+      throw std::invalid_argument("needs a vector or matrix dividend");
+    }
+  } else {
+    // dividend / divisor: the dividend is a row_vector or matrix with
+    // `order` columns and keeps its shape.
+    if (dividend.container == Kind::RowVector) {
+      if (dividend.storage_size != map.order)
+        throw std::invalid_argument("left-hand side size mismatch");
+      map.columns = 1;
+    } else if (dividend.container == Kind::Matrix) {
+      if (dividend.dimensions[1] != map.order)
+        throw std::invalid_argument("left-hand side size mismatch");
+      map.columns = dividend.dimensions[0];
+    } else {
+      throw std::invalid_argument("needs a row_vector or matrix dividend");
+    }
+  }
+  map.result = dividend;
+  return map;
 }
 
 std::vector<int64_t> builtin_shape_query(const BuiltinSpec& spec,

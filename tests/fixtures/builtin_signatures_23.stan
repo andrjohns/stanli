@@ -8,33 +8,18 @@
 functions {
   real builtin_signatures_23(real seed) {
     real total = 0;
-    // Phi(array[,,,,,,]real)=>array[,,,,,,]real
+    // Phi(array[,]vector)=>array[,]vector
     {
-      array[1, 1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{{(0.45000000000000001 + 0.0625 * seed)}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] real value = Phi(arg_1);
+      array[1, 1] vector[1] arg_1 = {{[(0.45000000000000001 + 0.0625 * seed)]'}};
+      array[1, 1] vector[1] value = Phi(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // Phi(array[,,,,,,]vector)=>array[,,,,,,]vector
+    // Phi(row_vector)=>row_vector
     {
-      array[1, 1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] vector[1] value = Phi(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // Phi(array[,,,,]matrix)=>array[,,,,]matrix
-    {
-      array[1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}};
-      array[1, 1, 1, 1, 1] matrix[1, 1] value = Phi(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // Phi(array[,,]real)=>array[,,]real
-    {
-      array[1, 1, 1] real arg_1 = {{{(0.45000000000000001 + 0.0625 * seed)}}};
-      array[1, 1, 1] real value = Phi(arg_1);
-      if (seed > 1e100)
-        print(value);
+      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
+      row_vector[1] value = Phi(arg_1);
+      total += 1.015625 * sum(value);
     }
     // Phi_approx(array[,,,,,,]vector)=>array[,,,,,,]vector
     {
@@ -43,73 +28,12 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // Phi_approx(array[,,,,,]matrix)=>array[,,,,,]matrix
-    {
-      array[1, 1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}}};
-      array[1, 1, 1, 1, 1, 1] matrix[1, 1] value = Phi_approx(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // abs(array[,,,,]vector)=>array[,,,,]vector
-    {
-      array[1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}};
-      array[1, 1, 1, 1, 1] vector[1] value = abs(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // abs(array[,,,]matrix)=>array[,,,]matrix
-    {
-      array[1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}};
-      array[1, 1, 1, 1] matrix[1, 1] value = abs(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // abs(array[]vector)=>array[]vector
-    {
-      array[1] vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]'};
-      array[1] vector[1] value = abs(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // acos(array[,,,,,,]matrix)=>array[,,,,,,]matrix
-    {
-      array[1, 1, 1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{{{[[(0.29999999999999999 + 0.0625 * seed)]]}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] matrix[1, 1] value = acos(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // acos(array[,,,,]int)=>array[,,,,]real
-    {
-      array[1, 1, 1, 1, 1] int arg_1 = {{{{{0}}}}};
-      array[1, 1, 1, 1, 1] real value = acos(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // acosh(array[,,,,,,]real)=>array[,,,,,,]real
-    {
-      array[1, 1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{{(1.3499999999999999 + 0.0625 * seed)}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] real value = acosh(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // acosh(int)=>real
-    {
-      int arg_1 = 1;
-      real value = acosh(arg_1);
-      total += 1.1875 * value;
-    }
-    // acosh(vector)=>vector
-    {
-      vector[1] arg_1 = [(1.3499999999999999 + 0.0625 * seed)]';
-      vector[1] value = acosh(arg_1);
-      total += 1.09375 * sum(value);
-    }
-    // add(matrix,real)=>matrix
+    // add_diag(matrix,vector)=>matrix
     {
       matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
-      real arg_2 = (1.2 + 0.0625 * seed);
-      matrix[1, 1] value = add(arg_1, arg_2);
-      total += 1.15625 * sum(value);
+      vector[1] arg_2 = [(1.2 + 0.0625 * seed)]';
+      matrix[1, 1] value = add_diag(arg_1, arg_2);
+      total += 1.03125 * sum(value);
     }
     // append_array(array[,,]real,array[,,]real)=>array[,,]real
     {
@@ -119,24 +43,24 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // asinh(array[,,,,,,]vector)=>array[,,,,,,]vector
+    // asin(array[,]row_vector)=>array[,]row_vector
     {
-      array[1, 1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] vector[1] value = asinh(arg_1);
+      array[1, 1] row_vector[1] arg_1 = {{[(0.29999999999999999 + 0.0625 * seed)]}};
+      array[1, 1] row_vector[1] value = asin(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // asinh(array[,]matrix)=>array[,]matrix
+    // asinh(array[]matrix)=>array[]matrix
     {
-      array[1, 1] matrix[1, 1] arg_1 = {{[[(0.45000000000000001 + 0.0625 * seed)]]}};
-      array[1, 1] matrix[1, 1] value = asinh(arg_1);
+      array[1] matrix[1, 1] arg_1 = {[[(0.45000000000000001 + 0.0625 * seed)]]};
+      array[1] matrix[1, 1] value = asinh(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // atan(array[,,,]vector)=>array[,,,]vector
+    // atan(array[,,,,,,]real)=>array[,,,,,,]real
     {
-      array[1, 1, 1, 1] vector[1] arg_1 = {{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}};
-      array[1, 1, 1, 1] vector[1] value = atan(arg_1);
+      array[1, 1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{{(0.45000000000000001 + 0.0625 * seed)}}}}}}};
+      array[1, 1, 1, 1, 1, 1, 1] real value = atan(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -148,27 +72,19 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // atan2(array[,,,]int,int)=>array[,,,]real
+    // atan2(array[,,]vector,int)=>array[,,]vector
     {
-      array[1, 1, 1, 1] int arg_1 = {{{{0}}}};
+      array[1, 1, 1] vector[1] arg_1 = {{{[(0.45000000000000001 + 0.0625 * seed)]'}}};
       int arg_2 = 1;
-      array[1, 1, 1, 1] real value = atan2(arg_1, arg_2);
+      array[1, 1, 1] vector[1] value = atan2(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // atan2(array[,]real,int)=>array[,]real
-    {
-      array[1, 1] real arg_1 = {{(0.45000000000000001 + 0.0625 * seed)}};
-      int arg_2 = 1;
-      array[1, 1] real value = atan2(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // atan2(int,array[,,,,]real)=>array[,,,,]real
+    // atan2(int,array[]vector)=>array[]vector
     {
       int arg_1 = 0;
-      array[1, 1, 1, 1, 1] real arg_2 = {{{{{(1.2 + 0.0625 * seed)}}}}};
-      array[1, 1, 1, 1, 1] real value = atan2(arg_1, arg_2);
+      array[1] vector[1] arg_2 = {[(1.2 + 0.0625 * seed)]'};
+      array[1] vector[1] value = atan2(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -188,18 +104,25 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // atan2(real,array[]matrix)=>array[]matrix
+    // atan2(real,array[]int)=>array[]real
     {
       real arg_1 = (0.45000000000000001 + 0.0625 * seed);
-      array[1] matrix[1, 1] arg_2 = {[[(1.2 + 0.0625 * seed)]]};
-      array[1] matrix[1, 1] value = atan2(arg_1, arg_2);
+      array[1] int arg_2 = {1};
+      array[1] real value = atan2(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // atanh(array[]matrix)=>array[]matrix
+    // atan2(real,row_vector)=>row_vector
     {
-      array[1] matrix[1, 1] arg_1 = {[[(0.29999999999999999 + 0.0625 * seed)]]};
-      array[1] matrix[1, 1] value = atanh(arg_1);
+      real arg_1 = (0.45000000000000001 + 0.0625 * seed);
+      row_vector[1] arg_2 = [(1.2 + 0.0625 * seed)];
+      row_vector[1] value = atan2(arg_1, arg_2);
+      total += 1.21875 * sum(value);
+    }
+    // atanh(array[,,,,,]int)=>array[,,,,,]real
+    {
+      array[1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{0}}}}}};
+      array[1, 1, 1, 1, 1, 1] real value = atanh(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -251,51 +174,11 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // beta(array[,,,,]int,real)=>array[,,,,]real
+    // beta(array[]vector,real)=>array[]vector
     {
-      array[1, 1, 1, 1, 1] int arg_1 = {{{{{2}}}}};
+      array[1] vector[1] arg_1 = {[(1.95 + 0.0625 * seed)]'};
       real arg_2 = (2.9500000000000002 + 0.0625 * seed);
-      array[1, 1, 1, 1, 1] real value = beta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // beta(array[]matrix,int)=>array[]matrix
-    {
-      array[1] matrix[1, 1] arg_1 = {[[(1.95 + 0.0625 * seed)]]};
-      int arg_2 = 3;
-      array[1] matrix[1, 1] value = beta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // beta(array[]real,real)=>array[]real
-    {
-      array[1] real arg_1 = {(1.95 + 0.0625 * seed)};
-      real arg_2 = (2.9500000000000002 + 0.0625 * seed);
-      array[1] real value = beta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // beta(int,array[,,]vector)=>array[,,]vector
-    {
-      int arg_1 = 2;
-      array[1, 1, 1] vector[1] arg_2 = {{{[(2.9500000000000002 + 0.0625 * seed)]'}}};
-      array[1, 1, 1] vector[1] value = beta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // beta(int,array[]matrix)=>array[]matrix
-    {
-      int arg_1 = 2;
-      array[1] matrix[1, 1] arg_2 = {[[(2.9500000000000002 + 0.0625 * seed)]]};
-      array[1] matrix[1, 1] value = beta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // beta(real,array[,,,,,]int)=>array[,,,,,]real
-    {
-      real arg_1 = (1.95 + 0.0625 * seed);
-      array[1, 1, 1, 1, 1, 1] int arg_2 = {{{{{{3}}}}}};
-      array[1, 1, 1, 1, 1, 1] real value = beta(arg_1, arg_2);
+      array[1] vector[1] value = beta(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -307,12 +190,12 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // beta(real,matrix)=>matrix
+    // beta(vector,vector)=>vector
     {
-      real arg_1 = (1.95 + 0.0625 * seed);
-      matrix[1, 1] arg_2 = [[(2.9500000000000002 + 0.0625 * seed)]];
-      matrix[1, 1] value = beta(arg_1, arg_2);
-      total += 1.203125 * sum(value);
+      vector[1] arg_1 = [(1.95 + 0.0625 * seed)]';
+      vector[1] arg_2 = [(2.9500000000000002 + 0.0625 * seed)]';
+      vector[1] value = beta(arg_1, arg_2);
+      total += 1.125 * sum(value);
     }
     // binary_log_loss(array[,,,,,,]int,array[,,,,,,]real)=>array[,,,,,,]real
     {
@@ -338,100 +221,124 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // cbrt(array[,,]int)=>array[,,]real
+    // cbrt(array[]row_vector)=>array[]row_vector
     {
-      array[1, 1, 1] int arg_1 = {{{1}}};
-      array[1, 1, 1] real value = cbrt(arg_1);
+      array[1] row_vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]};
+      array[1] row_vector[1] value = cbrt(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // cbrt(array[,]matrix)=>array[,]matrix
+    // ceil(array[,,,,,]matrix)=>array[,,,,,]matrix
     {
-      array[1, 1] matrix[1, 1] arg_1 = {{[[(0.45000000000000001 + 0.0625 * seed)]]}};
-      array[1, 1] matrix[1, 1] value = cbrt(arg_1);
+      array[1, 1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}}};
+      array[1, 1, 1, 1, 1, 1] matrix[1, 1] value = ceil(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // ceil(row_vector)=>row_vector
+    // ceil(array[,]row_vector)=>array[,]row_vector
     {
-      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
-      row_vector[1] value = ceil(arg_1);
-      total += 1.015625 * sum(value);
-    }
-    // cos(array[,,,,,,]matrix)=>array[,,,,,,]matrix
-    {
-      array[1, 1, 1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] matrix[1, 1] value = cos(arg_1);
+      array[1, 1] row_vector[1] arg_1 = {{[(0.45000000000000001 + 0.0625 * seed)]}};
+      array[1, 1] row_vector[1] value = ceil(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // cos(array[,,,,,,]vector)=>array[,,,,,,]vector
+    // choose(array[,,,,,,]int,int)=>array[,,,,,,]int
     {
-      array[1, 1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] vector[1] value = cos(arg_1);
+      array[1, 1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{{5}}}}}}};
+      int arg_2 = 2;
+      array[1, 1, 1, 1, 1, 1, 1] int value = choose(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // cos(array[,]real)=>array[,]real
+    // choose(int,array[,,,,,]int)=>array[,,,,,]int
     {
-      array[1, 1] real arg_1 = {{(0.45000000000000001 + 0.0625 * seed)}};
-      array[1, 1] real value = cos(arg_1);
+      int arg_1 = 5;
+      array[1, 1, 1, 1, 1, 1] int arg_2 = {{{{{{2}}}}}};
+      array[1, 1, 1, 1, 1, 1] int value = choose(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // cosh(array[,,,]row_vector)=>array[,,,]row_vector
+    // choose(int,array[]int)=>array[]int
     {
-      array[1, 1, 1, 1] row_vector[1] arg_1 = {{{{[(0.45000000000000001 + 0.0625 * seed)]}}}};
-      array[1, 1, 1, 1] row_vector[1] value = cosh(arg_1);
+      int arg_1 = 5;
+      array[1] int arg_2 = {2};
+      array[1] int value = choose(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // dims(array[,,,,]row_vector)=>array[]int
+    // col(matrix,int)=>vector
+    {
+      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
+      vector[1] value = col(arg_1, 1);
+      total += 1.09375 * sum(value);
+    }
+    // cos(array[,,,,]row_vector)=>array[,,,,]row_vector
     {
       array[1, 1, 1, 1, 1] row_vector[1] arg_1 = {{{{{[(0.45000000000000001 + 0.0625 * seed)]}}}}};
-      array[7] int value = dims(arg_1);
+      array[1, 1, 1, 1, 1] row_vector[1] value = cos(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // dims(array[,,,]int)=>array[]int
+    // cos(array[,,,]int)=>array[,,,]real
     {
-      array[1, 1, 1, 1] int arg_1 = {{{{2}}}};
-      array[4] int value = dims(arg_1);
+      array[1, 1, 1, 1] int arg_1 = {{{{1}}}};
+      array[1, 1, 1, 1] real value = cos(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // dims(array[,,]vector)=>array[]int
+    // cos(array[,,]row_vector)=>array[,,]row_vector
     {
-      array[1, 1, 1] vector[1] arg_1 = {{{[(0.45000000000000001 + 0.0625 * seed)]'}}};
+      array[1, 1, 1] row_vector[1] arg_1 = {{{[(0.45000000000000001 + 0.0625 * seed)]}}};
+      array[1, 1, 1] row_vector[1] value = cos(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // cosh(array[,,,]matrix)=>array[,,,]matrix
+    {
+      array[1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}};
+      array[1, 1, 1, 1] matrix[1, 1] value = cosh(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // digamma(array[,,]matrix)=>array[,,]matrix
+    {
+      array[1, 1, 1] matrix[1, 1] arg_1 = {{{[[(1.3499999999999999 + 0.0625 * seed)]]}}};
+      array[1, 1, 1] matrix[1, 1] value = digamma(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // dims(array[,,,,,,,]row_vector)=>array[]int
+    {
+      array[1, 1, 1, 1, 1, 1, 1, 1] row_vector[1] arg_1 = {{{{{{{{[(0.45000000000000001 + 0.0625 * seed)]}}}}}}}};
+      array[10] int value = dims(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // dims(array[,,,,]int)=>array[]int
+    {
+      array[1, 1, 1, 1, 1] int arg_1 = {{{{{2}}}}};
       array[5] int value = dims(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // dims(array[,]real)=>array[]int
+    // dims(array[,,,]row_vector)=>array[]int
     {
-      array[1, 1] real arg_1 = {{(0.45000000000000001 + 0.0625 * seed)}};
-      array[2] int value = dims(arg_1);
+      array[1, 1, 1, 1] row_vector[1] arg_1 = {{{{[(0.45000000000000001 + 0.0625 * seed)]}}}};
+      array[6] int value = dims(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // dims(matrix)=>array[]int
-    {
-      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
-      array[2] int value = dims(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // elt_divide(vector,vector)=>vector
+    // elt_divide(vector,real)=>vector
     {
       vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)]';
-      vector[1] arg_2 = [(1.2 + 0.0625 * seed)]';
+      real arg_2 = (1.2 + 0.0625 * seed);
       vector[1] value = elt_divide(arg_1, arg_2);
-      total += 1 * sum(value);
+      total += 1.15625 * sum(value);
     }
-    // erf(array[]matrix)=>array[]matrix
+    // erf(array[,,,,]real)=>array[,,,,]real
     {
-      array[1] matrix[1, 1] arg_1 = {[[(0.45000000000000001 + 0.0625 * seed)]]};
-      array[1] matrix[1, 1] value = erf(arg_1);
+      array[1, 1, 1, 1, 1] real arg_1 = {{{{{(0.45000000000000001 + 0.0625 * seed)}}}}};
+      array[1, 1, 1, 1, 1] real value = erf(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -442,36 +349,43 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // erf(real)=>real
+    // erfc(array[,,,,,,]int)=>array[,,,,,,]real
+    {
+      array[1, 1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{{1}}}}}}};
+      array[1, 1, 1, 1, 1, 1, 1] real value = erfc(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // erfc(array[,,,,]matrix)=>array[,,,,]matrix
+    {
+      array[1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}};
+      array[1, 1, 1, 1, 1] matrix[1, 1] value = erfc(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // exp(real)=>real
     {
       real arg_1 = (0.45000000000000001 + 0.0625 * seed);
-      real value = erf(arg_1);
-      total += 1.046875 * value;
+      real value = exp(arg_1);
+      total += 1.03125 * value;
     }
-    // erfc(array[,,,,,,]matrix)=>array[,,,,,,]matrix
+    // expm1(array[,]int)=>array[,]real
     {
-      array[1, 1, 1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] matrix[1, 1] value = erfc(arg_1);
+      array[1, 1] int arg_1 = {{1}};
+      array[1, 1] real value = expm1(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // erfc(matrix)=>matrix
+    // expm1(real)=>real
     {
-      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
-      matrix[1, 1] value = erfc(arg_1);
-      total += 1.0625 * sum(value);
+      real arg_1 = (0.45000000000000001 + 0.0625 * seed);
+      real value = expm1(arg_1);
+      total += 1.015625 * value;
     }
-    // exp(array[,,,,,]int)=>array[,,,,,]real
+    // falling_factorial(real,array[,,]int)=>array[,,]real
     {
-      array[1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{1}}}}}};
-      array[1, 1, 1, 1, 1, 1] real value = exp(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // falling_factorial(array[,,]real,int)=>array[,,]real
-    {
-      array[1, 1, 1] real arg_1 = {{{(3.4500000000000002 + 0.0625 * seed)}}};
-      int arg_2 = 2;
+      real arg_1 = (3.4500000000000002 + 0.0625 * seed);
+      array[1, 1, 1] int arg_2 = {{{2}}};
       array[1, 1, 1] real value = falling_factorial(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
@@ -492,11 +406,27 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // fdim(array[,]real,int)=>array[,]real
+    // fdim(array[,]int,array[,]int)=>array[,]real
     {
-      array[1, 1] real arg_1 = {{(0.94999999999999996 + 0.0625 * seed)}};
-      int arg_2 = 1;
+      array[1, 1] int arg_1 = {{1}};
+      array[1, 1] int arg_2 = {{1}};
       array[1, 1] real value = fdim(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // fdim(array[,]matrix,int)=>array[,]matrix
+    {
+      array[1, 1] matrix[1, 1] arg_1 = {{[[(0.94999999999999996 + 0.0625 * seed)]]}};
+      int arg_2 = 1;
+      array[1, 1] matrix[1, 1] value = fdim(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // fdim(array[]int,int)=>array[]real
+    {
+      array[1] int arg_1 = {1};
+      int arg_2 = 1;
+      array[1] real value = fdim(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -508,24 +438,12 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // floor(array[,,,]vector)=>array[,,,]vector
+    // floor(array[,,,,,,]vector)=>array[,,,,,,]vector
     {
-      array[1, 1, 1, 1] vector[1] arg_1 = {{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}};
-      array[1, 1, 1, 1] vector[1] value = floor(arg_1);
+      array[1, 1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}}};
+      array[1, 1, 1, 1, 1, 1, 1] vector[1] value = floor(arg_1);
       if (seed > 1e100)
         print(value);
-    }
-    // floor(row_vector)=>row_vector
-    {
-      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
-      row_vector[1] value = floor(arg_1);
-      total += 1.15625 * sum(value);
-    }
-    // floor(vector)=>vector
-    {
-      vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)]';
-      vector[1] value = floor(arg_1);
-      total += 1 * sum(value);
     }
     // fmax(array[,,,,,,]int,real)=>array[,,,,,,]real
     {
@@ -583,19 +501,18 @@ functions {
       if (seed > 1e100)
         print(value);
     }
+    // fmax(matrix,int)=>matrix
+    {
+      matrix[1, 1] arg_1 = [[(0.94999999999999996 + 0.0625 * seed)]];
+      int arg_2 = 1;
+      matrix[1, 1] value = fmax(arg_1, arg_2);
+      total += 1.109375 * sum(value);
+    }
     // fmax(real,array[,,,,,]vector)=>array[,,,,,]vector
     {
       real arg_1 = (0.94999999999999996 + 0.0625 * seed);
       array[1, 1, 1, 1, 1, 1] vector[1] arg_2 = {{{{{{[(0.94999999999999996 + 0.0625 * seed)]'}}}}}};
       array[1, 1, 1, 1, 1, 1] vector[1] value = fmax(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // fmax(real,array[,,]int)=>array[,,]real
-    {
-      real arg_1 = (0.94999999999999996 + 0.0625 * seed);
-      array[1, 1, 1] int arg_2 = {{{1}}};
-      array[1, 1, 1] real value = fmax(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -607,6 +524,30 @@ functions {
       if (seed > 1e100)
         print(value);
     }
+    // fmax(real,array[]vector)=>array[]vector
+    {
+      real arg_1 = (0.94999999999999996 + 0.0625 * seed);
+      array[1] vector[1] arg_2 = {[(0.94999999999999996 + 0.0625 * seed)]'};
+      array[1] vector[1] value = fmax(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // fmin(array[,,,]int,array[,,,]int)=>array[,,,]real
+    {
+      array[1, 1, 1, 1] int arg_1 = {{{{1}}}};
+      array[1, 1, 1, 1] int arg_2 = {{{{1}}}};
+      array[1, 1, 1, 1] real value = fmin(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // fmin(array[,,,]real,int)=>array[,,,]real
+    {
+      array[1, 1, 1, 1] real arg_1 = {{{{(0.94999999999999996 + 0.0625 * seed)}}}};
+      int arg_2 = 1;
+      array[1, 1, 1, 1] real value = fmin(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
     // fmin(array[,,,]row_vector,array[,,,]row_vector)=>array[,,,]row_vector
     {
       array[1, 1, 1, 1] row_vector[1] arg_1 = {{{{[(0.94999999999999996 + 0.0625 * seed)]}}}};
@@ -615,9 +556,9 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // fmin(array[,,]int,int)=>array[,,]real
+    // fmin(array[,,]real,int)=>array[,,]real
     {
-      array[1, 1, 1] int arg_1 = {{{1}}};
+      array[1, 1, 1] real arg_1 = {{{(0.94999999999999996 + 0.0625 * seed)}}};
       int arg_2 = 1;
       array[1, 1, 1] real value = fmin(arg_1, arg_2);
       if (seed > 1e100)
@@ -639,34 +580,19 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // fmin(int,array[,]int)=>array[,]real
+    // fmin(int,array[,,,,]real)=>array[,,,,]real
     {
       int arg_1 = 1;
-      array[1, 1] int arg_2 = {{1}};
-      array[1, 1] real value = fmin(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // fmin(int,real)=>real
-    {
-      int arg_1 = 1;
-      real arg_2 = (0.94999999999999996 + 0.0625 * seed);
-      real value = fmin(arg_1, arg_2);
-      total += 1.046875 * value;
-    }
-    // fmin(real,array[,,,,]int)=>array[,,,,]real
-    {
-      real arg_1 = (0.94999999999999996 + 0.0625 * seed);
-      array[1, 1, 1, 1, 1] int arg_2 = {{{{{1}}}}};
+      array[1, 1, 1, 1, 1] real arg_2 = {{{{{(0.94999999999999996 + 0.0625 * seed)}}}}};
       array[1, 1, 1, 1, 1] real value = fmin(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // fmin(real,array[]vector)=>array[]vector
+    // fmin(real,array[,,,,,]int)=>array[,,,,,]real
     {
       real arg_1 = (0.94999999999999996 + 0.0625 * seed);
-      array[1] vector[1] arg_2 = {[(0.94999999999999996 + 0.0625 * seed)]'};
-      array[1] vector[1] value = fmin(arg_1, arg_2);
+      array[1, 1, 1, 1, 1, 1] int arg_2 = {{{{{{1}}}}}};
+      array[1, 1, 1, 1, 1, 1] real value = fmin(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -691,30 +617,6 @@ functions {
       array[1] vector[1] arg_1 = {[(2.4500000000000002 + 0.0625 * seed)]'};
       array[1] vector[1] arg_2 = {[(0.94999999999999996 + 0.0625 * seed)]'};
       array[1] vector[1] value = fmod(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // fmod(array[]vector,int)=>array[]vector
-    {
-      array[1] vector[1] arg_1 = {[(2.4500000000000002 + 0.0625 * seed)]'};
-      int arg_2 = 1;
-      array[1] vector[1] value = fmod(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // fmod(array[]vector,real)=>array[]vector
-    {
-      array[1] vector[1] arg_1 = {[(2.4500000000000002 + 0.0625 * seed)]'};
-      real arg_2 = (0.94999999999999996 + 0.0625 * seed);
-      array[1] vector[1] value = fmod(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // fmod(int,array[]row_vector)=>array[]row_vector
-    {
-      int arg_1 = 2;
-      array[1] row_vector[1] arg_2 = {[(0.94999999999999996 + 0.0625 * seed)]};
-      array[1] row_vector[1] value = fmod(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -750,6 +652,13 @@ functions {
       if (seed > 1e100)
         print(value);
     }
+    // gamma_p(matrix,real)=>matrix
+    {
+      matrix[1, 1] arg_1 = [[(1.95 + 0.0625 * seed)]];
+      real arg_2 = (1.25 + 0.0625 * seed);
+      matrix[1, 1] value = gamma_p(arg_1, arg_2);
+      total += 1.1875 * sum(value);
+    }
     // gamma_p(real,array[,,,,,,]matrix)=>array[,,,,,,]matrix
     {
       real arg_1 = (1.95 + 0.0625 * seed);
@@ -763,6 +672,14 @@ functions {
       array[1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{[(1.95 + 0.0625 * seed)]'}}}}}};
       array[1, 1, 1, 1, 1, 1] vector[1] arg_2 = {{{{{{[(1.25 + 0.0625 * seed)]'}}}}}};
       array[1, 1, 1, 1, 1, 1] vector[1] value = gamma_q(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // gamma_q(array[,]matrix,real)=>array[,]matrix
+    {
+      array[1, 1] matrix[1, 1] arg_1 = {{[[(1.95 + 0.0625 * seed)]]}};
+      real arg_2 = (1.25 + 0.0625 * seed);
+      array[1, 1] matrix[1, 1] value = gamma_q(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -782,18 +699,19 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // gamma_q(row_vector,row_vector)=>row_vector
+    // gamma_q(real,vector)=>vector
     {
-      row_vector[1] arg_1 = [(1.95 + 0.0625 * seed)];
-      row_vector[1] arg_2 = [(1.25 + 0.0625 * seed)];
-      row_vector[1] value = gamma_q(arg_1, arg_2);
-      total += 1.015625 * sum(value);
+      real arg_1 = (1.95 + 0.0625 * seed);
+      vector[1] arg_2 = [(1.25 + 0.0625 * seed)]';
+      vector[1] value = gamma_q(arg_1, arg_2);
+      total += 1.0625 * sum(value);
     }
-    // head(vector,int)=>vector
+    // head(array[]matrix,int)=>array[]matrix
     {
-      vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)]';
-      vector[1] value = head(arg_1, 1);
-      total += 1.234375 * sum(value);
+      array[1] matrix[1, 1] arg_1 = {[[(0.45000000000000001 + 0.0625 * seed)]]};
+      array[1] matrix[1, 1] value = head(arg_1, 1);
+      if (seed > 1e100)
+        print(value);
     }
     // hypot(array[,,,,]real,array[,,,,]real)=>array[,,,,]real
     {
@@ -803,26 +721,43 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // hypot(array[]int,real)=>array[]real
+    // hypot(array[,]int,int)=>array[,]real
     {
-      array[1] int arg_1 = {0};
-      real arg_2 = (1.2 + 0.0625 * seed);
-      array[1] real value = hypot(arg_1, arg_2);
+      array[1, 1] int arg_1 = {{0}};
+      int arg_2 = 1;
+      array[1, 1] real value = hypot(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // hypot(matrix,int)=>matrix
+    // hypot(array[,]matrix,int)=>array[,]matrix
     {
-      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
+      array[1, 1] matrix[1, 1] arg_1 = {{[[(0.45000000000000001 + 0.0625 * seed)]]}};
       int arg_2 = 1;
-      matrix[1, 1] value = hypot(arg_1, arg_2);
-      total += 1.078125 * sum(value);
+      array[1, 1] matrix[1, 1] value = hypot(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // hypot(array[]row_vector,int)=>array[]row_vector
+    {
+      array[1] row_vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]};
+      int arg_2 = 1;
+      array[1] row_vector[1] value = hypot(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
     }
     // hypot(real,array[,,,]matrix)=>array[,,,]matrix
     {
       real arg_1 = (0.45000000000000001 + 0.0625 * seed);
       array[1, 1, 1, 1] matrix[1, 1] arg_2 = {{{{[[(1.2 + 0.0625 * seed)]]}}}};
       array[1, 1, 1, 1] matrix[1, 1] value = hypot(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // hypot(real,array[,,]real)=>array[,,]real
+    {
+      real arg_1 = (0.45000000000000001 + 0.0625 * seed);
+      array[1, 1, 1] real arg_2 = {{{(1.2 + 0.0625 * seed)}}};
+      array[1, 1, 1] real value = hypot(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -833,24 +768,10 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // inv_Phi(array[,,,,,]vector)=>array[,,,,,]vector
+    // inv_cloglog(array[,]real)=>array[,]real
     {
-      array[1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}};
-      array[1, 1, 1, 1, 1, 1] vector[1] value = inv_Phi(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // inv_cloglog(array[,,,,,]vector)=>array[,,,,,]vector
-    {
-      array[1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}};
-      array[1, 1, 1, 1, 1, 1] vector[1] value = inv_cloglog(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // inv_cloglog(array[,,,]matrix)=>array[,,,]matrix
-    {
-      array[1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}};
-      array[1, 1, 1, 1] matrix[1, 1] value = inv_cloglog(arg_1);
+      array[1, 1] real arg_1 = {{(0.45000000000000001 + 0.0625 * seed)}};
+      array[1, 1] real value = inv_cloglog(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -861,38 +782,86 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // inv_erfc(array[,,,,]vector)=>array[,,,,]vector
+    // inv_erfc(real)=>real
     {
-      array[1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}};
-      array[1, 1, 1, 1, 1] vector[1] value = inv_erfc(arg_1);
+      real arg_1 = (0.45000000000000001 + 0.0625 * seed);
+      real value = inv_erfc(arg_1);
+      total += 1.09375 * value;
+    }
+    // inv_logit(array[,,]vector)=>array[,,]vector
+    {
+      array[1, 1, 1] vector[1] arg_1 = {{{[(0.45000000000000001 + 0.0625 * seed)]'}}};
+      array[1, 1, 1] vector[1] value = inv_logit(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // inv_logit(array[,,,,,,]real)=>array[,,,,,,]real
+    // inv_sqrt(array[,,,,,]real)=>array[,,,,,]real
     {
-      array[1, 1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{{(0.45000000000000001 + 0.0625 * seed)}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] real value = inv_logit(arg_1);
+      array[1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{(1.3499999999999999 + 0.0625 * seed)}}}}}};
+      array[1, 1, 1, 1, 1, 1] real value = inv_sqrt(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // inv_sqrt(array[,,,,]matrix)=>array[,,,,]matrix
+    // inv_sqrt(array[,,,]row_vector)=>array[,,,]row_vector
     {
-      array[1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{[[(1.3499999999999999 + 0.0625 * seed)]]}}}}};
-      array[1, 1, 1, 1, 1] matrix[1, 1] value = inv_sqrt(arg_1);
+      array[1, 1, 1, 1] row_vector[1] arg_1 = {{{{[(1.3499999999999999 + 0.0625 * seed)]}}}};
+      array[1, 1, 1, 1] row_vector[1] value = inv_sqrt(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // inv_sqrt(array[,,]row_vector)=>array[,,]row_vector
+    // inv_sqrt(array[,,]matrix)=>array[,,]matrix
     {
-      array[1, 1, 1] row_vector[1] arg_1 = {{{[(1.3499999999999999 + 0.0625 * seed)]}}};
-      array[1, 1, 1] row_vector[1] value = inv_sqrt(arg_1);
+      array[1, 1, 1] matrix[1, 1] arg_1 = {{{[[(1.3499999999999999 + 0.0625 * seed)]]}}};
+      array[1, 1, 1] matrix[1, 1] value = inv_sqrt(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // is_nan(real)=>int
+    // inv_sqrt(array[,,]vector)=>array[,,]vector
     {
-      int value = is_nan(0.45000000000000001);
-      total += 1.0625 * value;
+      array[1, 1, 1] vector[1] arg_1 = {{{[(1.3499999999999999 + 0.0625 * seed)]'}}};
+      array[1, 1, 1] vector[1] value = inv_sqrt(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // inv_sqrt(vector)=>vector
+    {
+      vector[1] arg_1 = [(1.3499999999999999 + 0.0625 * seed)]';
+      vector[1] value = inv_sqrt(arg_1);
+      total += 1.03125 * sum(value);
+    }
+    // inv_square(array[,,,]real)=>array[,,,]real
+    {
+      array[1, 1, 1, 1] real arg_1 = {{{{(0.45000000000000001 + 0.0625 * seed)}}}};
+      array[1, 1, 1, 1] real value = inv_square(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // inv_square(array[,,]real)=>array[,,]real
+    {
+      array[1, 1, 1] real arg_1 = {{{(0.45000000000000001 + 0.0625 * seed)}}};
+      array[1, 1, 1] real value = inv_square(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // inv_square(array[,]vector)=>array[,]vector
+    {
+      array[1, 1] vector[1] arg_1 = {{[(0.45000000000000001 + 0.0625 * seed)]'}};
+      array[1, 1] vector[1] value = inv_square(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // inv_square(array[]matrix)=>array[]matrix
+    {
+      array[1] matrix[1, 1] arg_1 = {[[(0.45000000000000001 + 0.0625 * seed)]]};
+      array[1] matrix[1, 1] value = inv_square(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // inv_square(row_vector)=>row_vector
+    {
+      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
+      row_vector[1] value = inv_square(arg_1);
+      total += 1.046875 * sum(value);
     }
     // lambert_w0(array[,,,,,,]int)=>array[,,,,,,]real
     {
@@ -901,64 +870,45 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // lambert_w0(array[]row_vector)=>array[]row_vector
+    // lambert_w0(array[,,,]row_vector)=>array[,,,]row_vector
     {
-      array[1] row_vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]};
-      array[1] row_vector[1] value = lambert_w0(arg_1);
+      array[1, 1, 1, 1] row_vector[1] arg_1 = {{{{[(0.45000000000000001 + 0.0625 * seed)]}}}};
+      array[1, 1, 1, 1] row_vector[1] value = lambert_w0(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // lambert_wm1(array[,,,,]real)=>array[,,,,]real
+    // lambert_w0(array[,]row_vector)=>array[,]row_vector
     {
-      array[1, 1, 1, 1, 1] real arg_1 = {{{{{(-0.25 + 0.0625 * seed)}}}}};
-      array[1, 1, 1, 1, 1] real value = lambert_wm1(arg_1);
+      array[1, 1] row_vector[1] arg_1 = {{[(0.45000000000000001 + 0.0625 * seed)]}};
+      array[1, 1] row_vector[1] value = lambert_w0(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // lambert_wm1(array[,,,]row_vector)=>array[,,,]row_vector
+    // lambert_w0(matrix)=>matrix
     {
-      array[1, 1, 1, 1] row_vector[1] arg_1 = {{{{[(-0.25 + 0.0625 * seed)]}}}};
-      array[1, 1, 1, 1] row_vector[1] value = lambert_wm1(arg_1);
+      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
+      matrix[1, 1] value = lambert_w0(arg_1);
+      total += 1.125 * sum(value);
+    }
+    // lambert_wm1(array[,]int)=>array[,]real
+    {
+      array[1, 1] int arg_1 = {{0}};
+      array[1, 1] real value = lambert_wm1(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // lbeta(array[,,,,,]int,int)=>array[,,,,,]real
+    // lambert_wm1(array[,]real)=>array[,]real
     {
-      array[1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{2}}}}}};
+      array[1, 1] real arg_1 = {{(-0.25 + 0.0625 * seed)}};
+      array[1, 1] real value = lambert_wm1(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // lbeta(array[,,,,,,]int,int)=>array[,,,,,,]real
+    {
+      array[1, 1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{{2}}}}}}};
       int arg_2 = 3;
-      array[1, 1, 1, 1, 1, 1] real value = lbeta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // lbeta(array[,,]real,real)=>array[,,]real
-    {
-      array[1, 1, 1] real arg_1 = {{{(1.95 + 0.0625 * seed)}}};
-      real arg_2 = (2.9500000000000002 + 0.0625 * seed);
-      array[1, 1, 1] real value = lbeta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // lbeta(array[,,]vector,int)=>array[,,]vector
-    {
-      array[1, 1, 1] vector[1] arg_1 = {{{[(1.95 + 0.0625 * seed)]'}}};
-      int arg_2 = 3;
-      array[1, 1, 1] vector[1] value = lbeta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // lbeta(array[,]vector,real)=>array[,]vector
-    {
-      array[1, 1] vector[1] arg_1 = {{[(1.95 + 0.0625 * seed)]'}};
-      real arg_2 = (2.9500000000000002 + 0.0625 * seed);
-      array[1, 1] vector[1] value = lbeta(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // lbeta(real,array[]matrix)=>array[]matrix
-    {
-      real arg_1 = (1.95 + 0.0625 * seed);
-      array[1] matrix[1, 1] arg_2 = {[[(2.9500000000000002 + 0.0625 * seed)]]};
-      array[1] matrix[1, 1] value = lbeta(arg_1, arg_2);
+      array[1, 1, 1, 1, 1, 1, 1] real value = lbeta(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -978,6 +928,14 @@ functions {
       if (seed > 1e100)
         print(value);
     }
+    // lchoose(array[,]vector,int)=>array[,]vector
+    {
+      array[1, 1] vector[1] arg_1 = {{[(3.9500000000000002 + 0.0625 * seed)]'}};
+      int arg_2 = 2;
+      array[1, 1] vector[1] value = lchoose(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
     // lchoose(int,array[,,,,,,,]real)=>array[,,,,,,,]real
     {
       int arg_1 = 4;
@@ -986,40 +944,40 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // lchoose(int,array[,,,,]real)=>array[,,,,]real
+    // lchoose(int,array[,,]int)=>array[,,]real
     {
       int arg_1 = 4;
-      array[1, 1, 1, 1, 1] real arg_2 = {{{{{(1.95 + 0.0625 * seed)}}}}};
-      array[1, 1, 1, 1, 1] real value = lchoose(arg_1, arg_2);
+      array[1, 1, 1] int arg_2 = {{{2}}};
+      array[1, 1, 1] real value = lchoose(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // lchoose(real,array[,]int)=>array[,]real
+    // ldexp(array[,,,,,]real,int)=>array[,,,,,]real
     {
-      real arg_1 = (3.9500000000000002 + 0.0625 * seed);
-      array[1, 1] int arg_2 = {{2}};
-      array[1, 1] real value = lchoose(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // ldexp(array[,,]real,int)=>array[,,]real
-    {
-      array[1, 1, 1] real arg_1 = {{{(0.45000000000000001 + 0.0625 * seed)}}};
+      array[1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{(0.45000000000000001 + 0.0625 * seed)}}}}}};
       int arg_2 = 2;
-      array[1, 1, 1] real value = ldexp(arg_1, arg_2);
+      array[1, 1, 1, 1, 1, 1] real value = ldexp(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // lgamma(array[,,,]int)=>array[,,,]real
+    // ldexp(vector,int)=>vector
     {
-      array[1, 1, 1, 1] int arg_1 = {{{{1}}}};
-      array[1, 1, 1, 1] real value = lgamma(arg_1);
+      vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)]';
+      int arg_2 = 2;
+      vector[1] value = ldexp(arg_1, arg_2);
+      total += 1.21875 * sum(value);
+    }
+    // lgamma(array[,,,]vector)=>array[,,,]vector
+    {
+      array[1, 1, 1, 1] vector[1] arg_1 = {{{{[(1.3499999999999999 + 0.0625 * seed)]'}}}};
+      array[1, 1, 1, 1] vector[1] value = lgamma(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // linspaced_int_array(int,int,int)=>array[]int
+    // lgamma(array[,,]real)=>array[,,]real
     {
-      array[1] int value = linspaced_int_array(1, 0, 1);
+      array[1, 1, 1] real arg_1 = {{{(1.3499999999999999 + 0.0625 * seed)}}};
+      array[1, 1, 1] real value = lgamma(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -1047,11 +1005,11 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // lmultiply(int,array[,,]int)=>array[,,]real
+    // lmultiply(array[]vector,int)=>array[]vector
     {
-      int arg_1 = 0;
-      array[1, 1, 1] int arg_2 = {{{1}}};
-      array[1, 1, 1] real value = lmultiply(arg_1, arg_2);
+      array[1] vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]'};
+      int arg_2 = 1;
+      array[1] vector[1] value = lmultiply(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -1063,33 +1021,46 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // log(array[,,]matrix)=>array[,,]matrix
+    // lmultiply(real,matrix)=>matrix
     {
-      array[1, 1, 1] matrix[1, 1] arg_1 = {{{[[(1.3499999999999999 + 0.0625 * seed)]]}}};
-      array[1, 1, 1] matrix[1, 1] value = log(arg_1);
+      real arg_1 = (0.45000000000000001 + 0.0625 * seed);
+      matrix[1, 1] arg_2 = [[(1.2 + 0.0625 * seed)]];
+      matrix[1, 1] value = lmultiply(arg_1, arg_2);
+      total += 1.234375 * sum(value);
+    }
+    // log1m_exp(array[,,,,,]matrix)=>array[,,,,,]matrix
+    {
+      array[1, 1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{{[[(-0.55000000000000004 + 0.0625 * seed)]]}}}}}};
+      array[1, 1, 1, 1, 1, 1] matrix[1, 1] value = log1m_exp(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // log(array[,,]row_vector)=>array[,,]row_vector
+    // log1m_exp(array[,,,,,]real)=>array[,,,,,]real
     {
-      array[1, 1, 1] row_vector[1] arg_1 = {{{[(1.3499999999999999 + 0.0625 * seed)]}}};
-      array[1, 1, 1] row_vector[1] value = log(arg_1);
+      array[1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{(-0.55000000000000004 + 0.0625 * seed)}}}}}};
+      array[1, 1, 1, 1, 1, 1] real value = log1m_exp(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // log1m(array[,,,,]real)=>array[,,,,]real
+    // log1m_exp(array[,,,]int)=>array[,,,]real
     {
-      array[1, 1, 1, 1, 1] real arg_1 = {{{{{(0.29999999999999999 + 0.0625 * seed)}}}}};
-      array[1, 1, 1, 1, 1] real value = log1m(arg_1);
+      array[1, 1, 1, 1] int arg_1 = {{{{-1}}}};
+      array[1, 1, 1, 1] real value = log1m_exp(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // log1m_inv_logit(array[,,,,,,]real)=>array[,,,,,,]real
+    // log1m_exp(array[,]row_vector)=>array[,]row_vector
     {
-      array[1, 1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{{(0.45000000000000001 + 0.0625 * seed)}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] real value = log1m_inv_logit(arg_1);
+      array[1, 1] row_vector[1] arg_1 = {{[(-0.55000000000000004 + 0.0625 * seed)]}};
+      array[1, 1] row_vector[1] value = log1m_exp(arg_1);
       if (seed > 1e100)
         print(value);
+    }
+    // log1m_exp(row_vector)=>row_vector
+    {
+      row_vector[1] arg_1 = [(-0.55000000000000004 + 0.0625 * seed)];
+      row_vector[1] value = log1m_exp(arg_1);
+      total += 1.015625 * sum(value);
     }
     // log1m_inv_logit(array[,,,,,]vector)=>array[,,,,,]vector
     {
@@ -1098,51 +1069,23 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // log1m_inv_logit(array[,,,,]vector)=>array[,,,,]vector
+    // log1m_inv_logit(vector)=>vector
     {
-      array[1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}};
-      array[1, 1, 1, 1, 1] vector[1] value = log1m_inv_logit(arg_1);
-      if (seed > 1e100)
-        print(value);
+      vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)]';
+      vector[1] value = log1m_inv_logit(arg_1);
+      total += 1.25 * sum(value);
     }
-    // log1p(array[,,,,,]row_vector)=>array[,,,,,]row_vector
+    // log1p_exp(row_vector)=>row_vector
     {
-      array[1, 1, 1, 1, 1, 1] row_vector[1] arg_1 = {{{{{{[(0.45000000000000001 + 0.0625 * seed)]}}}}}};
-      array[1, 1, 1, 1, 1, 1] row_vector[1] value = log1p(arg_1);
-      if (seed > 1e100)
-        print(value);
+      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
+      row_vector[1] value = log1p_exp(arg_1);
+      total += 1.125 * sum(value);
     }
-    // log1p_exp(array[,,,,]matrix)=>array[,,,,]matrix
+    // log_diff_exp(array[,,,,,,]int,int)=>array[,,,,,,]real
     {
-      array[1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}};
-      array[1, 1, 1, 1, 1] matrix[1, 1] value = log1p_exp(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // log1p_exp(array[,,,,]real)=>array[,,,,]real
-    {
-      array[1, 1, 1, 1, 1] real arg_1 = {{{{{(0.45000000000000001 + 0.0625 * seed)}}}}};
-      array[1, 1, 1, 1, 1] real value = log1p_exp(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // log1p_exp(array[,]real)=>array[,]real
-    {
-      array[1, 1] real arg_1 = {{(0.45000000000000001 + 0.0625 * seed)}};
-      array[1, 1] real value = log1p_exp(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // log1p_exp(real)=>real
-    {
-      real arg_1 = (0.45000000000000001 + 0.0625 * seed);
-      real value = log1p_exp(arg_1);
-      total += 1.015625 * value;
-    }
-    // log2(array[]matrix)=>array[]matrix
-    {
-      array[1] matrix[1, 1] arg_1 = {[[(1.3499999999999999 + 0.0625 * seed)]]};
-      array[1] matrix[1, 1] value = log2(arg_1);
+      array[1, 1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{{1}}}}}}};
+      int arg_2 = 0;
+      array[1, 1, 1, 1, 1, 1, 1] real value = log_diff_exp(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -1154,19 +1097,27 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // log_diff_exp(int,array[]int)=>array[]real
+    // log_diff_exp(array[,,,]int,int)=>array[,,,]real
     {
-      int arg_1 = 1;
-      array[1] int arg_2 = {0};
-      array[1] real value = log_diff_exp(arg_1, arg_2);
+      array[1, 1, 1, 1] int arg_1 = {{{{1}}}};
+      int arg_2 = 0;
+      array[1, 1, 1, 1] real value = log_diff_exp(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // log_diff_exp(real,array[,,,,]int)=>array[,,,,]real
+    // log_diff_exp(array[]vector,real)=>array[]vector
     {
-      real arg_1 = (1.45 + 0.0625 * seed);
-      array[1, 1, 1, 1, 1] int arg_2 = {{{{{0}}}}};
-      array[1, 1, 1, 1, 1] real value = log_diff_exp(arg_1, arg_2);
+      array[1] vector[1] arg_1 = {[(1.45 + 0.0625 * seed)]'};
+      real arg_2 = (0.45000000000000001 + 0.0625 * seed);
+      array[1] vector[1] value = log_diff_exp(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // log_diff_exp(int,array[,,,,,,,]int)=>array[,,,,,,,]real
+    {
+      int arg_1 = 1;
+      array[1, 1, 1, 1, 1, 1, 1, 1] int arg_2 = {{{{{{{{0}}}}}}}};
+      array[1, 1, 1, 1, 1, 1, 1, 1] real value = log_diff_exp(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -1178,11 +1129,11 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // log_diff_exp(real,array[]vector)=>array[]vector
+    // log_falling_factorial(array[]real,int)=>array[]real
     {
-      real arg_1 = (1.45 + 0.0625 * seed);
-      array[1] vector[1] arg_2 = {[(0.45000000000000001 + 0.0625 * seed)]'};
-      array[1] vector[1] value = log_diff_exp(arg_1, arg_2);
+      array[1] real arg_1 = {(3.4500000000000002 + 0.0625 * seed)};
+      int arg_2 = 1;
+      array[1] real value = log_falling_factorial(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -1194,11 +1145,26 @@ functions {
       if (seed > 1e100)
         print(value);
     }
+    // log_falling_factorial(int,array[,,]int)=>array[,,]real
+    {
+      int arg_1 = 3;
+      array[1, 1, 1] int arg_2 = {{{1}}};
+      array[1, 1, 1] real value = log_falling_factorial(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
     // log_falling_factorial(real,array[]real)=>array[]real
     {
       real arg_1 = (3.4500000000000002 + 0.0625 * seed);
       array[1] real arg_2 = {(1.1499999999999999 + 0.0625 * seed)};
       array[1] real value = log_falling_factorial(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // log_inv_logit(array[,,,,]vector)=>array[,,,,]vector
+    {
+      array[1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}};
+      array[1, 1, 1, 1, 1] vector[1] value = log_inv_logit(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -1242,13 +1208,12 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // log_inv_logit_diff(int,array[]vector)=>array[]vector
+    // log_inv_logit_diff(matrix,real)=>matrix
     {
-      int arg_1 = 1;
-      array[1] vector[1] arg_2 = {[(-0.55000000000000004 + 0.0625 * seed)]'};
-      array[1] vector[1] value = log_inv_logit_diff(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
+      matrix[1, 1] arg_1 = [[(0.94999999999999996 + 0.0625 * seed)]];
+      real arg_2 = (-0.55000000000000004 + 0.0625 * seed);
+      matrix[1, 1] value = log_inv_logit_diff(arg_1, arg_2);
+      total += 1.125 * sum(value);
     }
     // log_inv_logit_diff(real,array[,,,,]vector)=>array[,,,,]vector
     {
@@ -1322,12 +1287,20 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // log_modified_bessel_first_kind(int,int)=>real
+    // log_modified_bessel_first_kind(real,vector)=>vector
     {
-      int arg_1 = 0;
+      real arg_1 = (0.45000000000000001 + 0.0625 * seed);
+      vector[1] arg_2 = [(1.2 + 0.0625 * seed)]';
+      vector[1] value = log_modified_bessel_first_kind(arg_1, arg_2);
+      total += 1.203125 * sum(value);
+    }
+    // log_rising_factorial(array[,,,,,,]int,int)=>array[,,,,,,]real
+    {
+      array[1, 1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{{1}}}}}}};
       int arg_2 = 1;
-      real value = log_modified_bessel_first_kind(arg_1, arg_2);
-      total += 1.15625 * value;
+      array[1, 1, 1, 1, 1, 1, 1] real value = log_rising_factorial(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
     }
     // log_rising_factorial(array[,,,,,]matrix,int)=>array[,,,,,]matrix
     {
@@ -1353,25 +1326,11 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // log_rising_factorial(int,vector)=>vector
+    // log_sum_exp(array[,,,,,]int,int)=>array[,,,,,]real
     {
-      int arg_1 = 1;
-      vector[1] arg_2 = [(1.1499999999999999 + 0.0625 * seed)]';
-      vector[1] value = log_rising_factorial(arg_1, arg_2);
-      total += 1.0625 * sum(value);
-    }
-    // log_rising_factorial(real,array[]real)=>array[]real
-    {
-      real arg_1 = (1.45 + 0.0625 * seed);
-      array[1] real arg_2 = {(1.1499999999999999 + 0.0625 * seed)};
-      array[1] real value = log_rising_factorial(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // log_softmax(array[]vector)=>array[]vector
-    {
-      array[1] vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]'};
-      array[1] vector[1] value = log_softmax(arg_1);
+      array[1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{0}}}}}};
+      int arg_2 = 1;
+      array[1, 1, 1, 1, 1, 1] real value = log_sum_exp(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -1399,6 +1358,14 @@ functions {
       if (seed > 1e100)
         print(value);
     }
+    // log_sum_exp(array[,,]int,int)=>array[,,]real
+    {
+      array[1, 1, 1] int arg_1 = {{{0}}};
+      int arg_2 = 1;
+      array[1, 1, 1] real value = log_sum_exp(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
     // log_sum_exp(array[,,]row_vector,real)=>array[,,]row_vector
     {
       array[1, 1, 1] row_vector[1] arg_1 = {{{[(0.45000000000000001 + 0.0625 * seed)]}}};
@@ -1407,11 +1374,11 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // log_sum_exp(array[]int,real)=>array[]real
+    // log_sum_exp(array[,,]vector,int)=>array[,,]vector
     {
-      array[1] int arg_1 = {0};
-      real arg_2 = (1.2 + 0.0625 * seed);
-      array[1] real value = log_sum_exp(arg_1, arg_2);
+      array[1, 1, 1] vector[1] arg_1 = {{{[(0.45000000000000001 + 0.0625 * seed)]'}}};
+      int arg_2 = 1;
+      array[1, 1, 1] vector[1] value = log_sum_exp(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -1423,17 +1390,18 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // logical_gt(real,real)=>int
+    // log_sum_exp(int,array[,,,]real)=>array[,,,]real
     {
-      int value = logical_gt(0.45000000000000001, 1.2);
-      total += 1.0625 * value;
-    }
-    // logit(array[,,,,,]real)=>array[,,,,,]real
-    {
-      array[1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{(0.29999999999999999 + 0.0625 * seed)}}}}}};
-      array[1, 1, 1, 1, 1, 1] real value = logit(arg_1);
+      int arg_1 = 0;
+      array[1, 1, 1, 1] real arg_2 = {{{{(1.2 + 0.0625 * seed)}}}};
+      array[1, 1, 1, 1] real value = log_sum_exp(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
+    }
+    // logical_gte(int,real)=>int
+    {
+      int value = logical_gte(0, 1.2);
+      total += 1.015625 * value;
     }
     // logit(array[,,,,]matrix)=>array[,,,,]matrix
     {
@@ -1442,17 +1410,17 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // logit(array[,]int)=>array[,]real
+    // logit(array[,,,]vector)=>array[,,,]vector
     {
-      array[1, 1] int arg_1 = {{0}};
-      array[1, 1] real value = logit(arg_1);
+      array[1, 1, 1, 1] vector[1] arg_1 = {{{{[(0.29999999999999999 + 0.0625 * seed)]'}}}};
+      array[1, 1, 1, 1] vector[1] value = logit(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // minus(array[,]real)=>array[,]real
+    // minus(array[,,,,,,]vector)=>array[,,,,,,]vector
     {
-      array[1, 1] real arg_1 = {{(0.45000000000000001 + 0.0625 * seed)}};
-      array[1, 1] real value = minus(arg_1);
+      array[1, 1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}}};
+      array[1, 1, 1, 1, 1, 1, 1] vector[1] value = minus(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -1469,6 +1437,14 @@ functions {
       int arg_1 = 2;
       array[1, 1, 1, 1] vector[1] arg_2 = {{{{[(1.3499999999999999 + 0.0625 * seed)]'}}}};
       array[1, 1, 1, 1] vector[1] value = modified_bessel_first_kind(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
+    }
+    // modified_bessel_first_kind(int,array[,]real)=>array[,]real
+    {
+      int arg_1 = 2;
+      array[1, 1] real arg_2 = {{(1.3499999999999999 + 0.0625 * seed)}};
+      array[1, 1] real value = modified_bessel_first_kind(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -1504,15 +1480,30 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // num_elements(array[]real)=>int
+    // modified_bessel_second_kind(int,array[]real)=>array[]real
     {
-      array[1] real arg_1 = {(0.45000000000000001 + 0.0625 * seed)};
-      int value = num_elements(arg_1);
-      total += 1.015625 * value;
+      int arg_1 = 2;
+      array[1] real arg_2 = {(1.3499999999999999 + 0.0625 * seed)};
+      array[1] real value = modified_bessel_second_kind(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
     }
-    // ones_int_array(int)=>array[]int
+    // multiply(real,row_vector)=>row_vector
     {
-      array[1] int value = ones_int_array(1);
+      real arg_1 = (0.45000000000000001 + 0.0625 * seed);
+      row_vector[1] arg_2 = [(1.2 + 0.0625 * seed)];
+      row_vector[1] value = multiply(arg_1, arg_2);
+      total += 1.203125 * sum(value);
+    }
+    // num_elements(matrix)=>int
+    {
+      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
+      int value = num_elements(arg_1);
+      total += 1.15625 * value;
+    }
+    // one_hot_array(int,int)=>array[]real
+    {
+      array[1] real value = one_hot_array(1, 1);
       if (seed > 1e100)
         print(value);
     }
@@ -1524,26 +1515,19 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // owens_t(real,matrix)=>matrix
+    // owens_t(real,array[,]vector)=>array[,]vector
     {
       real arg_1 = (0.45000000000000001 + 0.0625 * seed);
-      matrix[1, 1] arg_2 = [[(1.2 + 0.0625 * seed)]];
-      matrix[1, 1] value = owens_t(arg_1, arg_2);
-      total += 1.125 * sum(value);
+      array[1, 1] vector[1] arg_2 = {{[(1.2 + 0.0625 * seed)]'}};
+      array[1, 1] vector[1] value = owens_t(arg_1, arg_2);
+      if (seed > 1e100)
+        print(value);
     }
     // pow(array[,,,,,,]real,real)=>array[,,,,,,]real
     {
       array[1, 1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{{(0.45000000000000001 + 0.0625 * seed)}}}}}}};
       real arg_2 = (1.2 + 0.0625 * seed);
       array[1, 1, 1, 1, 1, 1, 1] real value = pow(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // pow(array[,,,,,]int,real)=>array[,,,,,]real
-    {
-      array[1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{0}}}}}};
-      real arg_2 = (1.2 + 0.0625 * seed);
-      array[1, 1, 1, 1, 1, 1] real value = pow(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
@@ -1563,14 +1547,6 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // pow(array[,,,]vector,int)=>array[,,,]vector
-    {
-      array[1, 1, 1, 1] vector[1] arg_1 = {{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}};
-      int arg_2 = 1;
-      array[1, 1, 1, 1] vector[1] value = pow(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
     // pow(array[,,]vector,array[,,]vector)=>array[,,]vector
     {
       array[1, 1, 1] vector[1] arg_1 = {{{[(0.45000000000000001 + 0.0625 * seed)]'}}};
@@ -1579,28 +1555,20 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // pow(int,array[,,,,]int)=>array[,,,,]real
+    // pow(array[]row_vector,int)=>array[]row_vector
     {
-      int arg_1 = 0;
-      array[1, 1, 1, 1, 1] int arg_2 = {{{{{1}}}}};
-      array[1, 1, 1, 1, 1] real value = pow(arg_1, arg_2);
+      array[1] row_vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]};
+      int arg_2 = 1;
+      array[1] row_vector[1] value = pow(arg_1, arg_2);
       if (seed > 1e100)
         print(value);
     }
-    // pow(int,array[,]int)=>array[,]real
+    // pow(int,real)=>real
     {
       int arg_1 = 0;
-      array[1, 1] int arg_2 = {{1}};
-      array[1, 1] real value = pow(arg_1, arg_2);
-      if (seed > 1e100)
-        print(value);
-    }
-    // pow(matrix,real)=>matrix
-    {
-      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
       real arg_2 = (1.2 + 0.0625 * seed);
-      matrix[1, 1] value = pow(arg_1, arg_2);
-      total += 1.15625 * sum(value);
+      real value = pow(arg_1, arg_2);
+      total += 1.21875 * value;
     }
     // pow(real,array[,,]matrix)=>array[,,]matrix
     {
@@ -1610,17 +1578,31 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // pow(row_vector,row_vector)=>row_vector
+    // rep_array(array[]matrix,int)=>array[,]matrix
     {
-      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
-      row_vector[1] arg_2 = [(1.2 + 0.0625 * seed)];
-      row_vector[1] value = pow(arg_1, arg_2);
-      total += 1.03125 * sum(value);
+      array[1] matrix[1, 1] arg_1 = {[[(0.45000000000000001 + 0.0625 * seed)]]};
+      array[1, 1] matrix[1, 1] value = rep_array(arg_1, 1);
+      if (seed > 1e100)
+        print(value);
     }
-    // reverse(array[,,,]matrix)=>array[,,,]matrix
+    // reverse(array[,,,,,]vector)=>array[,,,,,]vector
     {
-      array[1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}};
-      array[1, 1, 1, 1] matrix[1, 1] value = reverse(arg_1);
+      array[1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}};
+      array[1, 1, 1, 1, 1, 1] vector[1] value = reverse(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // reverse(array[,,,]row_vector)=>array[,,,]row_vector
+    {
+      array[1, 1, 1, 1] row_vector[1] arg_1 = {{{{[(0.45000000000000001 + 0.0625 * seed)]}}}};
+      array[1, 1, 1, 1] row_vector[1] value = reverse(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // reverse(array[,]real)=>array[,]real
+    {
+      array[1, 1] real arg_1 = {{(0.45000000000000001 + 0.0625 * seed)}};
+      array[1, 1] real value = reverse(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -1632,126 +1614,139 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // rising_factorial(array[,]real,array[,]int)=>array[,]real
+    // round(array[,,,,,]matrix)=>array[,,,,,]matrix
     {
-      array[1, 1] real arg_1 = {{(1.45 + 0.0625 * seed)}};
-      array[1, 1] int arg_2 = {{2}};
-      array[1, 1] real value = rising_factorial(arg_1, arg_2);
+      array[1, 1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}}};
+      array[1, 1, 1, 1, 1, 1] matrix[1, 1] value = round(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // sd(vector)=>real
+    // sin(array[,,,,]int)=>array[,,,,]real
     {
-      vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)]';
-      real value = sd(arg_1);
-      total += 1.1875 * value;
-    }
-    // segment(array[,,]int,int,int)=>array[,,]int
-    {
-      array[1, 1, 1] int arg_1 = {{{1}}};
-      array[1, 1, 1] int value = segment(arg_1, 1, 1);
+      array[1, 1, 1, 1, 1] int arg_1 = {{{{{1}}}}};
+      array[1, 1, 1, 1, 1] real value = sin(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // size(array[,,,,,,]row_vector)=>int
-    {
-      array[1, 1, 1, 1, 1, 1, 1] row_vector[1] arg_1 = {{{{{{{[(0.45000000000000001 + 0.0625 * seed)]}}}}}}};
-      int value = size(arg_1);
-      total += 1.078125 * value;
-    }
-    // sqrt(array[,,,]real)=>array[,,,]real
-    {
-      array[1, 1, 1, 1] real arg_1 = {{{{(1.3499999999999999 + 0.0625 * seed)}}}};
-      array[1, 1, 1, 1] real value = sqrt(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // sqrt(array[,,,]vector)=>array[,,,]vector
-    {
-      array[1, 1, 1, 1] vector[1] arg_1 = {{{{[(1.3499999999999999 + 0.0625 * seed)]'}}}};
-      array[1, 1, 1, 1] vector[1] value = sqrt(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // sqrt(array[,]vector)=>array[,]vector
-    {
-      array[1, 1] vector[1] arg_1 = {{[(1.3499999999999999 + 0.0625 * seed)]'}};
-      array[1, 1] vector[1] value = sqrt(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // square(row_vector)=>row_vector
-    {
-      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
-      row_vector[1] value = square(arg_1);
-      total += 1.078125 * sum(value);
-    }
-    // std_normal_qf(array[,,]row_vector)=>array[,,]row_vector
-    {
-      array[1, 1, 1] row_vector[1] arg_1 = {{{[(0.45000000000000001 + 0.0625 * seed)]}}};
-      array[1, 1, 1] row_vector[1] value = std_normal_qf(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // subtract(row_vector,real)=>row_vector
-    {
-      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
-      real arg_2 = (1.2 + 0.0625 * seed);
-      row_vector[1] value = subtract(arg_1, arg_2);
-      total += 1.21875 * sum(value);
-    }
-    // tan(array[,,,,,]vector)=>array[,,,,,]vector
-    {
-      array[1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}}};
-      array[1, 1, 1, 1, 1, 1] vector[1] value = tan(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // tan(array[,,,,]real)=>array[,,,,]real
+    // sin(array[,,,,]real)=>array[,,,,]real
     {
       array[1, 1, 1, 1, 1] real arg_1 = {{{{{(0.45000000000000001 + 0.0625 * seed)}}}}};
-      array[1, 1, 1, 1, 1] real value = tan(arg_1);
+      array[1, 1, 1, 1, 1] real value = sin(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // tanh(array[,,,,]vector)=>array[,,,,]vector
+    // sin(array[]row_vector)=>array[]row_vector
     {
-      array[1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{[(0.45000000000000001 + 0.0625 * seed)]'}}}}};
-      array[1, 1, 1, 1, 1] vector[1] value = tanh(arg_1);
+      array[1] row_vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]};
+      array[1] row_vector[1] value = sin(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // tgamma(array[]matrix)=>array[]matrix
+    // sinh(array[,,,,,]matrix)=>array[,,,,,]matrix
+    {
+      array[1, 1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}}};
+      array[1, 1, 1, 1, 1, 1] matrix[1, 1] value = sinh(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // sinh(array[,,,,,]row_vector)=>array[,,,,,]row_vector
+    {
+      array[1, 1, 1, 1, 1, 1] row_vector[1] arg_1 = {{{{{{[(0.45000000000000001 + 0.0625 * seed)]}}}}}};
+      array[1, 1, 1, 1, 1, 1] row_vector[1] value = sinh(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // sqrt(array[,,,,]matrix)=>array[,,,,]matrix
+    {
+      array[1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{[[(1.3499999999999999 + 0.0625 * seed)]]}}}}};
+      array[1, 1, 1, 1, 1] matrix[1, 1] value = sqrt(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // std_normal_log_qf(matrix)=>matrix
+    {
+      matrix[1, 1] arg_1 = [[(-0.55000000000000004 + 0.0625 * seed)]];
+      matrix[1, 1] value = std_normal_log_qf(arg_1);
+      total += 1.078125 * sum(value);
+    }
+    // std_normal_qf(array[]matrix)=>array[]matrix
     {
       array[1] matrix[1, 1] arg_1 = {[[(0.45000000000000001 + 0.0625 * seed)]]};
-      array[1] matrix[1, 1] value = tgamma(arg_1);
+      array[1] matrix[1, 1] value = std_normal_qf(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // to_row_vector(array[]real)=>row_vector
+    // sum(matrix)=>real
     {
-      array[1] real arg_1 = {(0.45000000000000001 + 0.0625 * seed)};
+      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
+      real value = sum(arg_1);
+      total += 1.046875 * value;
+    }
+    // tail(array[,]int,int)=>array[,]int
+    {
+      array[1, 1] int arg_1 = {{1}};
+      array[1, 1] int value = tail(arg_1, 1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // tan(array[,]int)=>array[,]real
+    {
+      array[1, 1] int arg_1 = {{1}};
+      array[1, 1] real value = tan(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // tanh(array[,,,,,]int)=>array[,,,,,]real
+    {
+      array[1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{1}}}}}};
+      array[1, 1, 1, 1, 1, 1] real value = tanh(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // tanh(array[,,,,]matrix)=>array[,,,,]matrix
+    {
+      array[1, 1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{{[[(0.45000000000000001 + 0.0625 * seed)]]}}}}};
+      array[1, 1, 1, 1, 1] matrix[1, 1] value = tanh(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // tanh(array[]vector)=>array[]vector
+    {
+      array[1] vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]'};
+      array[1] vector[1] value = tanh(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // tgamma(array[,]real)=>array[,]real
+    {
+      array[1, 1] real arg_1 = {{(0.45000000000000001 + 0.0625 * seed)}};
+      array[1, 1] real value = tgamma(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // tgamma(int)=>real
+    {
+      int arg_1 = 1;
+      real value = tgamma(arg_1);
+      total += 1.203125 * value;
+    }
+    // to_array_1d(array[,,,,,,,]real)=>array[]real
+    {
+      array[1, 1, 1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{{{(0.45000000000000001 + 0.0625 * seed)}}}}}}}};
+      array[1] real value = to_array_1d(arg_1);
+      if (seed > 1e100)
+        print(value);
+    }
+    // to_row_vector(row_vector)=>row_vector
+    {
+      row_vector[1] arg_1 = [(0.45000000000000001 + 0.0625 * seed)];
       row_vector[1] value = to_row_vector(arg_1);
-      total += 1.15625 * sum(value);
+      total += 1.1875 * sum(value);
     }
-    // trigamma(array[,,,,,,]real)=>array[,,,,,,]real
+    // trigamma(array[,,,,,,]vector)=>array[,,,,,,]vector
     {
-      array[1, 1, 1, 1, 1, 1, 1] real arg_1 = {{{{{{{(1.3499999999999999 + 0.0625 * seed)}}}}}}};
-      array[1, 1, 1, 1, 1, 1, 1] real value = trigamma(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // trigamma(array[,,,]matrix)=>array[,,,]matrix
-    {
-      array[1, 1, 1, 1] matrix[1, 1] arg_1 = {{{{[[(1.3499999999999999 + 0.0625 * seed)]]}}}};
-      array[1, 1, 1, 1] matrix[1, 1] value = trigamma(arg_1);
-      if (seed > 1e100)
-        print(value);
-    }
-    // trigamma(array[,,]int)=>array[,,]real
-    {
-      array[1, 1, 1] int arg_1 = {{{1}}};
-      array[1, 1, 1] real value = trigamma(arg_1);
+      array[1, 1, 1, 1, 1, 1, 1] vector[1] arg_1 = {{{{{{{[(1.3499999999999999 + 0.0625 * seed)]'}}}}}}};
+      array[1, 1, 1, 1, 1, 1, 1] vector[1] value = trigamma(arg_1);
       if (seed > 1e100)
         print(value);
     }
@@ -1762,19 +1757,25 @@ functions {
       if (seed > 1e100)
         print(value);
     }
-    // trigamma(array[]int)=>array[]real
+    // trunc(array[,,]real)=>array[,,]real
     {
-      array[1] int arg_1 = {1};
-      array[1] real value = trigamma(arg_1);
+      array[1, 1, 1] real arg_1 = {{{(0.45000000000000001 + 0.0625 * seed)}}};
+      array[1, 1, 1] real value = trunc(arg_1);
       if (seed > 1e100)
         print(value);
     }
-    // trunc(array[,,,,,]int)=>array[,,,,,]real
+    // trunc(array[]vector)=>array[]vector
     {
-      array[1, 1, 1, 1, 1, 1] int arg_1 = {{{{{{1}}}}}};
-      array[1, 1, 1, 1, 1, 1] real value = trunc(arg_1);
+      array[1] vector[1] arg_1 = {[(0.45000000000000001 + 0.0625 * seed)]'};
+      array[1] vector[1] value = trunc(arg_1);
       if (seed > 1e100)
         print(value);
+    }
+    // variance(matrix)=>real
+    {
+      matrix[1, 1] arg_1 = [[(0.45000000000000001 + 0.0625 * seed)]];
+      real value = variance(arg_1);
+      total += 1.15625 * value;
     }
     return total;
   }

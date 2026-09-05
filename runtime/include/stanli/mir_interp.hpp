@@ -1866,60 +1866,80 @@ class MirInterp {
     }
     if (e.name == "Times__" || e.name == "multiply") {
       // Times on shaped operands is linear algebra, not elementwise; only
-      // a scalar operand (either side) scales elementwise.
+      // a scalar operand (either side) scales elementwise. The shared
+      // product resolver owns the classification and the inner-dimension
+      // check; interpreter values carry no orientation, so a one-axis
+      // operand takes the orientation its position implies -- a row before
+      // a matrix, a column after one, and the result type splits the
+      // one-axis pair into outer product against dot product.
       Value a = eval(e.args[0]), b = eval(e.args[1]);
       const bool a_mat = a.dims.size() == 2, b_mat = b.dims.size() == 2;
-      if (!is_scalar(a) && !is_scalar(b) && (a_mat || b_mat)) {
-        const int64_t Ra = a_mat ? a.dims[0] : 1;
-        const int64_t Ca = a_mat ? a.dims[1] : (int64_t)a.r.size();
-        const int64_t Rb = b_mat ? b.dims[0] : (int64_t)b.r.size();
-        const int64_t Cb = b_mat ? b.dims[1] : 1;
-        if (Ca != Rb) fail(e.name + ": inner dimension mismatch", e.raw);
-        // Matrix * matrix must use Eigen's product evaluator, just as the
-        // graph GEMM and generated Stan do. A hand-written scalar loop has
-        // a measurably different association for a one-column product.
-        if (a_mat && b_mat) {
-          using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
-          r.r.resize((size_t)(Ra * Cb));
-          Eigen::Map<const Mat> am(a.r.data(), Ra, Ca);
-          Eigen::Map<const Mat> bm(b.r.data(), Rb, Cb);
-          Eigen::Map<Mat>(r.r.data(), Ra, Cb) = am * bm;
-          r.dims = {Ra, Cb};
-          return r;
+      const bool outer_pair = !a_mat && !b_mat && e.type_ == "UMatrix";
+      const bool inner_pair =
+          !a_mat && !b_mat && (e.type_ == "UReal" || e.type_ == "UInt");
+      if (!is_scalar(a) && !is_scalar(b) &&
+          (a_mat || b_mat || outer_pair || inner_pair)) {
+        using Kind = FunctionContainerKind;
+        const auto oriented = [](const Value& v, Kind fallback) {
+          return make_function_shape(
+              FunctionArgumentKind::Real,
+              v.dims.size() == 2 ? Kind::Matrix : fallback, Kind::Scalar,
+              v.dims.size() == 2 ? v.dims
+                                 : std::vector<int64_t>{(int64_t)v.r.size()},
+              (int64_t)v.r.size());
+        };
+        BuiltinProductMap map;
+        try {
+          map = builtin_product_map(
+              oriented(a, outer_pair ? Kind::Vector : Kind::RowVector),
+              oriented(b, outer_pair ? Kind::RowVector : Kind::Vector));
+        } catch (const std::invalid_argument& error) {
+          fail(e.name + ": " + error.what(), e.raw);
         }
-        // Col-major storage on both sides.
-        r.r.assign((size_t)(Ra * Cb), T(0.0));
-        for (int64_t j = 0; j < Cb; ++j)
-          for (int64_t k = 0; k < Ca; ++k) {
-            const T& bv = b.r.at((size_t)(j * Rb + k));
-            for (int64_t i = 0; i < Ra; ++i)
-              r.r[(size_t)(j * Ra + i)] +=
-                  a.r.at((size_t)(a_mat ? k * Ra + i : k)) * bv;
+        switch (map.kind) {
+          case BuiltinProductMap::Kind::Gemm:
+            // Matrix * matrix must use Eigen's product evaluator, just as
+            // the graph GEMM and generated Stan do. A hand-written scalar
+            // loop has a measurably different association for a one-column
+            // product.
+            if (a_mat && b_mat) {
+              using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
+              r.r.resize((size_t)(map.m * map.n));
+              Eigen::Map<const Mat> am(a.r.data(), map.m, map.k);
+              Eigen::Map<const Mat> bm(b.r.data(), map.k, map.n);
+              Eigen::Map<Mat>(r.r.data(), map.m, map.n) = am * bm;
+              r.dims = {map.m, map.n};
+              return r;
+            }
+            [[fallthrough]];
+          case BuiltinProductMap::Kind::MatVec: {
+            // Col-major storage on both sides.
+            r.r.assign((size_t)(map.m * map.n), T(0.0));
+            for (int64_t j = 0; j < map.n; ++j)
+              for (int64_t k = 0; k < map.k; ++k) {
+                const T& bv = b.r.at((size_t)(b_mat ? j * map.k + k : k));
+                for (int64_t i = 0; i < map.m; ++i)
+                  r.r[(size_t)(j * map.m + i)] +=
+                      a.r.at((size_t)(a_mat ? k * map.m + i : k)) * bv;
+              }
+            r.dims = {(int64_t)r.r.size()};
+            return r;
           }
-        if (a_mat && b_mat)
-          r.dims = {Ra, Cb};
-        else
-          r.dims = {(int64_t)r.r.size()};
-        return r;
-      }
-      if (!is_scalar(a) && !is_scalar(b) && !a_mat && !b_mat) {
-        // vector * row_vector is an outer product when the result is a
-        // matrix; row_vector * vector is a dot product when it is a scalar.
-        if (e.type_ == "UMatrix") {
-          const int64_t nr = (int64_t)a.r.size(), nc = (int64_t)b.r.size();
-          r.dims = {nr, nc};
-          for (int64_t j = 0; j < nc; ++j)
-            for (int64_t i = 0; i < nr; ++i)
-              r.r.push_back(a.r[(size_t)i] * b.r[(size_t)j]);
-          return r;
-        }
-        if (e.type_ == "UReal" || e.type_ == "UInt") {
-          if (a.r.size() != b.r.size())
-            fail(e.name + ": dot product length mismatch", e.raw);
-          T s = T(0.0);
-          for (size_t i = 0; i < a.r.size(); ++i) s += a.r[i] * b.r[i];
-          r.r = {s};
-          return r;
+          case BuiltinProductMap::Kind::Outer: {
+            r.dims = {map.m, map.n};
+            for (int64_t j = 0; j < map.n; ++j)
+              for (int64_t i = 0; i < map.m; ++i)
+                r.r.push_back(a.r[(size_t)i] * b.r[(size_t)j]);
+            return r;
+          }
+          case BuiltinProductMap::Kind::Inner: {
+            T s = T(0.0);
+            for (size_t i = 0; i < a.r.size(); ++i) s += a.r[i] * b.r[i];
+            r.r = {s};
+            return r;
+          }
+          case BuiltinProductMap::Kind::ScalarScale:
+            break;
         }
       }
       // Scalar scale, elementwise on the already-evaluated operands (an
@@ -1944,29 +1964,15 @@ class MirInterp {
     // use, and pick a factorisation family with them: the plain solve, the
     // LLT of a symmetric positive definite matrix, or a triangular solve
     // that reads only the lower triangle.
-    enum class SolveKind { Plain, Spd, TriLow };
-    SolveKind kind = SolveKind::Plain;
-    bool named_left = false;
-    bool named_solve = false;
-    if (e.args.size() == 2 && e.name.rfind("mdivide_", 0) == 0) {
-      const std::string tail = e.name.substr(8);
-      if (tail.rfind("left", 0) == 0 || tail.rfind("right", 0) == 0) {
-        named_left = tail.rfind("left", 0) == 0;
-        const std::string family = tail.substr(named_left ? 4 : 5);
-        if (family.empty()) {
-          named_solve = true;
-        } else if (family == "_spd") {
-          named_solve = true;
-          kind = SolveKind::Spd;
-        } else if (family == "_tri_low") {
-          named_solve = true;
-          kind = SolveKind::TriLow;
-        }
-      }
-    }
-    if (named_solve || e.name == "LDivide__" ||
-        (e.name == "Divide__" && e.args.at(1).type_ == "UMatrix")) {
-      const bool left = named_solve ? named_left : e.name == "LDivide__";
+    const BuiltinSpec* solve_spec =
+        shaped_builtin_spec(e.name, e.args.size(), BuiltinShapePolicy::Solve);
+    if (solve_spec == nullptr && e.name == "Divide__" && e.args.size() == 2 &&
+        e.args.at(1).type_ == "UMatrix")
+      solve_spec =
+          shaped_builtin_spec("mdivide_right", 2, BuiltinShapePolicy::Solve);
+    if (solve_spec != nullptr) {
+      const bool left = solve_spec->solve_left;
+      const BuiltinSolveKind kind = solve_spec->solve;
       Value a = eval(e.args[0]), b = eval(e.args[1]);
       const Value& divisor = left ? a : b;
       const Value& dividend = left ? b : a;
@@ -1999,9 +2005,9 @@ class MirInterp {
       // std::invalid_argument CmdStan would.
       const auto left_solve = [&](const auto& x) {
         switch (kind) {
-          case SolveKind::Spd:
+          case BuiltinSolveKind::Spd:
             return Mat(stan::math::mdivide_left_spd(d, x));
-          case SolveKind::TriLow:
+          case BuiltinSolveKind::TriLow:
             return Mat(stan::math::mdivide_left_tri_low(d, x));
           default:
             return Mat(stan::math::mdivide_left(d, x));
@@ -2009,9 +2015,9 @@ class MirInterp {
       };
       const auto right_solve = [&](const auto& x) {
         switch (kind) {
-          case SolveKind::Spd:
+          case BuiltinSolveKind::Spd:
             return Mat(stan::math::mdivide_right_spd(x, d));
-          case SolveKind::TriLow:
+          case BuiltinSolveKind::TriLow:
             return Mat(stan::math::mdivide_right_tri_low(x, d));
           default:
             return Mat(stan::math::mdivide_right(x, d));
@@ -2778,9 +2784,14 @@ class MirInterp {
     // An RNG descriptor never reaches the pure-kernel bridge: draws carry
     // stream state the host hook owns, and outside a hook-equipped context
     // the call stays unsupported rather than invoking OP_RNG bare.
+    const auto pure_kernel_shape = [](const BuiltinSpec& spec) {
+      return spec.shape != BuiltinShapePolicy::Rng &&
+             spec.shape != BuiltinShapePolicy::Product &&
+             spec.shape != BuiltinShapePolicy::Solve;
+    };
     const BuiltinSpec* kernel_builtin =
         builtin != nullptr && builtin->result == FunctionArgumentKind::Real &&
-                builtin->shape != BuiltinShapePolicy::Rng
+                pure_kernel_shape(*builtin)
             ? builtin
             : reduction_builtin_spec(e.name, e.args.size());
     const bool named_builtin =
@@ -2806,7 +2817,7 @@ class MirInterp {
                           FunctionArgumentKind::Real);
         if (named != nullptr && named->builtin() != nullptr &&
             named->builtin()->result == FunctionArgumentKind::Real &&
-            named->builtin()->shape != BuiltinShapePolicy::Rng)
+            pure_kernel_shape(*named->builtin()))
           kernel_builtin = named->builtin();
       }
       if (kernel_builtin != nullptr)

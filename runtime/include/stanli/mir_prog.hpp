@@ -2625,6 +2625,8 @@ struct ProgramCompiler {
     // predicate lowering: a Predicate descriptor has no kernel, and its
     // comparison-opcode spelling lives with the other operators.
     if (builtin != nullptr && builtin->shape != BuiltinShapePolicy::Predicate &&
+        builtin->shape != BuiltinShapePolicy::Product &&
+        builtin->shape != BuiltinShapePolicy::Solve &&
         !(e.name == "Divide__" && e.args.size() == 2 &&
           e.args[1].type_ == "UMatrix")) {
       if (const auto native = native_builtin_code(builtin->opcode))
@@ -2676,6 +2678,46 @@ struct ProgramCompiler {
       Range out = lhs;
       out.reg = r;
       return out;
+    }
+    // The remaining registered solves (and the operator spellings the two
+    // native instructions above do not cover) go through the graph solve
+    // kernels: the shared resolver validates the square divisor and the
+    // dividend's conformity, and the variant carries the same operand-type
+    // bits the graph lowering stamps -- result var, vector-vs-one-column
+    // dividend, and the divisor/dividend scalar types.
+    {
+      const BuiltinSpec* solve =
+          shaped_builtin_spec(e.name, e.args.size(), BuiltinShapePolicy::Solve);
+      if (solve == nullptr && e.name == "Divide__" && e.args.size() == 2 &&
+          e.args[1].type_ == "UMatrix")
+        solve =
+            shaped_builtin_spec("mdivide_right", 2, BuiltinShapePolicy::Solve);
+      if (solve != nullptr) {
+        std::vector<Range> args;
+        args.reserve(2);
+        for (const mir::Expr& argument : e.args) args.push_back(expr(argument));
+        BuiltinSolveMap map;
+        try {
+          map = builtin_solve_map(*solve,
+                                  builtin_argument_shape(e.args[0], args[0]),
+                                  builtin_argument_shape(e.args[1], args[1]));
+        } catch (const std::invalid_argument& error) {
+          bail(e.name + ": " + std::string(error.what()));
+        }
+        const size_t dividend = solve->solve_left ? 1 : 0;
+        const bool divisor_active = !e.args[1 - dividend].data_only;
+        const bool dividend_active = !e.args[dividend].data_only;
+        const bool dm = args[dividend].kind == ViewKind::Matrix;
+        Range out{0, (int)map.result.storage_size};
+        out = shaped(std::move(out), map.result);
+        const uint8_t variant =
+            (uint8_t)(((divisor_active || dividend_active) ? 1u : 0u) |
+                      (dm ? 0u : 2u) | (divisor_active ? 4u : 0u) |
+                      (dividend_active ? 8u : 0u));
+        return kernel_call(solve->opcode, args, out, variant,
+                           solve->activity_mask,
+                           {(int)map.order, (int)map.columns}, {}, e.name);
+      }
     }
     if (e.fn_lib == mir::Expr::Lib::UserDefined) {
       auto it = funs.find(e.name);
@@ -2954,43 +2996,26 @@ struct ProgramCompiler {
         bail("array arithmetic is unsupported by the register program");
       if ((e.name == "Times__" || e.name == "multiply") && !a_scalar &&
           !b_scalar) {
-        int64_t rows = 0, inner = 0, cols = 0;
-        ViewKind result_kind = ViewKind::Flat;
-        if (a.kind == ViewKind::Matrix && b.kind == ViewKind::Matrix) {
-          rows = a.rows;
-          inner = a.cols;
-          cols = b.cols;
-          if (inner != b.rows) bail("matrix multiplication size mismatch");
-          result_kind = ViewKind::Matrix;
-        } else if (a.kind == ViewKind::Matrix && b.kind == ViewKind::Vector) {
-          rows = a.rows;
-          inner = a.cols;
-          cols = 1;
-          if (inner != b.len) bail("matrix-vector size mismatch");
-          result_kind = ViewKind::Vector;
-        } else if (a.kind == ViewKind::RowVector &&
-                   b.kind == ViewKind::Matrix) {
-          rows = 1;
-          inner = a.len;
-          cols = b.cols;
-          if (inner != b.rows) bail("row-vector matrix size mismatch");
-          result_kind = ViewKind::RowVector;
-        } else if (a.kind == ViewKind::RowVector &&
-                   b.kind == ViewKind::Vector) {
-          rows = cols = 1;
-          inner = a.len;
-          if (inner != b.len) bail("dot-product size mismatch");
-        } else if (a.kind == ViewKind::Vector &&
-                   b.kind == ViewKind::RowVector) {
-          rows = a.len;
-          inner = 1;
-          cols = b.len;
-          result_kind = ViewKind::Matrix;
-        } else {
-          bail(
-              "container multiplication is unsupported by the register "
-              "program");
+        // The shared product resolver classifies the matvec/GEMM/outer/
+        // inner forms and validates the inner dimension; the register
+        // emission below stays the explicit MUL/ADD chain the adjoint
+        // machinery prices.
+        BuiltinProductMap map;
+        try {
+          map = builtin_product_map(builtin_argument_shape(e.args[0], a),
+                                    builtin_argument_shape(e.args[1], b));
+        } catch (const std::invalid_argument& error) {
+          bail(e.name + ": " + error.what());
         }
+        const int64_t rows = map.m, inner = map.k, cols = map.n;
+        const ViewKind result_kind =
+            map.result.container == FunctionContainerKind::Matrix
+                ? ViewKind::Matrix
+            : map.result.container == FunctionContainerKind::Vector
+                ? ViewKind::Vector
+            : map.result.container == FunctionContainerKind::RowVector
+                ? ViewKind::RowVector
+                : ViewKind::Flat;
 
         const int64_t width = rows * cols;
         if (width > kMaxRegs) bail("matrix product needs too many registers");
