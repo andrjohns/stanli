@@ -294,6 +294,9 @@ set(STANLI_RUNTIME_SOURCES
   runtime/kernels/island.cpp
   runtime/src/island.cpp
   runtime/src/adjoint.cpp
+  runtime/src/builtin_registry.cpp
+  runtime/src/density_registry.cpp
+  runtime/src/function_registry.cpp
   runtime/src/program_density.cpp
   runtime/src/nuts.cpp
   runtime/src/walnuts.cpp
@@ -595,8 +598,32 @@ if(NOT EXISTS "${STANLI_STANC_EXECUTABLE}")
     "Pinned stanc not found at ${STANLI_STANC_EXECUTABLE}; "
     "run tools/dev_setup.sh --no-build or set STANLI_STANC_EXECUTABLE")
 endif()
-file(GLOB STANLI_FIXTURE_SOURCES CONFIGURE_DEPENDS
+# Keep additions and removals configuration-visible, then ask the fixture
+# generator for the authoritative subset. Generated signature models are lit
+# inputs that stanc compiles on demand and must not inflate this legacy corpus.
+file(GLOB STANLI_FIXTURE_CANDIDATES CONFIGURE_DEPENDS
      "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/*.stan")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fixtures.py")
+execute_process(
+  COMMAND ${STANLI_FIXTURE_PYTHON}
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fixtures.py"
+          --stanc "${STANLI_STANC_EXECUTABLE}"
+          --source-dir "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
+          --list-sources
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  RESULT_VARIABLE _stanli_fixture_list_result
+  OUTPUT_VARIABLE _stanli_fixture_list_output
+  ERROR_VARIABLE _stanli_fixture_list_error
+  OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _stanli_fixture_list_result EQUAL 0)
+  message(FATAL_ERROR
+    "Failed to enumerate legacy MIR fixtures: ${_stanli_fixture_list_error}")
+endif()
+string(REPLACE "\r\n" "\n" _stanli_fixture_list_output
+       "${_stanli_fixture_list_output}")
+string(REPLACE "\n" ";" STANLI_FIXTURE_SOURCES
+       "${_stanli_fixture_list_output}")
 set(STANLI_MIR_FIXTURES)
 foreach(STANLI_FIXTURE_SOURCE IN LISTS STANLI_FIXTURE_SOURCES)
   get_filename_component(STANLI_FIXTURE_STEM
@@ -785,6 +812,9 @@ target_link_libraries(dump_ops PRIVATE stanli)
 add_executable(dump_islands tools/dump_islands.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(dump_islands PRIVATE stanli)
+add_executable(dump_function_specs tools/dump_function_specs.cpp
+  $<TARGET_OBJECTS:stanli_tbb_stub>)
+target_link_libraries(dump_function_specs PRIVATE stanli)
 
 # Installable: the native sampler, the parity checker, the shared
 # library the language bindings load, and the headers a C++ caller
@@ -814,6 +844,7 @@ set(STANLI_TESTS
   test_structured_checks test_structured_loop
   test_mir_unary_fallback test_mir_binary_fallback test_mir_reduction_fallback
   test_constfold test_cse
+  test_function_registry test_function_shape
   test_partition
   test_solve test_cross_path
   test_write_array test_pool test_bridgestan test_mixture test_island
@@ -866,6 +897,18 @@ if(Python3_Interpreter_FOUND)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_function_model_generation
            COMMAND ${Python3_EXECUTABLE} tools/gen_function_models.py --check
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_density_signature_model_generation
+           COMMAND ${Python3_EXECUTABLE}
+                   tools/generate_density_signature_model.py
+                   --stanc ${STANLI_STANC_EXECUTABLE}
+                   --registry $<TARGET_FILE:dump_function_specs> --check
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME test_builtin_signature_model_generation
+           COMMAND ${Python3_EXECUTABLE}
+                   tools/generate_builtin_signature_models.py
+                   --stanc ${STANLI_STANC_EXECUTABLE}
+                   --registry $<TARGET_FILE:dump_function_specs> --check
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_function_model_harness
            COMMAND ${Python3_EXECUTABLE} tests/test_function_models.py

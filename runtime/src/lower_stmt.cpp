@@ -705,6 +705,15 @@ Lowering::Val Lowering::lower_runtime_int_sum(const mir::Expr& e,
 void Lowering::lower_stmt_impl(const mir::Stmt& s) {
   switch (s.kind) {
     case mir::Stmt::Decl:
+      // --O1 reuses one symbol id for block-local declarations at the same
+      // source position. A preceding scalar-int declaration may therefore
+      // leave a folded binding under the id subsequently assigned to an
+      // array or real container. The fresh declaration shadows every
+      // representation of that old scalar before its initializer is read.
+      if (s.decl_type.base != "SInt") {
+        int_env.erase(s.decl_id);
+        int_locals.erase(s.decl_id);
+      }
       if (s.read_transform) {
         lower_read_param(s);
       } else if (s.decl_type.base == "SInt") {
