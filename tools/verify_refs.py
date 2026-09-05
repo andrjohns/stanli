@@ -97,21 +97,9 @@ QUARANTINED = {
 # and the run stays red until the entry is deleted. A crash is never
 # excused: a segfault and a refusal are different bugs.
 KNOWN_GAPS = {
-    "i319_negbin_re": "neg_binomial_2_log_glm with a vector alpha",
-    "i319_pois_re": "poisson_log_glm with a vector alpha",
-    "i319_pois_re2": "poisson_log_glm with a vector alpha",
-    "sw_re_bern": "bernoulli_logit_glm with a vector alpha",
-    "sw_re_negbin": "neg_binomial_2_log_glm with a vector alpha",
-    "sw_re_pois": "poisson_log_glm with a vector alpha",
-    "i320_gp_matern32": "gp_matern32_cov",
-    "i320_sratio_cs": "num_elements of an expression inside a "
-                      "runtime-control region",
-    "sw_cratio_cs": "num_elements of an expression inside a "
-                    "runtime-control region",
-    "i320_mi_nhanes": "non-finite values in the data file",
-    "i320_pois_trunc_ub": "non-finite values in the data file",
-    "sw_mi": "non-finite values in the data file",
-    "sw_mv_rescor": "multi_normal_cholesky with an array-valued location",
+    # No entries. Every model in the corpus runs and matches CmdStan. The
+    # dict stays so the next refusal has a reviewed home, and the unit
+    # test covers the mechanism with a patched entry.
 }
 
 # (model, point) pairs excused from probe_point's finite-gradient rule,

@@ -55,10 +55,10 @@ broadcasts against a single random variable, matching stan-math.
 `make_stancode` and `make_standata` output they came out as, now carry
 recorded CmdStan references and are replayed by `tools/verify_refs.py` on
 every push alongside posteriordb and the stanc3 language fixtures.
-`tools/gen_brms_models.R` regenerates them. 51 of the 64 match CmdStan;
-the 13 that stanli refuses are listed in `KNOWN_GAPS` with what stops
-each one, and a listed model that starts passing fails the run until its
-entry is deleted.
+`tools/gen_brms_models.R` regenerates them. All 64 match CmdStan at the
+three evaluation points. A model stanli comes to refuse is listed in
+`KNOWN_GAPS` with what stops it, and a listed model that starts passing
+fails the run until its entry is deleted.
 
 =======
 >>>>>>> c4bde087 (Accept an array of locations in the multi_normal densities)

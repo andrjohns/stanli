@@ -54,7 +54,7 @@ below give the details and known exceptions.
 | unit tests for numerical operations | Does one numerical operation or graph transformation agree with stan-math? | Bitwise by default; a recorded limit of at most 2 ULP (10 for reassociation) where a kernel reorders arithmetic | every pull request |
 | compiler producer parity | Do native OCaml, js_of_ocaml, and the Windows executable emit identical compact-v2 bytes while the stock rollback paths remain usable? | Byte-for-byte identity on seven successful models; JS API/error/warning/rollback checks; Windows provenance, executable-format, and final-newline checks | every pull request |
 | MIR wire cost | Is the compact-v2 decoder materially faster and the wire materially smaller than legacy MIR? | On Eight Schools, median decode time and raw bytes must each be at most half the legacy value | every pull request |
-| corpus comparison | Are 119 posteriordb models, 11 compiler-derived fixtures and 64 brms models consistent with recorded CmdStan behavior at three fixed inputs? | Scaled error of 1e-9 for most points; documented limits for three `kronecker_gp` points and four brms Gaussian-process points; rejection parity; the 13 brms models named in `KNOWN_GAPS` must keep failing until their gap closes | every pull request |
+| corpus comparison | Are 119 posteriordb models, 11 compiler-derived fixtures and 64 brms models consistent with recorded CmdStan behavior at three fixed inputs? | Scaled error of 1e-9 for most points; documented limits for three `kronecker_gp` points and four brms Gaussian-process points; rejection parity; a model named in `KNOWN_GAPS` must keep failing until its gap closes | every pull request |
 | cross-path matrix | Do stanli's execution paths agree with one another? | Bitwise, except entries named in the ledger | every pull request, within CTest |
 | transformation A/B | Do selected graph optimizations preserve model results? | Optimizations enabled and disabled agree at the default point within 1e-11 | manually after optimization changes |
 | BridgeStan C-ABI comparison | Does the public C interface agree with reference BridgeStan? | Four fixture models must pass value, name, count, and output-shape checks | every pull request |
@@ -168,8 +168,8 @@ in-place update error produced a scaled difference of 1.7e+05.
 Of the 582 recorded points, 535 have status `VERIFIED`, 39 have status
 `CMDSTAN_ONLY`, 7 have status `MISMATCH`, and 1 has status
 `REJECTED_BOTH`. The `CMDSTAN_ONLY` points are the three points of each
-of the 13 brms models listed in `KNOWN_GAPS`, where CmdStan produced
-values and stanli refuses the model; see
+of 13 brms models, which stanli refused when the references were
+recorded and now matches at the recorded values; see
 [`tests/brms/README.md`](tests/brms/README.md). Three of the `MISMATCH`
 points belong to `kronecker_gp`, where two eigenvector gradients are
 sensitive to a nearly degenerate covariance whose smallest eigenvalue gap

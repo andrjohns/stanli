@@ -130,25 +130,9 @@ The headline ratios hide several important gaps:
   operation is registered.
 - **`student_t_qf`:** this quantile is refused and lies outside the scalar-math
   count. It has no graph operation.
-- **Gaussian-process covariance functions other than `gp_exp_quad_cov`:**
-  `gp_matern32_cov`, `gp_matern52_cov`, `gp_exponential_cov` and
-  `gp_periodic_cov` are refused. Only the exponentiated-quadratic kernel is
-  registered as a graph operation. brms reaches them through
-  `gp(x, cov = "matern32")` and its siblings.
-- **Shape queries on an expression inside a runtime-control region:** a
-  container's size is answered at compile time only for a named variable. A
-  call such as `num_elements(a - b)` inside a region whose control flow
-  depends on runtime values leaves the loop bound unknown, and the region is
-  refused. The ordinal lpmfs brms inlines for `sratio` and `cratio` with
-  `cs()` are written this way; binding the argument to a local variable first
-  compiles.
-- **Non-finite values in a data file:** the JSON reader refuses the
-  `Infinity`, `-Infinity` and `NaN` tokens that CmdStan's parser accepts. brms
-  writes them for an unset truncation bound and for the responses it imputes,
-  which stops the model before it is read.
-- **An array-valued location in `multi_normal_cholesky_lpdf`:** the
-  `array[N] vector[K]` location that brms generates for a multivariate model
-  with residual correlation is refused. A single vector location is supported.
+- **`gp_periodic_cov`:** this covariance is refused. It has no graph
+  operation. The exponentiated-quadratic, Matern 3/2, Matern 5/2 and
+  exponential kernels are supported.
 - **Complex values:** complex arguments or results are refused by policy. The
   graph represents real and integer values, not complex values.
 - **Tuple results:** tuple-valued results are refused by policy. The graph

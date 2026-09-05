@@ -49,25 +49,17 @@ values are kept as they come. Three models carry non-finite ones:
 `i320_pois_trunc_ub` truncates from above only and brms fills the lower
 bound with `-Infinity`, and `i320_mi_nhanes` and `sw_mi` carry
 `Infinity` for the responses they impute and for the imputation bounds.
-CmdStan's JSON parser reads those tokens; stanli's refuses them, which is
-one of the gaps below.
+Both parsers read those tokens.
 
 ## Known gaps
 
-Thirteen models do not run. Their references are recorded from CmdStan
-the same way every other model's are, and
-`KNOWN_GAPS` in [`tools/verify_refs.py`](../../tools/verify_refs.py)
-holds the list of models whose failure is expected. When a gap closes the
-model matches its references, the replay reports `GAP_CLOSED`, and the
-run stays red until the entry is deleted.
-
-| what stops it | models |
-| --- | --- |
-| a vector `alpha` in `poisson_log_glm`, `neg_binomial_2_log_glm` and `bernoulli_logit_glm`, which is what a group effect becomes | `i319_pois_re`, `i319_pois_re2`, `i319_negbin_re`, `sw_re_pois`, `sw_re_negbin`, `sw_re_bern` |
-| `gp_matern32_cov` | `i320_gp_matern32` |
-| `num_elements` of an expression inside a runtime-control region, which is how the inlined `sratio` and `cratio` lpmfs read their threshold count | `i320_sratio_cs`, `sw_cratio_cs` |
-| non-finite values in the data file | `i320_pois_trunc_ub`, `i320_mi_nhanes`, `sw_mi` |
-| an array-valued location in `multi_normal_cholesky` | `sw_mv_rescor` |
+Every model here runs and matches its CmdStan references, including the
+ones reported in issues #319 and #320. A model stanli comes to refuse
+goes in `KNOWN_GAPS` in
+[`tools/verify_refs.py`](../../tools/verify_refs.py) with what stops it.
+An entry suppresses only the failure: when the gap closes the model
+matches its references, the replay reports `GAP_CLOSED`, and the run
+stays red until the entry is deleted.
 
 ## Regenerating and recording
 
