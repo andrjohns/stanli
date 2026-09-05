@@ -3196,21 +3196,26 @@ static void runtime_slice_tests() {
       loop.bind(a);
       flat.bind(b);
       std::vector<double> ga(14), gb(14);
-      std::copy(point.begin(), point.end(), a.params_data());
-      std::copy(point.begin(), point.end(), b.params_data());
-      const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
-      if (va != vb) {
-        std::printf("  %s: %.17g != %.17g\n", names[op], va, vb);
-        check(false, "runtime slice value");
-      }
-      for (size_t i = 0; i < ga.size(); ++i)
-        if (!near(ga[i], gb[i])) {
-          std::printf("  %s g%zu: %.17g != %.17g\n", names[op], i, ga[i],
-                      gb[i]);
-          check(false, "runtime slice gradient");
+      for (int again = 0; again < 2; ++again) {
+        std::vector<double> at = point;
+        if (again)
+          for (double& q : at) q = 0.3 - q;
+        std::copy(at.begin(), at.end(), a.params_data());
+        std::copy(at.begin(), at.end(), b.params_data());
+        const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
+        if (va != vb) {
+          std::printf("  %s: %.17g != %.17g\n", names[op], va, vb);
+          check(false, "runtime slice value");
         }
-      close(written_s(loop, point), written_s(flat, point),
-            "runtime slice write_array");
+        for (size_t i = 0; i < ga.size(); ++i)
+          if (!near(ga[i], gb[i])) {
+            std::printf("  %s g%zu: %.17g != %.17g\n", names[op], i, ga[i],
+                        gb[i]);
+            check(false, "runtime slice gradient");
+          }
+        close(written_s(loop, at), written_s(flat, at),
+              "runtime slice write_array");
+      }
     }
   }
   test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
