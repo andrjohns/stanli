@@ -158,6 +158,41 @@ int main() {
       std::printf("FAIL all-NaN target: wanted the initialization error\n");
     }
   }
+  // A target that throws must report what it threw, not just that no draw
+  // was finite.
+  {
+    for (double radius : {2.0, 0.0}) {
+      Graph g;
+      const int x = g.add_slot(1, true);
+      const int zero = g.add_slot(1, false);
+      const int bad = g.add_slot(1, false);
+      const int lp = g.add_slot(1, false);
+      const int id = g.add_op(OP_NORMAL_LPDF, {x, zero, bad}, lp);
+      g.ops[(size_t)id].variant = 0x01;
+      g.result_slot = lp;
+      Executor ex(std::move(g));
+      ex.value_ptr(zero)[0] = 0.0;
+      ex.value_ptr(bad)[0] = -1.0;
+      NutsConfig cfg;
+      cfg.seed = 11;
+      cfg.warmup = 10;
+      cfg.samples = 5;
+      cfg.init_radius = radius;
+      std::string what;
+      try {
+        run_nuts(ex, cfg);
+      } catch (const std::exception& e) {
+        what = e.what();
+      }
+      const std::string tag =
+          "throwing target radius " + std::to_string(radius);
+      if (what.find("initialization failed") == std::string::npos ||
+          what.find("Scale parameter") == std::string::npos) {
+        ++failures;
+        std::printf("FAIL %s: got \"%s\"\n", tag.c_str(), what.c_str());
+      }
+    }
+  }
 
   // ---- sampler stats: one CmdStan-shaped row per post-warmup draw --------
   {
