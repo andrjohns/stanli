@@ -40,6 +40,7 @@ from function_signature_common import (  # noqa: E402
     balanced_partitions,
     generated_model_record,
     numeric_leaf_kind,
+    portable_build_id,
     registry_by_name,
     resolve_registry_spec,
     unwrap_data,
@@ -270,7 +271,7 @@ def generate(stanc: pathlib.Path, registry: pathlib.Path,
         models.append(generated_model_record(path, source, ids, ROOT))
     manifest = {
         "generator": "tools/generate_builtin_signature_models.py",
-        "stanc_build_id": inventory.stanc_build_id,
+        "stanc_build_id": portable_build_id(inventory.stanc_build_id),
         "signature_dump_sha256": inventory.raw_sha256,
         "registry_name_count": len(descriptors),
         "dumped_registry_name_count": len(dumped_names),

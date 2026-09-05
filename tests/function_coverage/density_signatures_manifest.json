@@ -12548,7 +12548,7 @@
   ],
   "registry_name_count": 173,
   "signature_dump_sha256": "06e94846cf9530eb88549fc86ac3f6b7ac9291f9d3085f5c7424f6268f08f692",
-  "stanc_build_id": "stanc3 v2.39.0-174-g8e154ac (Unix)",
+  "stanc_build_id": "stanc3 v2.39.0-174-g8e154ac",
   "tested_registry_name_count": 173,
   "tested_registry_names": [
     "bernoulli_cdf",
