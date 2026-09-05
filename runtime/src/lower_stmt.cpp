@@ -35,44 +35,50 @@ bool Lowering::has_target_pe(const mir::Stmt& s) {
     if (has_target_pe(k)) return true;
   return false;
 }
+// Both control scans run before the block is lowered, but loop bounds and
+// conditions later in the block can depend on scalar-int locals established
+// by earlier statements.  Mirror just that compile-time environment in
+// statement order.  In particular, stanc spells `int d = rows(x)` as a
+// default declaration followed by an assignment, and UDFs commonly use d to
+// size locals, to bound a loop and to guard an early return.  Looking
+// through the whole block without this lexical state rejects an otherwise
+// static UDF.
+bool Lowering::scan_block(const mir::Stmt& s,
+                          const std::function<bool(const mir::Stmt&)>& stop) {
+  const auto saved = int_env;
+  std::set<std::string> local_ints;
+  bool found = false;
+  try {
+    for (const auto& child : s.body) {
+      if (stop(child)) {
+        found = true;
+        break;
+      }
+      if (child.kind == mir::Stmt::Decl && child.decl_type.base == "SInt") {
+        local_ints.insert(child.decl_id);
+        int_env.erase(child.decl_id);
+        if (child.has_init) int_env[child.decl_id] = eval_int(child.init);
+      } else if (child.kind == mir::Stmt::Assignment && child.lhs_idx.empty() &&
+                 local_ints.count(child.lhs)) {
+        int_env[child.lhs] = eval_int(child.rhs);
+      }
+    }
+  } catch (...) {
+    int_env = saved;
+    throw;
+  }
+  int_env = saved;
+  return found;
+}
 bool Lowering::needs_runtime_control(const mir::Stmt& s) {
   // A structured while owns every runtime decision in its body.  Promoting
   // its enclosing block would absorb UDF-local declarations and returns,
   // which are not live-outs of that outer region.
   if (s.kind == mir::Stmt::While) return false;
-  if (s.kind == mir::Stmt::Block || s.kind == mir::Stmt::SList) {
-    // This scan runs before the block is lowered, but loop bounds later in
-    // the block can depend on scalar-int locals established by earlier
-    // statements.  Mirror just that compile-time environment in statement
-    // order.  In particular, stanc spells `int d = rows(x)` as a default
-    // declaration followed by an assignment, and UDFs commonly use d to
-    // size locals and loops.  Looking through the whole block without this
-    // lexical state rejects an otherwise static write-array UDF.
-    const auto saved = int_env;
-    std::set<std::string> local_ints;
-    bool found = false;
-    try {
-      for (const auto& child : s.body) {
-        if (needs_runtime_control(child)) {
-          found = true;
-          break;
-        }
-        if (child.kind == mir::Stmt::Decl && child.decl_type.base == "SInt") {
-          local_ints.insert(child.decl_id);
-          int_env.erase(child.decl_id);
-          if (child.has_init) int_env[child.decl_id] = eval_int(child.init);
-        } else if (child.kind == mir::Stmt::Assignment &&
-                   child.lhs_idx.empty() && local_ints.count(child.lhs)) {
-          int_env[child.lhs] = eval_int(child.rhs);
-        }
-      }
-    } catch (...) {
-      int_env = saved;
-      throw;
-    }
-    int_env = saved;
-    return found;
-  }
+  if (s.kind == mir::Stmt::Block || s.kind == mir::Stmt::SList)
+    return scan_block(s, [&](const mir::Stmt& child) {
+      return needs_runtime_control(child);
+    });
   if (s.kind == mir::Stmt::IfElse) {
     // This is a speculative write_array scan, so follow an already-known
     // arm exactly as ordinary lowering will.  Besides avoiding needless
@@ -132,6 +138,16 @@ bool Lowering::runtime_loop_control(const mir::Stmt& s, bool runtime_path) {
     for (const auto& arm : s.body)
       if (runtime_loop_control(arm, true)) return true;
     return false;
+  }
+  if (s.kind == mir::Stmt::Block || s.kind == mir::Stmt::SList) {
+    try {
+      return scan_block(s, [&](const mir::Stmt& child) {
+        return runtime_loop_control(child, runtime_path);
+      });
+    } catch (const CompileError&) {
+      // A local this scan cannot fold leaves every later condition
+      // undecided, which is the answer the unmirrored walk below gives.
+    }
   }
   for (const auto& child : s.body)
     if (runtime_loop_control(child, runtime_path)) return true;

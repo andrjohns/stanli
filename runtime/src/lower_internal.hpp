@@ -1193,6 +1193,8 @@ struct Lowering {
   // Does `s` increment the target, explicitly or through a Jacobian call?
   static bool has_target_pe(const mir::Stmt& s);
 
+  bool scan_block(const mir::Stmt& s,
+                  const std::function<bool(const mir::Stmt&)>& stop);
   bool needs_runtime_control(const mir::Stmt& s);
 
   // A Break/Continue selected by a runtime condition cannot be lowered as a
