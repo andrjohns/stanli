@@ -4,6 +4,30 @@
 
 ### Fixes
 
+A retained loop no longer answers a reduction from a slice's storage capacity.
+A slice whose upper bound is a loop-carried integer, `t[1:k]` with `k` advanced
+by a `while`, keeps its declaration's capacity as storage and the read leaves
+the unselected tail at zero. Only `sum` consulted the live length, so
+`log_sum_exp` reduced over the capacity and the zeros with it, `max` returned
+zero, `num_elements` returned the capacity, and a density over the slice
+integrated the tail. The loop form of such a model answered 1.863 where CmdStan
+answers -0.819. Nothing had to be turned on to reach this: a `while` whose guard
+is data lowers as a retained loop by default. The live length is now an operand
+of the ops that consume the slice, and the executor rewrites their operand
+lengths from it before each call, forward and backward, so the reductions, the
+elementwise ops, the dot products and the densities all stop where the values
+do and the backward stops there rather than scattering adjoints into the tail.
+An operand shape this cannot describe now refuses at compile time instead of
+answering from the capacity.
+
+`pow` keeps its base gradient at a base of exactly zero when the exponent is
+data. stan-math's reverse-mode `pow` sends a non-var exponent of 1, -1, -2 or
+-0.5 to the base itself, `inv`, `inv_square` or `inv_sqrt` before it reaches
+its zero-base guard, so those four carry a partial where the guard carries
+none, and stanli returned zero for all of them. brms models built with
+`ar(cov = TRUE)` reach this through `cholesky_cor_ar1`'s `pow(ar, i - 1)`,
+whose autocorrelation gradient was zero at every point where `ar` is zero.
+
 `choose` is available wherever an integer is evaluated when the model
 compiles: a transformed data int, a declaration extent, and an index whose
 argument is an unrolled loop variable. brms writes `cor_1[choose(k - 1, 2) +
@@ -13,11 +37,12 @@ per-draw interpreter, which then refused `lkj_corr_cholesky_lpdf` and left
 `stanli_run` writing no CSV at all. A model with a `logistic_normal` response
 sizes a transformed data array the same way and did not compile.
 
-The per-draw interpreter carries `lkj_corr_cholesky_lpdf` and `lkj_corr_lpdf`,
-which the write_array graph already had. It is the fallback for any section
-the graph cannot express, so a model that writes an LKJ density in
-transformed parameters or generated quantities no longer depends on the
-graph covering everything else in the section.
+The corpus replay fails a model that produces no write_array row. The
+recorder drops the reference for a row the two engines disagreed about, so a
+model whose write_array failed outright recorded none and was then replayed
+as if it had no section to check. Every model has a row, so presence is
+demanded whether or not the reference carries one. Both models that lost
+their generated quantities to `choose` passed the gate this way.
 
 The write_array graph emits a column whose variable `--O1` substituted away.
 A transformed parameter with a constant value, such as the `real disc = 1`
@@ -27,19 +52,11 @@ takes its name from the declared emission order, the same rule the per-draw
 interpreter has used. Ten of the shipped brms models, every ordinal family
 with and without `cs()` among them, stop falling back.
 
-The corpus replay fails a model that produces no write_array row. The
-recorder drops the reference for a row the two engines disagreed about, so a
-model whose write_array failed outright recorded none and was then replayed
-as if it had no section to check. Every model has a row, so presence is
-demanded whether or not the reference carries one. Both models that lost
-their generated quantities to `choose` passed the gate this way.
-
-`log2()`, `log10()` and `sqrt2()` evaluate. Stan's nullary constants are one
-family and six of the nine were recognized, so these three failed to compile
-on every path with `unsupported function log2`. brms writes `-23 * log2()` as
-the convergence tolerance of the COM-Poisson normalizing constant. The values
-are stan-math's own, and the recorded CmdStan reference for the function
-coverage model holds them to the bit.
+The per-draw interpreter carries `lkj_corr_cholesky_lpdf` and `lkj_corr_lpdf`,
+which the write_array graph already had. It is the fallback for any section
+the graph cannot express, so a model that writes an LKJ density in
+transformed parameters or generated quantities no longer depends on the
+graph covering everything else in the section.
 
 A runtime-control region can hold the integer-outcome densities. A region is
 what a model compiles to where its control flow depends on a parameter, and
@@ -54,6 +71,13 @@ kernel's to the bit. The outcome, and the number of trials for the binomials,
 must be an integer the region knows when it compiles. The GLM forms are
 unchanged: their data matrix is a different argument shape.
 
+`log2()`, `log10()` and `sqrt2()` evaluate. Stan's nullary constants are one
+family and six of the nine were recognized, so these three failed to compile
+on every path with `unsupported function log2`. brms writes `-23 * log2()` as
+the convergence tolerance of the COM-Poisson normalizing constant. The values
+are stan-math's own, and the recorded CmdStan reference for the function
+coverage model holds them to the bit.
+
 A `while` whose body declares a local sized from the loop's own state now
 unrolls where the guard is data, instead of compiling as a loop whose counter
 sits in a register. A declared extent has to be a compile-time integer in
@@ -61,19 +85,12 @@ both loop forms, so `array[nobs[i]] int iobs` inside `while (i <= I)` used to
 fail with a runtime-control region error naming the extent. brms writes
 exactly that in `normal_time_hom_flex_lpdf`, the log density it emits for
 `unstr()` autocorrelation, so those models now compile. A `while` that does
-not size a local this way keeps its loop form as before. The scan that
-decides whether a loop needs a runtime-control region also mirrors
+not size a local this way keeps its loop form as before.
+
+The scan that decides whether a loop needs a runtime-control region mirrors
 block-local integers in statement order, the way the write_array scan beside
 it already did, so an early return guarded by a local count no longer forces
 the enclosing loop into a region.
-
-`pow` keeps its base gradient at a base of exactly zero when the exponent is
-data. stan-math's reverse-mode `pow` sends a non-var exponent of 1, -1, -2 or
--0.5 to the base itself, `inv`, `inv_square` or `inv_sqrt` before it reaches
-its zero-base guard, so those four carry a partial where the guard carries
-none, and stanli returned zero for all of them. brms models built with
-`ar(cov = TRUE)` reach this through `cholesky_cor_ar1`'s `pow(ar, i - 1)`,
-whose autocorrelation gradient was zero at every point where `ar` is zero.
 
 The GLM densities take a per-row vector intercept. `bernoulli_logit_glm_lpmf`,
 `poisson_log_glm_lpmf` and `neg_binomial_2_log_glm_lpmf` refused one, and
