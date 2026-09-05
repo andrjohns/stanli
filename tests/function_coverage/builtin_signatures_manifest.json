@@ -3431,6 +3431,8 @@
     "Pow__",
     "Times__",
     "Transpose__",
+    "binomial_coefficient_log",
+    "fabs",
     "multiply_log"
   ],
   "models": [
@@ -10778,7 +10780,7 @@
       "source_sha256": "e44c02fb9feae8720625386d4991da58dd8c91d56318d99af8c54aef60e493e7"
     }
   ],
-  "registry_name_count": 199,
+  "registry_name_count": 201,
   "signature_dump_sha256": "06e94846cf9530eb88549fc86ac3f6b7ac9291f9d3085f5c7424f6268f08f692",
   "stanc_build_id": "stanc3 v2.39.0-174-g8e154ac (Unix)",
   "tested_signature_count": 7103

@@ -27,12 +27,10 @@
 #include <stanli/builtin_registry.hpp>
 #include <stanli/function_registry.hpp>
 #include <stanli/extrema_grouping.hpp>
-#include <stanli/kernel_bridge.hpp>
 #include <stanli/mir_message.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/program.hpp>
-#include <stanli/regular_builtin.hpp>
 #include <stanli/structured_check.hpp>
 
 #include <stan/math.hpp>
@@ -890,24 +888,11 @@ class MirInterp {
     const Kernel* kernel = find_kernel(opcode);
     if (kernel == nullptr || !bind_call(call))
       fail(e.name + ": graph kernel is unavailable", e.raw);
-    if (kernel->scratch_size) {
-      Op op;
-      op.opcode = opcode;
-      op.variant = call.variant;
-      op.n_in = call.n_in;
-      op.out = call.n_in;
-      op.idata = call.idata.data();
-      op.n_idata = (int64_t)call.idata.size();
-      std::vector<Slot> slots(inputs.size() + 1);
-      for (size_t k = 0; k < inputs.size(); ++k) {
-        op.in[k] = (int)k;
-        slots[k].len = (int64_t)inputs[k].size();
-      }
-      slots.back().len = out_len;
-      call.scratch_len = (int32_t)kernel->scratch_size(op, slots.data());
-      call.scratch = next;
-      next += call.scratch_len;
-    }
+    call.scratch_len = (int32_t)kernel_call_scratch(
+        kernel->scratch_size, opcode, call.variant, call.n_in, call.in_len,
+        call.out_len, call.idata.data(), (int64_t)call.idata.size(), nullptr);
+    call.scratch = next;
+    next += call.scratch_len;
     std::vector<T> registers((size_t)next, T(0.0));
     for (size_t k = 0; k < inputs.size(); ++k)
       std::copy(inputs[k].begin(), inputs[k].end(),
@@ -1764,56 +1749,6 @@ class MirInterp {
       return is_scalar(a) || is_scalar(b) ||
              (a.dims == b.dims && a.r.size() == b.r.size());
     };
-    std::string regular_name = e.name;
-    if (regular_name == "fabs")
-      regular_name = "abs";
-    else if (regular_name == "binomial_coefficient_log")
-      regular_name = "lchoose";
-    if (const auto spec =
-            resolve_regular_builtin(regular_name, e.args.size())) {
-      const bool matrix_divisor =
-          e.name == "Divide__" && e.args.at(1).type_ == "UMatrix";
-      const bool int_preserving =
-          e.type_ == "UInt" &&
-          ((spec->kind == RegularKind::Binary &&
-            (spec->opcode == OP_ADD || spec->opcode == OP_SUB ||
-             spec->opcode == OP_DIV)) ||
-           (spec->kind == RegularKind::Unary && spec->opcode == OP_NEG));
-      if (!matrix_divisor && !int_preserving) {
-        if (spec->kind == RegularKind::Unary) {
-          Value a = eval(e.args[0]);
-          Value o;
-          o.dims = a.dims;
-          o.r.resize(a.r.size());
-          const std::vector<const std::vector<T>*> in{&a.r};
-          call_kernel<T>(spec->opcode, 0, 0x3f, {}, in, o.r);
-          return o;
-        }
-        Value a = eval(e.args[0]), b = eval(e.args[1]);
-        if (spec->kind == RegularKind::Binary && !shapes_match(a, b))
-          fail(e.name + ": incompatible shapes", e.raw);
-        Value o;
-        uint8_t mask = 0x3f;
-        if (spec->kind == RegularKind::Binary) {
-          const bool bigger_b = is_scalar(a) && !is_scalar(b);
-          o.dims = bigger_b ? b.dims : a.dims;
-          o.r.resize(bigger_b ? b.r.size() : a.r.size());
-        } else {
-          const bool int_first = spec->kind == RegularKind::BinaryIntFirst;
-          const Value& re = int_first ? b : a;
-          const Value& iv = int_first ? a : b;
-          if (!is_scalar(re) && !is_scalar(iv) && re.r.size() != iv.r.size())
-            fail(e.name + ": arguments must match in size", e.raw);
-          const bool re_scalar = is_scalar(re);
-          o.dims = re_scalar ? iv.dims : re.dims;
-          o.r.resize(re_scalar ? iv.r.size() : re.r.size());
-          mask = int_first ? 0x2 : 0x1;
-        }
-        const std::vector<const std::vector<T>*> in{&a.r, &b.r};
-        call_kernel<T>(spec->opcode, 0, mask, {}, in, o.r);
-        return o;
-      }
-    }
     const auto resolve_registered = [&](const std::vector<Value>& values) {
       if (builtin == nullptr)
         fail(e.name + ": missing builtin descriptor", e.raw);
@@ -2848,11 +2783,34 @@ class MirInterp {
                 builtin->shape != BuiltinShapePolicy::Rng
             ? builtin
             : reduction_builtin_spec(e.name, e.args.size());
-    if (kernel_builtin != nullptr) {
+    const bool named_builtin =
+        kernel_builtin == nullptr &&
+        function_spec(e.name, e.args.size(), FunctionFamily::Builtin) !=
+            nullptr;
+    if (kernel_builtin != nullptr || named_builtin) {
       std::vector<Value> values;
       values.reserve(e.args.size());
       for (const mir::Expr& arg : e.args) values.push_back(eval(arg));
-      return builtin_kernel_eval(e, *kernel_builtin, std::move(values));
+      if (kernel_builtin == nullptr) {
+        // Hand-built MIR may carry no numeric metadata, so the typed
+        // resolution above found nothing. Kind each argument from its
+        // evaluated value and select the overload the metadata-carrying
+        // path would have picked.
+        uint64_t integer_arguments = 0;
+        for (size_t k = 0; k < values.size(); ++k)
+          if (values[k].is_int ||
+              e.args[k].unsized.leaf == mir::UnsizedLeaf::Int)
+            integer_arguments |= uint64_t{1} << k;
+        const FunctionSpec* named =
+            function_spec(e.name, e.args.size(), integer_arguments,
+                          FunctionArgumentKind::Real);
+        if (named != nullptr && named->builtin() != nullptr &&
+            named->builtin()->result == FunctionArgumentKind::Real &&
+            named->builtin()->shape != BuiltinShapePolicy::Rng)
+          kernel_builtin = named->builtin();
+      }
+      if (kernel_builtin != nullptr)
+        return builtin_kernel_eval(e, *kernel_builtin, std::move(values));
     }
 
     if (registered != nullptr && registered->density() != nullptr)

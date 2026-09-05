@@ -354,6 +354,8 @@ const std::vector<FunctionSpec>& function_specs() {
     STANLI_SCALAR_BINARY_LIST(STANLI_BUILTIN_REAL_BINARY)
 #undef STANLI_BUILTIN_REAL_BINARY
     builtin("multiply_log", real_binary_builtin(OP_LMULTIPLY));
+    // Stan Math spellings of names the scalar lists hold as lchoose and abs.
+    builtin("binomial_coefficient_log", real_binary_builtin(OP_LCHOOSE));
 #define STANLI_BUILTIN_INT_FIRST(code, fn_name, fn) \
   builtin(#fn_name, mixed_binary_builtin(code, true));
     STANLI_SCALAR_BINARY_INT_FIRST_LIST(STANLI_BUILTIN_INT_FIRST)
@@ -375,6 +377,7 @@ const std::vector<FunctionSpec>& function_specs() {
     builtin("PMinus__", integer_unary_builtin(OP_NEG));
     builtin("minus", integer_unary_builtin(OP_NEG));
     builtin("abs", integer_unary_builtin(OP_ABS));
+    builtin("fabs", unary_builtin(OP_ABS));
     builtin("std_normal_qf", unary_builtin(OP_INV_PHI));
     builtin("trigamma", unary_builtin(OP_TRIGAMMA));
     builtin("exp", unary_builtin(OP_EXPV));
