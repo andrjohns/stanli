@@ -506,7 +506,7 @@ def compile_source(compiler, source, output, candidate_pass, enabled,
     return proc, info
 
 
-def reference_comparison(fields, point_reference, max_rel):
+def reference_comparison(model, fields, point_reference, max_rel):
     if point_reference is None:
         kind = fields[0] if fields else ""
         return {
@@ -531,7 +531,7 @@ def reference_comparison(fields, point_reference, max_rel):
         }
     values = fields[1:]
     compared = compare_vectors(point_reference["values"], values, False)
-    gate = gate_for(point_reference, max_rel)
+    gate = gate_for(model, point_reference, max_rel)
     rel = compared["max_rel"]
     within = (compared["same_shape"] and isinstance(rel, (int, float))
               and rel < gate)
@@ -545,7 +545,7 @@ def reference_comparison(fields, point_reference, max_rel):
     }
 
 
-def wa_comparison(outcome, point_reference, max_rel):
+def wa_comparison(model, outcome, point_reference, max_rel):
     if point_reference is None:
         return {
             "ok": True,
@@ -566,7 +566,7 @@ def wa_comparison(outcome, point_reference, max_rel):
             "actual": outcome["category"],
         }
     compared = compare_vectors(expected["values"], outcome["values"], False)
-    gate = gate_for(point_reference, max_rel)
+    gate = gate_for(model, point_reference, max_rel)
     rel = compared["max_rel"]
     names_match = outcome["names"] == expected["names"]
     within = (compared["same_shape"] and isinstance(rel, (int, float))
@@ -595,8 +595,8 @@ def ab_only_values_within_gate(compared, max_rel):
             and isinstance(relative, (int, float)) and relative < max_rel)
 
 
-def semantic_point(check, source, data, mirs, point, point_reference,
-                   timeout, max_rel):
+def semantic_point(check, source, data, mirs, model, point,
+                   point_reference, timeout, max_rel):
     runs = {}
     for mode in ("off", "on"):
         command = [
@@ -618,9 +618,10 @@ def semantic_point(check, source, data, mirs, point, point_reference,
             "wa": wa,
             "stderr_tail": proc["stderr"].strip().splitlines()[-1:][0]
             if proc["stderr"].strip() else "",
-            "reference": reference_comparison(status, point_reference,
-                                                max_rel),
-            "wa_reference": wa_comparison(wa, point_reference, max_rel),
+            "reference": reference_comparison(model, status,
+                                              point_reference, max_rel),
+            "wa_reference": wa_comparison(model, wa, point_reference,
+                                          max_rel),
         }
 
     left, right = runs["off"], runs["on"]
@@ -1272,7 +1273,7 @@ def main():
             model_points = 0
             for point in POINTS:
                 record = semantic_point(
-                    tools["check"], source, data, mirs, point,
+                    tools["check"], source, data, mirs, model, point,
                     refs[model]["points"][str(point)]
                     if model in refs else None, args.timeout,
                     args.max_rel)

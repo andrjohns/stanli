@@ -75,7 +75,7 @@ class VectorizeAbTest(unittest.TestCase):
                                side_effect=[rejected, rejected]):
             result = vectorize_ab.semantic_point(
                 "check", "model", "data", {"off": "a", "on": "b"},
-                0, None, 1, 1e-9)
+                "eight_schools", 0, None, 1, 1e-9)
         self.assertTrue(result["ok"])
         self.assertFalse(result["off"]["reference"]["referenced"])
         self.assertTrue(result["ab"]["error_match"])
@@ -92,7 +92,7 @@ class VectorizeAbTest(unittest.TestCase):
                                side_effect=[failed, failed]):
             result = vectorize_ab.semantic_point(
                 "check", "model", "data", {"off": "a", "on": "b"},
-                0, None, 1, 1e-9)
+                "eight_schools", 0, None, 1, 1e-9)
         self.assertFalse(result["ok"])
         self.assertFalse(result["off"]["reference"]["ok"])
 
@@ -109,7 +109,7 @@ class VectorizeAbTest(unittest.TestCase):
                                side_effect=[off, on]):
             result = vectorize_ab.semantic_point(
                 "check", "model", "data", {"off": "a", "on": "b"},
-                0, None, 1, 1e-9)
+                "eight_schools", 0, None, 1, 1e-9)
         self.assertFalse(result["ok"])
         self.assertTrue(result["ab"]["ab_only_finite_gate"]["applied"])
         self.assertFalse(result["ab"]["ab_only_finite_gate"]["values_ok"])
@@ -127,7 +127,7 @@ class VectorizeAbTest(unittest.TestCase):
                                side_effect=[off, on]):
             result = vectorize_ab.semantic_point(
                 "check", "model", "data", {"off": "a", "on": "b"},
-                0, None, 1, 1e-9)
+                "eight_schools", 0, None, 1, 1e-9)
         self.assertFalse(result["ok"])
         self.assertFalse(
             result["ab"]["ab_only_finite_gate"]["wa_values_ok"])
