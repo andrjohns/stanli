@@ -70,8 +70,8 @@ def run(check_bin, stan, data, point):
 def check_model(model, ref, pdb, exact_bin, lite_bin, tmp):
     """(model, status, detail)."""
     stan = pdb / "models" / "stan" / f"{model}.stan"
-    # The language models in tests/stanc3 carry no posteriordb dataset;
-    # they fall out here as SKIP, which is what they were before.
+    # The models carried in the tree carry no posteriordb dataset; they
+    # fall out here as SKIP, which is what they were before.
     dz = pdb / "data" / "data" / f"{ref.get('data')}.json.zip"
     if not stan.exists() or not dz.exists():
         return (model, "SKIP", "input missing")

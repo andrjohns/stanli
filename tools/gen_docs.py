@@ -90,13 +90,16 @@ def us(ns):
 
 def compute():
     ver = json.loads((REPO / "docs" / "verification.json").read_text())
-    # The same record holds two corpora, and the sentences about them say
-    # different things: posteriordb is real posteriors, tests/stanc3 is
-    # language constructs no posterior happens to use. Split them here so
-    # the posteriordb numbers stay posteriordb numbers.
+    # The same record holds three corpora, and the sentences about them
+    # say different things: posteriordb is real posteriors, tests/stanc3
+    # is language constructs no posterior happens to use, tests/brms is
+    # brms output. Split them here so the posteriordb numbers stay
+    # posteriordb numbers.
     lang = {k: v for k, v in ver.items()
             if (REPO / "tests" / "stanc3" / f"{k}.stan").exists()}
-    ver = {k: v for k, v in ver.items() if k not in lang}
+    brms = {k: v for k, v in ver.items()
+            if (REPO / "tests" / "brms" / f"{k}.stan").exists()}
+    ver = {k: v for k, v in ver.items() if k not in lang and k not in brms}
     verified = {k: v for k, v in ver.items() if v["status"] == "VERIFIED"}
     bitwise = sum(1 for v in verified.values() if v["max_ulp"] == 0)
     worst = max(v["max_rel"] for v in verified.values())
