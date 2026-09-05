@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <set>
+#include <stdexcept>
 #include <string>
 
 int main() {
@@ -167,6 +168,16 @@ int main() {
           uint8_t{kCategoricalArgAutodiff | kCategoricalScalarOutcome} ||
       categorical_plan.activity_mask != 2) {
     std::printf("FAIL shared categorical density plan\n");
+    return 1;
+  }
+  bool refused = false;
+  try {
+    (void)evaluate_integer_binary_builtin(OP_DIV, 1, 0);
+  } catch (const std::domain_error&) {
+    refused = true;
+  }
+  if (!refused) {
+    std::printf("FAIL integer division by zero was not refused\n");
     return 1;
   }
   std::printf("OK\n");

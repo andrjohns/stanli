@@ -1404,6 +1404,7 @@ int evaluate_integer_binary_builtin(uint16_t opcode, int lhs, int rhs) {
     case OP_MUL:
       return lhs * rhs;
     case OP_DIV:
+      if (rhs == 0) throw std::domain_error("integer division by zero");
       return lhs / rhs;
     case OP_CHOOSE:
       return stan::math::choose(lhs, rhs);

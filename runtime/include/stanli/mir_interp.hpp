@@ -2056,42 +2056,9 @@ class MirInterp {
         r.dims = {(int64_t)r.r.size()};
       return r;
     }
-    // `divide` reaches here and never the solve above: stan::math::divide
-    // divides by a scalar or divides a scalar elementwise, and has no
-    // matrix-divisor overload at all.
-    //
-    // Its int,int overload is the exception to that elementwise reading:
-    // it truncates and refuses a zero denominator, where the real
-    // division below would answer 3.5 for `divide(7, 2)`. The value the
-    // caller sees is `r`, not `i` -- lower.cpp's fold_const takes r[0]
-    // for a UInt result -- so the truncation has to land in both.
-    if ((e.name == "divide" || e.name == "elt_divide") && e.type_ == "UInt") {
-      const int x = (int)as_int(e.args[0]), y = (int)as_int(e.args[1]);
-      // divide is the one with the zero check; elt_divide is a bare `/`,
-      // so a zero denominator there is undefined behavior and refused.
-      if (e.name == "elt_divide" && y == 0)
-        fail("integer division by zero", e.raw);
-      const int q = e.name == "divide" ? stan::math::divide(x, y) : x / y;
-      r.is_int = true;
-      r.i = {q};
-      r.r = {T((double)q)};
-      return r;
-    }
-    // `%` and `%/%`. Both operands are int by stanc's typing, so these are
-    // C++ integer operators -- truncated toward zero -- and not fmod and
-    // real division rounded afterwards, which disagree on negatives.
-    // stan::math::modulus is what CmdStan calls, down to the exception it
-    // throws on a zero divisor; `%/%` becomes a bare C++ `/`, where a zero
-    // divisor is undefined behavior, so this refuses it instead.
-    if (e.name == "Modulo__" || e.name == "IntDivide__") {
+    if (e.name == "Modulo__") {
       const long x = as_int(e.args[0]), y = as_int(e.args[1]);
-      long q;
-      if (e.name == "Modulo__") {
-        q = stan::math::modulus((int)x, (int)y);
-      } else {
-        if (y == 0) fail("integer division by zero", e.raw);
-        q = x / y;
-      }
+      const long q = stan::math::modulus((int)x, (int)y);
       r.is_int = true;
       r.i = {(int)q};
       r.r = {T((double)q)};
