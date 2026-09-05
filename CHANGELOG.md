@@ -127,6 +127,12 @@ as a log density that sizes its locals with `num_elements(thres)` and passes
 `Intercept - transpose(mucs[n])` for `thres`, so those sizes stayed unknown
 and the models failed to compile with a runtime-control region error.
 
+A shape query is now also answered for a gathered submatrix, such as
+`x[idx, idx]` with `idx` a data array. Before, only a subview at a position
+known when the model compiled answered, so a user-defined function that
+takes `rows()` of its gathered-matrix argument bailed the whole
+runtime-control region as an unknown compile-time integer.
+
 Real data may be infinite or not-a-number, as it may in CmdStan. The JSON
 reader accepts `Infinity`, `-Infinity`, `Inf`, `-Inf` and `NaN` both bare and
 quoted, the two spellings CmdStan's reader takes. brms writes these routinely:
