@@ -74,6 +74,7 @@ namespace stanli {
   X(OP_MULTINOMIAL_LOGIT_LPMF)        \
   X(OP_DIRICHLET_MULTINOMIAL_LPMF)    \
   X(OP_ORDERED_PROBIT_LPMF)           \
+  X(OP_ORDERED_LOGISTIC_LPMF)         \
   X(OP_WIENER_LPDF)                   \
   X(OP_LKJ_COV_LPDF)                  \
   X(OP_BINOMIAL_LOGIT_GLM_LPMF)       \
@@ -473,20 +474,6 @@ namespace stanli {
   X(OP_NEG_BINOMIAL_2_LCCDF, neg_binomial_2_lccdf, 2, 0) \
   X(OP_NEG_BINOMIAL_2_LCDF, neg_binomial_2_lcdf, 2, 0)
 
-// Ordinal regression. Two things make these different from the list
-// above, and both are expressed in the kernel rather than here: the
-// cutpoint argument is a whole vector whatever its length (field 4 is
-// the VecMask that says so, since a one-element cutpoint set is a
-// one-element vector and NOT a scalar), and the integer outcome has to
-// reach stan-math as a std::vector<int> -- ordered_logistic asks
-// scalar_seq_view for a mutable data() pointer, which an
-// Eigen::Map<const VectorXi> cannot give it.
-//
-// reroll.cpp must never fuse these: element n of a shared cutpoint
-// vector is not observation n's cutpoints. They opt in to neither re-roll
-// density trait, which is the whole guard.
-#define STANLI_ORDERED_DENSITY_LIST(X) \
-  X(OP_ORDERED_LOGISTIC_LPMF, ordered_logistic_lpmf, 2, 0x2)
 // A unary may either always chain, chain only away from zero (abs), or be
 // disconnected.  Disconnected is not the same as multiplying by a zero
 // derivative: an infinite upstream adjoint must not turn 0 into NaN.
@@ -704,7 +691,6 @@ constexpr bool exact_lp_build() {
   STANLI_TWO_INT_CDF_LIST(DENSITY)                \
   STANLI_TAIL_CDF_LIST(DENSITY)                   \
   STANLI_TAIL_INT_CDF_LIST(DENSITY)               \
-  STANLI_ORDERED_DENSITY_LIST(DENSITY)            \
   STANLI_SCALAR_UNARY_LIST(UNARY)
 
 enum Opcode : uint16_t {

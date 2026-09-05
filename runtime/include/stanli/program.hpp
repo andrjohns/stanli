@@ -124,14 +124,10 @@ inline constexpr int32_t kProgramExtremaPhaseShift = 3;
   X(FMA, kProgramReadB | kProgramReadC | kProgramSaveA | kProgramSaveB)      \
   X(DIAG_PRE_MULTIPLY, kProgramReadB | kProgramNoAdjoint)                    \
   X(DIAG_POST_MULTIPLY, kProgramReadB | kProgramNoAdjoint)                   \
-  X(MATRIX_EXP, kProgramRangeA | kProgramRangeOutput | kProgramNoAdjoint)    \
   X(MDIVIDE_LEFT, kProgramRangeA | kProgramRangeB | kProgramReadB |          \
                       kProgramRangeOutput | kProgramNoAdjoint)               \
   X(MDIVIDE_RIGHT_SPD, kProgramRangeA | kProgramRangeB | kProgramReadB |     \
                            kProgramRangeOutput | kProgramNoAdjoint)          \
-  X(QUAD_FORM_SYM, kProgramRangeA | kProgramRangeB | kProgramReadB |         \
-                       kProgramRangeOutput | kProgramNoAdjoint)              \
-  X(MULT_LOWER_TRI_SELF_TRANSPOSE, kProgramRangeA | kProgramNoAdjoint)       \
   X(DENSITY, 0)                                                              \
   X(CALL, 0)                                                                 \
   X(TRANSFORM, kProgramNoInputs | kProgramNoAdjoint | kProgramNoOutput)      \
@@ -315,10 +311,6 @@ inline constexpr int program_output_len(const Program::Instr& instr) {
   if (instr.code == Program::DIAG_PRE_MULTIPLY ||
       instr.code == Program::DIAG_POST_MULTIPLY)
     return static_cast<int>(static_cast<int64_t>(instr.c) * instr.len);
-  // Squares a rows x cols argument into a rows x rows result, so `len`
-  // measures the input run (kProgramRangeA) and the output is its own size.
-  if (instr.code == Program::MULT_LOWER_TRI_SELF_TRANSPOSE)
-    return static_cast<int>(static_cast<int64_t>(instr.b) * instr.b);
   const ProgramOpSpec& spec = program_code_spec(instr.code);
   return spec.has(kProgramNoOutput)      ? 0
          : spec.has(kProgramRangeOutput) ? instr.len
@@ -640,34 +632,6 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
           out = stan::math::diag_post_multiply(m, v);
         break;
       }
-      case Program::MULT_LOWER_TRI_SELF_TRANSPOSE: {
-        using MatT = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
-        const int32_t rows = I.b, cols = I.c;
-        if (rows == 0) break;
-        // A rows x 0 argument has no lower triangle to multiply, and
-        // stan-math answers with the zero matrix rather than reading it.
-        if (cols == 0) {
-          for (int32_t k = 0; k < rows * rows; ++k) reg[I.dst + k] = T(0.0);
-          break;
-        }
-        // Materialise rather than hand stan-math a Map: the reverse-mode
-        // overload copies its argument into arena storage, which wants a
-        // plain matrix type. One call keeps the upper-triangle mask and the
-        // triangular pullback exactly as CmdStan would have them.
-        const MatT input = Eigen::Map<const MatT>(reg + I.a, rows, cols);
-        Eigen::Map<MatT> output(reg + I.dst, rows, rows);
-        output = stan::math::multiply_lower_tri_self_transpose(input);
-        break;
-      }
-      case Program::MATRIX_EXP: {
-        using MatT = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
-        const int32_t rows = I.b, cols = I.c;
-        if (rows == 0 || cols == 0) break;
-        Eigen::Map<const MatT> input(reg + I.a, rows, cols);
-        Eigen::Map<MatT> output(reg + I.dst, rows, cols);
-        output = stan::math::matrix_exp(input);
-        break;
-      }
       case Program::MDIVIDE_LEFT: {
         using MatT = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
         using VecT2 = Eigen::Matrix<T, Eigen::Dynamic, 1>;
@@ -701,26 +665,6 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
           Eigen::Map<const MatT> lhs(reg + I.b, nrow, ncol);
           Eigen::Map<MatT> output(reg + I.dst, nrow, ncol);
           output = stan::math::mdivide_right_spd(lhs, divisor);
-        }
-        break;
-      }
-      case Program::QUAD_FORM_SYM: {
-        using MatT = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
-        using VecT2 = Eigen::Matrix<T, Eigen::Dynamic, 1>;
-        const int32_t nrow = std::abs(I.c);
-        if (nrow == 0) {
-          for (int32_t k = 0; k < I.len; ++k) reg[I.dst + k] = T(0.0);
-          break;
-        }
-        Eigen::Map<const MatT> a(reg + I.a, nrow, nrow);
-        if (I.c < 0) {
-          Eigen::Map<const VecT2> b(reg + I.b, nrow);
-          reg[(size_t)I.dst] = stan::math::quad_form_sym(a, b);
-        } else {
-          const int32_t ncol = static_cast<int32_t>(std::sqrt(I.len));
-          Eigen::Map<const MatT> b(reg + I.b, nrow, ncol);
-          Eigen::Map<MatT> output(reg + I.dst, ncol, ncol);
-          output = stan::math::quad_form_sym(a, b);
         }
         break;
       }

@@ -3664,10 +3664,7 @@ int main() {
   }
 
   // The same call inside a while loop: the region compiles to the register
-  // machine, where one MULT_LOWER_TRI_SELF_TRANSPOSE instruction re-executed
-  // under var rebuilds stan-math's own tape. Expanding it into scalar MULs
-  // the way crossprod does would read the dropped triangle and accumulate
-  // the input adjoints in tape order rather than through the pullback.
+  // machine, which reaches the kernel through one CALL re-executed under var.
   {
     DataMap d = DataMap::from_json(slurp("tests/fixtures/mltgrad.json"));
     test_setenv("STANLI_STRUCTURED_LOOPS", "0", 1);
