@@ -4613,8 +4613,10 @@ int main() {
         stan::math::hypergeometric_lpmf<false>(2, 5, 4, 4) +
         stan::math::discrete_range_lpmf<false>(2, 1, 5);
     want.grad();
-    expect_eq("shared runtime density lp", got, want.val());
-    expect_eq("shared runtime density grad", grad, theta.adj());
+    // The kernels and this replay are separately compiled evaluations of the
+    // same math; clang and gcc round their sums a ULP apart.
+    expect_ulp("shared runtime density lp", got, want.val());
+    expect_ulp("shared runtime density grad", grad, theta.adj());
     stan::math::recover_memory();
 
     // The integer arguments are known while the region is compiled, but its
