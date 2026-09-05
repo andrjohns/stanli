@@ -86,6 +86,8 @@ const char* slice_function_name(BuiltinSlice slice) {
       return "append_col";
     case BuiltinSlice::AppendArray:
       return "append_array";
+    case BuiltinSlice::ColumnsDot:
+    case BuiltinSlice::RowsDot:
     case BuiltinSlice::None:
       break;
   }
