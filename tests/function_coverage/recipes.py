@@ -154,6 +154,7 @@ GROUPS = {
         "csr_extract_v": "csr_extract_v(m)",
         "csr_extract_w": "csr_extract_w(m)",
         "to_matrix": "to_matrix(a)",
+        "choose": "choose(5, 2)",
         "hypergeometric_lpmf": "hypergeometric_lpmf(2 | 4, 5, 7)",
         "discrete_range_lpmf": "discrete_range_lpmf(2 | 1, 4)",
     },

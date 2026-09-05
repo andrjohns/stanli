@@ -4,6 +4,15 @@
 
 ### Fixes
 
+`choose` is available wherever an integer is evaluated when the model
+compiles: a transformed data int, a declaration extent, and an index whose
+argument is an unrolled loop variable. brms writes `cor_1[choose(k - 1, 2) +
+j]` to flatten the upper triangle of a group-level correlation matrix, and a
+model that used it lost its whole generated quantities section to the
+per-draw interpreter, which then refused `lkj_corr_cholesky_lpdf` and left
+`stanli_run` writing no CSV at all. A model with a `logistic_normal` response
+sizes a transformed data array the same way and did not compile.
+
 The GLM densities take a per-row vector intercept. `bernoulli_logit_glm_lpmf`,
 `poisson_log_glm_lpmf` and `neg_binomial_2_log_glm_lpmf` refused one, and
 `binomial_logit_glm_lpmf` read only its first element while its backward wrote

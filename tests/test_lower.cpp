@@ -6669,6 +6669,20 @@ int main() {
     expect_eq("int size: gradient", grad[0], y.adj());
   }
 
+  // choose() sizing a parameter through a transformed data int, and sizing a
+  // generated quantities declaration directly. brms writes both for the
+  // correlation columns of a correlated group-level effect.
+  {
+    DataMap d = DataMap::from_json(R"({"M": 4})");
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/choosesize.tmir.sexp"), d);
+    check(cm.n_unconstrained == 22,
+          "choose size: choose(4, 2) sizes the parameter vector");
+    check(cm.write_array && !cm.write_array->columns.empty() &&
+              cm.write_array->truncated.empty(),
+          "choose size: the write_array graph carries the whole section");
+  }
+
   // Declaration extents may use data-only conditional expressions.  The
   // condition and only its selected arm are compile-time integer expressions;
   // compound conditions retain Stan's short-circuit semantics.

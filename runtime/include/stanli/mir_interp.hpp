@@ -1683,6 +1683,14 @@ class MirInterp {
       r.r = {T((double)q)};
       return r;
     }
+    if (e.name == "choose" && e.args.size() == 2) {
+      const int q =
+          stan::math::choose((int)as_int(e.args[0]), (int)as_int(e.args[1]));
+      r.is_int = true;
+      r.i = {q};
+      r.r = {T((double)q)};
+      return r;
+    }
     // fma from --O1 partial evaluation (`c + a*b`) or written explicitly:
     // fused like stan-math's, elementwise with scalar broadcast.
     if (e.name == "fma" && e.args.size() == 3) {

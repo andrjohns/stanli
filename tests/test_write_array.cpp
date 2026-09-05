@@ -10,6 +10,8 @@
 //   * csv_names on hand-built ParamViews, one per naming rule, and
 //   * the whole pipeline on tests/fixtures/wanames.stan, whose expected
 //     header was taken verbatim from a CmdStan run of the same model.
+#include "env_helpers.hpp"
+
 #include <stanli/compile.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/mir_interp.hpp>
@@ -4714,6 +4716,65 @@ void test_runtime_int_sum_redeclaration_shadowing() {
   }
 }
 
+// choose() as a generated quantities extent and inside an index whose
+// argument is the enclosing loop variable, which is how brms lays out the
+// upper triangle of a group-level correlation matrix.
+void test_choose_index_gq() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("M", 4);
+  const std::string text = slurp("tests/fixtures/choosesize.tmir.sexp");
+  test_setenv("STANLI_WA_FORCE_INTERP", "1");
+  CompiledModel cm = compile_model(text, data);
+  test_unsetenv("STANLI_WA_FORCE_INTERP");
+  if (!cm.write_array || !cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf(
+        "FAIL choosesize did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+  std::vector<double> q(22);
+  for (size_t i = 0; i < q.size(); ++i) q[i] = 0.25 * (double)i - 1.0;
+
+  Executor pex(cm.graph);
+  cm.bind(pex);
+  std::copy(q.begin(), q.end(), pex.params_data());
+  pex.run_forward_only();
+
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  std::copy(q.begin(), q.end(), wex.params_data());
+  WaRng graph_rng(5);
+  wex.run_forward_only(EvalState{&graph_rng});
+  std::vector<double> row;
+  for (const auto& c : cm.write_array->columns) {
+    const double* p = wex.value_ptr(c.slot);
+    for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+  }
+  expect_eq("choosesize header", joined(cm.write_array->columns),
+            "z.1,z.2,z.3,z.4,z.5,z.6,A.1.1,A.2.1,A.3.1,A.4.1,A.1.2,A.2.2,"
+            "A.3.2,A.4.2,A.1.3,A.2.3,A.3.3,A.4.3,A.1.4,A.2.4,A.3.4,A.4.4,"
+            "cor.1,cor.2,cor.3,cor.4,cor.5,cor.6");
+
+  WaRng interp_rng(5);
+  const std::vector<double> interp_row =
+      cm.write_array->interp->eval(cm.constrained_env(pex), interp_rng);
+  if (!same_double_bytes(row, interp_row)) {
+    ++failures;
+    std::printf("FAIL choosesize: graph and interpreter rows differ\n");
+  }
+  // cor holds A's strict upper triangle, column by column.
+  const double want[6] = {q[10], q[14], q[15], q[18], q[19], q[20]};
+  for (int i = 0; i < 6; ++i)
+    if (row.at((size_t)(22 + i)) != want[i]) {
+      ++failures;
+      std::printf("FAIL choosesize cor.%d: got %.17g want %.17g\n", i + 1,
+                  row.at((size_t)(22 + i)), want[i]);
+    }
+}
+
 void test_runtime_control_write_array() {
   using namespace stanli;
 
@@ -4872,6 +4933,7 @@ int main() {
   test_interpreted_gq_densities();
   test_interpreted_gq_gp_covariances();
   test_compiled_multiply_lower_tri();
+  test_choose_index_gq();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();

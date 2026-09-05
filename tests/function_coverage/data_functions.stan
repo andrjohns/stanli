@@ -43,7 +43,7 @@ transformed data {
   array[2,3] real a = {{1,2,3},{4,5,6}};
   matrix[2,3] m = [[1,0,2],[0,3,4]];
   vector[3] v = [0.5,1.5,2.5]';
-  vector[29] observed;
+  vector[30] observed;
   observed[1] = probe(ceil(v)); // ceil
   observed[2] = probe(floor(v)); // floor
   observed[3] = probe(round(v)); // round
@@ -71,9 +71,10 @@ transformed data {
   observed[25] = probe(csr_extract_v(m)); // csr_extract_v
   observed[26] = probe(csr_extract_w(m)); // csr_extract_w
   observed[27] = probe(to_matrix(a)); // to_matrix
-  observed[28] = probe(hypergeometric_lpmf(2 | 4, 5, 7)); // hypergeometric_lpmf
-  observed[29] = probe(discrete_range_lpmf(2 | 1, 4)); // discrete_range_lpmf
+  observed[28] = probe(choose(5, 2)); // choose
+  observed[29] = probe(hypergeometric_lpmf(2 | 4, 5, 7)); // hypergeometric_lpmf
+  observed[30] = probe(discrete_range_lpmf(2 | 1, 4)); // discrete_range_lpmf
 }
 parameters { real theta; }
 model { target += (1 + theta) * sum(observed); }
-generated quantities { vector[29] values = observed; }
+generated quantities { vector[30] values = observed; }

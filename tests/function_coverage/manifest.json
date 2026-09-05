@@ -72,6 +72,7 @@
     "chi_square_lpdf",
     "chi_square_rng",
     "cholesky_decompose",
+    "choose",
     "col",
     "cols",
     "columns_dot_product",
@@ -539,6 +540,7 @@
         "csr_extract_v",
         "csr_extract_w",
         "to_matrix",
+        "choose",
         "hypergeometric_lpmf",
         "discrete_range_lpmf"
       ],
@@ -1152,7 +1154,7 @@
       ]
     }
   },
-  "name_count": 419,
+  "name_count": 420,
   "recognized_but_unsupported": {
     "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout."
   },
