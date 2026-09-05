@@ -3233,6 +3233,49 @@ static void runtime_slice_tests() {
   close(ex.gradient(g.data()), -0.81912447467137883, "runtime slice series");
 }
 
+// A runtime-length selector reaches the index kernel as a fixed-capacity
+// buffer with its live count beside it, so the selector operand itself is not
+// a runtime-length value. The packing route has to agree with the direct one.
+static void runtime_index_tests() {
+  static const char* const names[] = {"", "gather"};
+  std::vector<double> point(14);
+  for (size_t i = 0; i < point.size(); ++i) point[i] = 0.15 * double(i) - 0.8;
+  for (int packed = 0; packed < 2; ++packed) {
+    if (packed)
+      test_setenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS", "1");
+    else
+      test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+    for (int op = 1; op <= 1; ++op) {
+      const auto loop =
+          compile_fixture("dynindex", runtime_slice_data(op), Mode::Auto);
+      const auto flat =
+          compile_fixture("dynindexflat", runtime_slice_data(op), Mode::Auto);
+      check(retained(loop) != nullptr, "runtime index model runs the loop");
+      check(retained(flat) == nullptr, "flat runtime index model has no loop");
+      Executor a(loop.graph), b(flat.graph);
+      loop.bind(a);
+      flat.bind(b);
+      std::vector<double> ga(14), gb(14);
+      std::copy(point.begin(), point.end(), a.params_data());
+      std::copy(point.begin(), point.end(), b.params_data());
+      const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
+      if (va != vb) {
+        std::printf("  %s: %.17g != %.17g\n", names[op], va, vb);
+        check(false, "runtime index value");
+      }
+      for (size_t i = 0; i < ga.size(); ++i)
+        if (!near(ga[i], gb[i])) {
+          std::printf("  %s g%zu: %.17g != %.17g\n", names[op], i, ga[i],
+                      gb[i]);
+          check(false, "runtime index gradient");
+        }
+      close(written_s(loop, point), written_s(flat, point),
+            "runtime index write_array");
+    }
+  }
+  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+}
+
 static std::atomic<int> memo_int_calls{0};
 static std::atomic<int> memo_compare_calls{0};
 static std::atomic<int> memo_index_calls{0};
@@ -4623,6 +4666,7 @@ int main() {
   prefer_parent_tests();
   direct_index_lowering_tests();
   runtime_slice_tests();
+  runtime_index_tests();
   memo_tests();
   trace_tests();
   for_trace_tests();
