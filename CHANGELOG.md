@@ -54,6 +54,19 @@ kernel's to the bit. The outcome, and the number of trials for the binomials,
 must be an integer the region knows when it compiles. The GLM forms are
 unchanged: their data matrix is a different argument shape.
 
+A `while` whose body declares a local sized from the loop's own state now
+unrolls where the guard is data, instead of compiling as a loop whose counter
+sits in a register. A declared extent has to be a compile-time integer in
+both loop forms, so `array[nobs[i]] int iobs` inside `while (i <= I)` used to
+fail with a runtime-control region error naming the extent. brms writes
+exactly that in `normal_time_hom_flex_lpdf`, the log density it emits for
+`unstr()` autocorrelation, so those models now compile. A `while` that does
+not size a local this way keeps its loop form as before. The scan that
+decides whether a loop needs a runtime-control region also mirrors
+block-local integers in statement order, the way the write_array scan beside
+it already did, so an early return guarded by a local count no longer forces
+the enclosing loop into a region.
+
 The GLM densities take a per-row vector intercept. `bernoulli_logit_glm_lpmf`,
 `poisson_log_glm_lpmf` and `neg_binomial_2_log_glm_lpmf` refused one, and
 `binomial_logit_glm_lpmf` read only its first element while its backward wrote
