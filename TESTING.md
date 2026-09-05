@@ -77,7 +77,7 @@ once with it on; every later check consumes those exact portable MIR files
 through `stanli_check --mir`. All other source-pass choices are explicit and
 identical between the two cells.
 
-The complete run covers all 130 recorded models plus any posteriordb census
+The complete run covers all 194 recorded models plus any posteriordb census
 model without a recorded CmdStan row:
 
 ```sh

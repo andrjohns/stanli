@@ -581,11 +581,12 @@ cmake --build build-rel --parallel "$build_jobs" && \
 python3 tools/verify_refs.py deps/posteriordb --check build-rel/stanli_check --jobs 8
 ```
 
-The second command is the corpus replay: 128 models, log density and
+The second command is the corpus replay: 194 models, log density and
 every gradient component, compared against recorded CmdStan values.
-That is the 119 runnable posteriordb posteriors plus the language
+That is the 119 runnable posteriordb posteriors, the language
 models in [`tests/stanc3/`](../tests/stanc3/README.md), which exercise
-type and language constructs no real posterior uses. It is the
+type and language constructs no real posterior uses, and the brms
+output in [`tests/brms/`](../tests/brms/README.md). It is the
 strongest oracle in the project. It
 runs in CI on every push, and
 [`tools/wasm_check.sh`](../tools/wasm_check.sh) drives the same replay
