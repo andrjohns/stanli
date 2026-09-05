@@ -765,17 +765,21 @@ class MirInterp {
     } else if (source.unsized.leaf == mir::UnsizedLeaf::Matrix) {
       container = FunctionContainerKind::Matrix;
     } else {
-      // Legacy hand-built MIR may only carry the old string type.
+      // Legacy hand-built MIR may only carry the old string type; kind the
+      // container from the evaluated value where even that is missing, the
+      // way the metadata-free dispatch tail kinds integers.
       if (source.type_ == "UVector")
         container = FunctionContainerKind::Vector;
       else if (source.type_ == "URowVector")
         container = FunctionContainerKind::RowVector;
-      else if (source.type_ == "UMatrix")
+      else if (source.type_ == "UMatrix" || value.dims.size() == 2)
         container = FunctionContainerKind::Matrix;
       else
         container = value.dims.empty() && value.r.size() == 1
                         ? FunctionContainerKind::Scalar
                         : FunctionContainerKind::Vector;
+      if (container == FunctionContainerKind::Matrix && dimensions.size() != 2)
+        dimensions = value.dims;
       if (container == FunctionContainerKind::Vector && dimensions.empty())
         dimensions = {static_cast<int64_t>(value.r.size())};
     }
@@ -809,8 +813,12 @@ class MirInterp {
         if constexpr (!std::is_same_v<T, double>)
           argument.active = !e.args[k].data_only;
         if (spec.evaluation == DensityEvaluationPolicy::AllInteger ||
-            k < static_cast<size_t>(spec.integer_args))
+            k < static_cast<size_t>(spec.integer_args)) {
           argument.integers = ints(k);
+          // Metadata-free MIR claims depth 0 everywhere; a multi-value
+          // integer group is a container whatever the source says.
+          if (argument.integers.size() > 1) argument.scalar = false;
+        }
         plan_arguments.push_back(std::move(argument));
       }
     } catch (const std::exception& error) {
@@ -2826,6 +2834,14 @@ class MirInterp {
 
     if (registered != nullptr && registered->density() != nullptr)
       return density_eval(e, *registered->density());
+    // Hand-built MIR without numeric metadata resolves densities by name
+    // and arity, the way the builtin tail above does; density_eval kinds
+    // each argument from its evaluated value.
+    if (registered == nullptr)
+      if (const FunctionSpec* named_density =
+              function_spec(e.name, e.args.size(), FunctionFamily::Density);
+          named_density != nullptr && named_density->density() != nullptr)
+        return density_eval(e, *named_density->density());
 
     if (e.name == "csr_extract_w" && e.args.size() == 1) {
       Value a = eval(e.args[0]);
