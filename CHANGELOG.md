@@ -12,6 +12,12 @@ missing rows of the response with `Inf`. Data declared `int` still has to
 arrive integer-valued. A declared bound follows Stan, so an infinite value
 satisfies `real<lower=0>` and a not-a-number value does not.
 
+The R data writer emits those tokens rather than refusing the value, and `NA`
+in a double becomes `NaN`; only integer and logical data still refuse a missing
+value. The browser API used to hand the runtime `null` for a non-finite number,
+which is what `JSON.stringify` writes, and now writes the tokens too. A brms
+`make_standata` list reaches a model unchanged.
+
 A shape query (`num_elements`, `size`, `rows`, `cols`) is now answered for
 elementwise arithmetic, `transpose`, and a matrix row selected by a loop
 variable. Before it was answered only for a named value and for a matrix
