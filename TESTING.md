@@ -168,17 +168,17 @@ in-place update error produced a scaled difference of 1.7e+05.
 Of the 762 recorded points, 697 have status `VERIFIED`, 48 have status
 `CMDSTAN_ONLY`, 11 have status `MISMATCH`, and 6 have status
 `REJECTED_BOTH`. The `CMDSTAN_ONLY` points are the three points of each
-of 16 brms models: 13 that stanli refused when their references were
-recorded and now matches at the recorded values, and the three named in
+of 16 brms models: 15 that stanli refused when their references were
+recorded and now matches at the recorded values, and the one named in
 `KNOWN_GAPS`; see [`tests/brms/README.md`](tests/brms/README.md). Three
 of the `MISMATCH` points belong to `kronecker_gp`, where two eigenvector
 gradients are sensitive to a nearly degenerate covariance whose smallest
 eigenvalue gap is 6.5e-17. Six are the `sdgp` and `lscale` gradients of
 `sw_gp`, `i320_gp_expquad` and `s2_gp_by_gr`, which flow through a
 Cholesky factorization whose smallest pivot is 1.1e-12, 3.7e-12 and
-1.8e-12. The last two are `s2_ar_cov`, whose `ar` gradient is zero where
-CmdStan's is not because `pow` reports a zero derivative at a zero base;
-both are in `QUARANTINED` with the CmdStan values that settled them.
+1.8e-12. The last two are `s2_ar_cov`, whose `ar` gradient was zero where
+CmdStan's is not because `pow` reported a zero derivative at a zero
+base; the derivative is fixed and both points match the recorded values.
 
 Verified points use the standard 1e-9 gate, except in the models named in
 `ILL_CONDITIONED` ([`tools/verify_refs.py`](tools/verify_refs.py)). The
@@ -188,9 +188,7 @@ models are held to that same limit at all three of their points. Which of
 their points comes out clean is a property of the machine that recorded
 the references: the third point of `sw_gp` and `i320_gp_expquad` was
 recorded clean on arm64 and deviates by 1.03e-7 and 6.38e-9 on the
-x86_64 runner, through the same Cholesky factorization. The two
-`s2_ar_cov` points in `QUARANTINED` are excluded from enforcement and
-announced on every run until the derivative is fixed. This keeps the
+x86_64 runner, through the same Cholesky factorization. This keeps the
 known numerical limitations visible without disabling checks for other
 models.
 

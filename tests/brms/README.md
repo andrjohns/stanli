@@ -86,15 +86,14 @@ tokens.
 ## Known gaps
 
 Every model here runs, including the ones reported in issues #319 and
-#320, except the three that `KNOWN_GAPS` in
+#320, except the one that `KNOWN_GAPS` in
 [`tools/verify_refs.py`](../../tools/verify_refs.py) names.
-`s2_logistic_normal` puts `choose` in an int size expression;
-`s2_unstr` and `s2_com_poisson` need a runtime-length local inside a
-runtime-control region, and `s2_com_poisson` reaches that only after
-`poisson_log_lpmf`, which such a region cannot hold either. An entry
-suppresses only the failure: when the gap closes the model matches its
-references, the replay reports `GAP_CLOSED`, and the run stays red until
-the entry is deleted.
+`s2_com_poisson` writes a `while` whose guard depends on a parameter and
+whose body sizes a local from the loop's own state, which needs the
+structured executor to take a statement region the island refuses. An
+entry suppresses only the failure: when the gap closes the model matches
+its references, the replay reports `GAP_CLOSED`, and the run stays red
+until the entry is deleted.
 
 ## Regenerating and recording
 
@@ -162,10 +161,12 @@ parameters { real a; }
 model { target += pow(a, 1); }
 ```
 
-which stanli evaluates with a gradient of 0 at `a = 0` where the answer
-is 1. Both points are in `QUARANTINED` with the CmdStan values that
-settled them, and the run says so every time until the derivative is
-fixed.
+which stanli evaluated with a gradient of 0 at `a = 0` where the answer
+is 1. stan-math's reverse-mode `pow` sends a data exponent of 1, -1, -2
+or -0.5 to the base itself, `inv`, `inv_square` or `inv_sqrt` before it
+reaches its zero-base guard, so those four carry a partial the guard
+drops. Both points were quarantined with the CmdStan values that settled
+them; both match now and `QUARANTINED` is empty.
 
 `s2_invgaussian` is undefined at all three points. Its link is
 `inv_sqrt(mu)` over a centred linear predictor, which takes both signs
@@ -176,11 +177,28 @@ spelling.
 
 Five models produced no sampler output when these references were
 recorded. brms writes `choose(M, 2)` for the size of a correlated
-group-effect block; the compile-time int evaluator does not know
+group-effect block; the compile-time int evaluator did not know
 `choose`, so the `write_array` graph could not be built for
 `sw_re_slope`, `sw_mv_rescor`, `s2_me2`, `s2_mmc` and `s2_mv_shared_re`,
-and the per-draw interpreter it falls back to has no
+and the per-draw interpreter it falls back to had no
 `lkj_corr_cholesky_lpdf`, so `stanli_run` exited with an empty CSV. The
 gradients were right the whole time, which is why the replay stayed
-green: a `write_array` that fails leaves the reference unrecorded rather
-than failing the gate.
+green: a `write_array` that failed left the reference unrecorded rather
+than failing the gate. `choose` is an integer the compiler evaluates
+now, the per-draw interpreter carries the LKJ densities, and the replay
+fails a model that produces no `write_array` row at all, so the blind
+spot that hid this is closed with the bug.
+
+The `unstr()` density found a wrong answer in the loop machinery. brms
+walks the groups of `normal_time_hom_flex_lpdf` with a `while` and
+slices by a loop-carried index, `begin[i:I]` and `Jtime[i, 1:nobs[i]]`.
+A slice whose upper bound is loop-carried keeps its declaration's
+capacity as storage and leaves the unselected tail at zero, and only
+`sum` consulted the live length, so `log_sum_exp` reduced over the zeros
+with the values, `max` returned zero, `num_elements` returned the
+capacity, and a density over the slice integrated the tail; a fixture on
+that shape answered 1.863 where CmdStan answers -0.819. The live length
+is an operand of the ops that consume the slice now, and the executor
+rewrites their operand lengths from it before each call, forward and
+backward. Nothing had to be turned on to reach this: a `while` whose
+guard is data lowers as a retained loop by default.

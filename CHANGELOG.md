@@ -151,15 +151,13 @@ A second sweep adds 60 more, for 124 in all: the remaining response
 families, the multimembership and by-group grouping terms, the spatial
 and autocorrelation structures, the addition terms, custom families with
 their own `stanvar` functions, and the approximate and grouped Gaussian
-processes. Recording them found two things. `pow(x, n)` reports a zero
+processes. Recording them found two things. `pow(x, n)` reported a zero
 derivative at `x == 0`, which is the whole `ar` gradient of a model
-written with `ar(cov = TRUE)` at two of its three points; those points
-are quarantined with the CmdStan values that settled them. And a
+written with `ar(cov = TRUE)` at two of its three points. And a
 `write_array` that fails did not fail the corpus gate, so five models
 whose gradients were right had been producing an empty CSV from
-`stanli_run` unnoticed. Three of the new models are refused today and
-are listed in `KNOWN_GAPS`: one puts `choose` in an int size expression
-and two need a runtime-length local inside a runtime-control region.
+`stanli_run` unnoticed. Both are fixed above, and one of the new models
+is refused today: `s2_com_poisson` is listed in `KNOWN_GAPS`.
 
 ## 0.11.1
 
