@@ -50,7 +50,10 @@ data {
 parameters {
   vector[N] y;
 }
+transformed parameters {
+  real s = acc_lpdf(y | nobs, op);
+}
 model {
-  target += acc_lpdf(y | nobs, op);
+  target += s;
   y ~ std_normal();
 }

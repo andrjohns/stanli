@@ -5,6 +5,7 @@
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/structured_loop.hpp>
+#include <stanli/wa_interp.hpp>
 #include <stan/math.hpp>
 
 #include <algorithm>
@@ -3139,6 +3140,32 @@ static DataMap runtime_slice_data(int op) {
 // capacity as its storage, so every consumer of one has to be told where the
 // live values stop. The flat model spells the same arithmetic over a
 // compile-time trip count, where the extents fold.
+static double written_s(const CompiledModel& model,
+                        const std::vector<double>& point) {
+  Executor ex(model.graph);
+  model.bind(ex);
+  std::copy(point.begin(), point.end(), ex.params_data());
+  ex.run_forward_only();
+  if (model.write_array && model.write_array->interp) {
+    WaRng rng(1234);
+    const std::vector<double> row =
+        model.write_array->interp->eval(model.constrained_env(ex), rng);
+    const std::vector<std::string> names =
+        CompiledModel::csv_names(model.write_array->interp->columns());
+    for (size_t i = 0; i < names.size() && i < row.size(); ++i)
+      if (names[i] == "s") return row[i];
+  } else if (model.write_array && model.write_array->truncated.empty()) {
+    Executor wex(model.write_array->graph);
+    model.write_array->bind(wex);
+    std::copy(point.begin(), point.end(), wex.params_data());
+    wex.run_forward_only();
+    for (const auto& column : model.write_array->columns)
+      if (column.name == "s") return wex.value_ptr(column.slot)[0];
+  }
+  check(false, "runtime slice write_array has s");
+  return 0;
+}
+
 static void runtime_slice_tests() {
   static const char* const names[] = {"",
                                       "log_sum_exp",
@@ -3150,30 +3177,41 @@ static void runtime_slice_tests() {
                                       "dot product",
                                       "moments",
                                       "reduction of an elementwise result"};
-  for (int op = 1; op <= 9; ++op) {
-    const auto loop =
-        compile_fixture("dynslice", runtime_slice_data(op), Mode::Auto);
-    const auto flat =
-        compile_fixture("dynsliceflat", runtime_slice_data(op), Mode::Auto);
-    check(retained(loop) != nullptr, "runtime slice model runs the loop");
-    check(retained(flat) == nullptr, "flat runtime slice model has no loop");
-    Executor a(loop.graph), b(flat.graph);
-    loop.bind(a);
-    flat.bind(b);
-    std::vector<double> ga(5), gb(5);
-    for (int i = 0; i < 5; ++i)
-      a.params_data()[i] = b.params_data()[i] = 0.4 * i - 0.9;
-    const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
-    if (va != vb) {
-      std::printf("  %s: %.17g != %.17g\n", names[op], va, vb);
-      check(false, "runtime slice value");
-    }
-    for (size_t i = 0; i < ga.size(); ++i)
-      if (!near(ga[i], gb[i])) {
-        std::printf("  %s g%zu: %.17g != %.17g\n", names[op], i, ga[i], gb[i]);
-        check(false, "runtime slice gradient");
+  const std::vector<double> point{-0.9, -0.5, -0.1, 0.3, 0.7};
+  for (int segments = 0; segments < 2; ++segments) {
+    if (segments)
+      test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
+    else
+      test_setenv("STANLI_NO_STRUCTURED_SEGMENTS", "1");
+    for (int op = 1; op <= 9; ++op) {
+      const auto loop =
+          compile_fixture("dynslice", runtime_slice_data(op), Mode::Auto);
+      const auto flat =
+          compile_fixture("dynsliceflat", runtime_slice_data(op), Mode::Auto);
+      check(retained(loop) != nullptr, "runtime slice model runs the loop");
+      check(retained(flat) == nullptr, "flat runtime slice model has no loop");
+      Executor a(loop.graph), b(flat.graph);
+      loop.bind(a);
+      flat.bind(b);
+      std::vector<double> ga(5), gb(5);
+      std::copy(point.begin(), point.end(), a.params_data());
+      std::copy(point.begin(), point.end(), b.params_data());
+      const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
+      if (va != vb) {
+        std::printf("  %s: %.17g != %.17g\n", names[op], va, vb);
+        check(false, "runtime slice value");
       }
+      for (size_t i = 0; i < ga.size(); ++i)
+        if (!near(ga[i], gb[i])) {
+          std::printf("  %s g%zu: %.17g != %.17g\n", names[op], i, ga[i],
+                      gb[i]);
+          check(false, "runtime slice gradient");
+        }
+      close(written_s(loop, point), written_s(flat, point),
+            "runtime slice write_array");
+    }
   }
+  test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
 }
 
 static std::atomic<int> memo_int_calls{0};
