@@ -290,7 +290,10 @@ DensityCallPlan density_call_plan(
     else
       for (const DensityArgumentShape& shape : real_shapes)
         lanes = std::max(lanes, shape.storage_size);
-    if (lanes > 1) plan.idata.assign(static_cast<size_t>(lanes), plan.idata[0]);
+    if (lanes > 1) {
+      const int outcome = plan.idata[0];
+      plan.idata.assign(static_cast<size_t>(lanes), outcome);
+    }
   }
 
   if (spec.glm_layout) {
@@ -299,8 +302,10 @@ DensityCallPlan density_call_plan(
       plan.idata.clear();
       for (size_t k = 0; k < integer_groups.size(); ++k) {
         std::vector<int>& group = integer_groups[k];
-        if ((glm_scalar_mask & (uint8_t{1} << k)) && rows > 1)
-          group.assign(static_cast<size_t>(rows), group[0]);
+        if ((glm_scalar_mask & (uint8_t{1} << k)) && rows > 1) {
+          const int value = group[0];
+          group.assign(static_cast<size_t>(rows), value);
+        }
         if (static_cast<int64_t>(group.size()) != rows)
           throw std::invalid_argument(
               "integer density argument does not match matrix rows");
