@@ -979,6 +979,71 @@ static void test_native_extras_carved() {
     expect_close("native extras v" + std::to_string(i), got[i], want[i]);
 }
 
+// pow at a base of exactly zero, over the exponents stan-math dispatches on
+// plus one that stays a parameter. Against the values, not just the ops:
+// both engines used to agree on the same wrong zero.
+static Graph build_pow_zero(Fills& fills, std::vector<int>& terms) {
+  Graph g;
+  const int base = g.add_slot(1, true);
+  const int vexp = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  auto pw = [&](int e) {
+    const int s = g.add_slot(1, false);
+    g.add_op(OP_POW, {base, e}, s);
+    return s;
+  };
+  int acc = -1;
+  auto add = [&](int x) {
+    if (acc < 0) {
+      acc = x;
+      return;
+    }
+    const int s = g.add_slot(1, false);
+    g.add_op(OP_ADD, {acc, x}, s);
+    acc = s;
+  };
+  for (int t = 0; t < 8; ++t) {
+    add(pw(cslot(1.0)));
+    add(pw(cslot(2.0)));
+    add(pw(cslot(0.5)));
+    add(pw(vexp));
+  }
+  g.result_slot = acc;
+  terms = {acc};
+  return g;
+}
+
+static void test_pow_zero_base_carved() {
+  const std::vector<double> want{8.0, 8.0, 0.0};
+  auto at_zero = [](int64_t) { return 0.0; };
+
+  Fills ref_fills;
+  std::vector<int> ref_terms;
+  Graph ref = build_pow_zero(ref_fills, ref_terms);
+  const std::vector<double> ops =
+      testutil::run_grad(std::move(ref), ref_fills, at_zero);
+  expect("pow zero ops sizes", ops.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < ops.size(); ++i)
+    expect_close("pow zero ops v" + std::to_string(i), ops[i], want[i]);
+
+  Fills fills;
+  std::vector<int> terms;
+  Graph g = build_pow_zero(fills, terms);
+  test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);
+  const int carved = carve_islands(g, fills, terms, {});
+  test_unsetenv("STANLI_ISLAND_ALWAYS");
+  expect("pow zero carved==1", carved == 1);
+  const std::vector<double> got =
+      testutil::run_grad(std::move(g), fills, at_zero);
+  expect("pow zero island sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("pow zero island v" + std::to_string(i), got[i], want[i]);
+}
+
 // A recurrence threaded through ops the register machine has no
 // instruction for -- ATAN2, a unary from the generated list, a cdf, an
 // integer-outcome lpmf. Each compiles as a CALL to the graph's own
@@ -1441,6 +1506,7 @@ int main() {
   test_compact_adjoint_cost_boundary();
   test_scalar_chain_carved();
   test_native_extras_carved();
+  test_pow_zero_base_carved();
   test_inplace_slice_cost_refuses_wide_state();
   if (failures) {
     std::printf("%d failures\n", failures);

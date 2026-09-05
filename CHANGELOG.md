@@ -67,6 +67,14 @@ block-local integers in statement order, the way the write_array scan beside
 it already did, so an early return guarded by a local count no longer forces
 the enclosing loop into a region.
 
+`pow` keeps its base gradient at a base of exactly zero when the exponent is
+data. stan-math's reverse-mode `pow` sends a non-var exponent of 1, -1, -2 or
+-0.5 to the base itself, `inv`, `inv_square` or `inv_sqrt` before it reaches
+its zero-base guard, so those four carry a partial where the guard carries
+none, and stanli returned zero for all of them. brms models built with
+`ar(cov = TRUE)` reach this through `cholesky_cor_ar1`'s `pow(ar, i - 1)`,
+whose autocorrelation gradient was zero at every point where `ar` is zero.
+
 The GLM densities take a per-row vector intercept. `bernoulli_logit_glm_lpmf`,
 `poisson_log_glm_lpmf` and `neg_binomial_2_log_glm_lpmf` refused one, and
 `binomial_logit_glm_lpmf` read only its first element while its backward wrote

@@ -4,6 +4,7 @@
 
 #include <stanli/kernel_types.hpp>
 
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -499,6 +500,19 @@ constexpr bool unary_has_pullback(UnaryTopology topology, double x) {
       return false;
   }
   return false;
+}
+
+// What pow's base collects at `base == 0`, where the generic rule is 0/0.
+// stan-math's rev pow sends a non-var exponent of 1, -1, -2 or -0.5 to the
+// base itself, inv, inv_square or inv_sqrt before its zero-base guard, and
+// those four adjoints are transcribed here. Every other exponent, and any
+// var one, keeps the guard's zero.
+inline double pow_zero_base_partial(double seed, double base, double exponent) {
+  if (exponent == 1.0) return seed;
+  if (exponent == -1.0) return -seed / (base * base);
+  if (exponent == -2.0) return -2.0 * seed / (base * base * base);
+  if (exponent == -0.5) return -0.5 * seed / (base * std::sqrt(base));
+  return 0.0;
 }
 
 // Scalar unary math, one line each: opcode, kernel, registration, lowering
