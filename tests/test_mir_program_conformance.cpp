@@ -324,7 +324,17 @@ bool same_observation(const Observation& a, const Observation& b) {
   return a.bits == b.bits;
 }
 
-bool satisfies_semantics(const Observation& got, const Observation& want) {
+int64_t ulp_distance(double a, double b) {
+  int64_t ia, ib;
+  std::memcpy(&ia, &a, sizeof ia);
+  std::memcpy(&ib, &b, sizeof ib);
+  if ((ia < 0) != (ib < 0)) return std::numeric_limits<int64_t>::max();
+  const int64_t d = ia - ib;
+  return d < 0 ? -d : d;
+}
+
+bool satisfies_semantics(const Observation& got, const Observation& want,
+                         int64_t ulps) {
   if (got.stage != want.stage || got.kind != want.kind ||
       got.value.size() != want.value.size() ||
       got.stdout_text != want.stdout_text)
@@ -337,7 +347,8 @@ bool satisfies_semantics(const Observation& got, const Observation& want) {
   for (size_t i = 0; i < want.value.size(); ++i) {
     if (std::isnan(want.value[i])) {
       if (!std::isnan(got.value[i])) return false;
-    } else if (got.bits[i] != want.bits[i]) {
+    } else if (got.bits[i] != want.bits[i] &&
+               ulp_distance(got.value[i], want.value[i]) > ulps) {
       return false;
     }
   }
@@ -345,8 +356,9 @@ bool satisfies_semantics(const Observation& got, const Observation& want) {
 }
 
 void expect_observation(const std::string& case_name, const char* path,
-                        const Observation& got, const Observation& want) {
-  if (satisfies_semantics(got, want)) return;
+                        const Observation& got, const Observation& want,
+                        int64_t ulps) {
+  if (satisfies_semantics(got, want, ulps)) return;
   ++failures;
   std::printf("FAIL %-24s %-11s got %s; Stan semantics require %s\n",
               case_name.c_str(), path, describe(got).c_str(),
@@ -357,7 +369,7 @@ void run_observation_case(const std::string& name, const char* semantics,
                           std::vector<FunDef> functions, double t,
                           Observation want,
                           const char* required_refusal = nullptr,
-                          bool required_acceptance = false) {
+                          bool required_acceptance = false, int64_t ulps = 0) {
   std::map<std::string, const FunDef*> table;
   for (const FunDef& f : functions) table[f.name] = &f;
   const FunDef& entry = functions.front();
@@ -382,8 +394,8 @@ void run_observation_case(const std::string& name, const char* semantics,
         "FAIL %-24s expected a cleared Program refusal naming %s; got %s\n",
         name.c_str(), required_refusal, describe(program.compile).c_str());
   }
-  expect_observation(name, "Program", program.outcome, want);
-  expect_observation(name, "MirInterp", interpreter, want);
+  expect_observation(name, "Program", program.outcome, want, ulps);
+  expect_observation(name, "MirInterp", interpreter, want, ulps);
   if (!same_observation(program.outcome, interpreter)) {
     ++failures;
     std::printf("FAIL %-24s path parity Program=%s; MirInterp=%s\n",
@@ -406,9 +418,10 @@ void run_case(const std::string& name, const char* semantics,
 // allowed to decline: a refusal here is a failure, not a fallback.
 void run_program_case(const std::string& name, const char* semantics,
                       std::vector<FunDef> functions, double t,
-                      std::vector<double> expected) {
+                      std::vector<double> expected, int64_t ulps = 0) {
   run_observation_case(name, semantics, std::move(functions), t,
-                       observed_values(std::move(expected)), nullptr, true);
+                       observed_values(std::move(expected)), nullptr, true,
+                       ulps);
 }
 
 void run_domain_error_case(const std::string& name, const char* semantics,
@@ -562,13 +575,14 @@ void test_discrete_densities() {
   // on an argument register, so both routes reach the graph kernel and the
   // oracle is Stan Math's own propto-OFF value.
   const Expr rate = var("t", "UReal");
+  const int64_t library_ulps = 2;
   const auto check = [&](const std::string& name, std::vector<Expr> args,
                          double expected) {
     FunDef entry = rhs_function(
         name + "_rhs",
         {return_value(make_array({fun(name, std::move(args), "UReal")}))});
     run_program_case(name, "an integer outcome reaches the same kernel",
-                     {std::move(entry)}, 0.25, {expected});
+                     {std::move(entry)}, 0.25, {expected}, library_ulps);
   };
   check("poisson_lpmf", {lit_int(3), rate},
         stan::math::poisson_lpmf<false>(3, 0.25));

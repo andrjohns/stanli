@@ -7,6 +7,7 @@ import json
 import os
 import math
 import pathlib
+import re
 import subprocess
 from typing import Sequence, TypeVar
 
@@ -178,15 +179,23 @@ def write_or_check(path: pathlib.Path, content: str, check: bool,
         if touch_unchanged:
             os.utime(path, None)
         return True
-    path.write_text(content)
+    with path.open("w", newline="\n") as handle:
+        handle.write(content)
     return True
 
 
 def display_path(path: pathlib.Path, root: pathlib.Path) -> str:
     try:
-        return str(path.resolve().relative_to(root.resolve()))
+        return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
-        return str(path.resolve())
+        return path.resolve().as_posix()
+
+
+HOST_TAG = re.compile(r" \((?:Unix|Win32|Cygwin)\)$")
+
+
+def portable_build_id(build_id: str) -> str:
+    return HOST_TAG.sub("", build_id)
 
 
 def generated_model_record(path: pathlib.Path, source: str,

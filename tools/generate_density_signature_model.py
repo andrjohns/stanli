@@ -30,6 +30,7 @@ from function_signature_common import (  # noqa: E402
     balanced_partitions,
     generated_model_record,
     numeric_leaf_kind,
+    portable_build_id,
     registry_by_name,
     resolve_registry_spec,
     unwrap_data,
@@ -443,7 +444,7 @@ def main() -> int:
     manifest = {
         "generator": "tools/generate_density_signature_model.py",
         "partial": partial,
-        "stanc_build_id": inventory.stanc_build_id,
+        "stanc_build_id": portable_build_id(inventory.stanc_build_id),
         "signature_dump_sha256": inventory.raw_sha256,
         "registry_name_count": len(registered_names),
         "tested_registry_name_count": len(tested_names),
