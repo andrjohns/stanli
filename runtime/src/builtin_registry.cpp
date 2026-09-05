@@ -738,6 +738,8 @@ BuiltinSliceMap builtin_slice_map(const BuiltinSpec& spec,
     case BuiltinSlice::Block: {
       const int64_t i = indexes[0], j = indexes[1];
       const int64_t height = indexes[2], columns = indexes[3];
+      stan::math::check_nonnegative(function, "nrows", height);
+      stan::math::check_nonnegative(function, "ncols", columns);
       check_slice_index(function, i, rows, " for rows of i");
       check_slice_index(function, i + height - 1, rows,
                         " for rows of i+nrows-1");
