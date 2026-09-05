@@ -719,6 +719,63 @@ void test_interpreted_gq_densities() {
   expect_close("multi_normal accumulation", row[3], want_mvn);
 }
 
+// The interpreter's own closed forms for the GP covariances, over
+// array[N] vector[D] coordinates.
+void test_interpreted_gq_gp_covariances() {
+  using namespace stanli;
+  const std::string text = slurp("tests/fixtures/gpmatern.tmir.sexp");
+  auto program =
+      std::make_shared<mir::Program>(mir::read_program(sexp::parse(text)));
+  std::map<std::string, DataMap::Entry> base;
+  for (const char* flag :
+       {"emit_transformed_parameters__", "emit_generated_quantities__"}) {
+    DataMap::Entry one;
+    one.is_int = true;
+    one.i = {1};
+    one.r = {1.0};
+    base[flag] = one;
+  }
+  WaInterp wi(program, std::move(base));
+
+  std::vector<Eigen::VectorXd> pts(3, Eigen::VectorXd(2));
+  pts[0] << 0.3, -0.7;
+  pts[1] << 1.1, -0.2;
+  pts[2] << 0.4, 0.9;
+  const double alpha = 0.85, rho = 1.3;
+  std::map<std::string, DataMap::Entry> params;
+  DataMap::Entry x;
+  x.dims = {3, 2};
+  for (int d = 0; d < 2; ++d)
+    for (int n = 0; n < 3; ++n) x.r.push_back(pts[(size_t)n](d));
+  params["x"] = x;
+  params["alpha"].r = {alpha};
+  params["rho"].r = {rho};
+
+  WaRng rng(7);
+  const std::vector<double> row = wi.eval(params, rng);
+  expect_idx("gpmatern interpreted row width", row.size(), 44);
+  if (row.size() != 44) return;
+
+  const Eigen::MatrixXd want[4] = {
+      stan::math::gp_exp_quad_cov(pts, alpha, rho),
+      stan::math::gp_matern32_cov(pts, alpha, rho),
+      stan::math::gp_matern52_cov(pts, alpha, rho),
+      stan::math::gp_exponential_cov(pts, alpha, rho)};
+  const char* labels[4] = {"Kq", "K32", "K52", "Kexp"};
+  for (int k = 0; k < 4; ++k)
+    for (int j = 0; j < 3; ++j)
+      for (int i = 0; i < 3; ++i) {
+        const double got = row[(size_t)(8 + 9 * k + 3 * j + i)];
+        const double expected = want[k](i, j);
+        if (std::abs(got - expected) >
+            1e-13 * std::max(1.0, std::abs(expected))) {
+          ++failures;
+          std::printf("FAIL gpmatern %s(%d,%d): got %.17g want %.17g\n",
+                      labels[k], i + 1, j + 1, got, expected);
+        }
+      }
+}
+
 // multiply_lower_tri_self_transpose in a runtime-control region. The register
 // machine carries it now, so the whole section compiles; the interpreter runs
 // beside it here because both still have to agree. The function zeros A's
@@ -4813,6 +4870,7 @@ int main() {
   test_compiled_region_rng();
   test_region_rng_is_not_folded();
   test_interpreted_gq_densities();
+  test_interpreted_gq_gp_covariances();
   test_compiled_multiply_lower_tri();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();

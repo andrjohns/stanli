@@ -1,10 +1,12 @@
 # The user-facing API: compile a model, sample it, summarize it.
 
 json_scalar <- function(x) {
-  if (is.logical(x)) return(if (isTRUE(x)) "1" else "0")
   if (is.character(x)) return(paste0("\"", x, "\""))
-  if (!is.finite(x)) stop("Stan data cannot contain NA, NaN or Inf",
-                          call. = FALSE)
+  if (is.logical(x) && !is.na(x)) return(if (x) "1" else "0")
+  if (is.na(x) && !is.double(x))
+    stop("Stan integer data cannot contain NA", call. = FALSE)
+  if (is.na(x)) return("\"NaN\"")
+  if (is.infinite(x)) return(if (x > 0) "\"Infinity\"" else "\"-Infinity\"")
   format(x, digits = 17, scientific = FALSE, trim = TRUE)
 }
 

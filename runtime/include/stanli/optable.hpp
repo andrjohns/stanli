@@ -5,6 +5,8 @@
 #include <stanli/kernel_types.hpp>
 
 #include <limits>
+#include <optional>
+#include <string_view>
 
 namespace stanli {
 
@@ -43,7 +45,7 @@ namespace stanli {
   X(OP_GATHER)                        \
   X(OP_CONCAT2)                       \
   X(OP_REP_MAT)                       \
-  X(OP_GP_EXP_QUAD_COV)               \
+  X(OP_GP_COV)                        \
   X(OP_DIAG_MATRIX)                   \
   X(OP_CHOLESKY)                      \
   X(OP_MULTI_NORMAL_CHOL_LPDF)        \
@@ -844,6 +846,22 @@ constexpr bool is_effectful_op(uint16_t opcode) {
 // "OP_NORMAL_LPDF" for a known opcode, "OP_?" otherwise. Diagnostics and
 // tooling only; never on a hot path.
 const char* opcode_name(uint16_t opcode);
+
+// OP_GP_COV's variant selects the covariance function.
+enum GpCov : uint8_t {
+  kGpExpQuad,
+  kGpMatern32,
+  kGpMatern52,
+  kGpExponential,
+};
+
+inline std::optional<GpCov> gp_cov_family(std::string_view name) {
+  if (name == "gp_exp_quad_cov") return kGpExpQuad;
+  if (name == "gp_matern32_cov") return kGpMatern32;
+  if (name == "gp_matern52_cov") return kGpMatern52;
+  if (name == "gp_exponential_cov") return kGpExponential;
+  return std::nullopt;
+}
 
 struct Kernel {
   // Reads ctx.in values, writes ctx.out, may stash partials in ctx.scratch.

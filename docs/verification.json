@@ -342,6 +342,97 @@
   "point": 0,
   "status": "VERIFIED"
  },
+ "i319_gauss_re": {
+  "max_rel": 2.6962017371290446e-16,
+  "max_ulp": 2,
+  "n_values": 67,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "i319_negbin_fixed": {
+  "max_rel": 5.58735223821029e-16,
+  "max_ulp": 3,
+  "n_values": 7,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "i319_negbin_re": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "i319_pois_fixed": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 6,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "i319_pois_re": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "i319_pois_re2": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "i320_gp_expquad": {
+  "max_rel": 2.832353129811338e-09,
+  "max_ulp": 25511569,
+  "n_values": 35,
+  "point": 0,
+  "status": "MISMATCH"
+ },
+ "i320_gp_matern32": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "i320_mi_nhanes": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "i320_pois_trunc_both": {
+  "max_rel": 1.6647214501283718e-15,
+  "max_ulp": 13,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "i320_pois_trunc_ub": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "i320_sratio_cs": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "i320_sratio_plain": {
+  "max_rel": 1.4529228077417952e-15,
+  "max_ulp": 7,
+  "n_values": 7,
+  "point": 0,
+  "status": "VERIFIED"
+ },
  "iohmm_reg": {
   "max_rel": 2.3092638912203256e-14,
   "max_ulp": 2768,
@@ -829,6 +920,363 @@
   "max_rel": 0.0,
   "max_ulp": 0,
   "n_values": 15,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_acat": {
+  "max_rel": 3.6802300134873437e-14,
+  "max_ulp": 196,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_acat_cs": {
+  "max_rel": 4.7680044321788635e-14,
+  "max_ulp": 383,
+  "n_values": 8,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_ar": {
+  "max_rel": 6.245004513516506e-17,
+  "max_ulp": 9,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_arma": {
+  "max_rel": 4.251376658853009e-16,
+  "max_ulp": 2,
+  "n_values": 6,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_asymlaplace": {
+  "max_rel": 9.109873760235105e-16,
+  "max_ulp": 6,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_bernoulli": {
+  "max_rel": 2.220446049250313e-16,
+  "max_ulp": 4,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_beta": {
+  "max_rel": 1.676223357353142e-16,
+  "max_ulp": 1,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_binomial": {
+  "max_rel": 7.142500147949294e-16,
+  "max_ulp": 4,
+  "n_values": 3,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_categorical": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_cens": {
+  "max_rel": 3.0676908793921366e-16,
+  "max_ulp": 2,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_cratio": {
+  "max_rel": 4.412026299860372e-13,
+  "max_ulp": 3974,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_cratio_cs": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "sw_cumulative": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 6,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_cumulative_cs": {
+  "max_rel": 3.253508573664021e-13,
+  "max_ulp": 5861,
+  "n_values": 8,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_dist_sigma": {
+  "max_rel": 4.440892098500626e-16,
+  "max_ulp": 4,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_exgaussian": {
+  "max_rel": 1.3140717311443162e-16,
+  "max_ulp": 1,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_gamma": {
+  "max_rel": 2.8407003682662073e-16,
+  "max_ulp": 2,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_gaussian": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_gp": {
+  "max_rel": 1.2186723624453631e-08,
+  "max_ulp": 80871424,
+  "n_values": 45,
+  "point": 0,
+  "status": "MISMATCH"
+ },
+ "sw_hurdle_gamma": {
+  "max_rel": 6.284814970130472e-16,
+  "max_ulp": 4,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_hurdle_lognormal": {
+  "max_rel": 6.284814970130472e-16,
+  "max_ulp": 4,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_hurdle_pois": {
+  "max_rel": 2.1928447396934674e-16,
+  "max_ulp": 1,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_lognormal": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_ma": {
+  "max_rel": 1.2212453270876722e-15,
+  "max_ulp": 176,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_me": {
+  "max_rel": 3.579771080421726e-16,
+  "max_ulp": 3,
+  "n_values": 46,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_mi": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "sw_mixture": {
+  "max_rel": 4.1660493898426127e-16,
+  "max_ulp": 4,
+  "n_values": 8,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_mono": {
+  "max_rel": 1.6653345369377348e-16,
+  "max_ulp": 6,
+  "n_values": 6,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_mv_norescor": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 7,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_mv_rescor": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "sw_negbinomial": {
+  "max_rel": 1.5543122344752192e-15,
+  "max_ulp": 14,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_nonlinear": {
+  "max_rel": 5.551115123125783e-16,
+  "max_ulp": 5,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_poisson": {
+  "max_rel": 4.440892098500626e-15,
+  "max_ulp": 40,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_re_bern": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "sw_re_gauss": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 10,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_re_negbin": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "sw_re_pois": {
+  "max_rel": 0.0,
+  "max_ulp": 0,
+  "n_values": 0,
+  "point": 0,
+  "status": "REJECTED_BOTH"
+ },
+ "sw_re_slope": {
+  "max_rel": 2.123301225335912e-16,
+  "max_ulp": 1,
+  "n_values": 17,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_se": {
+  "max_rel": 1.2460516984843854e-16,
+  "max_ulp": 1,
+  "n_values": 3,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_skewnormal": {
+  "max_rel": 8.881784197001252e-16,
+  "max_ulp": 60,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_spline_s": {
+  "max_rel": 1.942890293094024e-16,
+  "max_ulp": 28,
+  "n_values": 13,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_spline_t2": {
+  "max_rel": 1.1102230246251565e-16,
+  "max_ulp": 1,
+  "n_values": 30,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_sratio": {
+  "max_rel": 4.412026299860372e-13,
+  "max_ulp": 3974,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_student": {
+  "max_rel": 4.440892098500626e-16,
+  "max_ulp": 16,
+  "n_values": 6,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_trunc": {
+  "max_rel": 1.8396546696659295e-16,
+  "max_ulp": 1,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_vonmises": {
+  "max_rel": 9.78771632987868e-16,
+  "max_ulp": 5,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_weibull": {
+  "max_rel": 1.6653345369377348e-15,
+  "max_ulp": 120,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_weights": {
+  "max_rel": 1.0547118733938987e-15,
+  "max_ulp": 19,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_zi_binomial": {
+  "max_rel": 7.142500147949294e-16,
+  "max_ulp": 4,
+  "n_values": 4,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_zi_negbin": {
+  "max_rel": 4.196478303655471e-16,
+  "max_ulp": 2,
+  "n_values": 5,
+  "point": 0,
+  "status": "VERIFIED"
+ },
+ "sw_zi_poisson": {
+  "max_rel": 3.892599860895256e-16,
+  "max_ulp": 2,
+  "n_values": 4,
   "point": 0,
   "status": "VERIFIED"
  },

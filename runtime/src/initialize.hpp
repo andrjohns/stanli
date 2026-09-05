@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace stanli {
@@ -26,6 +27,7 @@ void initialize_point(Executor& ex, RNG& rng, double radius, const double* init,
   // optimizer historically hands fixed starts directly to L-BFGS.
   if (fixed && fixed_policy == FixedInitPolicy::SkipValidation) return;
   std::vector<double> grad((size_t)n);
+  std::string first_error;
   const auto acceptable = [&] {
     for (int64_t i = 0; i < n; ++i) ex.params_data()[i] = q[i];
     try {
@@ -36,7 +38,8 @@ void initialize_point(Executor& ex, RNG& rng, double radius, const double* init,
       for (int64_t i = 0; i < n; ++i)
         if (!std::isfinite(grad[(size_t)i])) return false;
       return true;
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+      if (first_error.empty()) first_error = e.what();
       return false;
     }
   };
@@ -49,17 +52,18 @@ void initialize_point(Executor& ex, RNG& rng, double radius, const double* init,
       if (acceptable()) return;
     }
   }
+  std::string message = "initialization failed: ";
   if (init != nullptr)
-    throw std::runtime_error(
-        "initialization failed: the supplied unconstrained init has no "
-        "finite log density and gradient");
-  if (radius == 0.0)
-    throw std::runtime_error(
-        "initialization failed: the origin has no finite log density and "
-        "gradient (init radius is 0)");
-  throw std::runtime_error(
-      "initialization failed: no draw in 100 attempts had finite log density "
-      "and gradient");
+    message +=
+        "the supplied unconstrained init has no finite log density and "
+        "gradient";
+  else if (radius == 0.0)
+    message +=
+        "the origin has no finite log density and gradient (init radius is 0)";
+  else
+    message += "no draw in 100 attempts had finite log density and gradient";
+  if (!first_error.empty()) message += "; first error: " + first_error;
+  throw std::runtime_error(message);
 }
 
 }  // namespace stanli

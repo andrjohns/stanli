@@ -130,6 +130,9 @@ The headline ratios hide several important gaps:
   operation is registered.
 - **`student_t_qf`:** this quantile is refused and lies outside the scalar-math
   count. It has no graph operation.
+- **`gp_periodic_cov`:** this covariance is refused. It has no graph
+  operation. The exponentiated-quadratic, Matern 3/2, Matern 5/2 and
+  exponential kernels are supported.
 - **Complex values:** complex arguments or results are refused by policy. The
   graph represents real and integer values, not complex values.
 - **Tuple results:** tuple-valued results are refused by policy. The graph
@@ -137,13 +140,9 @@ The headline ratios hide several important gaps:
 
 ### GLM argument-shape gaps
 
-Three GLMs share two argument-shape restrictions:
-
-- `bernoulli_logit_glm_lpmf`, `poisson_log_glm_lpmf`, and
-  `neg_binomial_2_log_glm_lpmf` accept a scalar intercept `alpha`, but not a
-  per-row vector intercept.
-- The same three functions require one outcome per row of the design matrix.
-  They refuse Stan Math's scalar-outcome broadcast.
+`bernoulli_logit_glm_lpmf`, `poisson_log_glm_lpmf`, and
+`neg_binomial_2_log_glm_lpmf` require one outcome per row of the design
+matrix. They refuse Stan Math's scalar-outcome broadcast.
 
 Copying a scalar outcome into an array is not always equivalent. For four rows
 with `y = 3`, the normalized scalar and replicated-array forms of

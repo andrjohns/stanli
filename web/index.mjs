@@ -167,6 +167,14 @@ function pathfinderInitOptions(value) {
  *   lp__, accept_stat__, stepsize__, treedepth__, n_leapfrog__,
  *   divergent__, energy__. Other methods return null for samplerStats.
  */
+// JSON.stringify writes null for a non-finite number, which Stan's data
+// reader rejects. It takes these quoted tokens.
+function stanNumber(key, value) {
+  if (typeof value !== "number" || Number.isFinite(value)) return value;
+  if (Number.isNaN(value)) return "NaN";
+  return value > 0 ? "Infinity" : "-Infinity";
+}
+
 export function sample(opts) {
   const sampler = opts.sampler === "walnuts" || opts.sampler === "pathfinder"
       ? opts.sampler : "nuts";
@@ -180,7 +188,7 @@ export function sample(opts) {
     live: !!opts.onLive,
     dataJson: typeof opts.data === "string"
         ? opts.data
-        : JSON.stringify(opts.data || {}),
+        : JSON.stringify(opts.data || {}, stanNumber),
     seed: opts.seed == null ? 1 : opts.seed,
     warmup: opts.warmup == null ? 1000 : opts.warmup,
     samples: opts.samples == null ? 1000 : opts.samples,

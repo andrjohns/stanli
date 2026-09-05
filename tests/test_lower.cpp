@@ -3167,6 +3167,41 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // The Matern and exponential covariances over array[N] vector[D]
+  // coordinates, with active coordinates, scale and length scale.
+  {
+    CompiledModel lm =
+        compile_model(slurp("tests/fixtures/gpmatern.tmir.sexp"), DataMap());
+    check(lm.n_unconstrained == 8, "gpmatern 8 unconstrained");
+    Executor lex(std::move(lm.graph));
+    lm.bind(lex);
+    const double q[8] = {0.3, -0.7, 1.1, -0.2, 0.4, 0.9, -0.15, 0.25};
+    for (int k = 0; k < 8; ++k) lex.params_data()[k] = q[k];
+    double grad[8];
+    const double lp = lex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> qv(8);
+    for (int k = 0; k < 8; ++k) qv(k) = q[k];
+    var jac = 0.0;
+    std::vector<Eigen::Matrix<var, -1, 1>> pts(3, Eigen::Matrix<var, -1, 1>(2));
+    for (int n = 0; n < 3; ++n)
+      for (int d = 0; d < 2; ++d) pts[n](d) = qv(n * 2 + d);
+    var alpha = stan::math::lb_constrain<true>(qv(6), 0.0, jac);
+    var rho = stan::math::lb_constrain<true>(qv(7), 0.0, jac);
+    Eigen::Matrix<var, -1, -1> a = stan::math::gp_matern32_cov(pts, alpha, rho);
+    Eigen::Matrix<var, -1, -1> b = stan::math::gp_matern52_cov(pts, alpha, rho);
+    Eigen::Matrix<var, -1, -1> c =
+        stan::math::gp_exponential_cov(pts, alpha, rho);
+    var acc = stan::math::sum(a) + 2 * stan::math::sum(b) +
+              3 * stan::math::sum(c) + a(0, 1) * b(1, 2) * c(0, 2) + jac;
+    acc.grad();
+    expect_ulp("gpmatern lp", lp, acc.val());
+    for (int k = 0; k < 8; ++k)
+      expect_ulp("gpmatern g" + std::to_string(k), grad[k], qv(k).adj());
+    stan::math::recover_memory();
+  }
+
   // is_inf / is_nan on data-time scalars and the nullary math constants
   // (negative_infinity / positive_infinity / not_a_number, which stanc
   // will not fold) all reduce to integer constants: the finite reads give
@@ -3584,6 +3619,30 @@ int main() {
     expect_eq("densityvecgrad lp", lp, acc.val());
     expect_eq("densityvecgrad g0", grad[0], a.adj());
     stan::math::recover_memory();
+  }
+
+  // A threshold count taken with num_elements of an expression, the shape
+  // brms's category-specific ordinal families write, against the same model
+  // with the expression bound to a local first.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/csthres.json"));
+    CompiledModel expression =
+        compile_model(slurp("tests/fixtures/csthres.tmir.sexp"), d);
+    CompiledModel bound =
+        compile_model(slurp("tests/fixtures/csthresbound.tmir.sexp"), d);
+    check(expression.n_unconstrained == 12, "csthres 12 unconstrained");
+    check(bound.n_unconstrained == 12, "csthresbound 12 unconstrained");
+    Executor ex(std::move(expression.graph)), bx(std::move(bound.graph));
+    expression.bind(ex);
+    bound.bind(bx);
+    double point[12];
+    for (int i = 0; i < 12; ++i) point[i] = 0.3 * i - 1.1;
+    std::copy(point, point + 12, ex.params_data());
+    std::copy(point, point + 12, bx.params_data());
+    double ga[12], gb[12];
+    expect_eq("csthres lp", ex.gradient(ga), bx.gradient(gb));
+    for (int i = 0; i < 12; ++i)
+      expect_eq("csthres g" + std::to_string(i), ga[i], gb[i]);
   }
 
   // multiply_lower_tri_self_transpose on a matrix parameter whose upper
@@ -6174,6 +6233,71 @@ int main() {
       const double tol = 8 * 2.220446049250313e-16 * std::abs(acc.val());
       check(std::abs(lp - acc.val()) <= tol, "mnarr: lp matches the var path");
     }
+  }
+
+  // An array-valued location, which set_rescor(TRUE) multivariate brms
+  // models emit, and the same location broadcast against a single random
+  // variable.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_int("K", 2);
+    d.set_real_array("y", {1, 3, 5, 2, 4, 6}, {3, 2});
+    d.set_real_array("y1", {0.5, -1.0}, {2});
+    d.set_real_array("L", {1.2, 0.4, 0.0, 0.9}, {2, 2});
+    CompiledModel am =
+        compile_model(slurp("tests/fixtures/mnarrmu.tmir.sexp"), d);
+    check(am.n_unconstrained == 7, "mnarrmu 7 unconstrained");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    const double q[7] = {0.4, -0.7, -0.3, 0.9, 0.15, -0.55, 0.2};
+    for (int k = 0; k < 7; ++k) aex.params_data()[k] = q[k];
+    double grad[7];
+    const double lp = aex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> qv(7);
+    for (int k = 0; k < 7; ++k) qv(k) = q[k];
+    var jac = 0.0;
+    std::vector<Eigen::Matrix<var, -1, 1>> mus(3, Eigen::Matrix<var, -1, 1>(2));
+    for (int n = 0; n < 3; ++n)
+      for (int i = 0; i < 2; ++i) mus[(size_t)n](i) = qv(n * 2 + i);
+    var s = stan::math::lb_constrain<true>(qv(6), 0.0, jac);
+    Eigen::MatrixXd Ld(2, 2);
+    Ld << 1.2, 0.0, 0.4, 0.9;
+    Eigen::Matrix<var, -1, -1> Ls = s * Ld;
+    std::vector<Eigen::VectorXd> ys(3, Eigen::VectorXd(2));
+    ys[0] << 1, 2;
+    ys[1] << 3, 4;
+    ys[2] << 5, 6;
+    Eigen::VectorXd y1(2);
+    y1 << 0.5, -1.0;
+    var acc = stan::math::multi_normal_cholesky_lpdf<false>(ys, mus, Ls) +
+              stan::math::multi_normal_cholesky_lpdf<false>(y1, mus, Ls) + jac;
+    acc.grad();
+    expect_ulp("mnarrmu lp", lp, acc.val());
+    for (int k = 0; k < 7; ++k)
+      expect_ulp("mnarrmu g" + std::to_string(k), grad[k], qv(k).adj());
+    stan::math::recover_memory();
+  }
+
+  // multi_student_t shares the shape derivation but not the kernel, whose
+  // location is one vector.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_int("K", 2);
+    d.set_real_array("y", {1, 3, 5, 2, 4, 6}, {3, 2});
+    d.set_real_array("S", {2.0, 0.5, 0.5, 1.0}, {2, 2});
+    std::string msg;
+    try {
+      compile_model(slurp("tests/fixtures/mstarrmu.tmir.sexp"), d);
+    } catch (const CompileError& e) {
+      msg = e.what();
+    }
+    check(msg.find("multi_student_t_lpdf") != std::string::npos &&
+              msg.find("array-valued location") != std::string::npos,
+          "multi_student_t refuses an array-valued location");
   }
 
   // `p ~ dirichlet(a)` over an array of simplexes. See

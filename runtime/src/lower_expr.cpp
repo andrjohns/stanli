@@ -1243,7 +1243,10 @@ Lowering::StaticProbe<Lowering::StaticSelector> Lowering::try_static_selector(
     return {StaticProbeState::Known, {extent, false}, {}};
   if (index.name == "IndexSingle" && index.args.size() == 1) {
     const auto at = try_static_int(index.args[0]);
-    if (at.state != StaticProbeState::Known) return {at.state, {}, at.error};
+    if (at.state == StaticProbeState::Invalid) return {at.state, {}, at.error};
+    // A single index drops its dimension whichever element it selects.
+    if (at.state != StaticProbeState::Known)
+      return {StaticProbeState::Known, {1, true}, {}};
     if (at.value < 1 || at.value > extent)
       return {
           StaticProbeState::Invalid, {}, "static matrix index out of bounds"};
@@ -1289,11 +1292,19 @@ Lowering::StaticProbe<Lowering::StaticSelector> Lowering::try_static_selector(
   }
   return {};
 }
+// The shape of whichever operand carries one, like the binaries.
+Lowering::StaticProbe<Lowering::StaticView> Lowering::try_static_broadcast_view(
+    const mir::Expr& e) {
+  for (const mir::Expr& arg : e.args) {
+    if (arg.type_ != e.type_) continue;
+    const auto view = try_static_view(arg);
+    if (view.state == StaticProbeState::Known) return view;
+  }
+  return {};
+}
 // Logical geometry only: this probe must never materialize a data value or
-// emit a graph op.  The first tranche deliberately handles the expression
-// forms responsible for the ctsem false island -- named values and matrix
-// subviews selected by compile-time integer data.  Everything else declines
-// to the existing runtime-control path.
+// emit a graph op.  Everything it does not recognize declines to the
+// existing runtime-control path.
 Lowering::StaticProbe<Lowering::StaticView> Lowering::try_static_view(
     const mir::Expr& e) {
   if (e.kind == mir::Expr::Var) {
@@ -1308,6 +1319,29 @@ Lowering::StaticProbe<Lowering::StaticView> Lowering::try_static_view(
               {declaration->second.len, declaration->second.si},
               {}};
     return {};
+  }
+  if (e.kind == mir::Expr::Promotion && e.args.size() == 1)
+    return try_static_view(e.args[0]);
+  if (e.kind == mir::Expr::FunApp) {
+    if (e.name == "transpose" && e.args.size() == 1) {
+      auto base = try_static_view(e.args[0]);
+      if (base.state != StaticProbeState::Known) return base;
+      std::swap(base.value.si.rows, base.value.si.cols);
+      if (is_vector(base.value.si))
+        base.value.si.kind = ViewKind::RowVector;
+      else if (is_row_vector(base.value.si))
+        base.value.si.kind = ViewKind::Vector;
+      return base;
+    }
+    const auto regular = resolve_regular_builtin(e.name, e.args.size());
+    if (regular && regular->kind == RegularKind::Unary)
+      return try_static_view(e.args[0]);
+    const bool scalar_factor =
+        e.args.size() == 2 &&
+        (is_scalar_type(e.args[0].type_) || is_scalar_type(e.args[1].type_));
+    if (regular || (e.name == "fma" && e.args.size() == 3) ||
+        ((e.name == "Times__" || e.name == "multiply") && scalar_factor))
+      return try_static_broadcast_view(e);
   }
   if (e.kind != mir::Expr::Indexed || e.args.size() < 2 || e.args.size() > 3)
     return {};

@@ -24,8 +24,10 @@ import unittest.mock
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
-from verify_refs import (POINTS, QUARANTINED, SCHEMA,  # noqa: E402
-                         check_model, load_refs, parse_status, probe_point)
+from verify_refs import (ILL_CONDITIONED, KNOWN_GAPS,  # noqa: E402
+                         LOCAL_CORPORA, POINTS, QUARANTINED, SCHEMA,
+                         check_model, load_refs, model_files, parse_status,
+                         probe_point)
 from cmdstan_ref import _result_line  # noqa: E402
 import verify_sample  # noqa: E402
 from verify_sample import evaluate, record_wa, write_refs  # noqa: E402
@@ -210,6 +212,50 @@ class CheckModelPointsTest(unittest.TestCase):
         self.assertEqual(status, "OK")
         self.assertIn(f"QUARANTINE {MODEL} point 1: test", notes)
 
+    def test_an_ill_conditioned_model_is_gated_at_the_mismatch_floor(self):
+        # Which of these models' points come out clean is a property of
+        # the machine that recorded them, so a clean point in one of them
+        # gets the floor too, and the run says the floor carried it.
+        body = ('if [ "$point" = 2 ]; then echo "OK -3.5 1 -2.00001"; '
+                'else echo "OK -3.5 1 -2"; fi')
+        self.assertEqual(self.run_check(body)[1], "GATE")
+        with unittest.mock.patch.dict(ILL_CONDITIONED, {MODEL: "test"}):
+            _, status, _, _, _, _, notes = self.run_check(body)
+        self.assertEqual(status, "OK")
+        self.assertIn(f"ILL-CONDITIONED {MODEL} point 2: test", " ".join(notes))
+
+    def test_a_known_gap_may_refuse_the_model(self):
+        with unittest.mock.patch.dict(KNOWN_GAPS, {MODEL: "test gap"}):
+            _, status, _, _, _, _, notes = self.run_check(
+                'echo "COMPILE_FAIL unsupported function"')
+        self.assertEqual(status, "OK")
+        self.assertIn(f"KNOWN GAP {MODEL}: test gap", notes)
+
+    def test_a_known_gap_that_passes_is_reported(self):
+        with unittest.mock.patch.dict(KNOWN_GAPS, {MODEL: "test gap"}):
+            _, status, _, _, _, detail, _ = self.run_check(
+                'echo "OK -3.5 1 -2"')
+        self.assertEqual(status, "GAP_CLOSED")
+        self.assertIn(MODEL, detail)
+
+    def test_a_known_gap_still_may_not_crash(self):
+        with unittest.mock.patch.dict(KNOWN_GAPS, {MODEL: "test gap"}):
+            _, status, _, _, _, detail, _ = self.run_check('kill -SEGV $$')
+        self.assertEqual(status, "CRASH")
+        self.assertIn("signal 11", detail)
+
+
+class LocalCorpusTest(unittest.TestCase):
+    """Models carried in the tree, resolved by name before posteriordb."""
+
+    def test_every_local_model_is_found_where_it_lives(self):
+        for directory in LOCAL_CORPORA:
+            for stan in sorted(directory.glob("*.stan")):
+                found, data = model_files(stan.stem, {}, REPO / "nonexistent",
+                                          REPO / "nonexistent")
+                self.assertEqual(found, stan)
+                self.assertEqual(data, stan.with_suffix(".json"))
+
 
 class RecorderEvaluateTest(unittest.TestCase):
     """The recorder extracts both engines' statuses from full stdout."""
@@ -253,6 +299,14 @@ class SchemaTest(unittest.TestCase):
         for model, ref in models.items():
             self.assertEqual(sorted(ref["points"]),
                              sorted(str(p) for p in POINTS), model)
+
+    def test_every_local_model_carries_a_reference(self):
+        # The replay iterates the reference file, so a model that failed to
+        # record is not a failure anywhere: it is simply never run.
+        models = load_refs()[0]
+        for directory in LOCAL_CORPORA:
+            for stan in sorted(directory.glob("*.stan")):
+                self.assertIn(stan.stem, models)
 
     def test_an_older_schema_is_refused_not_half_read(self):
         # Reading schema 1's one-point entries as if they were this format

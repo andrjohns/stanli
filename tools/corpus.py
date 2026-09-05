@@ -17,8 +17,8 @@ import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
-from verify_refs import (REFS_PATH, default_check_bin, load_refs,  # noqa: E402
-                         parse_status)
+from verify_refs import (LOCAL_CORPORA, REFS_PATH,  # noqa: E402
+                         default_check_bin, load_refs, parse_status)
 
 CHECK = default_check_bin()
 
@@ -109,12 +109,13 @@ def main():
             reasons[key] += 1
 
     ver = load_verification()
-    # tests/stanc3 models go through the same oracle but are a separate
-    # corpus: language constructs no real posterior happens to use. This
-    # doc reports the posteriordb sweep, so drop them before anything is
-    # counted or tabulated (tools/gen_docs.py splits them the same way).
+    # The models carried in the tree go through the same oracle but are
+    # separate corpora: language constructs no real posterior happens to
+    # use, and brms output. This doc reports the posteriordb sweep, so
+    # drop them before anything is counted or tabulated
+    # (tools/gen_docs.py splits them the same way).
     ver = {m: v for m, v in ver.items()
-           if not (REPO / "tests" / "stanc3" / f"{m}.stan").exists()}
+           if not any((d / f"{m}.stan").exists() for d in LOCAL_CORPORA)}
     ok = sorted(m for m, (s, _) in results.items() if s == "OK")
     verified = [m for m in ok
                 if ver.get(m, {}).get("status") == "VERIFIED"]

@@ -27,6 +27,7 @@ harnesses/conformance/generated/
 tests/fixtures/*.hpp
 tests/fixtures/*.tmir.sexp
 tests/stanc3/*.hpp
+tests/brms/*.hpp
 build-wasm/
 web/stanli.js
 web/stanli.wasm

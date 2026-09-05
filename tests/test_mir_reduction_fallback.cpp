@@ -321,7 +321,7 @@ int main() {
         [](auto& a) { return kernel(a, 3, OP_FMA, 0, {}, {}, a[0].r.size()); });
   check("gp_exp_quad_cov", {real(xs), real({1.3}), real({0.9})}, [](auto& a) {
     const int64_t n = (int64_t)a[0].r.size();
-    return kernel(a, 3, OP_GP_EXP_QUAD_COV, 0, {(int)n, 1}, {n, n},
+    return kernel(a, 3, OP_GP_COV, kGpExpQuad, {(int)n, 1}, {n, n},
                   (size_t)(n * n));
   });
 

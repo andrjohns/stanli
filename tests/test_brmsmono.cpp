@@ -9,12 +9,11 @@
 // real arithmetic, which reached "unsupported function rows" instead, so
 // every model with an `mo()` term failed to compile.
 //
-// harnesses/brms_sweep.py verifies this shape against CmdStan (bitwise);
-// this is the CI guard, and it checks the thing a compile alone does not:
-// that the constant folded in is the RIGHT one. rows(simo_1) is the
-// simplex length, so the gradient of the monotonic term scales with it,
-// and folding the wrong dimension would still compile and still produce
-// a finite gradient.
+// This is the CI guard for the shape, and it checks the thing a compile
+// alone does not: that the constant folded in is the RIGHT one.
+// rows(simo_1) is the simplex length, so the gradient of the monotonic
+// term scales with it, and folding the wrong dimension would still
+// compile and still produce a finite gradient.
 #include <stanli/compile.hpp>
 #include <stanli/island.hpp>
 #include <stanli/optable.hpp>

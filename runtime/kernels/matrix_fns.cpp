@@ -64,9 +64,10 @@ void nary_bwd(KernelCtx& ctx, F&& f) {
   }
 }
 
-// ---- gp_exp_quad_cov(x, alpha, rho) ---------------------------------------
+// ---- gp_*_cov(x, alpha, rho) ----------------------------------------------
 // in = {x (data, N*D), alpha, rho}; idata = {N, D}; out = N*N column-major.
 // x as array[N] real is D == 1; array[N] vector[D] flattens array-major.
+// The variant selects the covariance function.
 std::vector<VecD> gp_points(const KernelCtx& ctx) {
   const int64_t N = ctx.idata[0], D = ctx.idata[1];
   std::vector<VecD> pts(N, VecD(D));
@@ -74,11 +75,24 @@ std::vector<VecD> gp_points(const KernelCtx& ctx) {
     for (int64_t d = 0; d < D; ++d) pts[n](d) = ctx.in[0].data[n * D + d];
   return pts;
 }
+template <typename P, typename S>
+auto gp_cov_call(uint8_t variant, const P& pts, const S& sigma,
+                 const S& length_scale) {
+  switch (variant) {
+    case kGpMatern32:
+      return stan::math::gp_matern32_cov(pts, sigma, length_scale);
+    case kGpMatern52:
+      return stan::math::gp_matern52_cov(pts, sigma, length_scale);
+    case kGpExponential:
+      return stan::math::gp_exponential_cov(pts, sigma, length_scale);
+    default:
+      return stan::math::gp_exp_quad_cov(pts, sigma, length_scale);
+  }
+}
 void gp_cov_fwd(KernelCtx& ctx) {
   const int64_t N = ctx.idata[0];
   auto pts = gp_points(ctx);
-  MatD c =
-      stan::math::gp_exp_quad_cov(pts, ctx.in[1].data[0], ctx.in[2].data[0]);
+  MatD c = gp_cov_call(ctx.variant, pts, ctx.in[1].data[0], ctx.in[2].data[0]);
   MapM(ctx.out.data, N, N) = c;
 }
 void gp_cov_bwd(KernelCtx& ctx) {
@@ -86,11 +100,12 @@ void gp_cov_bwd(KernelCtx& ctx) {
   // adjoints flow back too. nary_bwd copies back whatever input carries an
   // adjoint slot, so a data x simply contributes nothing here.
   const int64_t N = ctx.idata[0], D = ctx.idata[1];
+  const uint8_t variant = ctx.variant;
   nary_bwd(ctx, [&](std::vector<VarV>& xs) {
     std::vector<VarV> pts(N, VarV(D));
     for (int64_t n = 0; n < N; ++n)
       for (int64_t d = 0; d < D; ++d) pts[n](d) = xs[0](n * D + d);
-    return stan::math::gp_exp_quad_cov(pts, xs[1](0), xs[2](0));
+    return gp_cov_call(variant, pts, xs[1](0), xs[2](0));
   });
 }
 
@@ -361,6 +376,17 @@ VarV tail_v(const KernelCtx& ctx, int k, int64_t n) {
   for (int64_t i = 0; i < n; ++i) v(i) = ctx.in[k].data[i];
   return v;
 }
+// A length-1 slot enters stan-math as a scalar rather than a
+// one-element vector: the sequence views broadcast a scalar but require
+// vectors to match sizes. That is the same rule bind_args_m follows in
+// densities_impl.hpp, and getting it wrong is not a size error -- it is
+// every observation evaluated with element 0's parameters, which is what
+// the sweep caught in the old scalar-only wiener tail.
+using TailArg = std::variant<stan::math::var, VarV>;
+TailArg tail_arg(const KernelCtx& ctx, int k) {
+  if (ctx.in[k].len == 1) return stan::math::var(ctx.in[k].data[0]);
+  return tail_v(ctx, k, ctx.in[k].len);
+}
 void tail_scatter(KernelCtx& ctx, int k, const VarM& M) {
   if (!ctx.in_adj[k].data) return;
   const int64_t rows = M.rows(), cols = M.cols();
@@ -469,6 +495,7 @@ template <bool Grad, MnKind Kind = kMnCov>
 double mn_eval(KernelCtx& ctx) {
   const int64_t n = ctx.idata[0];
   const int64_t m = ctx.n_idata > 1 ? ctx.idata[1] : 1;
+  const int64_t l = ctx.n_idata > 2 ? ctx.idata[2] : 1;
   const bool propto = (ctx.variant & 0x80u) != 0;
   const unsigned mask = ctx.variant == 0 ? 0x7u : (ctx.variant & 0x3fu);
   stan::math::nested_rev_autodiff nested;
@@ -484,6 +511,19 @@ double mn_eval(KernelCtx& ctx) {
   VarV y = ys[0], mu(n);
   VarM S(n, n);
   for (int64_t i = 0; i < n; ++i) mu(i) = ctx.in[1].data[i];
+  // l > 1: the location is an array of l K-vectors, paired elementwise with
+  // the random variables or broadcast against a single one.
+  std::vector<VarV> mus;
+  std::vector<VecD> musd;
+  if (l > 1) {
+    mus.assign(l, VarV(n));
+    musd.assign(l, VecD(n));
+    for (int64_t k = 0; k < l; ++k)
+      for (int64_t i = 0; i < n; ++i) {
+        mus[k](i) = ctx.in[1].data[k * n + i];
+        musd[k](i) = ctx.in[1].data[k * n + i];
+      }
+  }
   for (int64_t j = 0; j < n; ++j)
     for (int64_t i = 0; i < n; ++i) S(i, j) = ctx.in[2].data[j * n + i];
   CMapV yd(ctx.in[0].data, n), mud(ctx.in[1].data, n);
@@ -503,17 +543,21 @@ double mn_eval(KernelCtx& ctx) {
   };
   var out;
   const bool ay = mask & 1u, am = mask & 2u, aS = mask & 4u;
-  if (m > 1) {
+  if (m > 1 || l > 1) {
     // Vectorized form: y is an array of m K-vectors and may itself be a
     // parameter expression (array[S] vector[K] built from parameters), so
     // it binds var-or-double per the activity mask like the others.
-    var v_out;
-    if (ay)
-      v_out = aS ? (am ? call(ys, mu, S) : call(ys, mud, S))
-                 : (am ? call(ys, mu, Sd) : call(ys, mud, Sd));
-    else
-      v_out = aS ? (am ? call(ysd, mu, S) : call(ysd, mud, S))
-                 : (am ? call(ysd, mu, Sd) : call(ysd, mud, Sd));
+    auto with_mu = [&](auto&& yy) {
+      if (l > 1)
+        return aS ? (am ? call(yy, mus, S) : call(yy, musd, S))
+                  : (am ? call(yy, mus, Sd) : call(yy, musd, Sd));
+      return aS ? (am ? call(yy, mu, S) : call(yy, mud, S))
+                : (am ? call(yy, mu, Sd) : call(yy, mud, Sd));
+    };
+    // stan-math broadcasts a single vector against an array, but not a
+    // one-element array.
+    const var v_out = m > 1 ? (ay ? with_mu(ys) : with_mu(ysd))
+                            : (ay ? with_mu(y) : with_mu(yd));
     if constexpr (Kind == kMnPrec) {
       const double vv = v_out.val();
       if constexpr (Grad) {
@@ -524,11 +568,19 @@ double mn_eval(KernelCtx& ctx) {
           for (int64_t k = 0; k < m; ++k)
             for (int64_t i = 0; i < n; ++i)
               ctx.in_adj[0].data[k * n + i] += ys[k](i).adj();
-        if (am) tail_scatter(ctx, 1, mu);
+        if (am) {
+          if (l > 1)
+            tail_scatter(ctx, 1, mus);
+          else
+            tail_scatter(ctx, 1, mu);
+        }
         if (aS) tail_scatter(ctx, 2, S);
       }
       return vv;
     } else {
+      if (l > 1)
+        return m > 1 ? tail_density_fwd(ctx, v_out, ys, mus, S)
+                     : tail_density_fwd(ctx, v_out, y, mus, S);
       return tail_density_fwd(ctx, v_out, ys, mu, S);
     }
   }
@@ -1369,13 +1421,17 @@ double tglm_eval(KernelCtx& ctx) {
     // idata = [n..., N..., rows, cols]
     std::vector<int> nn(ctx.idata, ctx.idata + rows);
     std::vector<int> NN(ctx.idata + rows, ctx.idata + 2 * rows);
-    var alpha = ctx.in[1].data[0];
+    const TailArg alpha = tail_arg(ctx, 1);
     VarV beta = tail_v(ctx, 2, cols);
-    out = propto ? stan::math::binomial_logit_glm_lpmf<true>(nn, NN, X, alpha,
-                                                             beta)
-                 : stan::math::binomial_logit_glm_lpmf<false>(nn, NN, X, alpha,
-                                                              beta);
-    return tail_density_fwd(ctx, out, X, alpha, beta);
+    return std::visit(
+        [&](const auto& a) {
+          out = propto ? stan::math::binomial_logit_glm_lpmf<true>(nn, NN, X, a,
+                                                                   beta)
+                       : stan::math::binomial_logit_glm_lpmf<false>(nn, NN, X,
+                                                                    a, beta);
+          return tail_density_fwd(ctx, out, X, a, beta);
+        },
+        alpha);
   } else {
     std::vector<int> y(ctx.idata, ctx.idata + rows);
     if constexpr (Kind == kCatLogitGlm) {
@@ -1417,18 +1473,6 @@ void olglm_fwd(KernelCtx& ctx) {
 // scalar type, and neg_binomial_2_lcdf forms `phi / (phi + mu)`. Neither
 // builds its result through stan-math's partials propagator, so neither
 // can be handed an rvar. See STANLI_TAIL_CDF_LIST in optable.hpp.
-//
-// A length-1 slot enters stan-math as a scalar rather than a
-// one-element vector: the sequence views broadcast a scalar but require
-// vectors to match sizes. That is the same rule bind_args_m follows in
-// densities_impl.hpp, and getting it wrong is not a size error -- it is
-// every observation evaluated with element 0's parameters, which is what
-// the sweep caught in the old scalar-only wiener tail.
-using TailArg = std::variant<stan::math::var, VarV>;
-TailArg tail_arg(const KernelCtx& ctx, int k) {
-  if (ctx.in[k].len == 1) return stan::math::var(ctx.in[k].data[0]);
-  return tail_v(ctx, k, ctx.in[k].len);
-}
 
 // finish_tail_density's shape, over arguments that are variants: one
 // visit picks the scalar-or-vector instantiation, a second scatters each
@@ -1487,7 +1531,7 @@ STANLI_TAIL_INT_CDF_LIST(STANLI_TAIL_INT_CDF_KERNEL)
 }  // namespace
 
 void register_matrix_kernels() {
-  register_kernel(OP_GP_EXP_QUAD_COV, Kernel{gp_cov_fwd, gp_cov_bwd, nullptr});
+  register_kernel(OP_GP_COV, Kernel{gp_cov_fwd, gp_cov_bwd, nullptr});
   register_kernel(OP_WISHART_LPDF, Kernel{wish_fwd, wish_bwd, nullptr});
   register_kernel(OP_INV_WISHART_LPDF, Kernel{iwish_fwd, iwish_bwd, nullptr});
   register_kernel(OP_WISHART_CHOL_LPDF, Kernel{wishc_fwd, wishc_bwd, nullptr});

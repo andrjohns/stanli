@@ -41,11 +41,13 @@ import tempfile
 import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-# Models from stanc3's own test suite, with data generated for them; see
-# tests/stanc3/README.md. They cover language and type constructs no real
-# posterior happens to use, so they live beside the corpus rather than in
-# it, and a reference is keyed on the file name either way.
-LANG = REPO / "tests" / "stanc3"
+# Corpora carried in the tree, each a directory of model.stan next to
+# model.json: language and type constructs lifted from stanc3's own test
+# suite (tests/stanc3/README.md), and brms output for the families and
+# effect structures posteriordb does not contain (tests/brms/README.md).
+# They go through the same oracle as posteriordb, and a reference is keyed
+# on the file name either way.
+LOCAL_CORPORA = (REPO / "tests" / "stanc3", REPO / "tests" / "brms")
 N_SAMPLER_COLS = 7
 REFS_PATH = REPO / "docs" / "corpus-refs.json.gz"
 # The reference file's format. Bumping this is a hard break on purpose:
@@ -88,6 +90,18 @@ QUARANTINED = {
     # test covers the mechanism with a patched entry.
 }
 
+# Models stanli does not run at all, mapped to what stops them. The
+# references are recorded from CmdStan the same way every other model's
+# are, so the only thing an entry suppresses is the failure; when the gap
+# closes, the model matches its references, the replay reports GAP_CLOSED,
+# and the run stays red until the entry is deleted. A crash is never
+# excused: a segfault and a refusal are different bugs.
+KNOWN_GAPS = {
+    # No entries. Every model in the corpus runs and matches CmdStan. The
+    # dict stays so the next refusal has a reviewed home, and the unit
+    # test covers the mechanism with a patched entry.
+}
+
 # (model, point) pairs excused from probe_point's finite-gradient rule,
 # for points that carry no reference at all. Empty while every point is
 # referenced -- pair_dev already counts NaN against NaN as agreement, so
@@ -96,6 +110,25 @@ QUARANTINED = {
 # point makes its covariance degenerate outright) needs no entry: its
 # reference records those nonfinite values and stanli reproduces them.
 NONFINITE_GRAD_OK = {}
+
+# Models held at every point to the floor gate_for gives a MISMATCH
+# point, because the instruction set moves their values rather than
+# stanli. Both entries factor an exponentiated-quadratic covariance that
+# brms holds up with a 1e-12 jitter on the diagonal, and the smallest
+# Cholesky pivot at the evaluation points is 3.7e-12 for i320_gp_expquad
+# and 1.1e-12 for sw_gp against a diagonal of 1, so the factorization is
+# singular to machine precision. Moving the GP covariates by one ulp on
+# arm64 moves the latent-GP gradients at point 2 by 1.9e-7 and 4.7e-8
+# relative, the same scale the x86_64 runner measured against references
+# recorded on arm64: 1.03e-7 and 6.38e-9 at point 2, which arm64 recorded
+# clean (CI run 33938697559). Points 0 and 1 of both models are recorded
+# MISMATCH and were already held to that floor.
+ILL_CONDITIONED = {
+    "i320_gp_expquad": "cholesky_decompose of a jittered exp-quad "
+                       "covariance whose smallest pivot is 3.7e-12",
+    "sw_gp": "cholesky_decompose of a jittered exp-quad covariance whose "
+             "smallest pivot is 1.1e-12",
+}
 
 
 def load_refs(path=REFS_PATH):
@@ -142,12 +175,13 @@ def model_files(model, ref, pdb, tmp):
     """(stan, data) for a reference entry, from whichever corpus has it.
 
     posteriordb data is a zip per dataset and several models share one, so
-    it is unpacked into tmp; the language models carry their data next to
-    them and need no unpacking.
+    it is unpacked into tmp; the models carried in the tree have their data
+    next to them and need no unpacking.
     """
-    local = LANG / f"{model}.stan"
-    if local.exists():
-        return local, LANG / f"{model}.json"
+    for directory in LOCAL_CORPORA:
+        local = directory / f"{model}.stan"
+        if local.exists():
+            return local, directory / f"{model}.json"
     stan = pdb / "models" / "stan" / f"{model}.stan"
     dz = pdb / "data" / "data" / f"{ref['data']}.json.zip"
     if not stan.exists() or not dz.exists():
@@ -496,6 +530,24 @@ def check_point(model, stan, dj, check_bin, point, pt, timeout, no_wa,
 
 def check_model(model, ref, pdb, check_bin, tmp, timeout, max_rel,
                 no_wa=False, no_lp=False):
+    """Replay one model, under whatever KNOWN_GAPS says about it."""
+    result = replay_model(model, ref, pdb, check_bin, tmp, timeout, max_rel,
+                          no_wa, no_lp)
+    if model not in KNOWN_GAPS:
+        return result
+    _, status, rel, ulp, total, _, notes = result
+    notes.append(f"KNOWN GAP {model}: {KNOWN_GAPS[model]}")
+    if status == "CRASH":
+        return result
+    if status == "OK":
+        return (model, "GAP_CLOSED", rel, ulp, total,
+                f"{model} matches its references now "
+                f"({KNOWN_GAPS[model]}); delete it from KNOWN_GAPS", notes)
+    return (model, "OK", 0.0, 0, total, "", notes)
+
+
+def replay_model(model, ref, pdb, check_bin, tmp, timeout, max_rel,
+                 no_wa=False, no_lp=False):
     """Replay every point of one model.
 
     Returns (model, status, max_rel, max_ulp, n_values, detail, notes).
@@ -542,12 +594,15 @@ def check_model(model, ref, pdb, check_bin, tmp, timeout, max_rel,
         total += n
         if status != "OK":
             return (model, status, worst, worst_ulp, total, detail, notes)
-        gate = gate_for(pt, max_rel)
+        gate = gate_for(model, pt, max_rel)
         if rel >= gate:
             return (model, "GATE", rel, ulp, total,
                     f"point {point}: {rel:.2e} ({ulp} ulp) over {n} "
                     f"values, allowed {gate:.1e}", notes)
-        if pt.get("status") != "MISMATCH":
+        if model in ILL_CONDITIONED and rel >= max_rel:
+            notes.append(f"ILL-CONDITIONED {model} point {point}: "
+                         f"{ILL_CONDITIONED[model]} ({rel:.2e})")
+        if pt.get("status") != "MISMATCH" and model not in ILL_CONDITIONED:
             worst, worst_ulp = max(worst, rel), max(worst_ulp, ulp)
     return (model, "OK", worst, worst_ulp, total, "", notes)
 
@@ -629,7 +684,7 @@ def check_wa_coverage(pdb, check_bin, models, contains, timeout, excluded=()):
     return 0
 
 
-def gate_for(pt, default):
+def gate_for(model, pt, default):
     """The threshold this recorded point is held to.
 
     A point recorded as MISMATCH is one whose disagreement with CmdStan is
@@ -657,13 +712,17 @@ def gate_for(pt, default):
     x86_64 (CI run 32637919029) -- 7.8x where point 0 moved 2.4x -- so a
     pure multiplier under-gates precisely the smallest recorded
     deviations. The floor is 4x the worst cross-platform measurement over
-    the model's points, and it applies only to MISMATCH points; a clean
-    point keeps the clean gate. The gate is a tripwire for the regression
-    class this corpus has actually caught, which measured 1.7e+5
-    relative, six orders of magnitude above the floor.
+    the model's points, and a clean point keeps the clean gate unless its
+    model is in ILL_CONDITIONED, where the recording platform decides
+    which points come out clean and holding one of them to 1e-9 fails on
+    the others. The gate is a tripwire for the regression class this
+    corpus has actually caught, which measured 1.7e+5 relative, six
+    orders of magnitude above the floor.
     """
     rel = pt.get("max_rel")
-    if pt.get("status") == "MISMATCH" and rel is not None:
+    if rel is None:
+        return default
+    if model in ILL_CONDITIONED or pt.get("status") == "MISMATCH":
         return max(rel * 4.0, 4.0 * 8.2e-3, default)
     return default
 
