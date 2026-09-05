@@ -190,6 +190,29 @@ class CheckModelPointsTest(unittest.TestCase):
             'if [ "$point" = 1 ]; then echo "EVAL_FAIL out of range"; '
             'else echo "OK -3.5 1 -2"; fi', ref)[1], "OK")
 
+    def test_an_all_nan_row_is_the_other_spelling_of_a_rejection(self):
+        # stanli_check prints its values rather than refusing them, so a
+        # point it cannot evaluate comes back as OK with a row of nan.
+        # The recorder reads that row as a rejection (verify_sample's
+        # accepted) and records REJECTED_BOTH; the replay has to read it
+        # the same way.
+        ref = {"primary": 0, "points": dict(REF["points"],
+                                            **{"1": {"status":
+                                                     "REJECTED_BOTH"}})}
+        self.assertEqual(self.run_check(
+            'if [ "$point" = 1 ]; then echo "OK nan nan nan"; '
+            'else echo "OK -3.5 1 -2"; fi', ref)[1], "OK")
+
+    def test_a_partly_nan_row_is_not_a_rejection(self):
+        ref = {"primary": 0, "points": dict(REF["points"],
+                                            **{"1": {"status":
+                                                     "REJECTED_BOTH"}})}
+        _, status, _, _, _, detail, _ = self.run_check(
+            'if [ "$point" = 1 ]; then echo "OK nan 1 nan"; '
+            'else echo "OK -3.5 1 -2"; fi', ref)
+        self.assertEqual(status, "POINT_NOT_REJECTED")
+        self.assertIn("point 1", detail)
+
     def test_accepting_a_point_cmdstan_rejects_fails(self):
         ref = {"primary": 0, "points": dict(REF["points"],
                                             **{"1": {"status":

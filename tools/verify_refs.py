@@ -82,12 +82,12 @@ POINTS = (0, 1, 2)
 # CmdStan run that settled it: tools/ref_driver.cpp compiled for that
 # model and run at that point.
 QUARANTINED = {
-    # No entries. accel_gp's two (NaN gradients through spd_cov_exp_quad
-    # at points 1 and 2, CmdStan finite) lived here for the hours between
-    # the recording and the sqrt adjoint fix -- sqrtv_bwd at exactly
-    # zero -- landing; full three-point parity now bites everywhere. The
-    # dict stays so the next open bug has a reviewed home, and the unit
-    # test covers the mechanism with a patched entry.
+    ("s2_ar_cov", 1): "pow(x, n) reports a zero derivative at x == 0, so "
+                      "the ar gradient is 0 where CmdStan gives "
+                      "-4.1658099670210404",
+    ("s2_ar_cov", 2): "pow(x, n) reports a zero derivative at x == 0, so "
+                      "the ar gradient is 0 where CmdStan gives "
+                      "-4.1935902986959563",
 }
 
 # Models stanli does not run at all, mapped to what stops them. The
@@ -97,9 +97,11 @@ QUARANTINED = {
 # and the run stays red until the entry is deleted. A crash is never
 # excused: a segfault and a refusal are different bugs.
 KNOWN_GAPS = {
-    # No entries. Every model in the corpus runs and matches CmdStan. The
-    # dict stays so the next refusal has a reviewed home, and the unit
-    # test covers the mechanism with a patched entry.
+    "s2_com_poisson": "poisson_log_lpmf is not one of the densities a "
+                      "runtime-control region can hold, and the region "
+                      "behind it needs a runtime-length local",
+    "s2_logistic_normal": "choose in an int size expression",
+    "s2_unstr": "a runtime-length local inside a runtime-control region",
 }
 
 # (model, point) pairs excused from probe_point's finite-gradient rule,
@@ -113,19 +115,22 @@ NONFINITE_GRAD_OK = {}
 
 # Models held at every point to the floor gate_for gives a MISMATCH
 # point, because the instruction set moves their values rather than
-# stanli. Both entries factor an exponentiated-quadratic covariance that
+# stanli. Every entry factors an exponentiated-quadratic covariance that
 # brms holds up with a 1e-12 jitter on the diagonal, and the smallest
-# Cholesky pivot at the evaluation points is 3.7e-12 for i320_gp_expquad
-# and 1.1e-12 for sw_gp against a diagonal of 1, so the factorization is
-# singular to machine precision. Moving the GP covariates by one ulp on
-# arm64 moves the latent-GP gradients at point 2 by 1.9e-7 and 4.7e-8
-# relative, the same scale the x86_64 runner measured against references
-# recorded on arm64: 1.03e-7 and 6.38e-9 at point 2, which arm64 recorded
-# clean (CI run 33938697559). Points 0 and 1 of both models are recorded
-# MISMATCH and were already held to that floor.
+# Cholesky pivot at the evaluation points is 3.7e-12 for i320_gp_expquad,
+# 1.1e-12 for sw_gp and 1.8e-12 for s2_gp_by_gr against a diagonal of 1,
+# so the factorization is singular to machine precision. Moving the GP
+# covariates by one ulp on arm64 moves the latent-GP gradients at point 2
+# by 1.9e-7 and 4.7e-8 relative, the same scale the x86_64 runner
+# measured against references recorded on arm64: 1.03e-7 and 6.38e-9 at
+# point 2, which arm64 recorded clean (CI run 33938697559). Points 0 and
+# 1 of all three are recorded MISMATCH and were already held to that
+# floor.
 ILL_CONDITIONED = {
     "i320_gp_expquad": "cholesky_decompose of a jittered exp-quad "
                        "covariance whose smallest pivot is 3.7e-12",
+    "s2_gp_by_gr": "cholesky_decompose of five jittered exp-quad "
+                   "covariances whose smallest pivot is 1.8e-12",
     "sw_gp": "cholesky_decompose of a jittered exp-quad covariance whose "
              "smallest pivot is 1.1e-12",
 }
@@ -249,6 +254,25 @@ def parse_status(out):
         if fields and fields[0] in ("OK", "COMPILE_FAIL", "EVAL_FAIL"):
             return fields
     return []
+
+
+def accepted(fields):
+    """Did this engine accept the point, per its own way of saying no?
+
+    The two spell a rejection differently. stanli_check prints EVAL_FAIL
+    and no OK line when evaluation threw, and prints the values when it
+    did not, so a point it cannot evaluate also arrives as OK with a row
+    of nan. CmdStan's log_prob hands back that same row and only throws
+    later, out of write_array, so ref_driver prints OK first. A
+    unit_vector at the origin is one; s2_invgaussian is another, since
+    its inverse-square link takes inv_sqrt of a linear predictor that no
+    evaluation point keeps positive. Reading the all-nan row as a value
+    would record a reference no engine can be held to.
+    """
+    if not fields or fields[0] != "OK":
+        return False
+    values = [float(x) for x in fields[1:]]
+    return not (values and all(v != v for v in values))
 
 
 def corpus_models(pdb, wanted=(), contains="", excluded=()):
@@ -451,10 +475,11 @@ def check_point(model, stan, dj, check_bin, point, pt, timeout, no_wa,
     A point whose entry has no `values` is one CmdStan itself refuses (it
     threw, or answered with a row of nan, which is how a unit_vector at
     the origin reports itself). The reference records the refusal, and
-    stanli has to refuse it too: EVAL_FAIL, which stanli_check prints only
-    when evaluation threw. Accepting a point CmdStan rejects is a real
-    disagreement, not a free pass -- it is the same asymmetry as one
-    engine throwing, read from the other side.
+    stanli has to refuse it too, in either of the two spellings the
+    recorder reads as one: EVAL_FAIL, which stanli_check prints when
+    evaluation threw, or an OK line whose values are all nan. Accepting a
+    point CmdStan rejects is a real disagreement, not a free pass -- it is
+    the same asymmetry as one engine throwing, read from the other side.
     """
     cmd = [str(check_bin), str(stan), str(dj), "--point", str(point)]
     want_wa = "wa" in pt and not no_wa
@@ -471,6 +496,8 @@ def check_point(model, stan, dj, check_bin, point, pt, timeout, no_wa,
         if kind == "EVAL_FAIL":
             return ("OK", 0.0, 0, 0, "")
         if kind == "OK":
+            if not accepted(got):
+                return ("OK", 0.0, 0, 0, "")
             return ("POINT_NOT_REJECTED", 0.0, 0, 0,
                     f"point {point}: CmdStan rejects it, stanli returned "
                     f"lp {got[1]}")
