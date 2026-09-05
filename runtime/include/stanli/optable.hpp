@@ -74,6 +74,7 @@ namespace stanli {
   X(OP_MULTINOMIAL_LOGIT_LPMF)        \
   X(OP_DIRICHLET_MULTINOMIAL_LPMF)    \
   X(OP_ORDERED_PROBIT_LPMF)           \
+  X(OP_ORDERED_LOGISTIC_LPMF)         \
   X(OP_WIENER_LPDF)                   \
   X(OP_LKJ_COV_LPDF)                  \
   X(OP_BINOMIAL_LOGIT_GLM_LPMF)       \
@@ -110,6 +111,7 @@ namespace stanli {
   X(OP_DIV)                           \
   X(OP_POW)                           \
   X(OP_DOT)                           \
+  X(OP_GROUP_DOT)                     \
   X(OP_NEG)                           \
   X(OP_EXPV)                          \
   X(OP_LOGV)                          \
@@ -138,6 +140,7 @@ namespace stanli {
   X(OP_LOG_MODIFIED_BESSEL_1)         \
   X(OP_LOG_RISING_FACTORIAL)          \
   X(OP_OWENS_T)                       \
+  X(OP_CHOOSE)                        \
   X(OP_BESSEL_1)                      \
   X(OP_BESSEL_2)                      \
   X(OP_MODIFIED_BESSEL_1)             \
@@ -167,6 +170,7 @@ namespace stanli {
   X(OP_CHECK_LOWER)                   \
   X(OP_CHECK_UPPER)                   \
   X(OP_CATEGORICAL)                   \
+  X(OP_ALL_INTEGER_DENSITY)           \
   X(OP_REJECT)                        \
   X(OP_PRINT)                         \
   X(OP_DIRICHLET_LPDF)                \
@@ -470,20 +474,6 @@ namespace stanli {
   X(OP_NEG_BINOMIAL_2_LCCDF, neg_binomial_2_lccdf, 2, 0) \
   X(OP_NEG_BINOMIAL_2_LCDF, neg_binomial_2_lcdf, 2, 0)
 
-// Ordinal regression. Two things make these different from the list
-// above, and both are expressed in the kernel rather than here: the
-// cutpoint argument is a whole vector whatever its length (field 4 is
-// the VecMask that says so, since a one-element cutpoint set is a
-// one-element vector and NOT a scalar), and the integer outcome has to
-// reach stan-math as a std::vector<int> -- ordered_logistic asks
-// scalar_seq_view for a mutable data() pointer, which an
-// Eigen::Map<const VectorXi> cannot give it.
-//
-// reroll.cpp must never fuse these: element n of a shared cutpoint
-// vector is not observation n's cutpoints. They opt in to neither re-roll
-// density trait, which is the whole guard.
-#define STANLI_ORDERED_DENSITY_LIST(X) \
-  X(OP_ORDERED_LOGISTIC_LPMF, ordered_logistic_lpmf, 2, 0x2)
 // A unary may either always chain, chain only away from zero (abs), or be
 // disconnected.  Disconnected is not the same as multiplying by a zero
 // derivative: an infinite upstream adjoint must not turn 0 into NaN.
@@ -657,6 +647,11 @@ constexpr bool unary_has_pullback(UnaryTopology topology, double x) {
   X(OP_RISING_FACTORIAL, rising_factorial, rising_factorial)    \
   X(OP_LDEXP, ldexp, ldexp)
 
+// Two integer arguments and an integer result. Values still travel through
+// graph/register double slots, but the kernel converts both operands back to
+// their declared integer type and has no reverse pass.
+#define STANLI_SCALAR_BINARY_INTEGER_LIST(X) X(OP_CHOOSE, choose, choose)
+
 // The tier a density is actually built at. STANLI_LITE_LP drops the
 // propto family from every one of them: about half the library, at the
 // cost of an lp__ that differs from CmdStan's by a per-model constant on
@@ -696,7 +691,6 @@ constexpr bool exact_lp_build() {
   STANLI_TWO_INT_CDF_LIST(DENSITY)                \
   STANLI_TAIL_CDF_LIST(DENSITY)                   \
   STANLI_TAIL_INT_CDF_LIST(DENSITY)               \
-  STANLI_ORDERED_DENSITY_LIST(DENSITY)            \
   STANLI_SCALAR_UNARY_LIST(UNARY)
 
 enum Opcode : uint16_t {
@@ -822,10 +816,10 @@ constexpr bool has_op_trait(uint16_t opcode, uint8_t trait) {
 }
 
 // Ops no rewrite may run a different number of times than the graph says.
-// Most are effects -- a merged print prints once, a hoisted draw returns the
-// same number twice, a folded check throws at compile time -- and
-// OP_CATEGORICAL rides along because its per-op spec payload is not
-// comparable, so two of them are never known to be the same computation.
+// A merged print prints once, a hoisted draw returns the same number twice,
+// and a folded check throws at compile time. OP_CATEGORICAL remains a boundary
+// because its runtime outcome/check topology is consumed by lane partitioning;
+// its call contract itself is now comparable in the variant byte.
 constexpr bool is_effectful_op(uint16_t opcode) {
   switch (opcode) {
     case OP_CHECK_STRUCTURED:
@@ -833,6 +827,7 @@ constexpr bool is_effectful_op(uint16_t opcode) {
     case OP_CHECK_LOWER:
     case OP_CHECK_UPPER:
     case OP_CATEGORICAL:
+    case OP_ALL_INTEGER_DENSITY:
     case OP_RNG:
     case OP_PRINT:
     case OP_REJECT:
