@@ -227,17 +227,18 @@ void pow_fwd(KernelCtx& ctx) {
 }
 void pow_bwd(KernelCtx& ctx) {
   const bool s0 = scal(ctx, 0), s1 = scal(ctx, 1);
-  const bool var_exp = ctx.in_adj[1].data != nullptr;
   if (ctx.out.len == 1) {
     const double a = ctx.in[0].data[0], b = ctx.in[1].data[0];
     const double v = ctx.out.data[0];
     if (a == 0.0) {
-      if (ctx.in_adj[0].data && !var_exp)
-        ctx.in_adj[0].data[0] += pow_zero_base_partial(ctx.out_adj, a, b);
+      if (ctx.in_adj[0].data)
+        ctx.in_adj[0].data[0] +=
+            pow_zero_base_partial(ctx.variant, ctx.out_adj, a, b);
       return;
     }
     if (ctx.in_adj[0].data) ctx.in_adj[0].data[0] += ctx.out_adj * b * v / a;
-    if (var_exp) ctx.in_adj[1].data[0] += ctx.out_adj * std::log(a) * v;
+    if (ctx.in_adj[1].data)
+      ctx.in_adj[1].data[0] += ctx.out_adj * std::log(a) * v;
     return;
   }
   for (int64_t i = 0; i < ctx.out.len; ++i) {
@@ -246,12 +247,14 @@ void pow_bwd(KernelCtx& ctx) {
     const double v = ctx.out.data[i];
     const double dout = ctx.out_adj_vec.data[i];
     if (a == 0.0) {
-      if (ctx.in_adj[0].data && !var_exp)
-        ctx.in_adj[0].data[s0 ? 0 : i] += pow_zero_base_partial(dout, a, b);
+      if (ctx.in_adj[0].data)
+        ctx.in_adj[0].data[s0 ? 0 : i] +=
+            pow_zero_base_partial(ctx.variant, dout, a, b);
       continue;
     }
     if (ctx.in_adj[0].data) ctx.in_adj[0].data[s0 ? 0 : i] += dout * b * v / a;
-    if (var_exp) ctx.in_adj[1].data[s1 ? 0 : i] += dout * std::log(a) * v;
+    if (ctx.in_adj[1].data)
+      ctx.in_adj[1].data[s1 ? 0 : i] += dout * std::log(a) * v;
   }
 }
 

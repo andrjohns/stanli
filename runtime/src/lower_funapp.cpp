@@ -1206,8 +1206,11 @@ std::optional<Lowering::Val> Lowering::lower_eltwise_fn(
     const BuiltinLayout layout = resolved_builtin_layout(e, *builtin, values);
     SlotInfo si = values[layout.result_argument].si;
     si.param_free = a.si.param_free && b.si.param_free;
-    return with_layout(emit_value(builtin->opcode, {a, b}, layout.lanes, si),
-                       elementwise_layout({a, b}));
+    Val v = emit_value(builtin->opcode, {a, b}, layout.lanes, si);
+    if (builtin->opcode == OP_POW)
+      g.ops.back().variant =
+          mir::pow_zero_base_law(e.args[0], e.args[1], b.autodiff);
+    return with_layout(v, elementwise_layout({a, b}));
   }
 
   if (elementwise_builtin && builtin->arity == 2 &&

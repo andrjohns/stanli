@@ -432,7 +432,7 @@ struct Compiler {
       }
       case OP_POW: {
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(Program::POW, write_reg(op.out), a, b);
+        emit(Program::POW, write_reg(op.out), a, b, 0, op.variant);
         return ok;
       }
       case OP_FMAX: {

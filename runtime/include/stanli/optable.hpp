@@ -491,15 +491,22 @@ constexpr bool unary_has_pullback(UnaryTopology topology, double x) {
   return false;
 }
 
-// What pow's base collects at `base == 0`, where the generic rule is 0/0.
-// stan-math's rev pow sends a non-var exponent of 1, -1, -2 or -0.5 to the
-// base itself, inv, inv_square or inv_sqrt before its zero-base guard, and
-// those four adjoints are transcribed here. Every other exponent, and any
-// var one, keeps the guard's zero.
-inline double pow_zero_base_partial(double seed, double base, double exponent) {
+// Which of stan-math's pow overloads a call resolves to, decided from the
+// static C++ types stanc3 emits and carried on the op.
+enum PowZeroBaseLaw : uint8_t {
+  kPowZeroBaseGuarded = 0,
+  kPowZeroBaseScalar = 1,
+  kPowZeroBaseMatrix = 2,
+};
+
+inline double pow_zero_base_partial(uint8_t law, double seed, double base,
+                                    double exponent) {
+  if (law == kPowZeroBaseGuarded) return 0.0;
   if (exponent == 1.0) return seed;
   if (exponent == -1.0) return -seed / (base * base);
-  if (exponent == -2.0) return -2.0 * seed / (base * base * base);
+  if (exponent == -2.0)
+    return law == kPowZeroBaseMatrix ? std::numeric_limits<double>::quiet_NaN()
+                                     : -2.0 * seed / (base * base * base);
   if (exponent == -0.5) return -0.5 * seed / (base * std::sqrt(base));
   return 0.0;
 }

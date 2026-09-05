@@ -949,9 +949,13 @@ class MirInterp {
       }
     }
     activity &= spec.activity_mask;
+    const uint8_t variant =
+        spec.opcode == OP_POW
+            ? mir::pow_zero_base_law(e.args[0], e.args[1], !e.args[1].data_only)
+            : 0;
     Value o;
-    o.r = run_kernel_call(e, spec.opcode, 0, activity, {}, std::move(inputs),
-                          layout.lanes);
+    o.r = run_kernel_call(e, spec.opcode, variant, activity, {},
+                          std::move(inputs), layout.lanes);
     if (spec.shape == BuiltinShapePolicy::Reduction) return o;
     o.dims = values[layout.result_argument].dims;
     if (spec.shape == BuiltinShapePolicy::WholeValue && o.dims.empty())

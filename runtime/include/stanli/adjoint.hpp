@@ -44,10 +44,9 @@ namespace stanli {
 // generator had to checkpoint them.
 struct AdjInstr {
   Program::Code code = Program::CONST;
-  // Argument activity: bit k set where argument k is downstream of a
-  // parameter. DENSITY reads it per argument; POW reads it as a whole, to
-  // tell a var exponent from a data one. Rides in the padding after `code`,
-  // as the graph's density ops carry their activity in Op::variant.
+  // DENSITY only: bit k set where argument k is downstream of a parameter.
+  // Rides in the padding after `code`, as the graph's density ops carry
+  // their activity in Op::variant.
   uint8_t mask = 0xf;
   int32_t dst = 0, a = 0, b = 0, c = 0;
   int32_t len = 0;

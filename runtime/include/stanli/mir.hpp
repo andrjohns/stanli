@@ -185,6 +185,19 @@ inline bool language_scalar(const Expr& e) {
                                   e.unsized.leaf == UnsizedLeaf::Real);
 }
 
+inline bool eigen_leaf(const Expr& e) {
+  return e.unsized.leaf == UnsizedLeaf::Vector ||
+         e.unsized.leaf == UnsizedLeaf::RowVector ||
+         e.unsized.leaf == UnsizedLeaf::Matrix;
+}
+
+inline uint8_t pow_zero_base_law(const Expr& base, const Expr& exponent,
+                                 bool exponent_autodiff) {
+  if (exponent_autodiff) return kPowZeroBaseGuarded;
+  if (!eigen_leaf(base)) return kPowZeroBaseScalar;
+  return eigen_leaf(exponent) ? kPowZeroBaseGuarded : kPowZeroBaseMatrix;
+}
+
 inline bool source_unary_elementwise(const std::string& name) {
   bool unary = false;
 #define STANLI_SOURCE_UNARY(code, fn_name, value, delta, topology) \

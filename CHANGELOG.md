@@ -20,13 +20,21 @@ do and the backward stops there rather than scattering adjoints into the tail.
 An operand shape this cannot describe now refuses at compile time instead of
 answering from the capacity.
 
-`pow` keeps its base gradient at a base of exactly zero when the exponent is
-data. stan-math's reverse-mode `pow` sends a non-var exponent of 1, -1, -2 or
--0.5 to the base itself, `inv`, `inv_square` or `inv_sqrt` before it reaches
-its zero-base guard, so those four carry a partial where the guard carries
-none, and stanli returned zero for all of them. brms models built with
-`ar(cov = TRUE)` reach this through `cholesky_cor_ar1`'s `pow(ar, i - 1)`,
-whose autocorrelation gradient was zero at every point where `ar` is zero.
+`pow` keeps its base gradient at a base of exactly zero wherever stan-math
+does, and the exponent's static type is what decides, as in stan-math.
+stan-math's reverse-mode `pow` sends a non-var exponent of 1, -1, -2 or -0.5
+to the base itself, `inv`, `inv_square` or `inv_sqrt` before it reaches its
+zero-base guard, so those four carry a partial where the guard carries none,
+and stanli returned zero for all of them. The type stanc3 emits is what
+selects the overload, so a model-block local holding a data value is a `var`
+and stays on the guard, while a transformed-data real or an integer
+expression is a `double` or an `int` and takes the redirect. An Eigen base
+against a scalar exponent takes the matrix redirects, whose `inv_square` is
+NaN rather than infinite at zero; an Eigen base against an Eigen exponent has
+no redirect at all; a loop of scalar calls that reroll widened keeps the
+scalar answer each of its lanes had. brms models built with `ar(cov = TRUE)`
+reach this through `cholesky_cor_ar1`'s `pow(ar, i - 1)`, whose
+autocorrelation gradient was zero at every point where `ar` is zero.
 
 `choose` is available wherever an integer is evaluated when the model
 compiles: a transformed data int, a declaration extent, and an index whose

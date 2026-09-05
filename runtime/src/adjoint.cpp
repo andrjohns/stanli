@@ -197,7 +197,6 @@ bool gen_adjoint(IslandProg& p) {
         dmask[i] = (uint8_t)m;
         any = m != 0;
       } else {
-        if (I.code == Program::POW) dmask[i] = active[(size_t)I.b] ? 0xf : 0;
         read(I.a, spec.has(kProgramRangeA) ? I.len : 1);
         if (spec.has(kProgramReadB))
           read(I.b, spec.has(kProgramRangeB) ? I.len : 1);
@@ -209,8 +208,7 @@ bool gen_adjoint(IslandProg& p) {
   // STANLI_NO_DENSITY_MASK=1 binds every density argument as a recorder
   // scalar again, which is the comparison the masks have to survive.
   if (std::getenv("STANLI_NO_DENSITY_MASK"))
-    for (size_t i = 0; i < dmask.size(); ++i)
-      if (orig[i].code != Program::POW) dmask[i] = 0xf;
+    std::fill(dmask.begin(), dmask.end(), (uint8_t)0xf);
 
   std::vector<Program::Instr> ncode;
   ncode.reserve(orig.size());
@@ -524,8 +522,8 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
       case Program::POW: {
         adj[I.dst] = 0.0;
         if (val[I.va] == 0.0) {
-          if (I.mask == 0)
-            adj[I.a] += pow_zero_base_partial(t, val[I.va], val[I.vb]);
+          adj[I.a] +=
+              pow_zero_base_partial((uint8_t)I.len, t, val[I.va], val[I.vb]);
           break;
         }
         const double m = t * val[I.vd];

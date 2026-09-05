@@ -981,8 +981,10 @@ static void test_native_extras_carved() {
 
 // pow at a base of exactly zero, over the exponents stan-math dispatches on
 // plus one that stays a parameter. Against the values, not just the ops:
-// both engines used to agree on the same wrong zero.
-static Graph build_pow_zero(Fills& fills, std::vector<int>& terms) {
+// both engines used to agree on the same wrong zero. `law` is what the
+// lowering would have read off the exponent's static type.
+static Graph build_pow_zero(Fills& fills, std::vector<int>& terms,
+                            uint8_t law) {
   Graph g;
   const int base = g.add_slot(1, true);
   const int vexp = g.add_slot(1, true);
@@ -991,9 +993,10 @@ static Graph build_pow_zero(Fills& fills, std::vector<int>& terms) {
     fills.emplace_back(s, std::vector<double>{v});
     return s;
   };
-  auto pw = [&](int e) {
+  auto pw = [&](int e, uint8_t v) {
     const int s = g.add_slot(1, false);
     g.add_op(OP_POW, {base, e}, s);
+    g.ops.back().variant = v;
     return s;
   };
   int acc = -1;
@@ -1007,41 +1010,54 @@ static Graph build_pow_zero(Fills& fills, std::vector<int>& terms) {
     acc = s;
   };
   for (int t = 0; t < 8; ++t) {
-    add(pw(cslot(1.0)));
-    add(pw(cslot(2.0)));
-    add(pw(cslot(0.5)));
-    add(pw(vexp));
+    add(pw(cslot(1.0), law));
+    add(pw(cslot(2.0), law));
+    add(pw(cslot(0.5), law));
+    add(pw(vexp, kPowZeroBaseGuarded));
   }
   g.result_slot = acc;
   terms = {acc};
   return g;
 }
 
-static void test_pow_zero_base_carved() {
-  const std::vector<double> want{8.0, 8.0, 0.0};
+static void check_pow_zero_law(const std::string& tag, uint8_t law,
+                               const std::vector<double>& want) {
   auto at_zero = [](int64_t) { return 0.0; };
 
   Fills ref_fills;
   std::vector<int> ref_terms;
-  Graph ref = build_pow_zero(ref_fills, ref_terms);
+  Graph ref = build_pow_zero(ref_fills, ref_terms, law);
   const std::vector<double> ops =
       testutil::run_grad(std::move(ref), ref_fills, at_zero);
-  expect("pow zero ops sizes", ops.size() == want.size());
+  expect((tag + " ops sizes").c_str(), ops.size() == want.size());
   for (size_t i = 0; i < want.size() && i < ops.size(); ++i)
-    expect_close("pow zero ops v" + std::to_string(i), ops[i], want[i]);
+    expect_close(tag + " ops v" + std::to_string(i), ops[i], want[i]);
 
-  Fills fills;
-  std::vector<int> terms;
-  Graph g = build_pow_zero(fills, terms);
-  test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);
-  const int carved = carve_islands(g, fills, terms, {});
-  test_unsetenv("STANLI_ISLAND_ALWAYS");
-  expect("pow zero carved==1", carved == 1);
-  const std::vector<double> got =
-      testutil::run_grad(std::move(g), fills, at_zero);
-  expect("pow zero island sizes", got.size() == want.size());
-  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
-    expect_close("pow zero island v" + std::to_string(i), got[i], want[i]);
+  // Both island engines: the generated adjoint reads the law off the
+  // instruction, the var replay off the overload it calls.
+  for (const bool replay : {false, true}) {
+    const std::string what = tag + (replay ? " replay" : " island");
+    Fills fills;
+    std::vector<int> terms;
+    Graph g = build_pow_zero(fills, terms, law);
+    test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);
+    if (replay) test_setenv("STANLI_NO_NATIVE_ADJ", "1", 1);
+    const int carved = carve_islands(g, fills, terms, {});
+    test_unsetenv("STANLI_ISLAND_ALWAYS");
+    test_unsetenv("STANLI_NO_NATIVE_ADJ");
+    expect((what + " carved==1").c_str(), carved == 1);
+    const std::vector<double> got =
+        testutil::run_grad(std::move(g), fills, at_zero);
+    expect((what + " sizes").c_str(), got.size() == want.size());
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close(what + " v" + std::to_string(i), got[i], want[i]);
+  }
+}
+
+static void test_pow_zero_base_carved() {
+  check_pow_zero_law("pow zero scalar law", kPowZeroBaseScalar,
+                     {8.0, 8.0, 0.0});
+  check_pow_zero_law("pow zero guarded", kPowZeroBaseGuarded, {8.0, 0.0, 0.0});
 }
 
 // A recurrence threaded through ops the register machine has no
