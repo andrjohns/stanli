@@ -908,18 +908,6 @@ class MirInterp {
     }
   }
 
-  // max-shifted log-sum-exp over a buffer; -inf on an empty or all
-  // -inf input rather than NaN.
-  static T lse(const std::vector<T>& xs) {
-    T m = T(-std::numeric_limits<double>::infinity());
-    for (const T& x : xs)
-      if (val(x) > val(m)) m = x;
-    if (!(val(m) > -std::numeric_limits<double>::infinity())) return m;
-    T s = T(0.0);
-    for (const T& x : xs) s += stan::math::exp(x - m);
-    return m + stan::math::log(s);
-  }
-
   static Value from_entry(const DataMap::Entry& d) {
     if constexpr (std::is_same_v<T, double>) {
       return d;
@@ -2011,40 +1999,22 @@ class MirInterp {
     }
     if (e.name == "mean") {
       Value a = eval(e.args[0]);
-      T m = T(0.0);
-      for (const T& v : a.r) m += v;
-      r.r = {m / (double)a.r.size()};
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_MEAN, 0, 0x3f, {}, in, o.r);
+      return o;
     }
-    if (e.name == "sd") {
+    if (e.name == "sd" || e.name == "variance") {
       Value a = eval(e.args[0]);
-      if (a.r.empty()) fail("sd: input must have a positive size", e.raw);
-      if (a.r.size() == 1) {
-        r.r = {T(0.0)};
-        return r;
-      }
-      T m = T(0.0);
-      for (const T& v : a.r) m += v;
-      m /= (double)a.r.size();
-      T s2 = T(0.0);
-      for (const T& v : a.r) s2 += (v - m) * (v - m);
-      r.r = {stan::math::sqrt(s2 / (double)(a.r.size() - 1))};
-      return r;
-    }
-    if (e.name == "variance") {
-      Value a = eval(e.args[0]);
-      if (a.r.empty()) fail("variance: input must have a positive size", e.raw);
-      if (a.r.size() == 1) {
-        r.r = {T(0.0)};
-        return r;
-      }
-      T m = T(0.0);
-      for (const T& v : a.r) m += v;
-      m /= (double)a.r.size();
-      T s2 = T(0.0);
-      for (const T& v : a.r) s2 += (v - m) * (v - m);
-      r.r = {s2 / (double)(a.r.size() - 1)};
-      return r;
+      if (a.r.empty())
+        fail(e.name + ": input must have a positive size", e.raw);
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(e.name == "sd" ? OP_SD : OP_VARIANCE, 0, 0x3f, {}, in,
+                     o.r);
+      return o;
     }
     if (e.name == "sum") {
       Value a = eval(e.args[0]);
@@ -2054,12 +2024,39 @@ class MirInterp {
         r.is_int = true;
         r.i = {total};
         r.r = {T((double)total)};
-      } else {
-        T total = T(0.0);
-        for (const T& x : a.r) total += x;
-        r.r = {total};
+        return r;
       }
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_SUM_VEC, 0, 0x3f, {}, in, o.r);
+      return o;
+    }
+    if (e.name == "squared_distance" && e.args.size() == 2) {
+      Value a = eval(e.args[0]), b = eval(e.args[1]);
+      if (a.r.size() != b.r.size())
+        fail("squared_distance: length mismatch", e.raw);
+      Value diff;
+      diff.r.resize(a.r.size());
+      {
+        const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+        call_kernel<T>(OP_SUB, 0, 0x3f, {}, in, diff.r);
+      }
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&diff.r, &diff.r};
+      call_kernel<T>(OP_DOT, 0, 0x3f, {}, in, o.r);
+      return o;
+    }
+    if ((e.name == "dot_product" || e.name == "dot_self")) {
+      Value a = eval(e.args[0]);
+      Value b = e.name == "dot_self" ? a : eval(e.args[1]);
+      if (a.r.size() != b.r.size()) fail("dot_product: length mismatch", e.raw);
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+      call_kernel<T>(OP_DOT, 0, 0x3f, {}, in, o.r);
+      return o;
     }
     // The matrix slice family, all on col-major storage.
     if (e.name == "sub_col" && e.args.size() == 4) {
@@ -2156,33 +2153,6 @@ class MirInterp {
       };
       reverse_outer(&r.r);
       if (r.is_int) reverse_outer(&r.i);
-      return r;
-    }
-    // squared_distance is dot_self of the difference, which is how the
-    // graph lowers it too (lower.cpp); the two spellings agreeing keeps
-    // transformed data and the log density on the same summation order.
-    // A vector may be paired with a row_vector, and neither view carries
-    // anything but a length, so there is nothing to reorder. No
-    // broadcasting: the language has no scalar-against-container overload.
-    if (e.name == "squared_distance" && e.args.size() == 2) {
-      Value a = eval(e.args[0]), b = eval(e.args[1]);
-      if (a.r.size() != b.r.size())
-        fail("squared_distance: length mismatch", e.raw);
-      T s = T(0.0);
-      for (size_t i = 0; i < a.r.size(); ++i) {
-        const T d = a.r[i] - b.r[i];
-        s += d * d;
-      }
-      r.r = {s};
-      return r;
-    }
-    if ((e.name == "dot_product" || e.name == "dot_self")) {
-      Value a = eval(e.args[0]);
-      Value b = e.name == "dot_self" ? a : eval(e.args[1]);
-      if (a.r.size() != b.r.size()) fail("dot_product: length mismatch", e.raw);
-      T s = T(0.0);
-      for (size_t i = 0; i < a.r.size(); ++i) s += a.r[i] * b.r[i];
-      r.r = {s};
       return r;
     }
     if (e.name == "tcrossprod" && e.args.size() == 1) {
@@ -2290,41 +2260,25 @@ class MirInterp {
           (e.args[0].unsized.leaf == mir::UnsizedLeaf::Vector ||
            e.args[0].unsized.leaf == mir::UnsizedLeaf::RowVector);
       const ExpressionLayout layout =
-          udf_depth_ == 0 ? mir::source_expression_layout(e.args[0])
-                          : ExpressionLayout::unknown();
-      if (!eigen_container || !layout.known()) {
-        T product = T(1.0);
-        for (const T& value : a.r) product *= value;
-        r.r = {product};
-        return r;
+          udf_depth_ == 0 && eigen_container
+              ? mir::source_expression_layout(e.args[0])
+              : ExpressionLayout::unknown();
+      const bool active = std::is_same_v<T, stan::math::var>;
+      uint8_t variant = 0;
+      std::vector<int> idata;
+      if (active || !layout.known() ||
+          layout.kind == ExpressionLayout::Kind::Scalar) {
+        variant = active ? 2u : 1u;
+      } else if (layout.kind == ExpressionLayout::Kind::Direct &&
+                 layout.element_offset != 0) {
+        variant = 4u;
+        idata = {(int)layout.element_offset};
       }
-      if (layout.kind == ExpressionLayout::Kind::Scalar) {
-        T product = a.r[0];
-        for (size_t i = 1; i < a.r.size(); ++i) product *= a.r[i];
-        r.r = {product};
-        return r;
-      }
-      if (layout.kind == ExpressionLayout::Kind::Direct &&
-          layout.element_offset != 0) {
-        if constexpr (std::is_same_v<T, double>) {
-          r.r = {prod_phased(a.r.data(), static_cast<int64_t>(a.r.size()),
-                             layout.element_offset)};
-          return r;
-        }
-        T product = T(1.0);
-        for (const T& value : a.r) product *= value;
-        r.r = {product};
-        return r;
-      }
-      // Match the address-independent packet grouping used by the compiled
-      // generated-quantities kernel.  A direct Map (including the Map used
-      // by stan::math::prod(std::vector)) can pick a different alignedStart
-      // when this vector's allocation is shifted under AVX.
-      using Vec = Eigen::Matrix<T, Eigen::Dynamic, 1>;
-      const Eigen::Map<const Vec> input(a.r.data(), a.r.size());
-      r.r = {stan::math::prod(
-          input.unaryExpr(Eigen::internal::core_cast_op<T, T>()))};
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_PROD_VEC, variant, 0x3f, idata, in, o.r);
+      return o;
     }
     if ((e.name == "columns_dot_product" || e.name == "rows_dot_product") &&
         e.args.size() == 2) {
@@ -2364,8 +2318,11 @@ class MirInterp {
     }
     if (e.name == "log_sum_exp") {
       Value a = eval(e.args[0]);
-      r.r = {lse(a.r)};
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_LOG_SUM_EXP, 0, 0x3f, {}, in, o.r);
+      return o;
     }
     if ((e.name == "diag_pre_multiply" || e.name == "diag_post_multiply") &&
         e.args.size() == 2) {
