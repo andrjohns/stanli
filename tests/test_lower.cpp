@@ -3621,15 +3621,9 @@ int main() {
     stan::math::recover_memory();
   }
 
-  // brms's category-specific ordinal families (sratio, cratio and acat with
-  // cs()) pass `Intercept - transpose(mucs[n])` to an lpmf whose body opens
-  // `int nthres = num_elements(thres);` and then walks
-  // `while (k <= min(y, nthres))`. Shape queries were answered for a named
-  // value and for a matrix subview of one, so `vector[nthres + 1] p` stayed
-  // runtime-sized, the loop refused the structured lowering, and the register
-  // program that took over could not fold the while. Binding the argument to
-  // a local first always compiled and is the reference here: the fold has to
-  // reach the same values, not merely compile.
+  // A threshold count taken with num_elements of an expression, the shape
+  // brms's category-specific ordinal families write, against the same model
+  // with the expression bound to a local first.
   {
     DataMap d = DataMap::from_json(slurp("tests/fixtures/csthres.json"));
     CompiledModel expression =
@@ -6243,7 +6237,7 @@ int main() {
 
   // An array-valued location, which set_rescor(TRUE) multivariate brms
   // models emit, and the same location broadcast against a single random
-  // variable. See tests/fixtures/mnarrmu.stan.
+  // variable.
   {
     DataMap d;
     d.set_int("N", 3);
