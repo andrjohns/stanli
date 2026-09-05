@@ -2,6 +2,7 @@
 // stages can be diffed. The dumps are a debugging aid, so the property that
 // matters most is that turning them on does not change what is compiled.
 #include "env_helpers.hpp"
+#include "stdout_capture.hpp"
 #include <stanli/compile.hpp>
 #include <stanli/graph_print.hpp>
 
@@ -12,27 +13,6 @@
 #include <sstream>
 #include <string>
 #include <vector>
-
-#ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
-#include <sys/stat.h>
-#define test_dup _dup
-#define test_dup2 _dup2
-#define test_close _close
-static int test_open_for_write(const char* path) {
-  return _open(path, _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IWRITE);
-}
-#else
-#include <fcntl.h>
-#include <unistd.h>
-#define test_dup dup
-#define test_dup2 dup2
-#define test_close close
-static int test_open_for_write(const char* path) {
-  return ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-}
-#endif
 
 static int failures = 0;
 static void expect(const std::string& what, bool ok) {
@@ -152,23 +132,19 @@ int main() {
                                    "17-write_array-constfold.txt"});
   expect("all selects every stage", listing_with("all", "all") == want);
 
-  const std::filesystem::path captured = root / "stdout.txt";
-  std::fflush(stdout);
-  const int saved = test_dup(1);
-  const int sink = test_open_for_write(captured.string().c_str());
-  test_dup2(sink, 1);
-  test_setenv("STANLI_DUMP_PASSES", "-", 1);
-  test_setenv("STANLI_DUMP_STAGES", "reroll", 1);
-  compile_model(mir, data);
-  test_unsetenv("STANLI_DUMP_PASSES");
-  test_unsetenv("STANLI_DUMP_STAGES");
-  std::fflush(stdout);
-  test_dup2(saved, 1);
-  test_close(sink);
-  test_close(saved);
+  std::string captured;
+  {
+    stanli_test::StdoutCapture capture;
+    test_setenv("STANLI_DUMP_PASSES", "-", 1);
+    test_setenv("STANLI_DUMP_STAGES", "reroll", 1);
+    compile_model(mir, data);
+    test_unsetenv("STANLI_DUMP_PASSES");
+    test_unsetenv("STANLI_DUMP_STAGES");
+    captured = capture.finish();
+  }
 
   std::vector<std::string> banners;
-  std::istringstream lines(slurp(captured));
+  std::istringstream lines(captured);
   for (std::string line; std::getline(lines, line);)
     if (line.rfind(";; ", 0) == 0) banners.push_back(line);
   expect("stdout banners are balanced",
