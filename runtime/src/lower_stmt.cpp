@@ -3,6 +3,10 @@
 namespace stanli {
 namespace lower_detail {
 
+// A guard that stays decidable and never false is the model's own
+// nontermination. Stop unrolling and let it compile as a loop.
+constexpr long kWhileUnrollLimit = 1L << 16;
+
 bool Lowering::expr_has_jacobian(const mir::Expr& e) {
   if (e.kind == mir::Expr::FunApp) {
     CallableTransformSpec transform;
@@ -33,6 +37,46 @@ bool Lowering::has_target_pe(const mir::Stmt& s) {
     if (expr_has_jacobian(e)) return true;
   for (const auto& k : s.body)
     if (has_target_pe(k)) return true;
+  return false;
+}
+static void bound_names(const mir::Stmt& s, std::set<std::string>* out) {
+  if (s.kind == mir::Stmt::Decl) out->insert(s.decl_id);
+  if (s.kind == mir::Stmt::Assignment) out->insert(s.lhs);
+  for (const auto& child : s.body) bound_names(child, out);
+}
+static bool sized_from(const mir::Stmt& s, const std::set<std::string>& names) {
+  if (s.kind == mir::Stmt::Decl)
+    for (const auto& extent : s.decl_type.dims)
+      for (const auto& name : names)
+        if (Lowering::expr_references(extent, name)) return true;
+  for (const auto& child : s.body)
+    if (sized_from(child, names)) return true;
+  return false;
+}
+// A local whose extent the body itself computes: brms sizes
+// `array[nobs[i]] int` from the while's own counter.
+bool Lowering::while_sizes_from_loop_state(const mir::Stmt& s) {
+  std::set<std::string> names;
+  for (const auto& child : s.body) bound_names(child, &names);
+  for (const auto& child : s.body)
+    if (sized_from(child, names)) return true;
+  return false;
+}
+// Unroll `s` while the data interpreter answers its guard.  Returns false
+// where the guard stopped being decidable, leaving the rest of the loop to
+// the caller.
+bool Lowering::unroll_while(const mir::Stmt& s) {
+  for (long trip = 0; trip < kWhileUnrollLimit; ++trip) {
+    auto evaluated = try_eval_pure(s.cond);
+    if (!evaluated) return false;
+    if (evaluated->r.at(0) == 0.0) return true;
+    try {
+      for (const auto& child : s.body) lower_stmt(child);
+    } catch (LoopContinue&) {
+    } catch (LoopBreak&) {
+      return true;
+    }
+  }
   return false;
 }
 // Both control scans run before the block is lowered, but loop bounds and
@@ -1511,6 +1555,23 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
       return;
     }
     case mir::Stmt::While: {
+      // A body that sizes a local from the loop's own state has no loop
+      // form: the island and the retained loop both hold the counter at
+      // runtime, and a declared extent has to be a compile-time integer.
+      // Where the guard is data the trip count is one too, so unroll it the
+      // way `for` unrolls and every such extent folds with it.
+      if (while_unroll_depth || while_sizes_from_loop_state(s)) {
+        ++while_unroll_depth;
+        bool complete = false;
+        try {
+          complete = unroll_while(s);
+        } catch (...) {
+          --while_unroll_depth;
+          throw;
+        }
+        --while_unroll_depth;
+        if (complete) return;
+      }
       if (try_lower_region(s)) return;
       // Unlike `for`, a `while` has no statically supplied trip count.
       // Compile it as one structured register-program island, which

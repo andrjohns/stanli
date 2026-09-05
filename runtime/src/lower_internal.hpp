@@ -1195,6 +1195,12 @@ struct Lowering {
 
   bool scan_block(const mir::Stmt& s,
                   const std::function<bool(const mir::Stmt&)>& stop);
+  static bool while_sizes_from_loop_state(const mir::Stmt& s);
+  bool unroll_while(const mir::Stmt& s);
+  // A while inside a while being unrolled belongs to the same compile-time
+  // execution: leaving it as a loop puts the outer counter in a register
+  // and undoes the unroll around it.
+  int while_unroll_depth = 0;
   bool needs_runtime_control(const mir::Stmt& s);
 
   // A Break/Continue selected by a runtime condition cannot be lowered as a
