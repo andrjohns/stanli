@@ -177,32 +177,6 @@ void check(const std::string& name, std::vector<Arg> args, Expected expected) {
   }
 }
 
-// idata is the outcome (lpmf1) or outcome-and-trials (lpmf2) int group(s).
-auto lpmf1(uint16_t opcode) {
-  return [opcode](auto& a) {
-    using T = typename decltype(a[0].r)::value_type;
-    auto r = out_like(a, {}, 1);
-    std::vector<const std::vector<T>*> in;
-    for (size_t k = 1; k < a.size(); ++k) in.push_back(&a[k].r);
-    const std::vector<int> idata(a[0].i.begin(), a[0].i.end());
-    stanli::call_kernel<T>(opcode, 0, 0x3f, idata, in, r.r);
-    return r;
-  };
-}
-auto lpmf2(uint16_t opcode) {
-  return [opcode](auto& a) {
-    using T = typename decltype(a[0].r)::value_type;
-    auto r = out_like(a, {}, 1);
-    std::vector<int> idata{(int)a[0].i.size()};
-    idata.insert(idata.end(), a[0].i.begin(), a[0].i.end());
-    idata.push_back((int)a[1].i.size());
-    idata.insert(idata.end(), a[1].i.begin(), a[1].i.end());
-    const std::vector<const std::vector<T>*> in{&a[2].r};
-    stanli::call_kernel<T>(opcode, 0, 0x3f, idata, in, r.r);
-    return r;
-  };
-}
-
 }  // namespace
 
 int main() {
@@ -245,6 +219,84 @@ int main() {
     const std::vector<const std::vector<T>*> dot_in{&diff.r, &diff.r};
     call_kernel<T>(OP_DOT, 0, 0x3f, {}, dot_in, r.r);
     return r;
+  });
+
+  // spd: symmetric positive definite 3x3. gen: general invertible 3x3.
+  const std::vector<double> spd{4, 1, 0, 1, 3, 1, 0, 1, 2};
+  const std::vector<double> gen{2, 1, 0, 0, 3, 1, 1, 0, 2};
+  const std::vector<double> rect{1, 2, 3, 0, 1, 1};
+  const std::vector<double> v3{0.5, -0.3, 0.8};
+  const std::vector<double> d2{0.3, -0.2};
+
+  check("crossprod", {mat(rect, 3, 2)}, [](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    const uint8_t variant = std::is_same_v<T, stan::math::var> ? 1u : 0u;
+    return kernel(a, 1, OP_CROSSPROD, variant, {3, 2}, {2, 2}, 4);
+  });
+  check("multiply_lower_tri_self_transpose", {mat(rect, 3, 2)}, [](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    const uint8_t variant = std::is_same_v<T, stan::math::var> ? 1u : 0u;
+    return kernel(a, 1, OP_MULT_LOWER_TRI_SELF_TRANSPOSE, variant, {3, 2},
+                  {3, 3}, 9);
+  });
+  check("tcrossprod", {mat(rect, 3, 2)}, [](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    auto transpose = out_like(a, {2, 3}, 6);
+    const std::vector<const std::vector<T>*> t_in{&a[0].r};
+    call_kernel<T>(OP_TRANSPOSE, 0, 0x3f, {3, 2}, t_in, transpose.r);
+    auto r = out_like(a, {3, 3}, 9);
+    const std::vector<const std::vector<T>*> g_in{&a[0].r, &transpose.r};
+    call_kernel<T>(OP_GEMM, 0, 0x3f, {3, 2, 3}, g_in, r.r);
+    return r;
+  });
+  check("cholesky_decompose", {mat(spd, 3, 3)},
+        [](auto& a) { return kernel(a, 1, OP_CHOLESKY, 0, {3}, {3, 3}, 9); });
+  check("inverse", {mat(gen, 3, 3)},
+        [](auto& a) { return kernel(a, 1, OP_INVERSE, 0, {3}, {3, 3}, 9); });
+  check("inverse_spd", {mat(spd, 3, 3)}, [](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    const uint8_t variant = std::is_same_v<T, stan::math::var> ? 1u : 0u;
+    return kernel(a, 1, OP_INVERSE_SPD, variant, {3}, {3, 3}, 9);
+  });
+  check("log_determinant", {mat(gen, 3, 3)}, [](auto& a) {
+    return kernel(a, 1, OP_LOG_DETERMINANT, 0, {3}, {}, 1);
+  });
+  check("matrix_exp", {mat(gen, 3, 3)},
+        [](auto& a) { return kernel(a, 1, OP_MATRIX_EXP, 0, {3}, {3, 3}, 9); });
+  check("diag_matrix", {real(v3)},
+        [](auto& a) { return kernel(a, 1, OP_DIAG_MATRIX, 0, {}, {3, 3}, 9); });
+  check("quad_form", {mat(spd, 3, 3), real(v3)}, [](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    const uint8_t variant =
+        (uint8_t)(1u | (std::is_same_v<T, stan::math::var> ? 2u : 0u));
+    return kernel(a, 2, OP_QUAD_FORM, variant, {3, 1}, {}, 1);
+  });
+  check("quad_form_sym", {mat(spd, 3, 3), real(v3)}, [](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    const uint8_t variant =
+        (uint8_t)(1u | (std::is_same_v<T, stan::math::var> ? 2u : 0u));
+    return kernel(a, 2, OP_QUAD_FORM_SYM, variant, {3, 1}, {}, 1);
+  });
+  check("add_diag", {mat(rect, 3, 2), real(d2)}, [](auto& a) {
+    return kernel(a, 2, OP_ADD_DIAG, 0, {3, 2}, {3, 2}, 6);
+  });
+  check("multiply", {mat(rect, 3, 2), real(d2)}, [](auto& a) {
+    using T = typename decltype(a[0].r)::value_type;
+    auto r = out_like(a, {3}, 3);
+    const std::vector<const std::vector<T>*> in{&a[0].r, &a[1].r};
+    if constexpr (std::is_same_v<T, double>) {
+      call_kernel<T>(OP_MATVEC, 0, 0x3f, {3, 2}, in, r.r);
+    } else {
+      call_kernel<T>(OP_GEMM, 0, 0x3f, {3, 2, 1}, in, r.r);
+    }
+    return r;
+  });
+  check("fma", {real(as), real(bs), real(xs)},
+        [](auto& a) { return kernel(a, 3, OP_FMA, 0, {}, {}, a[0].r.size()); });
+  check("gp_exp_quad_cov", {real(xs), real({1.3}), real({0.9})}, [](auto& a) {
+    const int64_t n = (int64_t)a[0].r.size();
+    return kernel(a, 3, OP_GP_EXP_QUAD_COV, 0, {(int)n, 1}, {n, n},
+                  (size_t)(n * n));
   });
 
   if (failures == 0)

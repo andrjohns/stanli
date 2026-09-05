@@ -1483,19 +1483,23 @@ class MirInterp {
           r.dims = {Ra, Cb};
           return r;
         }
-        // Col-major storage on both sides.
-        r.r.assign((size_t)(Ra * Cb), T(0.0));
-        for (int64_t j = 0; j < Cb; ++j)
-          for (int64_t k = 0; k < Ca; ++k) {
-            const T& bv = b.r.at((size_t)(j * Rb + k));
-            for (int64_t i = 0; i < Ra; ++i)
-              r.r[(size_t)(j * Ra + i)] +=
-                  a.r.at((size_t)(a_mat ? k * Ra + i : k)) * bv;
+        if (a_mat) {
+          Value o;
+          o.dims = {Ra};
+          o.r.resize((size_t)Ra);
+          const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+          if constexpr (std::is_same_v<T, double>) {
+            call_kernel<T>(OP_MATVEC, 0, 0x3f, {(int)Ra, (int)Ca}, in, o.r);
+          } else {
+            call_kernel<T>(OP_GEMM, 0, 0x3f, {(int)Ra, (int)Ca, 1}, in, o.r);
           }
-        if (a_mat && b_mat)
-          r.dims = {Ra, Cb};
-        else
-          r.dims = {(int64_t)r.r.size()};
+          return o;
+        }
+        r.r.assign((size_t)Cb, T(0.0));
+        for (int64_t j = 0; j < Cb; ++j)
+          for (int64_t k = 0; k < Ca; ++k)
+            r.r[(size_t)j] += a.r.at((size_t)k) * b.r.at((size_t)(j * Rb + k));
+        r.dims = {(int64_t)r.r.size()};
         return r;
       }
       if (!is_scalar(a) && !is_scalar(b) && !a_mat && !b_mat) {
@@ -1695,10 +1699,8 @@ class MirInterp {
         have_container = true;
       }
       o.r.resize(n);
-      for (size_t i = 0; i < n; ++i)
-        o.r[i] = stan::math::fma(a.r[a.r.size() == 1 ? 0 : i],
-                                 b.r[b.r.size() == 1 ? 0 : i],
-                                 c.r[c.r.size() == 1 ? 0 : i]);
+      const std::vector<const std::vector<T>*> in{&a.r, &b.r, &c.r};
+      call_kernel<T>(OP_FMA, 0, 0x3f, {}, in, o.r);
       return o;
     }
     // Callable transforms share their name/arity dispatch and their typed
@@ -1833,7 +1835,6 @@ class MirInterp {
       return o;
     }
     if (e.name == "matrix_exp" && e.args.size() == 1) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("matrix_exp: needs a square matrix", e.raw);
@@ -1841,148 +1842,110 @@ class MirInterp {
       if (n < 0 || (n != 0 && n > std::numeric_limits<int64_t>::max() / n) ||
           n * n != static_cast<int64_t>(a.r.size()))
         fail("matrix_exp: matrix shape does not match storage", e.raw);
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r[(size_t)(j * n + i)];
-      const Mat c = stan::math::matrix_exp(A);
       Value o;
       o.dims = {n, n};
       o.r.resize((size_t)(n * n));
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) o.r[(size_t)(j * n + i)] = c(i, j);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_MATRIX_EXP, 0, 0x3f, {(int)n}, in, o.r);
       return o;
     }
     if ((e.name == "inverse" || e.name == "inverse_spd") &&
         e.args.size() == 1) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail(e.name + ": needs a square matrix", e.raw);
       const int64_t n = a.dims[0];
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
-      const Mat c = e.name == "inverse" ? stan::math::inverse(A)
-                                        : stan::math::inverse_spd(A);
       Value o;
       o.dims = {n, n};
       o.r.resize((size_t)(n * n));
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) o.r[(size_t)(j * n + i)] = c(i, j);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      const uint8_t variant =
+          e.name == "inverse_spd" && std::is_same_v<T, stan::math::var> ? 1u
+                                                                        : 0u;
+      call_kernel<T>(e.name == "inverse" ? OP_INVERSE : OP_INVERSE_SPD, variant,
+                     0x3f, {(int)n}, in, o.r);
       return o;
     }
     if (e.name == "log_determinant" && e.args.size() == 1) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("log_determinant: needs a square matrix", e.raw);
       const int64_t n = a.dims[0];
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
-      r.r = {stan::math::log_determinant(A)};
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_LOG_DETERMINANT, 0, 0x3f, {(int)n}, in, o.r);
+      return o;
     }
     if (e.name == "quad_form" && e.args.size() == 2) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       Value b = eval(e.args[1]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("quad_form: needs a square matrix", e.raw);
       const int64_t n = a.dims[0];
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
+      const bool b_matrix = b.dims.size() == 2;
+      const int64_t m = b_matrix ? b.dims[1] : 1;
       Value o;
-      if (b.dims.size() != 2) {
-        Eigen::Matrix<T, Eigen::Dynamic, 1> B((Eigen::Index)b.r.size());
-        for (size_t i = 0; i < b.r.size(); ++i) B((Eigen::Index)i) = b.r[i];
-        o.r = {stan::math::quad_form(A, B)};
-        return o;
-      }
-      const int64_t rb = b.dims[0], m = b.dims[1];
-      Mat B(rb, m);
-      for (int64_t j = 0; j < m; ++j)
-        for (int64_t i = 0; i < rb; ++i) B(i, j) = b.r.at((size_t)(j * rb + i));
-      const Mat c = stan::math::quad_form(A, B);
-      o.dims = {m, m};
-      o.r.resize((size_t)(m * m));
-      for (int64_t j = 0; j < m; ++j)
-        for (int64_t i = 0; i < m; ++i) o.r[(size_t)(j * m + i)] = c(i, j);
+      o.r.resize(b_matrix ? (size_t)(m * m) : 1);
+      if (b_matrix) o.dims = {m, m};
+      const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+      const bool active = std::is_same_v<T, stan::math::var>;
+      const uint8_t variant =
+          (uint8_t)((b_matrix ? 0u : 1u) | (active ? 2u : 0u));
+      call_kernel<T>(OP_QUAD_FORM, variant, 0x3f, {(int)n, (int)m}, in, o.r);
       return o;
     }
     if (e.name == "add_diag" && e.args.size() == 2) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       Value d = eval(e.args[1]);
       if (a.dims.size() != 2) fail("add_diag: needs a matrix", e.raw);
       const int64_t rows = a.dims[0], cols = a.dims[1];
-      Mat A(rows, cols);
-      for (int64_t j = 0; j < cols; ++j)
-        for (int64_t i = 0; i < rows; ++i)
-          A(i, j) = a.r.at((size_t)(j * rows + i));
-      Mat c;
-      if (d.r.size() == 1 && d.dims.empty()) {
-        c = stan::math::add_diag(A, d.r[0]);
-      } else {
-        Eigen::Matrix<T, Eigen::Dynamic, 1> D((Eigen::Index)d.r.size());
-        for (size_t i = 0; i < d.r.size(); ++i) D((Eigen::Index)i) = d.r[i];
-        c = stan::math::add_diag(A, D);
-      }
+      const bool scalar = d.r.size() == 1 && d.dims.empty();
       Value o;
       o.dims = {rows, cols};
       o.r.resize((size_t)(rows * cols));
-      for (int64_t j = 0; j < cols; ++j)
-        for (int64_t i = 0; i < rows; ++i)
-          o.r[(size_t)(j * rows + i)] = c(i, j);
+      const std::vector<const std::vector<T>*> in{&a.r, &d.r};
+      call_kernel<T>(OP_ADD_DIAG, scalar ? 1u : 0u, 0x3f,
+                     {(int)rows, (int)cols}, in, o.r);
       return o;
     }
     if (e.name == "quad_form_sym" && e.args.size() == 2) {
-      // B' A B, symmetrised. Overload resolution on T reaches the same
-      // stan-math call the graph kernel makes -- prim's B.dot(A * B) at
-      // double, quad_form_vari's B' * A * B at var -- so the two paths
-      // group the arithmetic the same way. stan-math checks A for symmetry
-      // and throws the std::domain_error CmdStan would.
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       Value b = eval(e.args[1]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("quad_form_sym: needs a square matrix", e.raw);
       const int64_t n = a.dims[0];
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
+      const bool b_matrix = b.dims.size() == 2;
+      const int64_t m = b_matrix ? b.dims[1] : 1;
       Value o;
-      if (b.dims.size() != 2) {
-        // A vector goes in as a vector: the one-column matrix would take
-        // Eigen's matrix paths and associate the product differently.
-        Eigen::Matrix<T, Eigen::Dynamic, 1> B((Eigen::Index)b.r.size());
-        for (size_t i = 0; i < b.r.size(); ++i) B((Eigen::Index)i) = b.r[i];
-        o.r = {stan::math::quad_form_sym(A, B)};
-        return o;
-      }
-      const int64_t rb = b.dims[0], m = b.dims[1];
-      Mat B(rb, m);
-      for (int64_t j = 0; j < m; ++j)
-        for (int64_t i = 0; i < rb; ++i) B(i, j) = b.r.at((size_t)(j * rb + i));
-      const Mat c = stan::math::quad_form_sym(A, B);
-      o.dims = {m, m};
-      o.r.resize((size_t)(m * m));
-      for (int64_t j = 0; j < m; ++j)
-        for (int64_t i = 0; i < m; ++i) o.r[(size_t)(j * m + i)] = c(i, j);
+      o.r.resize(b_matrix ? (size_t)(m * m) : 1);
+      if (b_matrix) o.dims = {m, m};
+      const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+      const bool active = std::is_same_v<T, stan::math::var>;
+      const uint8_t variant =
+          (uint8_t)((b_matrix ? 0u : 1u) | (active ? 2u : 0u));
+      call_kernel<T>(OP_QUAD_FORM_SYM, variant, 0x3f, {(int)n, (int)m}, in,
+                     o.r);
       return o;
     }
     if (e.name == "gp_exp_quad_cov" && e.args.size() == 3) {
       // K(i,j) = alpha^2 exp(-|x_i - x_j|^2 / (2 rho^2)); x is array[N]
       // real or array[N] vector[D] in Fortran storage.
       Value x = eval(e.args[0]);
-      const T alpha = eval(e.args[1]).r.at(0);
-      const T rho = eval(e.args[2]).r.at(0);
-      const int64_t N = x.dims.size() == 2 ? x.dims[0] : (int64_t)x.r.size();
-      const int64_t D = x.dims.size() == 2 ? x.dims[1] : 1;
-      const T a2 = alpha * alpha;
-      const T inv2r2 = T(1.0) / (T(2.0) * rho * rho);
+      Value alpha = eval(e.args[1]);
+      Value rho = eval(e.args[2]);
       Value o;
+      if (x.dims.size() != 2) {
+        const int64_t N = (int64_t)x.r.size();
+        o.dims = {N, N};
+        o.r.resize((size_t)(N * N));
+        const std::vector<const std::vector<T>*> in{&x.r, &alpha.r, &rho.r};
+        call_kernel<T>(OP_GP_EXP_QUAD_COV, 0, 0x3f, {(int)N, 1}, in, o.r);
+        return o;
+      }
+      const int64_t N = x.dims[0], D = x.dims[1];
+      const T a2 = alpha.r[0] * alpha.r[0];
+      const T inv2r2 = T(1.0) / (T(2.0) * rho.r[0] * rho.r[0]);
       o.dims = {N, N};
       o.r.resize((size_t)(N * N));
       for (int64_t j = 0; j < N; ++j)
@@ -2159,20 +2122,25 @@ class MirInterp {
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2) fail("tcrossprod: needs a matrix", e.raw);
       const int64_t rows = a.dims[0], cols = a.dims[1];
-      r.dims = {rows, rows};
-      r.r.assign((size_t)(rows * rows), T(0.0));
-      for (int64_t j = 0; j < rows; ++j)
-        for (int64_t k = 0; k < cols; ++k) {
-          const T& rhs = a.r.at((size_t)(k * rows + j));
-          for (int64_t i = 0; i < rows; ++i)
-            r.r[(size_t)(j * rows + i)] += a.r.at((size_t)(k * rows + i)) * rhs;
-        }
-      return r;
+      Value transpose;
+      transpose.dims = {cols, rows};
+      transpose.r.resize((size_t)(rows * cols));
+      {
+        const std::vector<const std::vector<T>*> in{&a.r};
+        call_kernel<T>(OP_TRANSPOSE, 0, 0x3f, {(int)rows, (int)cols}, in,
+                       transpose.r);
+      }
+      Value o;
+      o.dims = {rows, rows};
+      o.r.resize((size_t)(rows * rows));
+      const std::vector<const std::vector<T>*> in{&a.r, &transpose.r};
+      call_kernel<T>(OP_GEMM, 0, 0x3f, {(int)rows, (int)cols, (int)rows}, in,
+                     o.r);
+      return o;
     }
     if ((e.name == "crossprod" ||
          e.name == "multiply_lower_tri_self_transpose") &&
         e.args.size() == 1) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2) fail(e.name + ": needs a matrix", e.raw);
       const int64_t rows = a.dims[0], cols = a.dims[1];
@@ -2180,32 +2148,28 @@ class MirInterp {
           (rows != 0 && cols > std::numeric_limits<int64_t>::max() / rows) ||
           rows * cols != static_cast<int64_t>(a.r.size()))
         fail(e.name + ": matrix shape does not match storage", e.raw);
-      Mat matrix(rows, cols);
-      for (int64_t j = 0; j < cols; ++j)
-        for (int64_t i = 0; i < rows; ++i)
-          matrix(i, j) = a.r[(size_t)(j * rows + i)];
       // crossprod is A' A (cols x cols); multiply_lower_tri_self_transpose
       // takes the lower triangle of A and forms L L' (rows x rows).
-      const Mat product =
-          e.name == "crossprod"
-              ? Mat(stan::math::crossprod(matrix))
-              : Mat(stan::math::multiply_lower_tri_self_transpose(matrix));
       const int64_t out = e.name == "crossprod" ? cols : rows;
-      r.dims = {out, out};
-      r.r.resize((size_t)(out * out));
-      for (int64_t j = 0; j < out; ++j)
-        for (int64_t i = 0; i < out; ++i)
-          r.r[(size_t)(j * out + i)] = product(i, j);
-      return r;
+      Value o;
+      o.dims = {out, out};
+      o.r.resize((size_t)(out * out));
+      const std::vector<const std::vector<T>*> in{&a.r};
+      const uint8_t variant = std::is_same_v<T, stan::math::var> ? 1u : 0u;
+      call_kernel<T>(e.name == "crossprod" ? OP_CROSSPROD
+                                           : OP_MULT_LOWER_TRI_SELF_TRANSPOSE,
+                     variant, 0x3f, {(int)rows, (int)cols}, in, o.r);
+      return o;
     }
     if (e.name == "diag_matrix" && e.args.size() == 1) {
       Value diagonal = eval(e.args[0]);
       const int64_t n = (int64_t)diagonal.r.size();
-      r.dims = {n, n};
-      r.r.assign((size_t)(n * n), T(0.0));
-      for (int64_t i = 0; i < n; ++i)
-        r.r[(size_t)(i * n + i)] = diagonal.r[(size_t)i];
-      return r;
+      Value o;
+      o.dims = {n, n};
+      o.r.resize((size_t)(n * n));
+      const std::vector<const std::vector<T>*> in{&diagonal.r};
+      call_kernel<T>(OP_DIAG_MATRIX, 0, 0x3f, {}, in, o.r);
+      return o;
     }
     if (e.name == "diagonal") {
       if (e.args.size() != 1)
@@ -2222,31 +2186,15 @@ class MirInterp {
       return r;
     }
     if (e.name == "cholesky_decompose" && e.args.size() == 1) {
-      // Standard column-oriented Cholesky on the templated scalar.
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("cholesky_decompose: needs a square matrix", e.raw);
       const int64_t K = a.dims[0];
       Value o;
       o.dims = {K, K};
-      o.r.assign((size_t)(K * K), T(0.0));
-      for (int64_t j = 0; j < K; ++j) {
-        T d = a.r.at((size_t)(j * K + j));
-        for (int64_t k = 0; k < j; ++k) {
-          const T& l = o.r[(size_t)(k * K + j)];
-          d -= l * l;
-        }
-        if (!(val(d) > 0.0))
-          fail("cholesky_decompose: matrix is not positive definite", e.raw);
-        const T dj = stan::math::sqrt(d);
-        o.r[(size_t)(j * K + j)] = dj;
-        for (int64_t i = j + 1; i < K; ++i) {
-          T s = a.r.at((size_t)(j * K + i));
-          for (int64_t k = 0; k < j; ++k)
-            s -= o.r[(size_t)(k * K + i)] * o.r[(size_t)(k * K + j)];
-          o.r[(size_t)(j * K + i)] = s / dj;
-        }
-      }
+      o.r.resize((size_t)(K * K));
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_CHOLESKY, 0, 0x3f, {(int)K}, in, o.r);
       return o;
     }
     if (e.name == "prod") {
