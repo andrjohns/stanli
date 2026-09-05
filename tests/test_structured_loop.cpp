@@ -3219,6 +3219,18 @@ static void runtime_slice_tests() {
     }
   }
   test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
+
+  // The series whose `while` advances k past two terms, against the value
+  // CmdStan computes for it.
+  DataMap theta;
+  theta.set_real("theta", std::exp(0.1));
+  const auto series =
+      compile_fixture("dynseries", std::move(theta), Mode::Force);
+  Executor ex(series.graph);
+  series.bind(ex);
+  ex.params_data()[0] = 0.5;
+  std::vector<double> g(static_cast<size_t>(series.n_unconstrained));
+  close(ex.gradient(g.data()), -0.81912447467137883, "runtime slice series");
 }
 
 static std::atomic<int> memo_int_calls{0};
