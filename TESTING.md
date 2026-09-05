@@ -54,7 +54,7 @@ below give the details and known exceptions.
 | unit tests for numerical operations | Does one numerical operation or graph transformation agree with stan-math? | Bitwise by default; a recorded limit of at most 2 ULP (10 for reassociation) where a kernel reorders arithmetic | every pull request |
 | compiler producer parity | Do native OCaml, js_of_ocaml, and the Windows executable emit identical compact-v2 bytes while the stock rollback paths remain usable? | Byte-for-byte identity on seven successful models; JS API/error/warning/rollback checks; Windows provenance, executable-format, and final-newline checks | every pull request |
 | MIR wire cost | Is the compact-v2 decoder materially faster and the wire materially smaller than legacy MIR? | On Eight Schools, median decode time and raw bytes must each be at most half the legacy value | every pull request |
-| corpus comparison | Are 119 posteriordb models, 11 compiler-derived fixtures and 64 brms models consistent with recorded CmdStan behavior at three fixed inputs? | Scaled error of 1e-9 for most points; documented limits for three `kronecker_gp` points and four brms Gaussian-process points; rejection parity; a model named in `KNOWN_GAPS` must keep failing until its gap closes | every pull request |
+| corpus comparison | Are 119 posteriordb models, 11 compiler-derived fixtures and 64 brms models consistent with recorded CmdStan behavior at three fixed inputs? | Scaled error of 1e-9 for most points; documented limits for three `kronecker_gp` points and for every point of the two brms Gaussian-process models; rejection parity; a model named in `KNOWN_GAPS` must keep failing until its gap closes | every pull request |
 | cross-path matrix | Do stanli's execution paths agree with one another? | Bitwise, except entries named in the ledger | every pull request, within CTest |
 | transformation A/B | Do selected graph optimizations preserve model results? | Optimizations enabled and disabled agree at the default point within 1e-11 | manually after optimization changes |
 | BridgeStan C-ABI comparison | Does the public C interface agree with reference BridgeStan? | Four fixture models must pass value, name, count, and output-shape checks | every pull request |
@@ -175,11 +175,17 @@ points belong to `kronecker_gp`, where two eigenvector gradients are
 sensitive to a nearly degenerate covariance whose smallest eigenvalue gap
 is 6.5e-17. The other four are the `sdgp` and `lscale` gradients of
 `sw_gp` and `i320_gp_expquad`, which flow through a Cholesky
-factorization whose smallest pivot is 1.1e-12.
+factorization whose smallest pivot is 1.1e-12 and 3.7e-12.
 
-Verified points use the standard 1e-9 gate. The seven `MISMATCH` points
-use limits derived from their recorded deviations and measured
-cross-platform variation. No recorded point is currently excluded from
+Verified points use the standard 1e-9 gate, except in the models named in
+`ILL_CONDITIONED` ([`tools/verify_refs.py`](tools/verify_refs.py)). The
+seven `MISMATCH` points use limits derived from their recorded deviations
+and measured cross-platform variation, and the two Gaussian-process
+models are held to that same limit at all three of their points. Which of
+their points comes out clean is a property of the machine that recorded
+the references: the third point of both was recorded clean on arm64 and
+deviates by 1.03e-7 and 6.38e-9 on the x86_64 runner, through the same
+Cholesky factorization. No recorded point is currently excluded from
 enforcement. This keeps the known numerical limitations visible without
 disabling checks for other models.
 

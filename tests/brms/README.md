@@ -82,8 +82,21 @@ three points. Their log density and every gradient are bitwise identical
 to CmdStan except for the two GP hyperparameters, `sdgp` and `lscale`,
 which differ by 1.2e-8 and 2.8e-9 relative. Both flow through
 `cholesky_decompose` of the exponentiated-quadratic covariance, which
-brms holds up with a 1e-12 jitter on the diagonal. At the shared
-evaluation point the smallest Cholesky pivot of that covariance is
-1.1e-12 against a diagonal of 1, so the factorization is singular to
-machine precision and its derivative divides by that pivot. This is the
-same amplification `kronecker_gp` shows in the posteriordb corpus.
+brms holds up with a 1e-12 jitter on the diagonal. The smallest Cholesky
+pivot of that covariance is 1.1e-12 for `sw_gp` and 3.7e-12 for
+`i320_gp_expquad` against a diagonal of 1, so the factorization is
+singular to machine precision and its derivative divides by that pivot.
+This is the same amplification `kronecker_gp` shows in the posteriordb
+corpus.
+
+The third point sets every unconstrained value to zero, which zeroes the
+latent GP variables and with them the `sdgp` and `lscale` adjoints, so
+both models record it clean on the arm64 machine the references come
+from. The amplification lands in the latent-GP gradients there instead:
+moving the GP covariates by one ulp on arm64 moves those gradients by
+1.9e-7 and 4.7e-8 relative, and the x86_64 CI runner measures 1.03e-7 and
+6.38e-9 against the arm64 references (CI run 33938697559). Which points
+come out clean is therefore a property of the recording machine, so both
+models are listed in `ILL_CONDITIONED` in
+[`tools/verify_refs.py`](../../tools/verify_refs.py) and every one of
+their points is held to the limit a `MISMATCH` point gets.

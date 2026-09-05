@@ -111,6 +111,25 @@ KNOWN_GAPS = {
 # reference records those nonfinite values and stanli reproduces them.
 NONFINITE_GRAD_OK = {}
 
+# Models held at every point to the floor gate_for gives a MISMATCH
+# point, because the instruction set moves their values rather than
+# stanli. Both entries factor an exponentiated-quadratic covariance that
+# brms holds up with a 1e-12 jitter on the diagonal, and the smallest
+# Cholesky pivot at the evaluation points is 3.7e-12 for i320_gp_expquad
+# and 1.1e-12 for sw_gp against a diagonal of 1, so the factorization is
+# singular to machine precision. Moving the GP covariates by one ulp on
+# arm64 moves the latent-GP gradients at point 2 by 1.9e-7 and 4.7e-8
+# relative, the same scale the x86_64 runner measured against references
+# recorded on arm64: 1.03e-7 and 6.38e-9 at point 2, which arm64 recorded
+# clean (CI run 33938697559). Points 0 and 1 of both models are recorded
+# MISMATCH and were already held to that floor.
+ILL_CONDITIONED = {
+    "i320_gp_expquad": "cholesky_decompose of a jittered exp-quad "
+                       "covariance whose smallest pivot is 3.7e-12",
+    "sw_gp": "cholesky_decompose of a jittered exp-quad covariance whose "
+             "smallest pivot is 1.1e-12",
+}
+
 
 def load_refs(path=REFS_PATH):
     """(models, provenance) from the reference file, or a hard failure.
@@ -575,12 +594,15 @@ def replay_model(model, ref, pdb, check_bin, tmp, timeout, max_rel,
         total += n
         if status != "OK":
             return (model, status, worst, worst_ulp, total, detail, notes)
-        gate = gate_for(pt, max_rel)
+        gate = gate_for(model, pt, max_rel)
         if rel >= gate:
             return (model, "GATE", rel, ulp, total,
                     f"point {point}: {rel:.2e} ({ulp} ulp) over {n} "
                     f"values, allowed {gate:.1e}", notes)
-        if pt.get("status") != "MISMATCH":
+        if model in ILL_CONDITIONED and rel >= max_rel:
+            notes.append(f"ILL-CONDITIONED {model} point {point}: "
+                         f"{ILL_CONDITIONED[model]} ({rel:.2e})")
+        if pt.get("status") != "MISMATCH" and model not in ILL_CONDITIONED:
             worst, worst_ulp = max(worst, rel), max(worst_ulp, ulp)
     return (model, "OK", worst, worst_ulp, total, "", notes)
 
@@ -662,7 +684,7 @@ def check_wa_coverage(pdb, check_bin, models, contains, timeout, excluded=()):
     return 0
 
 
-def gate_for(pt, default):
+def gate_for(model, pt, default):
     """The threshold this recorded point is held to.
 
     A point recorded as MISMATCH is one whose disagreement with CmdStan is
@@ -690,13 +712,17 @@ def gate_for(pt, default):
     x86_64 (CI run 32637919029) -- 7.8x where point 0 moved 2.4x -- so a
     pure multiplier under-gates precisely the smallest recorded
     deviations. The floor is 4x the worst cross-platform measurement over
-    the model's points, and it applies only to MISMATCH points; a clean
-    point keeps the clean gate. The gate is a tripwire for the regression
-    class this corpus has actually caught, which measured 1.7e+5
-    relative, six orders of magnitude above the floor.
+    the model's points, and a clean point keeps the clean gate unless its
+    model is in ILL_CONDITIONED, where the recording platform decides
+    which points come out clean and holding one of them to 1e-9 fails on
+    the others. The gate is a tripwire for the regression class this
+    corpus has actually caught, which measured 1.7e+5 relative, six
+    orders of magnitude above the floor.
     """
     rel = pt.get("max_rel")
-    if pt.get("status") == "MISMATCH" and rel is not None:
+    if rel is None:
+        return default
+    if model in ILL_CONDITIONED or pt.get("status") == "MISMATCH":
         return max(rel * 4.0, 4.0 * 8.2e-3, default)
     return default
 
