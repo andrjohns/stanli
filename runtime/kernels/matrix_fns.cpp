@@ -495,6 +495,7 @@ template <bool Grad, MnKind Kind = kMnCov>
 double mn_eval(KernelCtx& ctx) {
   const int64_t n = ctx.idata[0];
   const int64_t m = ctx.n_idata > 1 ? ctx.idata[1] : 1;
+  const int64_t l = ctx.n_idata > 2 ? ctx.idata[2] : 1;
   const bool propto = (ctx.variant & 0x80u) != 0;
   const unsigned mask = ctx.variant == 0 ? 0x7u : (ctx.variant & 0x3fu);
   stan::math::nested_rev_autodiff nested;
@@ -510,6 +511,19 @@ double mn_eval(KernelCtx& ctx) {
   VarV y = ys[0], mu(n);
   VarM S(n, n);
   for (int64_t i = 0; i < n; ++i) mu(i) = ctx.in[1].data[i];
+  // l > 1: the location is an array of l K-vectors, paired elementwise with
+  // the random variables or broadcast against a single one.
+  std::vector<VarV> mus;
+  std::vector<VecD> musd;
+  if (l > 1) {
+    mus.assign(l, VarV(n));
+    musd.assign(l, VecD(n));
+    for (int64_t k = 0; k < l; ++k)
+      for (int64_t i = 0; i < n; ++i) {
+        mus[k](i) = ctx.in[1].data[k * n + i];
+        musd[k](i) = ctx.in[1].data[k * n + i];
+      }
+  }
   for (int64_t j = 0; j < n; ++j)
     for (int64_t i = 0; i < n; ++i) S(i, j) = ctx.in[2].data[j * n + i];
   CMapV yd(ctx.in[0].data, n), mud(ctx.in[1].data, n);
@@ -529,17 +543,21 @@ double mn_eval(KernelCtx& ctx) {
   };
   var out;
   const bool ay = mask & 1u, am = mask & 2u, aS = mask & 4u;
-  if (m > 1) {
+  if (m > 1 || l > 1) {
     // Vectorized form: y is an array of m K-vectors and may itself be a
     // parameter expression (array[S] vector[K] built from parameters), so
     // it binds var-or-double per the activity mask like the others.
-    var v_out;
-    if (ay)
-      v_out = aS ? (am ? call(ys, mu, S) : call(ys, mud, S))
-                 : (am ? call(ys, mu, Sd) : call(ys, mud, Sd));
-    else
-      v_out = aS ? (am ? call(ysd, mu, S) : call(ysd, mud, S))
-                 : (am ? call(ysd, mu, Sd) : call(ysd, mud, Sd));
+    auto with_mu = [&](auto&& yy) {
+      if (l > 1)
+        return aS ? (am ? call(yy, mus, S) : call(yy, musd, S))
+                  : (am ? call(yy, mus, Sd) : call(yy, musd, Sd));
+      return aS ? (am ? call(yy, mu, S) : call(yy, mud, S))
+                : (am ? call(yy, mu, Sd) : call(yy, mud, Sd));
+    };
+    // stan-math broadcasts a single vector against an array, but not a
+    // one-element array.
+    const var v_out = m > 1 ? (ay ? with_mu(ys) : with_mu(ysd))
+                            : (ay ? with_mu(y) : with_mu(yd));
     if constexpr (Kind == kMnPrec) {
       const double vv = v_out.val();
       if constexpr (Grad) {
@@ -550,11 +568,19 @@ double mn_eval(KernelCtx& ctx) {
           for (int64_t k = 0; k < m; ++k)
             for (int64_t i = 0; i < n; ++i)
               ctx.in_adj[0].data[k * n + i] += ys[k](i).adj();
-        if (am) tail_scatter(ctx, 1, mu);
+        if (am) {
+          if (l > 1)
+            tail_scatter(ctx, 1, mus);
+          else
+            tail_scatter(ctx, 1, mu);
+        }
         if (aS) tail_scatter(ctx, 2, S);
       }
       return vv;
     } else {
+      if (l > 1)
+        return m > 1 ? tail_density_fwd(ctx, v_out, ys, mus, S)
+                     : tail_density_fwd(ctx, v_out, y, mus, S);
       return tail_density_fwd(ctx, v_out, ys, mu, S);
     }
   }

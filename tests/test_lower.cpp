@@ -6241,6 +6241,71 @@ int main() {
     }
   }
 
+  // An array-valued location, which set_rescor(TRUE) multivariate brms
+  // models emit, and the same location broadcast against a single random
+  // variable. See tests/fixtures/mnarrmu.stan.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_int("K", 2);
+    d.set_real_array("y", {1, 3, 5, 2, 4, 6}, {3, 2});
+    d.set_real_array("y1", {0.5, -1.0}, {2});
+    d.set_real_array("L", {1.2, 0.4, 0.0, 0.9}, {2, 2});
+    CompiledModel am =
+        compile_model(slurp("tests/fixtures/mnarrmu.tmir.sexp"), d);
+    check(am.n_unconstrained == 7, "mnarrmu 7 unconstrained");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    const double q[7] = {0.4, -0.7, -0.3, 0.9, 0.15, -0.55, 0.2};
+    for (int k = 0; k < 7; ++k) aex.params_data()[k] = q[k];
+    double grad[7];
+    const double lp = aex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, 1> qv(7);
+    for (int k = 0; k < 7; ++k) qv(k) = q[k];
+    var jac = 0.0;
+    std::vector<Eigen::Matrix<var, -1, 1>> mus(3, Eigen::Matrix<var, -1, 1>(2));
+    for (int n = 0; n < 3; ++n)
+      for (int i = 0; i < 2; ++i) mus[(size_t)n](i) = qv(n * 2 + i);
+    var s = stan::math::lb_constrain<true>(qv(6), 0.0, jac);
+    Eigen::MatrixXd Ld(2, 2);
+    Ld << 1.2, 0.0, 0.4, 0.9;
+    Eigen::Matrix<var, -1, -1> Ls = s * Ld;
+    std::vector<Eigen::VectorXd> ys(3, Eigen::VectorXd(2));
+    ys[0] << 1, 2;
+    ys[1] << 3, 4;
+    ys[2] << 5, 6;
+    Eigen::VectorXd y1(2);
+    y1 << 0.5, -1.0;
+    var acc = stan::math::multi_normal_cholesky_lpdf<false>(ys, mus, Ls) +
+              stan::math::multi_normal_cholesky_lpdf<false>(y1, mus, Ls) + jac;
+    acc.grad();
+    expect_ulp("mnarrmu lp", lp, acc.val());
+    for (int k = 0; k < 7; ++k)
+      expect_ulp("mnarrmu g" + std::to_string(k), grad[k], qv(k).adj());
+    stan::math::recover_memory();
+  }
+
+  // multi_student_t shares the shape derivation but not the kernel, whose
+  // location is one vector.
+  {
+    DataMap d;
+    d.set_int("N", 3);
+    d.set_int("K", 2);
+    d.set_real_array("y", {1, 3, 5, 2, 4, 6}, {3, 2});
+    d.set_real_array("S", {2.0, 0.5, 0.5, 1.0}, {2, 2});
+    std::string msg;
+    try {
+      compile_model(slurp("tests/fixtures/mstarrmu.tmir.sexp"), d);
+    } catch (const CompileError& e) {
+      msg = e.what();
+    }
+    check(msg.find("multi_student_t_lpdf") != std::string::npos &&
+              msg.find("array-valued location") != std::string::npos,
+          "multi_student_t refuses an array-valued location");
+  }
+
   // `p ~ dirichlet(a)` over an array of simplexes. See
   // tests/fixtures/dirvec.stan: the kernel read the whole slot as one
   // theta, so the vectorized form threw on a length mismatch and only the

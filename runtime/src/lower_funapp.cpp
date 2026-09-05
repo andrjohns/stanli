@@ -1306,9 +1306,22 @@ std::optional<Lowering::Val> Lowering::lower_density_fn(
         fail(e.name + ": an empty array of random variables is unsupported",
              e.raw);
       const size_t location = e.name.rfind("multi_student_t", 0) == 0 ? 2 : 1;
-      if (vector_repetitions(location, "location") != 1)
-        fail(e.name + ": an array-valued location is unsupported", e.raw);
+      const int64_t locations = vector_repetitions(location, "location");
       idata = {(int)K, (int)repetitions};
+      // Only the multi_normal kernels read an array of locations.
+      if (locations != 1) {
+        const bool multi_normal = spec.opcode == OP_MULTI_NORMAL_LPDF ||
+                                  spec.opcode == OP_MULTI_NORMAL_PREC_LPDF ||
+                                  spec.opcode == OP_MULTI_NORMAL_CHOL_LPDF;
+        if (!multi_normal)
+          fail(e.name + ": an array-valued location is unsupported", e.raw);
+        if (repetitions != 1 && locations != repetitions)
+          fail(e.name + ": " + std::to_string(repetitions) +
+                   " random variables against " + std::to_string(locations) +
+                   " locations",
+               e.raw);
+        idata.push_back((int)locations);
+      }
     }
     Val dv =
         emit_raw(spec.opcode, ins, 1, result_si, idata, -1, result_autodiff);
