@@ -4,7 +4,9 @@
 
 #include <stan/io/dump.hpp>
 
+#include <cmath>
 #include <cstdio>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -55,6 +57,58 @@ int main() {
   check(z.at("Z3").dims == std::vector<int64_t>({2, 2, 0}) &&
             z.at("Z3").r.empty() && z.at("Z3").i.empty(),
         "JSON nested zero-width shape");
+
+  // Non-finite reals, in both spellings CmdStan's JSON reader accepts: the
+  // bare tokens rapidjson's kParseNanAndInfFlag allows, and the quoted forms
+  // json_data_handler::string() maps.
+  DataMap nf = DataMap::from_json(R"({
+    "a": Infinity, "b": -Infinity, "c": NaN, "d": Inf, "e": -Inf,
+    "qa": "Infinity", "qb": "-Infinity", "qc": "NaN", "qd": "Inf",
+    "qe": "-Inf"
+  })");
+  const double inf = std::numeric_limits<double>::infinity();
+  for (const std::string& p : {std::string(""), std::string("q")}) {
+    check(!nf.at(p + "a").is_int && nf.at(p + "a").r[0] == inf, p + "a +Inf");
+    check(nf.at(p + "b").r[0] == -inf, p + "b -Inf");
+    check(std::isnan(nf.at(p + "c").r[0]), p + "c NaN");
+    check(nf.at(p + "d").r[0] == inf, p + "d Inf");
+    check(nf.at(p + "e").r[0] == -inf, p + "e -Inf");
+  }
+
+  DataMap nfa = DataMap::from_json(R"({
+    "v": [1, Infinity, 3],
+    "M": [[1.0, Infinity], [NaN, 4.0]],
+    "A": [[[1, -Infinity]]],
+    "Info": 7, "NaNny": [1, 2]
+  })");
+  check(!nfa.at("v").is_int && nfa.at("v").r[1] == inf && nfa.at("v").r[2] == 3,
+        "Infinity demotes an otherwise-int array to real");
+  check(nfa.at("v").i.empty(), "no int mirror for a non-finite array");
+  check(nfa.at("M").dims == std::vector<int64_t>({2, 2}) &&
+            nfa.at("M").r[2] == inf && std::isnan(nfa.at("M").r[1]),
+        "non-finite matrix stays column-major");
+  check(nfa.at("A").dims == std::vector<int64_t>({1, 1, 2}) &&
+            nfa.at("A").r[1] == -inf,
+        "non-finite N-D array");
+  check(nfa.at("Info").is_int && nfa.at("Info").i[0] == 7 &&
+            nfa.at("NaNny").is_int,
+        "token spellings inside keys are not values");
+
+  bool bad_string = false;
+  try {
+    (void)DataMap::from_json(R"({"s": "hello"})");
+  } catch (const std::exception& e) {
+    bad_string = std::string(e.what()).find("s") != std::string::npos;
+  }
+  check(bad_string, "a non-token string is still rejected");
+
+  bool bad_null = false;
+  try {
+    (void)DataMap::from_json(R"({"s": null})");
+  } catch (const std::exception&) {
+    bad_null = true;
+  }
+  check(bad_null, "null is still rejected");
 
   // A var_context keeps reals and ints under separate name lists, and its
   // flat values are already column-major -- the same layout the JSON reader

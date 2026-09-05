@@ -4,6 +4,14 @@
 
 ### Fixes
 
+Real data may be infinite or not-a-number, as it may in CmdStan. The JSON
+reader accepts `Infinity`, `-Infinity`, `Inf`, `-Inf` and `NaN` both bare and
+quoted, the two spellings CmdStan's reader takes. brms writes these routinely:
+a one-sided truncation passes `-Inf` as the unused bound, and `mi()` fills the
+missing rows of the response with `Inf`. Data declared `int` still has to
+arrive integer-valued. A declared bound follows Stan, so an infinite value
+satisfies `real<lower=0>` and a not-a-number value does not.
+
 A shape query (`num_elements`, `size`, `rows`, `cols`) is now answered for
 elementwise arithmetic, `transpose`, and a matrix row selected by a loop
 variable. Before it was answered only for a named value and for a matrix

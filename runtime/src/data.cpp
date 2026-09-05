@@ -2,13 +2,89 @@
 
 #include "../third_party/nlohmann_json.hpp"
 
+#include <cstring>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <sstream>
 
 namespace stanli {
 
 using nlohmann::json;
+
+// The spellings CmdStan's JSON reader accepts: rapidjson's kParseNanAndInfFlag
+// takes them bare, json_data_handler::string() takes them quoted. Longest
+// prefix first, so the rewriter below does not stop at "Inf" inside
+// "Infinity".
+static const struct {
+  const char* text;
+  double value;
+} kNonFinite[] = {
+    {"-Infinity", -std::numeric_limits<double>::infinity()},
+    {"-Inf", -std::numeric_limits<double>::infinity()},
+    {"Infinity", std::numeric_limits<double>::infinity()},
+    {"Inf", std::numeric_limits<double>::infinity()},
+    {"NaN", std::numeric_limits<double>::quiet_NaN()},
+};
+
+static bool nonfinite_value(const std::string& s, double* out) {
+  for (const auto& t : kNonFinite)
+    if (s == t.text) {
+      *out = t.value;
+      return true;
+    }
+  return false;
+}
+
+// nlohmann's lexer has no option for the bare tokens, so quote them and let
+// the string case below decode both spellings the same way.
+static std::string quote_nonfinite(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  bool in_string = false;
+  size_t i = 0;
+  while (i < text.size()) {
+    const char c = text[i];
+    if (in_string) {
+      out += c;
+      if (c == '\\' && i + 1 < text.size())
+        out += text[++i];
+      else if (c == '"')
+        in_string = false;
+      ++i;
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+      out += c;
+      ++i;
+      continue;
+    }
+    const char* match = nullptr;
+    for (const auto& t : kNonFinite)
+      if (text.compare(i, std::strlen(t.text), t.text) == 0) {
+        match = t.text;
+        break;
+      }
+    if (!match) {
+      out += c;
+      ++i;
+      continue;
+    }
+    out += '"';
+    out += match;
+    out += '"';
+    i += std::strlen(match);
+  }
+  return out;
+}
+
+static double element_value(const json& v, const std::string& name) {
+  if (v.is_number()) return v.get<double>();
+  double d;
+  if (v.is_string() && nonfinite_value(v.get<std::string>(), &d)) return d;
+  throw std::runtime_error("data: unsupported JSON value for " + name);
+}
 
 static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
   DataMap::Entry e;
@@ -16,10 +92,6 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
     e.is_int = true;
     e.i = {v.get<int>()};
     e.r = {v.get<double>()};  // int scalars are usable wherever reals are
-    return e;
-  }
-  if (v.is_number()) {
-    e.r = {v.get<double>()};
     return e;
   }
   if (v.is_array()) {
@@ -52,7 +124,7 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
         bool all_int = true;
         for (int64_t i = 0; i < R; ++i)
           for (int64_t j = 0; j < C; ++j) {
-            e.r[j * R + i] = v[i][j].get<double>();
+            e.r[j * R + i] = element_value(v[i][j], name);
             if (!v[i][j].is_number_integer()) all_int = false;
           }
         if (all_int) {
@@ -80,7 +152,7 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
           if (depth == D.size()) {
             int64_t flatpos = 0;
             for (size_t d = 0; d < D.size(); ++d) flatpos += ix[d] * stride[d];
-            e.r[flatpos] = node.get<double>();
+            e.r[flatpos] = element_value(node, name);
             if (!node.is_number_integer()) all_int = false;
             return;
           }
@@ -108,15 +180,18 @@ static DataMap::Entry entry_from_json(const std::string& name, const json& v) {
       // Int arrays also usable as reals.
       for (const auto& k : v) e.r.push_back(k.get<double>());
     } else {
-      for (const auto& k : v) e.r.push_back(k.get<double>());
+      for (const auto& k : v) e.r.push_back(element_value(k, name));
     }
     return e;
   }
-  throw std::runtime_error("data: unsupported JSON value for " + name);
+  e.r = {element_value(v, name)};
+  return e;
 }
 
 DataMap DataMap::from_json(const std::string& text) {
-  json root = json::parse(text);
+  const bool bare = text.find("Inf") != std::string::npos ||
+                    text.find("NaN") != std::string::npos;
+  json root = json::parse(bare ? quote_nonfinite(text) : text);
   if (!root.is_object())
     throw std::runtime_error("data: top-level JSON must be an object");
   DataMap d;
