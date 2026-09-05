@@ -3586,6 +3586,36 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // brms's category-specific ordinal families (sratio, cratio and acat with
+  // cs()) pass `Intercept - transpose(mucs[n])` to an lpmf whose body opens
+  // `int nthres = num_elements(thres);` and then walks
+  // `while (k <= min(y, nthres))`. Shape queries were answered for a named
+  // value and for a matrix subview of one, so `vector[nthres + 1] p` stayed
+  // runtime-sized, the loop refused the structured lowering, and the register
+  // program that took over could not fold the while. Binding the argument to
+  // a local first always compiled and is the reference here: the fold has to
+  // reach the same values, not merely compile.
+  {
+    DataMap d = DataMap::from_json(slurp("tests/fixtures/csthres.json"));
+    CompiledModel expression =
+        compile_model(slurp("tests/fixtures/csthres.tmir.sexp"), d);
+    CompiledModel bound =
+        compile_model(slurp("tests/fixtures/csthresbound.tmir.sexp"), d);
+    check(expression.n_unconstrained == 12, "csthres 12 unconstrained");
+    check(bound.n_unconstrained == 12, "csthresbound 12 unconstrained");
+    Executor ex(std::move(expression.graph)), bx(std::move(bound.graph));
+    expression.bind(ex);
+    bound.bind(bx);
+    double point[12];
+    for (int i = 0; i < 12; ++i) point[i] = 0.3 * i - 1.1;
+    std::copy(point, point + 12, ex.params_data());
+    std::copy(point, point + 12, bx.params_data());
+    double ga[12], gb[12];
+    expect_eq("csthres lp", ex.gradient(ga), bx.gradient(gb));
+    for (int i = 0; i < 12; ++i)
+      expect_eq("csthres g" + std::to_string(i), ga[i], gb[i]);
+  }
+
   // multiply_lower_tri_self_transpose on a matrix parameter whose upper
   // triangle is not zero (unsupported_multiply_lower_tri_self_transpose).
   // The graph used to spell it TRANSPOSE + GEMM, which is A * A' and reads

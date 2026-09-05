@@ -4,6 +4,15 @@
 
 ### Fixes
 
+A shape query (`num_elements`, `size`, `rows`, `cols`) is now answered for
+elementwise arithmetic, `transpose`, and a matrix row selected by a loop
+variable. Before it was answered only for a named value and for a matrix
+subview at a position known when the model compiled. brms writes its
+category-specific ordinal models (`sratio`, `cratio` and `acat` with `cs()`)
+as a log density that sizes its locals with `num_elements(thres)` and passes
+`Intercept - transpose(mucs[n])` for `thres`, so those sizes stayed unknown
+and the models failed to compile with a runtime-control region error.
+
 The GLM densities take a per-row vector intercept. `bernoulli_logit_glm_lpmf`,
 `poisson_log_glm_lpmf` and `neg_binomial_2_log_glm_lpmf` refused one, and
 `binomial_logit_glm_lpmf` read only its first element while its backward wrote

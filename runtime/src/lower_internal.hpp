@@ -1445,12 +1445,14 @@ struct Lowering {
   }
   StaticProbe<StaticSelector> try_static_selector(const mir::Expr& index,
                                                   int64_t extent);
+  static bool is_scalar_type(const std::string& type) {
+    return type == "UReal" || type == "UInt";
+  }
+  StaticProbe<StaticView> try_static_broadcast_view(const mir::Expr& e);
 
   // Logical geometry only: this probe must never materialize a data value or
-  // emit a graph op.  The first tranche deliberately handles the expression
-  // forms responsible for the ctsem false island -- named values and matrix
-  // subviews selected by compile-time integer data.  Everything else declines
-  // to the existing runtime-control path.
+  // emit a graph op.  Everything it does not recognize declines to the
+  // existing runtime-control path.
   StaticProbe<StaticView> try_static_view(const mir::Expr& e);
 
   StaticProbe<int64_t> try_static_shape_query(const mir::Expr& e);
