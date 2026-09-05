@@ -501,10 +501,6 @@ void Executor::bind_() {
   bwd_.reserve(graph_.ops.size());
   for (size_t i = 0; i < graph_.ops.size(); ++i) {
     fwd_fn_[i] = resolve_forward_fn(graph_.ops[i]);
-    if (ctx_[i].dyn_lengths) {
-      ctx_[i].dyn_inner = fwd_fn_[i];
-      fwd_fn_[i] = dynamic_length_forward;
-    }
   }
   for (size_t i = graph_.ops.size(); i-- > 0;) {
     void (*b)(KernelCtx&) = kernel(graph_.ops[i].opcode).backward;
@@ -531,9 +527,6 @@ KernelCtx Executor::make_ctx_(const Op& op, int64_t scratch_offset,
   ctx.scratch = scratch_.empty() ? nullptr : scratch_.data() + scratch_offset;
   ctx.idata = op.idata;
   ctx.udata = op.udata;
-  ctx.dyn_capacity = op.dyn_capacity;
-  ctx.dyn_extent_in = op.dyn_extent_in;
-  ctx.dyn_lengths = op.dyn_lengths;
   ctx.eval_state = &eval_state_;
   ctx.n_idata = op.n_idata;
   for (int i = 0; i < op.n_in; ++i) {
@@ -612,7 +605,6 @@ void Executor::run_forward_only(EvalState state) {
     const size_t np = graph_.ops.size();
     for (size_t i = 0; i < np; ++i) {
       const uint16_t op = graph_.ops[i].opcode;
-      if (ctx_[i].dyn_lengths) apply_dynamic_length(ctx_[i]);
       const auto t0 = std::chrono::steady_clock::now();
       kernel(op).forward(ctx_[i]);
       const auto t1 = std::chrono::steady_clock::now();

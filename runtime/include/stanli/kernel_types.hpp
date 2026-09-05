@@ -86,7 +86,6 @@ struct KernelCtx {
   int64_t dyn_capacity = 0;
   int8_t dyn_extent_in = -1;
   uint8_t dyn_lengths = 0;
-  void (*dyn_inner)(KernelCtx&) = nullptr;
 };
 
 // Rewrite the lengths of the operands that are views, so a kernel reading its
@@ -107,11 +106,6 @@ inline void apply_dynamic_length(KernelCtx& c) {
     c.out_adj_vec.len = live;
   }
   c.n_in = c.dyn_extent_in;
-}
-
-inline void dynamic_length_forward(KernelCtx& c) {
-  apply_dynamic_length(c);
-  c.dyn_inner(c);
 }
 
 }  // namespace stanli

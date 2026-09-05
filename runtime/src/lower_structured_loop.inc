@@ -2197,6 +2197,10 @@ bool try_lower_region(
     value.runtime_dims = results[i].runtime_dims;
     for (int& dim : value.runtime_dims) {
       if (dim < 0) continue;
+      // Only a region body executes dynamic lengths; the graph outside the
+      // outermost loop has no form for one.
+      if (!region_current)
+        fail("structured live-out keeps a runtime logical extent: " + names[i]);
       const size_t index = output_index.at(dim);
       dim = emit_raw(OP_INDEX, {result.slot}, 1, view_of("UInt"),
                      {checked_immediate(output_offsets[index],
