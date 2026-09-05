@@ -220,5 +220,8 @@ def write_generated_outputs(
             for path in stale:
                 path.unlink()
     manifest_source = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    return write_or_check(manifest_path, manifest_source, check,
-                          touch_unchanged=False) and okay
+    if not write_or_check(manifest_path, manifest_source, check,
+                          touch_unchanged=False):
+        print(f"regenerate with: python3 {manifest['generator']}")
+        return False
+    return okay

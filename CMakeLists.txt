@@ -819,12 +819,13 @@ target_link_libraries(dump_function_specs PRIVATE stanli)
 # --- generated signature models --------------------------------------------
 # The builtin and density signature models are build products, like the
 # legacy MIR corpus above: they derive entirely from the pinned stanc's
-# signature inventory and the registry dump, so committing them recorded
-# nothing but churn. The committed manifests stay as the reviewable coverage
-# record, and they also name every generated model, so the lit entries below
-# register at configure time before a fresh build has generated a file.
-# The --check generation tests still diff a fresh run against these outputs
-# and the manifests, gating drift and nondeterminism alike.
+# signature inventory and the registry dump. The committed manifests are the
+# reviewable coverage record and name every generated model, so the lit
+# entries below register at configure time before a fresh build has
+# generated a file. A build writes its own manifest into the build tree; the
+# --check generation tests compare a fresh run against the committed
+# manifests, so a registry or compiler change that moves coverage fails
+# until the generators are rerun by hand.
 set(STANLI_SIGNATURE_MODEL_MANIFESTS
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/function_coverage/builtin_signatures_manifest.json"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/function_coverage/density_signatures_manifest.json")
@@ -876,6 +877,8 @@ add_custom_command(
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_builtin_signature_models.py"
           --stanc "${STANLI_STANC_EXECUTABLE}"
           --registry $<TARGET_FILE:dump_function_specs>
+          --manifest
+          "${CMAKE_BINARY_DIR}/signature_manifests/builtin_signatures_manifest.json"
   DEPENDS ${_stanli_signature_common_dependencies}
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_builtin_signature_models.py"
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -887,6 +890,8 @@ add_custom_command(
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_density_signature_model.py"
           --stanc "${STANLI_STANC_EXECUTABLE}"
           --registry $<TARGET_FILE:dump_function_specs>
+          --manifest
+          "${CMAKE_BINARY_DIR}/signature_manifests/density_signatures_manifest.json"
   DEPENDS ${_stanli_signature_common_dependencies}
           "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_density_signature_model.py"
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
