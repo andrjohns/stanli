@@ -908,18 +908,6 @@ class MirInterp {
     }
   }
 
-  // max-shifted log-sum-exp over a buffer; -inf on an empty or all
-  // -inf input rather than NaN.
-  static T lse(const std::vector<T>& xs) {
-    T m = T(-std::numeric_limits<double>::infinity());
-    for (const T& x : xs)
-      if (val(x) > val(m)) m = x;
-    if (!(val(m) > -std::numeric_limits<double>::infinity())) return m;
-    T s = T(0.0);
-    for (const T& x : xs) s += stan::math::exp(x - m);
-    return m + stan::math::log(s);
-  }
-
   static Value from_entry(const DataMap::Entry& d) {
     if constexpr (std::is_same_v<T, double>) {
       return d;
@@ -1495,19 +1483,23 @@ class MirInterp {
           r.dims = {Ra, Cb};
           return r;
         }
-        // Col-major storage on both sides.
-        r.r.assign((size_t)(Ra * Cb), T(0.0));
-        for (int64_t j = 0; j < Cb; ++j)
-          for (int64_t k = 0; k < Ca; ++k) {
-            const T& bv = b.r.at((size_t)(j * Rb + k));
-            for (int64_t i = 0; i < Ra; ++i)
-              r.r[(size_t)(j * Ra + i)] +=
-                  a.r.at((size_t)(a_mat ? k * Ra + i : k)) * bv;
+        if (a_mat) {
+          Value o;
+          o.dims = {Ra};
+          o.r.resize((size_t)Ra);
+          const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+          if constexpr (std::is_same_v<T, double>) {
+            call_kernel<T>(OP_MATVEC, 0, 0x3f, {(int)Ra, (int)Ca}, in, o.r);
+          } else {
+            call_kernel<T>(OP_GEMM, 0, 0x3f, {(int)Ra, (int)Ca, 1}, in, o.r);
           }
-        if (a_mat && b_mat)
-          r.dims = {Ra, Cb};
-        else
-          r.dims = {(int64_t)r.r.size()};
+          return o;
+        }
+        r.r.assign((size_t)Cb, T(0.0));
+        for (int64_t j = 0; j < Cb; ++j)
+          for (int64_t k = 0; k < Ca; ++k)
+            r.r[(size_t)j] += a.r.at((size_t)k) * b.r.at((size_t)(j * Rb + k));
+        r.dims = {(int64_t)r.r.size()};
         return r;
       }
       if (!is_scalar(a) && !is_scalar(b) && !a_mat && !b_mat) {
@@ -1707,10 +1699,8 @@ class MirInterp {
         have_container = true;
       }
       o.r.resize(n);
-      for (size_t i = 0; i < n; ++i)
-        o.r[i] = stan::math::fma(a.r[a.r.size() == 1 ? 0 : i],
-                                 b.r[b.r.size() == 1 ? 0 : i],
-                                 c.r[c.r.size() == 1 ? 0 : i]);
+      const std::vector<const std::vector<T>*> in{&a.r, &b.r, &c.r};
+      call_kernel<T>(OP_FMA, 0, 0x3f, {}, in, o.r);
       return o;
     }
     // Callable transforms share their name/arity dispatch and their typed
@@ -1845,7 +1835,6 @@ class MirInterp {
       return o;
     }
     if (e.name == "matrix_exp" && e.args.size() == 1) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("matrix_exp: needs a square matrix", e.raw);
@@ -1853,148 +1842,110 @@ class MirInterp {
       if (n < 0 || (n != 0 && n > std::numeric_limits<int64_t>::max() / n) ||
           n * n != static_cast<int64_t>(a.r.size()))
         fail("matrix_exp: matrix shape does not match storage", e.raw);
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r[(size_t)(j * n + i)];
-      const Mat c = stan::math::matrix_exp(A);
       Value o;
       o.dims = {n, n};
       o.r.resize((size_t)(n * n));
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) o.r[(size_t)(j * n + i)] = c(i, j);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_MATRIX_EXP, 0, 0x3f, {(int)n}, in, o.r);
       return o;
     }
     if ((e.name == "inverse" || e.name == "inverse_spd") &&
         e.args.size() == 1) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail(e.name + ": needs a square matrix", e.raw);
       const int64_t n = a.dims[0];
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
-      const Mat c = e.name == "inverse" ? stan::math::inverse(A)
-                                        : stan::math::inverse_spd(A);
       Value o;
       o.dims = {n, n};
       o.r.resize((size_t)(n * n));
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) o.r[(size_t)(j * n + i)] = c(i, j);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      const uint8_t variant =
+          e.name == "inverse_spd" && std::is_same_v<T, stan::math::var> ? 1u
+                                                                        : 0u;
+      call_kernel<T>(e.name == "inverse" ? OP_INVERSE : OP_INVERSE_SPD, variant,
+                     0x3f, {(int)n}, in, o.r);
       return o;
     }
     if (e.name == "log_determinant" && e.args.size() == 1) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("log_determinant: needs a square matrix", e.raw);
       const int64_t n = a.dims[0];
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
-      r.r = {stan::math::log_determinant(A)};
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_LOG_DETERMINANT, 0, 0x3f, {(int)n}, in, o.r);
+      return o;
     }
     if (e.name == "quad_form" && e.args.size() == 2) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       Value b = eval(e.args[1]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("quad_form: needs a square matrix", e.raw);
       const int64_t n = a.dims[0];
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
+      const bool b_matrix = b.dims.size() == 2;
+      const int64_t m = b_matrix ? b.dims[1] : 1;
       Value o;
-      if (b.dims.size() != 2) {
-        Eigen::Matrix<T, Eigen::Dynamic, 1> B((Eigen::Index)b.r.size());
-        for (size_t i = 0; i < b.r.size(); ++i) B((Eigen::Index)i) = b.r[i];
-        o.r = {stan::math::quad_form(A, B)};
-        return o;
-      }
-      const int64_t rb = b.dims[0], m = b.dims[1];
-      Mat B(rb, m);
-      for (int64_t j = 0; j < m; ++j)
-        for (int64_t i = 0; i < rb; ++i) B(i, j) = b.r.at((size_t)(j * rb + i));
-      const Mat c = stan::math::quad_form(A, B);
-      o.dims = {m, m};
-      o.r.resize((size_t)(m * m));
-      for (int64_t j = 0; j < m; ++j)
-        for (int64_t i = 0; i < m; ++i) o.r[(size_t)(j * m + i)] = c(i, j);
+      o.r.resize(b_matrix ? (size_t)(m * m) : 1);
+      if (b_matrix) o.dims = {m, m};
+      const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+      const bool active = std::is_same_v<T, stan::math::var>;
+      const uint8_t variant =
+          (uint8_t)((b_matrix ? 0u : 1u) | (active ? 2u : 0u));
+      call_kernel<T>(OP_QUAD_FORM, variant, 0x3f, {(int)n, (int)m}, in, o.r);
       return o;
     }
     if (e.name == "add_diag" && e.args.size() == 2) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       Value d = eval(e.args[1]);
       if (a.dims.size() != 2) fail("add_diag: needs a matrix", e.raw);
       const int64_t rows = a.dims[0], cols = a.dims[1];
-      Mat A(rows, cols);
-      for (int64_t j = 0; j < cols; ++j)
-        for (int64_t i = 0; i < rows; ++i)
-          A(i, j) = a.r.at((size_t)(j * rows + i));
-      Mat c;
-      if (d.r.size() == 1 && d.dims.empty()) {
-        c = stan::math::add_diag(A, d.r[0]);
-      } else {
-        Eigen::Matrix<T, Eigen::Dynamic, 1> D((Eigen::Index)d.r.size());
-        for (size_t i = 0; i < d.r.size(); ++i) D((Eigen::Index)i) = d.r[i];
-        c = stan::math::add_diag(A, D);
-      }
+      const bool scalar = d.r.size() == 1 && d.dims.empty();
       Value o;
       o.dims = {rows, cols};
       o.r.resize((size_t)(rows * cols));
-      for (int64_t j = 0; j < cols; ++j)
-        for (int64_t i = 0; i < rows; ++i)
-          o.r[(size_t)(j * rows + i)] = c(i, j);
+      const std::vector<const std::vector<T>*> in{&a.r, &d.r};
+      call_kernel<T>(OP_ADD_DIAG, scalar ? 1u : 0u, 0x3f,
+                     {(int)rows, (int)cols}, in, o.r);
       return o;
     }
     if (e.name == "quad_form_sym" && e.args.size() == 2) {
-      // B' A B, symmetrised. Overload resolution on T reaches the same
-      // stan-math call the graph kernel makes -- prim's B.dot(A * B) at
-      // double, quad_form_vari's B' * A * B at var -- so the two paths
-      // group the arithmetic the same way. stan-math checks A for symmetry
-      // and throws the std::domain_error CmdStan would.
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       Value b = eval(e.args[1]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("quad_form_sym: needs a square matrix", e.raw);
       const int64_t n = a.dims[0];
-      Mat A(n, n);
-      for (int64_t j = 0; j < n; ++j)
-        for (int64_t i = 0; i < n; ++i) A(i, j) = a.r.at((size_t)(j * n + i));
+      const bool b_matrix = b.dims.size() == 2;
+      const int64_t m = b_matrix ? b.dims[1] : 1;
       Value o;
-      if (b.dims.size() != 2) {
-        // A vector goes in as a vector: the one-column matrix would take
-        // Eigen's matrix paths and associate the product differently.
-        Eigen::Matrix<T, Eigen::Dynamic, 1> B((Eigen::Index)b.r.size());
-        for (size_t i = 0; i < b.r.size(); ++i) B((Eigen::Index)i) = b.r[i];
-        o.r = {stan::math::quad_form_sym(A, B)};
-        return o;
-      }
-      const int64_t rb = b.dims[0], m = b.dims[1];
-      Mat B(rb, m);
-      for (int64_t j = 0; j < m; ++j)
-        for (int64_t i = 0; i < rb; ++i) B(i, j) = b.r.at((size_t)(j * rb + i));
-      const Mat c = stan::math::quad_form_sym(A, B);
-      o.dims = {m, m};
-      o.r.resize((size_t)(m * m));
-      for (int64_t j = 0; j < m; ++j)
-        for (int64_t i = 0; i < m; ++i) o.r[(size_t)(j * m + i)] = c(i, j);
+      o.r.resize(b_matrix ? (size_t)(m * m) : 1);
+      if (b_matrix) o.dims = {m, m};
+      const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+      const bool active = std::is_same_v<T, stan::math::var>;
+      const uint8_t variant =
+          (uint8_t)((b_matrix ? 0u : 1u) | (active ? 2u : 0u));
+      call_kernel<T>(OP_QUAD_FORM_SYM, variant, 0x3f, {(int)n, (int)m}, in,
+                     o.r);
       return o;
     }
     if (e.name == "gp_exp_quad_cov" && e.args.size() == 3) {
       // K(i,j) = alpha^2 exp(-|x_i - x_j|^2 / (2 rho^2)); x is array[N]
       // real or array[N] vector[D] in Fortran storage.
       Value x = eval(e.args[0]);
-      const T alpha = eval(e.args[1]).r.at(0);
-      const T rho = eval(e.args[2]).r.at(0);
-      const int64_t N = x.dims.size() == 2 ? x.dims[0] : (int64_t)x.r.size();
-      const int64_t D = x.dims.size() == 2 ? x.dims[1] : 1;
-      const T a2 = alpha * alpha;
-      const T inv2r2 = T(1.0) / (T(2.0) * rho * rho);
+      Value alpha = eval(e.args[1]);
+      Value rho = eval(e.args[2]);
       Value o;
+      if (x.dims.size() != 2) {
+        const int64_t N = (int64_t)x.r.size();
+        o.dims = {N, N};
+        o.r.resize((size_t)(N * N));
+        const std::vector<const std::vector<T>*> in{&x.r, &alpha.r, &rho.r};
+        call_kernel<T>(OP_GP_EXP_QUAD_COV, 0, 0x3f, {(int)N, 1}, in, o.r);
+        return o;
+      }
+      const int64_t N = x.dims[0], D = x.dims[1];
+      const T a2 = alpha.r[0] * alpha.r[0];
+      const T inv2r2 = T(1.0) / (T(2.0) * rho.r[0] * rho.r[0]);
       o.dims = {N, N};
       o.r.resize((size_t)(N * N));
       for (int64_t j = 0; j < N; ++j)
@@ -2011,40 +1962,22 @@ class MirInterp {
     }
     if (e.name == "mean") {
       Value a = eval(e.args[0]);
-      T m = T(0.0);
-      for (const T& v : a.r) m += v;
-      r.r = {m / (double)a.r.size()};
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_MEAN, 0, 0x3f, {}, in, o.r);
+      return o;
     }
-    if (e.name == "sd") {
+    if (e.name == "sd" || e.name == "variance") {
       Value a = eval(e.args[0]);
-      if (a.r.empty()) fail("sd: input must have a positive size", e.raw);
-      if (a.r.size() == 1) {
-        r.r = {T(0.0)};
-        return r;
-      }
-      T m = T(0.0);
-      for (const T& v : a.r) m += v;
-      m /= (double)a.r.size();
-      T s2 = T(0.0);
-      for (const T& v : a.r) s2 += (v - m) * (v - m);
-      r.r = {stan::math::sqrt(s2 / (double)(a.r.size() - 1))};
-      return r;
-    }
-    if (e.name == "variance") {
-      Value a = eval(e.args[0]);
-      if (a.r.empty()) fail("variance: input must have a positive size", e.raw);
-      if (a.r.size() == 1) {
-        r.r = {T(0.0)};
-        return r;
-      }
-      T m = T(0.0);
-      for (const T& v : a.r) m += v;
-      m /= (double)a.r.size();
-      T s2 = T(0.0);
-      for (const T& v : a.r) s2 += (v - m) * (v - m);
-      r.r = {s2 / (double)(a.r.size() - 1)};
-      return r;
+      if (a.r.empty())
+        fail(e.name + ": input must have a positive size", e.raw);
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(e.name == "sd" ? OP_SD : OP_VARIANCE, 0, 0x3f, {}, in,
+                     o.r);
+      return o;
     }
     if (e.name == "sum") {
       Value a = eval(e.args[0]);
@@ -2054,12 +1987,39 @@ class MirInterp {
         r.is_int = true;
         r.i = {total};
         r.r = {T((double)total)};
-      } else {
-        T total = T(0.0);
-        for (const T& x : a.r) total += x;
-        r.r = {total};
+        return r;
       }
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_SUM_VEC, 0, 0x3f, {}, in, o.r);
+      return o;
+    }
+    if (e.name == "squared_distance" && e.args.size() == 2) {
+      Value a = eval(e.args[0]), b = eval(e.args[1]);
+      if (a.r.size() != b.r.size())
+        fail("squared_distance: length mismatch", e.raw);
+      Value diff;
+      diff.r.resize(a.r.size());
+      {
+        const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+        call_kernel<T>(OP_SUB, 0, 0x3f, {}, in, diff.r);
+      }
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&diff.r, &diff.r};
+      call_kernel<T>(OP_DOT, 0, 0x3f, {}, in, o.r);
+      return o;
+    }
+    if ((e.name == "dot_product" || e.name == "dot_self")) {
+      Value a = eval(e.args[0]);
+      Value b = e.name == "dot_self" ? a : eval(e.args[1]);
+      if (a.r.size() != b.r.size()) fail("dot_product: length mismatch", e.raw);
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r, &b.r};
+      call_kernel<T>(OP_DOT, 0, 0x3f, {}, in, o.r);
+      return o;
     }
     // The matrix slice family, all on col-major storage.
     if (e.name == "sub_col" && e.args.size() == 4) {
@@ -2158,51 +2118,29 @@ class MirInterp {
       if (r.is_int) reverse_outer(&r.i);
       return r;
     }
-    // squared_distance is dot_self of the difference, which is how the
-    // graph lowers it too (lower.cpp); the two spellings agreeing keeps
-    // transformed data and the log density on the same summation order.
-    // A vector may be paired with a row_vector, and neither view carries
-    // anything but a length, so there is nothing to reorder. No
-    // broadcasting: the language has no scalar-against-container overload.
-    if (e.name == "squared_distance" && e.args.size() == 2) {
-      Value a = eval(e.args[0]), b = eval(e.args[1]);
-      if (a.r.size() != b.r.size())
-        fail("squared_distance: length mismatch", e.raw);
-      T s = T(0.0);
-      for (size_t i = 0; i < a.r.size(); ++i) {
-        const T d = a.r[i] - b.r[i];
-        s += d * d;
-      }
-      r.r = {s};
-      return r;
-    }
-    if ((e.name == "dot_product" || e.name == "dot_self")) {
-      Value a = eval(e.args[0]);
-      Value b = e.name == "dot_self" ? a : eval(e.args[1]);
-      if (a.r.size() != b.r.size()) fail("dot_product: length mismatch", e.raw);
-      T s = T(0.0);
-      for (size_t i = 0; i < a.r.size(); ++i) s += a.r[i] * b.r[i];
-      r.r = {s};
-      return r;
-    }
     if (e.name == "tcrossprod" && e.args.size() == 1) {
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2) fail("tcrossprod: needs a matrix", e.raw);
       const int64_t rows = a.dims[0], cols = a.dims[1];
-      r.dims = {rows, rows};
-      r.r.assign((size_t)(rows * rows), T(0.0));
-      for (int64_t j = 0; j < rows; ++j)
-        for (int64_t k = 0; k < cols; ++k) {
-          const T& rhs = a.r.at((size_t)(k * rows + j));
-          for (int64_t i = 0; i < rows; ++i)
-            r.r[(size_t)(j * rows + i)] += a.r.at((size_t)(k * rows + i)) * rhs;
-        }
-      return r;
+      Value transpose;
+      transpose.dims = {cols, rows};
+      transpose.r.resize((size_t)(rows * cols));
+      {
+        const std::vector<const std::vector<T>*> in{&a.r};
+        call_kernel<T>(OP_TRANSPOSE, 0, 0x3f, {(int)rows, (int)cols}, in,
+                       transpose.r);
+      }
+      Value o;
+      o.dims = {rows, rows};
+      o.r.resize((size_t)(rows * rows));
+      const std::vector<const std::vector<T>*> in{&a.r, &transpose.r};
+      call_kernel<T>(OP_GEMM, 0, 0x3f, {(int)rows, (int)cols, (int)rows}, in,
+                     o.r);
+      return o;
     }
     if ((e.name == "crossprod" ||
          e.name == "multiply_lower_tri_self_transpose") &&
         e.args.size() == 1) {
-      using Mat = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2) fail(e.name + ": needs a matrix", e.raw);
       const int64_t rows = a.dims[0], cols = a.dims[1];
@@ -2210,32 +2148,28 @@ class MirInterp {
           (rows != 0 && cols > std::numeric_limits<int64_t>::max() / rows) ||
           rows * cols != static_cast<int64_t>(a.r.size()))
         fail(e.name + ": matrix shape does not match storage", e.raw);
-      Mat matrix(rows, cols);
-      for (int64_t j = 0; j < cols; ++j)
-        for (int64_t i = 0; i < rows; ++i)
-          matrix(i, j) = a.r[(size_t)(j * rows + i)];
       // crossprod is A' A (cols x cols); multiply_lower_tri_self_transpose
       // takes the lower triangle of A and forms L L' (rows x rows).
-      const Mat product =
-          e.name == "crossprod"
-              ? Mat(stan::math::crossprod(matrix))
-              : Mat(stan::math::multiply_lower_tri_self_transpose(matrix));
       const int64_t out = e.name == "crossprod" ? cols : rows;
-      r.dims = {out, out};
-      r.r.resize((size_t)(out * out));
-      for (int64_t j = 0; j < out; ++j)
-        for (int64_t i = 0; i < out; ++i)
-          r.r[(size_t)(j * out + i)] = product(i, j);
-      return r;
+      Value o;
+      o.dims = {out, out};
+      o.r.resize((size_t)(out * out));
+      const std::vector<const std::vector<T>*> in{&a.r};
+      const uint8_t variant = std::is_same_v<T, stan::math::var> ? 1u : 0u;
+      call_kernel<T>(e.name == "crossprod" ? OP_CROSSPROD
+                                           : OP_MULT_LOWER_TRI_SELF_TRANSPOSE,
+                     variant, 0x3f, {(int)rows, (int)cols}, in, o.r);
+      return o;
     }
     if (e.name == "diag_matrix" && e.args.size() == 1) {
       Value diagonal = eval(e.args[0]);
       const int64_t n = (int64_t)diagonal.r.size();
-      r.dims = {n, n};
-      r.r.assign((size_t)(n * n), T(0.0));
-      for (int64_t i = 0; i < n; ++i)
-        r.r[(size_t)(i * n + i)] = diagonal.r[(size_t)i];
-      return r;
+      Value o;
+      o.dims = {n, n};
+      o.r.resize((size_t)(n * n));
+      const std::vector<const std::vector<T>*> in{&diagonal.r};
+      call_kernel<T>(OP_DIAG_MATRIX, 0, 0x3f, {}, in, o.r);
+      return o;
     }
     if (e.name == "diagonal") {
       if (e.args.size() != 1)
@@ -2252,31 +2186,15 @@ class MirInterp {
       return r;
     }
     if (e.name == "cholesky_decompose" && e.args.size() == 1) {
-      // Standard column-oriented Cholesky on the templated scalar.
       Value a = eval(e.args[0]);
       if (a.dims.size() != 2 || a.dims[0] != a.dims[1])
         fail("cholesky_decompose: needs a square matrix", e.raw);
       const int64_t K = a.dims[0];
       Value o;
       o.dims = {K, K};
-      o.r.assign((size_t)(K * K), T(0.0));
-      for (int64_t j = 0; j < K; ++j) {
-        T d = a.r.at((size_t)(j * K + j));
-        for (int64_t k = 0; k < j; ++k) {
-          const T& l = o.r[(size_t)(k * K + j)];
-          d -= l * l;
-        }
-        if (!(val(d) > 0.0))
-          fail("cholesky_decompose: matrix is not positive definite", e.raw);
-        const T dj = stan::math::sqrt(d);
-        o.r[(size_t)(j * K + j)] = dj;
-        for (int64_t i = j + 1; i < K; ++i) {
-          T s = a.r.at((size_t)(j * K + i));
-          for (int64_t k = 0; k < j; ++k)
-            s -= o.r[(size_t)(k * K + i)] * o.r[(size_t)(k * K + j)];
-          o.r[(size_t)(j * K + i)] = s / dj;
-        }
-      }
+      o.r.resize((size_t)(K * K));
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_CHOLESKY, 0, 0x3f, {(int)K}, in, o.r);
       return o;
     }
     if (e.name == "prod") {
@@ -2290,41 +2208,25 @@ class MirInterp {
           (e.args[0].unsized.leaf == mir::UnsizedLeaf::Vector ||
            e.args[0].unsized.leaf == mir::UnsizedLeaf::RowVector);
       const ExpressionLayout layout =
-          udf_depth_ == 0 ? mir::source_expression_layout(e.args[0])
-                          : ExpressionLayout::unknown();
-      if (!eigen_container || !layout.known()) {
-        T product = T(1.0);
-        for (const T& value : a.r) product *= value;
-        r.r = {product};
-        return r;
+          udf_depth_ == 0 && eigen_container
+              ? mir::source_expression_layout(e.args[0])
+              : ExpressionLayout::unknown();
+      const bool active = std::is_same_v<T, stan::math::var>;
+      uint8_t variant = 0;
+      std::vector<int> idata;
+      if (active || !layout.known() ||
+          layout.kind == ExpressionLayout::Kind::Scalar) {
+        variant = active ? 2u : 1u;
+      } else if (layout.kind == ExpressionLayout::Kind::Direct &&
+                 layout.element_offset != 0) {
+        variant = 4u;
+        idata = {(int)layout.element_offset};
       }
-      if (layout.kind == ExpressionLayout::Kind::Scalar) {
-        T product = a.r[0];
-        for (size_t i = 1; i < a.r.size(); ++i) product *= a.r[i];
-        r.r = {product};
-        return r;
-      }
-      if (layout.kind == ExpressionLayout::Kind::Direct &&
-          layout.element_offset != 0) {
-        if constexpr (std::is_same_v<T, double>) {
-          r.r = {prod_phased(a.r.data(), static_cast<int64_t>(a.r.size()),
-                             layout.element_offset)};
-          return r;
-        }
-        T product = T(1.0);
-        for (const T& value : a.r) product *= value;
-        r.r = {product};
-        return r;
-      }
-      // Match the address-independent packet grouping used by the compiled
-      // generated-quantities kernel.  A direct Map (including the Map used
-      // by stan::math::prod(std::vector)) can pick a different alignedStart
-      // when this vector's allocation is shifted under AVX.
-      using Vec = Eigen::Matrix<T, Eigen::Dynamic, 1>;
-      const Eigen::Map<const Vec> input(a.r.data(), a.r.size());
-      r.r = {stan::math::prod(
-          input.unaryExpr(Eigen::internal::core_cast_op<T, T>()))};
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_PROD_VEC, variant, 0x3f, idata, in, o.r);
+      return o;
     }
     if ((e.name == "columns_dot_product" || e.name == "rows_dot_product") &&
         e.args.size() == 2) {
@@ -2364,8 +2266,11 @@ class MirInterp {
     }
     if (e.name == "log_sum_exp") {
       Value a = eval(e.args[0]);
-      r.r = {lse(a.r)};
-      return r;
+      Value o;
+      o.r.resize(1);
+      const std::vector<const std::vector<T>*> in{&a.r};
+      call_kernel<T>(OP_LOG_SUM_EXP, 0, 0x3f, {}, in, o.r);
+      return o;
     }
     if ((e.name == "diag_pre_multiply" || e.name == "diag_post_multiply") &&
         e.args.size() == 2) {
@@ -2928,19 +2833,62 @@ class MirInterp {
       return r;
     }
 
-    // The continuous scalar ones come from the shared list, so this can
-    // never be narrower than what the register-machine compiler accepts
-    // -- the compiled path falls back here when compilation fails, and a
-    // narrower fallback turns a slow path into an error. The discrete
-    // ones are the interpreter's alone: the register file has nowhere to
-    // put an integer outcome.
+    {
+      struct DiscreteSpec {
+        uint16_t opcode;
+        int n_real;
+        bool two_int_groups;
+      };
+      static const std::map<std::string, DiscreteSpec> kDiscrete = {
+          {"bernoulli_lpmf", {OP_BERNOULLI_LPMF, 1, false}},
+          {"bernoulli_logit_lpmf", {OP_BERNOULLI_LOGIT_LPMF, 1, false}},
+          {"poisson_lpmf", {OP_POISSON_LPMF, 1, false}},
+          {"poisson_log_lpmf", {OP_POISSON_LOG_LPMF, 1, false}},
+          {"neg_binomial_2_lpmf", {OP_NEG_BINOMIAL_2_LPMF, 2, false}},
+          {"neg_binomial_2_log_lpmf", {OP_NEG_BINOMIAL_2_LOG_LPMF, 2, false}},
+          {"binomial_lpmf", {OP_BINOMIAL_LPMF, 1, true}},
+          {"binomial_logit_lpmf", {OP_BINOMIAL_LOGIT_LPMF, 1, true}},
+      };
+      const auto spec = kDiscrete.find(e.name);
+      if (spec != kDiscrete.end()) {
+        const int n_int = spec->second.two_int_groups ? 2 : 1;
+        if (e.args.size() != (size_t)(n_int + spec->second.n_real))
+          fail(e.name + ": wrong arity in the interpreter", e.raw);
+        std::vector<Value> av;
+        av.reserve(e.args.size());
+        for (const auto& a : e.args) av.push_back(eval(a));
+        const auto int_group = [&](const Value& a) {
+          std::vector<int> vals;
+          if (a.is_int && a.i.size() == a.r.size()) {
+            vals.assign(a.i.begin(), a.i.end());
+          } else {
+            vals.reserve(a.r.size());
+            for (const T& x : a.r) vals.push_back((int)val(x));
+          }
+          return vals;
+        };
+        std::vector<int> idata;
+        if (spec->second.two_int_groups) {
+          for (size_t k = 0; k < 2; ++k) {
+            const std::vector<int> vals = int_group(av[k]);
+            idata.push_back(is_scalar(av[k]) ? -1 : (int)vals.size());
+            idata.insert(idata.end(), vals.begin(), vals.end());
+          }
+        } else {
+          idata = int_group(av[0]);
+        }
+        std::vector<const std::vector<T>*> in;
+        for (size_t k = (size_t)n_int; k < av.size(); ++k)
+          in.push_back(&av[k].r);
+        Value o;
+        o.r.resize(1);
+        call_kernel<T>(spec->second.opcode, 0, 0x3f, idata, in, o.r);
+        return o;
+      }
+    }
     const int shared_id = program_density_id_by_name(e.name);
-    if (shared_id >= 0 || e.name == "bernoulli_lpmf" ||
-        e.name == "binomial_lpmf" || e.name == "poisson_lpmf" ||
-        e.name == "poisson_log_lpmf" || e.name == "bernoulli_logit_lpmf" ||
-        e.name == "binomial_logit_lpmf" || e.name == "hypergeometric_lpmf" ||
-        e.name == "discrete_range_lpmf" || e.name == "neg_binomial_2_lpmf" ||
-        e.name == "neg_binomial_2_log_lpmf") {
+    if (shared_id >= 0 || e.name == "hypergeometric_lpmf" ||
+        e.name == "discrete_range_lpmf") {
       if (shared_id >= 0 &&
           e.args.size() != (size_t)program_density_arity(shared_id))
         fail(e.name + " takes " +
@@ -2973,31 +2921,11 @@ class MirInterp {
           acc += program_density<T>(shared_id, argbuf);
           continue;
         }
-        if (e.name == "bernoulli_lpmf")
-          acc += stan::math::bernoulli_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "bernoulli_logit_lpmf")
-          acc += stan::math::bernoulli_logit_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "binomial_lpmf")
-          acc += stan::math::binomial_lpmf(ic(0, i), ic(1, i), sc(2, i));
-        else if (e.name == "binomial_logit_lpmf")
-          acc += stan::math::binomial_logit_lpmf(ic(0, i), ic(1, i), sc(2, i));
-        else if (e.name == "poisson_lpmf")
-          acc += stan::math::poisson_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "poisson_log_lpmf")
-          acc += stan::math::poisson_log_lpmf(ic(0, i), sc(1, i));
-        else if (e.name == "hypergeometric_lpmf")
+        if (e.name == "hypergeometric_lpmf")
           acc += stan::math::hypergeometric_lpmf(ic(0, i), ic(1, i), ic(2, i),
                                                  ic(3, i));
         else if (e.name == "discrete_range_lpmf")
           acc += stan::math::discrete_range_lpmf(ic(0, i), ic(1, i), ic(2, i));
-        else if (e.name == "neg_binomial_2_lpmf")
-          acc += stan::math::neg_binomial_2_lpmf(ic(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "neg_binomial_2_log_lpmf")
-          acc +=
-              stan::math::neg_binomial_2_log_lpmf(ic(0, i), sc(1, i), sc(2, i));
-        else if (e.name == "student_t_lpdf")
-          acc += stan::math::student_t_lpdf(sc(0, i), sc(1, i), sc(2, i),
-                                            sc(3, i));
         else
           fail("unsupported density " + e.name, e.raw);
       }
