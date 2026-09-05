@@ -733,6 +733,10 @@ struct Lowering {
   // to emit, not values to differentiate.
   bool in_write_array = false;
   bool write_array_known_static = false;
+  // The declared emission order, and the last name emitted from it: what a
+  // write whose variable --O1 substituted away is called.
+  const std::vector<std::string>* output_vars = nullptr;
+  std::string last_written;
   // Read once per lowering. The automatic parent path stays legacy until its
   // cheap outer-loop hazard gate fires, so ordinary expressions and loops pay
   // no repeated environment lookup or recursive scan.

@@ -1348,9 +1348,22 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
           }
           base = &base->args[0];
         }
-        if (base->kind != mir::Expr::Var)
-          fail("FnWriteParam of a non-variable", s.raw);
-        std::string name = base->name;
+        std::string name;
+        if (base->kind == mir::Expr::Var) {
+          name = base->name;
+        } else {
+          size_t next = 0;
+          if (output_vars) {
+            const auto at = std::find(output_vars->begin(), output_vars->end(),
+                                      last_written);
+            if (at != output_vars->end())
+              next = (size_t)(at - output_vars->begin()) + 1;
+          }
+          if (!output_vars || next >= output_vars->size())
+            fail("cannot name a substituted FnWriteParam", s.raw);
+          name = (*output_vars)[next];
+        }
+        last_written = name;
         for (auto it = ixs.rbegin(); it != ixs.rend(); ++it)
           name += "." + std::to_string(*it);
         const Val v = lower_expr(s.fn_args[0]);

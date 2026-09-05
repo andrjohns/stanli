@@ -19,6 +19,14 @@ the graph cannot express, so a model that writes an LKJ density in
 transformed parameters or generated quantities no longer depends on the
 graph covering everything else in the section.
 
+The write_array graph emits a column whose variable `--O1` substituted away.
+A transformed parameter with a constant value, such as the `real disc = 1`
+brms writes in every ordinal model, reaches the write as the literal rather
+than as a name, and the graph gave up the whole section for it. The column
+takes its name from the declared emission order, the same rule the per-draw
+interpreter has used. Ten of the shipped brms models, every ordinal family
+with and without `cs()` among them, stop falling back.
+
 The corpus replay fails a model that produces no write_array row. The
 recorder drops the reference for a row the two engines disagreed about, so a
 model whose write_array failed outright recorded none and was then replayed

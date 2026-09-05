@@ -98,6 +98,13 @@ std::map<std::string, stanli::DataMap::Entry> bound_check_env(
   return env;
 }
 
+bool same_double_bytes(const std::vector<double>& a,
+                       const std::vector<double>& b) {
+  return a.size() == b.size() &&
+         (a.empty() ||
+          std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
+}
+
 std::string joined(const std::vector<stanli::CompiledModel::ParamView>& cols) {
   std::string h;
   for (const auto& n : stanli::CompiledModel::csv_names(cols)) {
@@ -1131,27 +1138,50 @@ void test_transformed_parameter_checks() {
 
 // A generated quantity the optimizer folds to a constant: --O1 replaces
 // the FnWriteParam's variable reference with the literal value, so the
-// column's name has to come from the program's output_vars instead.
+// column's name has to come from the program's output_vars instead. Both
+// engines name it that way; the graph lowers the value like any other
+// expression.
 void test_constant_folded_gq_column() {
   using namespace stanli;
   DataMap data;
   data.set_real_array("rectangular", {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, {3, 2});
-  CompiledModel cm =
-      compile_model(slurp("tests/fixtures/gqconst.tmir.sexp"), data);
-  if (!cm.write_array || !cm.write_array->interp) {
+  const std::string text = slurp("tests/fixtures/gqconst.tmir.sexp");
+  test_setenv("STANLI_WA_FORCE_INTERP", "1");
+  CompiledModel cm = compile_model(text, data);
+  test_unsetenv("STANLI_WA_FORCE_INTERP");
+  if (!cm.write_array || !cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
     ++failures;
-    std::printf("FAIL gqconst: no interpreted write_array\n");
+    std::printf(
+        "FAIL gqconst did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
-  WaInterp& wi = *cm.write_array->interp;
-  std::map<std::string, DataMap::Entry> params;
-  DataMap::Entry x;
-  x.r = {0.25};
-  params["x"] = x;
-  WaRng rng(1);
-  const std::vector<double> row = wi.eval(params, rng);
-  expect_eq("gqconst header", joined(wi.columns()),
+  expect_eq("gqconst header", joined(cm.write_array->columns),
             "x,z,extracted.1,extracted.2");
+
+  Executor pex(cm.graph);
+  cm.bind(pex);
+  pex.params_data()[0] = 0.25;
+  pex.run_forward_only();
+
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  wex.params_data()[0] = 0.25;
+  WaRng graph_rng(1);
+  wex.run_forward_only(EvalState{&graph_rng});
+  std::vector<double> row;
+  for (const auto& c : cm.write_array->columns) {
+    const double* p = wex.value_ptr(c.slot);
+    for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+  }
+  WaRng interp_rng(1);
+  const std::vector<double> interp_row =
+      cm.write_array->interp->eval(cm.constrained_env(pex), interp_rng);
+  if (!same_double_bytes(row, interp_row)) {
+    ++failures;
+    std::printf("FAIL gqconst: graph and interpreter rows differ\n");
+  }
   if (row.size() != 4 || row[0] != 0.25 || row[1] != 3.0 || row[2] != 1.0 ||
       row[3] != 5.0) {
     ++failures;
@@ -1279,13 +1309,6 @@ static std::vector<double> direct_multi_normal_rng(
       multi_normal_location(mu),
       multi_normal_covariance(covariance, rows, cols), rng.gen());
   return std::vector<double>(draw.data(), draw.data() + draw.size());
-}
-
-static bool same_double_bytes(const std::vector<double>& a,
-                              const std::vector<double>& b) {
-  return a.size() == b.size() &&
-         (a.empty() ||
-          std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
 }
 
 // categorical_rng is unusual in this opcode family: one logical argument is
