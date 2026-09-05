@@ -26,6 +26,12 @@ static void expect(const char* what, bool ok) {
     std::printf("FAIL %s\n", what);
   }
 }
+static void expect_exact(const std::string& what, double got, double want) {
+  if (got == want) return;
+  ++failures;
+  std::printf("FAIL %-24s got %.17g want %.17g\n", what.c_str(), got, want);
+}
+
 static void expect_close(const std::string& what, double got, double want) {
   const double rel = std::abs(got - want) / std::max(std::abs(want), 1e-300);
   if (!(rel < 1e-12)) {
@@ -1358,11 +1364,46 @@ static void test_density_mask_gradient_identical() {
   expect_eq("mask: bitwise identical", wrong, 0);
 }
 
+// A parameter-dependent while loop holding poisson_log_lpmf and log2()
+// against the same terms written outside one, where the flat path unrolls a
+// data-bounded for. The trip count is 2 below zero and 3 above it.
+static void test_while_lpmf_region_matches_flat() {
+  const auto observations = [] {
+    DataMap data;
+    data.set_int("N", 3);
+    data.set_int_array("y", {2, 0, 5});
+    return data;
+  };
+  CompiledModel region = compile_model(
+      slurp("tests/fixtures/while_lpmf_region.tmir.sexp"), observations());
+  Executor region_ex(std::move(region.graph));
+  region.bind(region_ex);
+
+  for (double eta : {-0.3, -1.25, 0.4, 1.5}) {
+    DataMap data = observations();
+    data.set_int("reps", eta > 0 ? 3 : 2);
+    CompiledModel flat =
+        compile_model(slurp("tests/fixtures/while_lpmf_flat.tmir.sexp"), data);
+    Executor flat_ex(std::move(flat.graph));
+    flat.bind(flat_ex);
+
+    const std::string tag = "while lpmf eta=" + std::to_string(eta);
+    double region_grad = 0, flat_grad = 0;
+    region_ex.params_data()[0] = eta;
+    flat_ex.params_data()[0] = eta;
+    const double region_lp = region_ex.gradient(&region_grad);
+    const double flat_lp = flat_ex.gradient(&flat_grad);
+    expect_exact(tag + " lp", region_lp, flat_lp);
+    expect_exact(tag + " grad", region_grad, flat_grad);
+  }
+}
+
 int main() {
   // What the compiler does with a region, on graphs small enough to
   // reason about. The cost estimate would refuse most of them -- it is
   // policy, tested separately below, and these are about correctness.
   test_branch_bound_live_out();
+  test_while_lpmf_region_matches_flat();
   test_compact_copy_chain();
   test_compact_dead_fill();
   test_compact_rewritten_source_kept();

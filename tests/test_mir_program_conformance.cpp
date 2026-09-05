@@ -542,6 +542,9 @@ void test_nullary_constants() {
   };
   check("e", fun("e", {}, "UReal"), stan::math::e());
   check("pi", fun("pi", {}, "UReal"), stan::math::pi());
+  check("log2", fun("log2", {}, "UReal"), stan::math::log2());
+  check("log10", fun("log10", {}, "UReal"), stan::math::log10());
+  check("sqrt2", fun("sqrt2", {}, "UReal"), stan::math::sqrt2());
   check("machine_precision", fun("machine_precision", {}, "UReal"),
         std::numeric_limits<double>::epsilon());
   check("negative_infinity", fun("negative_infinity", {}, "UReal"),

@@ -43,7 +43,7 @@ transformed data {
   array[2,3] real a = {{1,2,3},{4,5,6}};
   matrix[2,3] m = [[1,0,2],[0,3,4]];
   vector[3] v = [0.5,1.5,2.5]';
-  vector[30] observed;
+  vector[31] observed;
   observed[1] = probe(ceil(v)); // ceil
   observed[2] = probe(floor(v)); // floor
   observed[3] = probe(round(v)); // round
@@ -56,25 +56,26 @@ transformed data {
   observed[10] = probe(is_inf(negative_infinity())); // negative_infinity
   observed[11] = probe(is_inf(positive_infinity())); // positive_infinity
   observed[12] = probe(pi()); // pi
-  observed[13] = probe(linspaced_array(3, -1.5, 2.5)); // linspaced_array
-  observed[14] = probe(linspaced_int_array(5, 2, 3)); // linspaced_int_array
-  observed[15] = probe(linspaced_vector(4, 0.0, 1.0)); // linspaced_vector
-  observed[16] = probe(linspaced_row_vector(3, 2.0, 8.0)); // linspaced_row_vector
-  observed[17] = probe(zeros_vector(3)); // zeros_vector
-  observed[18] = probe(zeros_row_vector(3)); // zeros_row_vector
-  observed[19] = probe(zeros_int_array(3)); // zeros_int_array
-  observed[20] = probe(ones_array(3)); // ones_array
-  observed[21] = probe(ones_vector(3)); // ones_vector
-  observed[22] = probe(ones_row_vector(3)); // ones_row_vector
-  observed[23] = probe(identity_matrix(3)); // identity_matrix
-  observed[24] = probe(csr_extract_u(m)); // csr_extract_u
-  observed[25] = probe(csr_extract_v(m)); // csr_extract_v
-  observed[26] = probe(csr_extract_w(m)); // csr_extract_w
-  observed[27] = probe(to_matrix(a)); // to_matrix
-  observed[28] = probe(choose(5, 2)); // choose
-  observed[29] = probe(hypergeometric_lpmf(2 | 4, 5, 7)); // hypergeometric_lpmf
-  observed[30] = probe(discrete_range_lpmf(2 | 1, 4)); // discrete_range_lpmf
+  observed[13] = probe(sqrt2()); // sqrt2
+  observed[14] = probe(linspaced_array(3, -1.5, 2.5)); // linspaced_array
+  observed[15] = probe(linspaced_int_array(5, 2, 3)); // linspaced_int_array
+  observed[16] = probe(linspaced_vector(4, 0.0, 1.0)); // linspaced_vector
+  observed[17] = probe(linspaced_row_vector(3, 2.0, 8.0)); // linspaced_row_vector
+  observed[18] = probe(zeros_vector(3)); // zeros_vector
+  observed[19] = probe(zeros_row_vector(3)); // zeros_row_vector
+  observed[20] = probe(zeros_int_array(3)); // zeros_int_array
+  observed[21] = probe(ones_array(3)); // ones_array
+  observed[22] = probe(ones_vector(3)); // ones_vector
+  observed[23] = probe(ones_row_vector(3)); // ones_row_vector
+  observed[24] = probe(identity_matrix(3)); // identity_matrix
+  observed[25] = probe(csr_extract_u(m)); // csr_extract_u
+  observed[26] = probe(csr_extract_v(m)); // csr_extract_v
+  observed[27] = probe(csr_extract_w(m)); // csr_extract_w
+  observed[28] = probe(to_matrix(a)); // to_matrix
+  observed[29] = probe(choose(5, 2)); // choose
+  observed[30] = probe(hypergeometric_lpmf(2 | 4, 5, 7)); // hypergeometric_lpmf
+  observed[31] = probe(discrete_range_lpmf(2 | 1, 4)); // discrete_range_lpmf
 }
 parameters { real theta; }
 model { target += (1 + theta) * sum(observed); }
-generated quantities { vector[30] values = observed; }
+generated quantities { vector[31] values = observed; }

@@ -140,6 +140,7 @@ GROUPS = {
         "machine_precision": "machine_precision()",
         "negative_infinity": "is_inf(negative_infinity())",
         "positive_infinity": "is_inf(positive_infinity())", "pi": "pi()",
+        "sqrt2": "sqrt2()",
         "linspaced_array": "linspaced_array(3, -1.5, 2.5)",
         "linspaced_int_array": "linspaced_int_array(5, 2, 3)",
         "linspaced_vector": "linspaced_vector(4, 0.0, 1.0)",

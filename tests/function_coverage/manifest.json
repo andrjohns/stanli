@@ -362,6 +362,7 @@
     "skew_normal_lpdf",
     "softmax",
     "sqrt",
+    "sqrt2",
     "square",
     "squared_distance",
     "std_normal_cdf",
@@ -525,6 +526,7 @@
         "negative_infinity",
         "positive_infinity",
         "pi",
+        "sqrt2",
         "linspaced_array",
         "linspaced_int_array",
         "linspaced_vector",
@@ -1154,7 +1156,7 @@
       ]
     }
   },
-  "name_count": 420,
+  "name_count": 421,
   "recognized_but_unsupported": {
     "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout."
   },

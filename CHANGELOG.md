@@ -34,6 +34,13 @@ as if it had no section to check. Every model has a row, so presence is
 demanded whether or not the reference carries one. Both models that lost
 their generated quantities to `choose` passed the gate this way.
 
+`log2()`, `log10()` and `sqrt2()` evaluate. Stan's nullary constants are one
+family and six of the nine were recognized, so these three failed to compile
+on every path with `unsupported function log2`. brms writes `-23 * log2()` as
+the convergence tolerance of the COM-Poisson normalizing constant. The values
+are stan-math's own, and the recorded CmdStan reference for the function
+coverage model holds them to the bit.
+
 A runtime-control region can hold the integer-outcome densities. A region is
 what a model compiles to where its control flow depends on a parameter, and
 its density vocabulary was the shared scalar list, which holds the continuous
