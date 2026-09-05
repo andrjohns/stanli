@@ -361,6 +361,17 @@ VarV tail_v(const KernelCtx& ctx, int k, int64_t n) {
   for (int64_t i = 0; i < n; ++i) v(i) = ctx.in[k].data[i];
   return v;
 }
+// A length-1 slot enters stan-math as a scalar rather than a
+// one-element vector: the sequence views broadcast a scalar but require
+// vectors to match sizes. That is the same rule bind_args_m follows in
+// densities_impl.hpp, and getting it wrong is not a size error -- it is
+// every observation evaluated with element 0's parameters, which is what
+// the sweep caught in the old scalar-only wiener tail.
+using TailArg = std::variant<stan::math::var, VarV>;
+TailArg tail_arg(const KernelCtx& ctx, int k) {
+  if (ctx.in[k].len == 1) return stan::math::var(ctx.in[k].data[0]);
+  return tail_v(ctx, k, ctx.in[k].len);
+}
 void tail_scatter(KernelCtx& ctx, int k, const VarM& M) {
   if (!ctx.in_adj[k].data) return;
   const int64_t rows = M.rows(), cols = M.cols();
@@ -1369,13 +1380,17 @@ double tglm_eval(KernelCtx& ctx) {
     // idata = [n..., N..., rows, cols]
     std::vector<int> nn(ctx.idata, ctx.idata + rows);
     std::vector<int> NN(ctx.idata + rows, ctx.idata + 2 * rows);
-    var alpha = ctx.in[1].data[0];
+    const TailArg alpha = tail_arg(ctx, 1);
     VarV beta = tail_v(ctx, 2, cols);
-    out = propto ? stan::math::binomial_logit_glm_lpmf<true>(nn, NN, X, alpha,
-                                                             beta)
-                 : stan::math::binomial_logit_glm_lpmf<false>(nn, NN, X, alpha,
-                                                              beta);
-    return tail_density_fwd(ctx, out, X, alpha, beta);
+    return std::visit(
+        [&](const auto& a) {
+          out = propto ? stan::math::binomial_logit_glm_lpmf<true>(nn, NN, X, a,
+                                                                   beta)
+                       : stan::math::binomial_logit_glm_lpmf<false>(nn, NN, X,
+                                                                    a, beta);
+          return tail_density_fwd(ctx, out, X, a, beta);
+        },
+        alpha);
   } else {
     std::vector<int> y(ctx.idata, ctx.idata + rows);
     if constexpr (Kind == kCatLogitGlm) {
@@ -1417,18 +1432,6 @@ void olglm_fwd(KernelCtx& ctx) {
 // scalar type, and neg_binomial_2_lcdf forms `phi / (phi + mu)`. Neither
 // builds its result through stan-math's partials propagator, so neither
 // can be handed an rvar. See STANLI_TAIL_CDF_LIST in optable.hpp.
-//
-// A length-1 slot enters stan-math as a scalar rather than a
-// one-element vector: the sequence views broadcast a scalar but require
-// vectors to match sizes. That is the same rule bind_args_m follows in
-// densities_impl.hpp, and getting it wrong is not a size error -- it is
-// every observation evaluated with element 0's parameters, which is what
-// the sweep caught in the old scalar-only wiener tail.
-using TailArg = std::variant<stan::math::var, VarV>;
-TailArg tail_arg(const KernelCtx& ctx, int k) {
-  if (ctx.in[k].len == 1) return stan::math::var(ctx.in[k].data[0]);
-  return tail_v(ctx, k, ctx.in[k].len);
-}
 
 // finish_tail_density's shape, over arguments that are variants: one
 // visit picks the scalar-or-vector instantiation, a second scatters each

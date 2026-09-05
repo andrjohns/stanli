@@ -1223,9 +1223,7 @@ std::optional<Lowering::Val> Lowering::lower_density_fn(
       // would buy the right gradients and an lp a constant off CmdStan's,
       // which is the one thing these kernels exist to get right. The
       // other two were measured and do not have that problem; they share
-      // this layout and this check, so they are refused with it. Refusing
-      // by name is what the vector-alpha form already gets; see
-      // docs/coverage.md.
+      // this layout and this check, so they are refused with it.
       if ((int64_t)idata.size() != xsi.rows)
         fail(e.name + ": outcome has " + std::to_string(idata.size()) +
                  " value(s) but X has " + std::to_string(xsi.rows) +

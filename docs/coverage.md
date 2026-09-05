@@ -156,15 +156,9 @@ The headline ratios hide several important gaps:
 
 ### GLM argument-shape gaps
 
-Three GLMs share two argument-shape restrictions:
-
-- `bernoulli_logit_glm_lpmf`, `poisson_log_glm_lpmf`, and
-  `neg_binomial_2_log_glm_lpmf` accept a scalar intercept `alpha`, but not a
-  per-row vector intercept. brms passes a vector `alpha` whenever the formula
-  carries a group-level effect, so this refusal covers every `(1 | g)` fit in
-  those three families.
-- The same three functions require one outcome per row of the design matrix.
-  They refuse Stan Math's scalar-outcome broadcast.
+`bernoulli_logit_glm_lpmf`, `poisson_log_glm_lpmf`, and
+`neg_binomial_2_log_glm_lpmf` require one outcome per row of the design
+matrix. They refuse Stan Math's scalar-outcome broadcast.
 
 Copying a scalar outcome into an array is not always equivalent. For four rows
 with `y = 3`, the normalized scalar and replicated-array forms of

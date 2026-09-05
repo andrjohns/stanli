@@ -97,6 +97,96 @@ static void check_empty_glm(uint16_t opcode, const std::string& name) {
   stan::math::recover_memory();
 }
 
+// A per-row intercept: brms writes one whenever the model has a group-level
+// term, and stan-math takes alpha as a vector there.
+static void check_vector_alpha(const std::string& tag, uint16_t opcode,
+                               bool propto) {
+  using namespace stanli;
+  using stan::math::var;
+  const int rows = 6, cols = 3;
+  const bool has_phi = opcode == OP_NEG_BINOMIAL_2_LOG_GLM_LPMF;
+  const bool bern = opcode == OP_BERNOULLI_LOGIT_GLM_LPMF;
+
+  std::vector<double> X((size_t)rows * cols), a((size_t)rows), b((size_t)cols);
+  for (int j = 0; j < cols; ++j)
+    for (int i = 0; i < rows; ++i)
+      X[(size_t)j * rows + i] = std::sin(0.31 * i + 0.7 * j);
+  for (int i = 0; i < rows; ++i) a[(size_t)i] = 0.15 - 0.08 * i;
+  for (int i = 0; i < cols; ++i) b[(size_t)i] = 0.2 + 0.11 * i;
+  std::vector<int> idata;
+  for (int i = 0; i < rows; ++i) idata.push_back(bern ? i % 2 : 1 + (i % 4));
+  idata.push_back(rows);
+  idata.push_back(cols);
+
+  const double seed = -0.73;
+  Graph g;
+  const int Xs = g.add_slot(rows * cols, false);
+  const int as = g.add_slot(rows, true);
+  const int bs = g.add_slot(cols, true);
+  const int ps = has_phi ? g.add_slot(1, true) : -1;
+  const int lp = g.add_slot(1, false);
+  const int ss = g.add_slot(1, false);
+  const int total = g.add_slot(1, false);
+  const int op = has_phi ? g.add_op(opcode, {Xs, as, bs, ps}, lp, idata)
+                         : g.add_op(opcode, {Xs, as, bs}, lp, idata);
+  g.ops[(size_t)op].variant =
+      (uint8_t)((propto ? 0x80u : 0u) | (has_phi ? 0x0eu : 0x06u));
+  g.add_op(OP_MUL, {lp, ss}, total);
+  g.result_slot = total;
+
+  Executor ex(std::move(g));
+  std::copy(X.begin(), X.end(), ex.value_ptr(Xs));
+  std::copy(a.begin(), a.end(), ex.param_ptr(as));
+  std::copy(b.begin(), b.end(), ex.param_ptr(bs));
+  if (has_phi) ex.param_ptr(ps)[0] = 1.7;
+  ex.value_ptr(ss)[0] = seed;
+  std::vector<double> grad((size_t)(rows + cols + (has_phi ? 1 : 0)), 0.0);
+  const double got = ex.gradient(grad.data());
+
+  stan::math::nested_rev_autodiff nested;
+  Eigen::Matrix<double, -1, -1> Xd(rows, cols);
+  for (size_t i = 0; i < X.size(); ++i) Xd.data()[i] = X[i];
+  Eigen::Matrix<var, -1, 1> av(rows), bv(cols);
+  for (int i = 0; i < rows; ++i) av(i) = a[(size_t)i];
+  for (int i = 0; i < cols; ++i) bv(i) = b[(size_t)i];
+  var phi = 1.7;
+  std::vector<int> y(idata.begin(), idata.begin() + rows);
+  var ref;
+  if (bern) {
+    ref = propto ? stan::math::bernoulli_logit_glm_lpmf<true>(y, Xd, av, bv)
+                 : stan::math::bernoulli_logit_glm_lpmf<false>(y, Xd, av, bv);
+  } else if (opcode == OP_POISSON_LOG_GLM_LPMF) {
+    ref = propto ? stan::math::poisson_log_glm_lpmf<true>(y, Xd, av, bv)
+                 : stan::math::poisson_log_glm_lpmf<false>(y, Xd, av, bv);
+  } else {
+    ref = propto ? stan::math::neg_binomial_2_log_glm_lpmf<true>(y, Xd, av, bv,
+                                                                 phi)
+                 : stan::math::neg_binomial_2_log_glm_lpmf<false>(y, Xd, av, bv,
+                                                                  phi);
+  }
+  var scaled = ref * seed;
+  stan::math::grad(scaled.vi_);
+  expect_eq(tag + " total", got, scaled.val());
+  size_t at = 0;
+  for (int i = 0; i < rows; ++i)
+    expect_eq(tag + " da" + std::to_string(i), grad[at++], av(i).adj());
+  for (int i = 0; i < cols; ++i)
+    expect_eq(tag + " db" + std::to_string(i), grad[at++], bv(i).adj());
+  if (has_phi) expect_eq(tag + " dphi", grad[at], phi.adj());
+}
+
+static void check_vector_alphas() {
+  using namespace stanli;
+  for (bool propto : {false, true}) {
+    const std::string s = propto ? " propto" : "";
+    check_vector_alpha("bern glm valpha" + s, OP_BERNOULLI_LOGIT_GLM_LPMF,
+                       propto);
+    check_vector_alpha("pois glm valpha" + s, OP_POISSON_LOG_GLM_LPMF, propto);
+    check_vector_alpha("nb2 glm valpha" + s, OP_NEG_BINOMIAL_2_LOG_GLM_LPMF,
+                       propto);
+  }
+}
+
 // The three GLMs that take the var tape rather than the recorder, each with
 // a non-unit output adjoint: their kernels seed the tape with 1.0 in the
 // forward and scale in the backward.
@@ -144,10 +234,13 @@ static void check_tail_glm(const std::string& tag, uint16_t opcode, bool propto,
   if (opcode == OP_BINOMIAL_LOGIT_GLM_LPMF) {
     std::vector<int> nn(idata.begin(), idata.begin() + rows);
     std::vector<int> NN(idata.begin() + rows, idata.begin() + 2 * rows);
-    ref =
-        propto
-            ? stan::math::binomial_logit_glm_lpmf<true>(nn, NN, Xv, av(0), bv)
-            : stan::math::binomial_logit_glm_lpmf<false>(nn, NN, Xv, av(0), bv);
+    auto call = [&](const auto& a) {
+      return propto
+                 ? stan::math::binomial_logit_glm_lpmf<true>(nn, NN, Xv, a, bv)
+                 : stan::math::binomial_logit_glm_lpmf<false>(nn, NN, Xv, a,
+                                                              bv);
+    };
+    ref = alpha_len == 1 ? call(av(0)) : call(av);
   } else if (opcode == OP_CATEGORICAL_LOGIT_GLM_LPMF) {
     std::vector<int> yy(idata.begin(), idata.begin() + rows);
     Eigen::Matrix<var, -1, -1> bm(cols, beta_len / cols);
@@ -197,6 +290,10 @@ static void check_tail_glms() {
                  cols, 1, cols);
   check_tail_glm("binom glm propto", OP_BINOMIAL_LOGIT_GLM_LPMF, true, bin,
                  rows, cols, 1, cols);
+  check_tail_glm("binom glm valpha", OP_BINOMIAL_LOGIT_GLM_LPMF, false, bin,
+                 rows, cols, rows, cols);
+  check_tail_glm("binom glm valpha propto", OP_BINOMIAL_LOGIT_GLM_LPMF, true,
+                 bin, rows, cols, rows, cols);
 
   const int cats = 3;
   std::vector<int> cat;
@@ -272,6 +369,7 @@ int main() {
   }
 
   check_tail_glms();
+  check_vector_alphas();
 
   check_empty_glm(OP_BERNOULLI_LOGIT_GLM_LPMF, "bernoulli_logit_glm");
   check_empty_glm(OP_POISSON_LOG_GLM_LPMF, "poisson_log_glm");
