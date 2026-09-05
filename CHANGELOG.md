@@ -13,12 +13,18 @@ zero, `num_elements` returned the capacity, and a density over the slice
 integrated the tail. The loop form of such a model answered 1.863 where CmdStan
 answers -0.819. Nothing had to be turned on to reach this: a `while` whose guard
 is data lowers as a retained loop by default. The live length is now an operand
-of the ops that consume the slice, and the executor rewrites their operand
-lengths from it before each call, forward and backward, so the reductions, the
+of the ops that consume the slice, and the loop rewrites their operand lengths
+from it before each call, forward and backward, so the reductions, the
 elementwise ops, the dot products and the densities all stop where the values
 do and the backward stops there rather than scattering adjoints into the tail.
 An operand shape this cannot describe now refuses at compile time instead of
-answering from the capacity.
+answering from the capacity, and a full-width operand beside a runtime-length
+one is one of those shapes: `sum(t[1:k] .* u)` used to narrow `u` to `k`
+silently, where the unrolled path and CmdStan both call it a size mismatch.
+`rows` and `cols` of a runtime submatrix and `size` of a slice of an array of
+vectors now answer from the axis the query names instead of declining, and a
+gather through a runtime-length selector, `y[idx[1:k]]`, no longer takes the
+whole loop down with it.
 
 `pow` keeps its base gradient at a base of exactly zero wherever stan-math
 does, and the exponent's static type is what decides, as in stan-math.

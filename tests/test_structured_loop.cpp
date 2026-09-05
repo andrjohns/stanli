@@ -3234,8 +3234,8 @@ static void runtime_slice_tests() {
 }
 
 // A runtime-length selector reaches the index kernel as a fixed-capacity
-// buffer with its live count beside it, so the selector operand itself is not
-// a runtime-length value. The packing route has to agree with the direct one.
+// buffer with its live count beside it. The packing route and the direct one
+// have to agree about that.
 static void runtime_index_tests() {
   static const char* const names[] = {"", "gather", "matrix slice shape",
                                       "array slice size"};
@@ -3285,9 +3285,6 @@ static void runtime_index_tests() {
   check(leaf_width.find("num_elements") != std::string::npos,
         "num_elements declines a rank-2 runtime view");
 
-  // CmdStan and the unrolled path both reject these as a size mismatch, so
-  // narrowing the full-width operand to the live extent would be an answer
-  // nothing else agrees with.
   for (int op = 4; op <= 6; ++op) {
     std::string mixed;
     try {

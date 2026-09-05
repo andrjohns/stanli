@@ -4,13 +4,12 @@
 #ifndef STANLI_KERNEL_TYPES_HPP
 #define STANLI_KERNEL_TYPES_HPP
 
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 
 namespace stanli {
-
-// Bit 6 of a dynamic-length mask names the output; bits 0..5 name inputs.
-inline constexpr uint8_t kDynamicLengthOutput = 1u << 6;
 
 class WaRng;
 
@@ -64,6 +63,11 @@ struct Op {
   uint8_t dyn_lengths = 0;
 };
 
+// Bit 6 of a dynamic-length mask names the output; bits 0..5 name inputs.
+inline constexpr uint8_t kDynamicLengthOutput = 1u << 6;
+static_assert(sizeof(Op::in) / sizeof(Op::in[0]) == 6,
+              "a dynamic-length mask has one bit per input");
+
 // Per-call view handed to kernels. Assembled by the executor; kernels never
 // see slots or arenas directly.
 struct KernelCtx {
@@ -88,15 +92,14 @@ struct KernelCtx {
   uint8_t dyn_lengths = 0;
 };
 
-// Rewrite the lengths of the operands that are views, so a kernel reading its
-// work from Desc::len sees where the live values stop.
 inline void apply_dynamic_length(KernelCtx& c) {
+  assert(c.in[c.dyn_extent_in].len == 1);
   const double raw = c.in[c.dyn_extent_in].data[0];
   const int64_t live = static_cast<int64_t>(raw);
   if (!(raw >= 0) || raw > static_cast<double>(c.dyn_capacity) ||
       static_cast<double>(live) != raw)
     throw std::domain_error("logical extent exceeds graph capacity");
-  for (int k = 0; k < 6; ++k)
+  for (size_t k = 0; k < sizeof(c.in) / sizeof(c.in[0]); ++k)
     if (c.dyn_lengths & (1u << k)) {
       c.in[k].len = live;
       c.in_adj[k].len = live;

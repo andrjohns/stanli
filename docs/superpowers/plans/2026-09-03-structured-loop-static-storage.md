@@ -1061,3 +1061,28 @@ survive because zero is their identity here. The slice publishes its live
 length in `runtime_dims` (`lower_structured_loop.inc:787`) and the reductions
 do not consult it. Fixing that is the prerequisite for offering the selector
 to this shape.
+
+## Addendum: what is in the tail of a runtime-length value
+
+A runtime-length value keeps its declared capacity as storage, so every one of
+them has a tail past the live extent, and the four writers of that storage do
+not agree on what is in it:
+
+- An elementwise kernel with a dynamic-length output writes only the live
+  prefix and leaves the tail holding whatever the slot held before.
+- `OP_INDEX_DYNAMIC` zero-fills the part of its output the selection does not
+  reach, so a gather's tail is zeros.
+- A runtime-sized declaration fills its capacity with NaN (an integer array
+  with `INT_MIN`), so an unwritten element is loud rather than plausible.
+- Nothing rewrites a tail when the extent shrinks between iterations.
+
+So the tail is not a defined value, and no consumer may read it. What keeps
+consumers off it is entirely a compile-time property: a kernel that spans a
+runtime-length operand must take the extent as an operand of its own, and
+`emit_value` refuses to lower any other shape over one. That is why the
+refusals matter as much as the forms that work. `append_row` and `head` have
+no extent operand and decline; `num_elements` of a rank-two runtime view
+declines because a single extent cannot express the leaf width; a full-extent
+operand beside a runtime-length one declines because narrowing it to the live
+extent would answer a question Stan itself rejects. Adding a form here means
+adding the extent operand with it, never widening what may read the tail.
