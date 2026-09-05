@@ -13,6 +13,7 @@
 #include <stanli/function_view_shape.hpp>
 #include <stanli/higher_order_eval.hpp>
 #include <stanli/expression_layout.hpp>
+#include <stanli/graph_print.hpp>
 #include <stanli/inplace.hpp>
 #include <stanli/mir_message.hpp>
 #include <stanli/mir_prog.hpp>
@@ -36,6 +37,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 #include <array>
 #include <chrono>
 #include <functional>
@@ -253,6 +259,78 @@ struct PrepTrace {
     if (size_ >= rows_.size()) std::abort();
     return rows_[size_++];
   }
+};
+
+// STANLI_DUMP_PASSES=<dir>|-: one graph dump per lowering stage, to files or
+// to stdout. STANLI_DUMP_STAGES selects stages by bare name or graph:stage.
+// Separate from PrepTrace, which selects a different reroll implementation
+// when it is on.
+struct PassDumper {
+  PassDumper(const char* dir, const char* stages) : dir_(dir ? dir : "") {
+    if (stages && *stages) {
+      std::string_view rest(stages);
+      while (!rest.empty()) {
+        const size_t comma = rest.find(',');
+        const std::string_view one = rest.substr(0, comma);
+        if (!one.empty()) stages_.emplace_back(one);
+        rest = comma == std::string_view::npos ? std::string_view()
+                                               : rest.substr(comma + 1);
+      }
+    }
+    if (stages_.size() == 1 && stages_[0] == "all") stages_.clear();
+    if (dir_.empty() || to_stdout()) return;
+    for (size_t i = 1; i <= dir_.size(); ++i) {
+      if (i < dir_.size() && dir_[i] != '/' && dir_[i] != '\\') continue;
+      const std::string part = dir_.substr(0, i);
+#ifdef _WIN32
+      _mkdir(part.c_str());
+#else
+      ::mkdir(part.c_str(), 0777);
+#endif
+    }
+  }
+
+  bool enabled() const { return !dir_.empty(); }
+
+  bool selects(const std::string& label) const {
+    if (stages_.empty()) return true;
+    const size_t colon = label.find(':');
+    const std::string stage =
+        colon == std::string::npos ? label : label.substr(colon + 1);
+    for (const std::string& want : stages_)
+      if (want == label || want == stage) return true;
+    return false;
+  }
+
+  // The sequence number advances for every stage the lowering reaches, so a
+  // filtered run keeps the numbers an unfiltered one would have given.
+  void write(const std::string& label, const std::string& name,
+             const std::string& text, bool unfiltered = false) {
+    const int n = n_++;
+    if (!unfiltered && !selects(label)) return;
+    if (to_stdout()) {
+      std::printf(";; %s\n", label.c_str());
+      std::fwrite(text.data(), 1, text.size(), stdout);
+      if (!text.empty() && text.back() != '\n') std::fputc('\n', stdout);
+      std::printf(";; end %s\n", label.c_str());
+      std::fflush(stdout);
+      return;
+    }
+    char prefix[8];
+    std::snprintf(prefix, sizeof(prefix), "%02d-", n);
+    const std::string path = dir_ + "/" + prefix + name;
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return;
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+  }
+
+ private:
+  bool to_stdout() const { return dir_ == "-"; }
+
+  std::string dir_;
+  std::vector<std::string> stages_;
+  int n_ = 0;
 };
 
 struct SlotInfo {
@@ -677,7 +755,10 @@ struct Lowering {
   const DataMap& data;
   std::shared_ptr<ShapeInterner> shape_pool;
   PrepTrace& prep;
+  PassDumper& dumper;
   const char* prep_graph;
+  const char* last_stage = "start";
+  std::vector<int> last_roots;
   // The MIR interpreter instance for everything DataOnly: prepare_data,
   // data-only conditions, size expressions. Its environment doubles as the
   // lowering's view of transformed data. Hooks route FnReadData to the
@@ -773,8 +854,36 @@ struct Lowering {
   bool expression_autodiff(const mir::Expr& e) const;
 
   explicit Lowering(
-      const DataMap& d, PrepTrace& p, const char* graph_name,
+      const DataMap& d, PrepTrace& p, PassDumper& dump_to,
+      const char* graph_name,
       std::shared_ptr<ShapeInterner> pool = std::make_shared<ShapeInterner>());
+
+  void dump_named(const std::string& label, const std::string& name,
+                  const std::vector<int>& roots, bool unfiltered);
+
+  void dump(const char* stage, const std::vector<int>& roots) {
+    if (!dumper.enabled()) return;
+    dump_named(std::string(prep_graph) + ":" + stage,
+               std::string(prep_graph) + "-" + stage + ".txt", roots, false);
+    last_stage = stage;
+    last_roots = roots;
+  }
+
+  struct DumpOnThrow {
+    Lowering& lo;
+    bool done = false;
+    ~DumpOnThrow() {
+      if (done || !lo.dumper.enabled()) return;
+      try {
+        lo.dump_named(
+            std::string(lo.prep_graph) + ":FAILED-after-" + lo.last_stage,
+            std::string(lo.prep_graph) + "-FAILED-after-" + lo.last_stage +
+                ".txt",
+            lo.last_roots, true);
+      } catch (...) {
+      }
+    }
+  };
 
   void observe(const Val& v, DataMap::Entry en) {
     const int64_t len = g.slots[v.slot].len;

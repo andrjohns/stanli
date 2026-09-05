@@ -13,9 +13,26 @@ StructuredMode read_structured_mode() {
   // An unrecognized policy must preserve the established representation.
   return StructuredMode::Off;
 }
-Lowering::Lowering(const DataMap& d, PrepTrace& p, const char* graph_name,
-                   std::shared_ptr<ShapeInterner> pool)
-    : data(d), shape_pool(std::move(pool)), prep(p), prep_graph(graph_name) {}
+Lowering::Lowering(const DataMap& d, PrepTrace& p, PassDumper& dump_to,
+                   const char* graph_name, std::shared_ptr<ShapeInterner> pool)
+    : data(d),
+      shape_pool(std::move(pool)),
+      prep(p),
+      dumper(dump_to),
+      prep_graph(graph_name) {}
+void Lowering::dump_named(const std::string& label, const std::string& name,
+                          const std::vector<int>& roots, bool unfiltered) {
+  GraphPrintInfo info;
+  info.roots = roots;
+  info.target_terms = target_terms;
+  info.jac_slots = jac_slots;
+  for (const CompiledModel::ParamView& v : out.views)
+    info.views.emplace_back(v.name, v.slot);
+  info.fills = &out.fills;
+  std::string text;
+  print_graph(text, g, info);
+  dumper.write(label, name, text, unfiltered);
+}
 void Lowering::sync_data_local(const std::string& name, const mir::Expr& rhs,
                                const Val& v) {
   if (!v.si.param_free) {
@@ -560,12 +577,14 @@ int Lowering::reduce_terms(std::vector<int> terms) {
 // that do run are noted where each stage starts.
 void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
   const auto trace = [&](const char* stage, PrepTrace::Time from,
+                         const std::vector<int>& stage_roots,
                          PrepTrace::Extra extra = PrepTrace::Extra::None,
                          int64_t a = 0, int64_t b = 0, bool deep = false,
                          int64_t params = 0, int64_t c = 0, int64_t d = 0,
                          const detail::RerollDispositionStats* disp = nullptr) {
     prep.graph(prep_graph, stage, from, g, out.fills, target_terms.size(),
                out.views.size(), extra, a, b, deep, params, c, d, disp);
+    dump(stage, stage_roots);
   };
 
   // Target terms have no consuming op yet either: reduce_terms (log_prob)
@@ -576,20 +595,23 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
   const auto inplace_time = prep.start();
   const int inplace =
       make_inplace_updates(g, update_roots);  // off under STANLI_NO_INPLACE
-  trace("inplace", inplace_time, PrepTrace::Extra::Rewrites, inplace);
+  trace("inplace", inplace_time, update_roots, PrepTrace::Extra::Rewrites,
+        inplace);
   // Deleting the write/read-back pairs first is what leaves a plain
   // arithmetic lane for reroll to vectorize.
   const auto forward_time = prep.start();
   const int forwarded = forward_stores_to_loads(g, update_roots);
-  trace("store_forward", forward_time, PrepTrace::Extra::Removed, forwarded);
+  trace("store_forward", forward_time, update_roots, PrepTrace::Extra::Removed,
+        forwarded);
   if (plan.constfold) {
     // After the update chains collapse, so a data-only chain is one slot
     // rather than N; before reroll, so the lanes it sees have data
     // operands.
     const auto constfold_time = prep.start();
     const ConstFoldStats constfolded = const_fold(g, out.fills, update_roots);
-    trace("constfold", constfold_time, PrepTrace::Extra::ConstFold,
-          constfolded.ops_removed, constfolded.slots_folded);
+    trace("constfold", constfold_time, update_roots,
+          PrepTrace::Extra::ConstFold, constfolded.ops_removed,
+          constfolded.slots_folded);
   }
   const auto reroll_time = prep.start();
   RerollStats rerolled;
@@ -602,9 +624,9 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
   } else {
     rerolled = reroll(g, out.fills, target_terms, roots);  // STANLI_NO_REROLL
   }
-  trace("reroll", reroll_time, PrepTrace::Extra::Reroll, rerolled.regions,
-        rerolled.list_steps, false, 0, rerolled.candidate_steps,
-        rerolled.row_steps, &reroll_dispositions);
+  trace("reroll", reroll_time, roots, PrepTrace::Extra::Reroll,
+        rerolled.regions, rerolled.list_steps, false, 0,
+        rerolled.candidate_steps, rerolled.row_steps, &reroll_dispositions);
   // Re-roll can replace many element writes with copying slice stores, and
   // may have replaced target terms with vector reductions: rebuild the
   // implicit-root set before giving those new ops the same last-use proof
@@ -615,7 +637,7 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
   const auto post_reroll_inplace_time = prep.start();
   const int post_reroll_inplace =
       rerolled.regions ? make_inplace_updates(g, post_reroll_roots) : 0;
-  trace("post_reroll_inplace", post_reroll_inplace_time,
+  trace("post_reroll_inplace", post_reroll_inplace_time, post_reroll_roots,
         PrepTrace::Extra::Rewrites, post_reroll_inplace);
   std::vector<int> current_roots = post_reroll_roots;
   if (plan.partition) {
@@ -625,7 +647,7 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     const auto partition_time = prep.start();
     const PartitionStats parted =
         partition_lanes(g, out.fills, target_terms, roots);
-    trace("partition", partition_time, PrepTrace::Extra::Partition,
+    trace("partition", partition_time, roots, PrepTrace::Extra::Partition,
           parted.groups, parted.lanes, false, 0, parted.declined,
           parted.list_steps);
     // Same proof the slice stores re-roll makes get: rebuilt from the
@@ -637,7 +659,8 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     const int post_partition_inplace =
         parted.groups ? make_inplace_updates(g, post_partition_roots) : 0;
     trace("post_partition_inplace", post_partition_inplace_time,
-          PrepTrace::Extra::Rewrites, post_partition_inplace);
+          post_partition_roots, PrepTrace::Extra::Rewrites,
+          post_partition_inplace);
     current_roots = post_partition_roots;
   }
   if (plan.elide_stores) {
@@ -646,7 +669,8 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     // reach.
     const auto elide_time = prep.start();
     const int elided = elide_full_extent_stores(g, current_roots);
-    trace("elide_stores", elide_time, PrepTrace::Extra::Removed, elided);
+    trace("elide_stores", elide_time, current_roots, PrepTrace::Extra::Removed,
+          elided);
   }
   if (plan.cse) {
     // After reroll, whose lane matching needs the repeated ops it hoists
@@ -654,7 +678,8 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     // residue.
     const auto cse_time = prep.start();
     const CseStats cse_st = cse(g, out.fills, target_terms, roots);
-    trace("cse", cse_time, PrepTrace::Extra::Removed, cse_st.ops_removed);
+    trace("cse", cse_time, roots, PrepTrace::Extra::Removed,
+          cse_st.ops_removed);
   }
   if (plan.island) {
     // LAST, after every other pass has had first crack: compile whatever
@@ -662,7 +687,7 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     // into island ops. Off under STANLI_NO_ISLAND.
     const auto island_time = prep.start();
     const int islands = carve_islands(g, out.fills, target_terms, roots);
-    trace("island", island_time, PrepTrace::Extra::Regions, islands);
+    trace("island", island_time, roots, PrepTrace::Extra::Regions, islands);
   }
 }
 CompiledModel::WriteArray Lowering::run_write_array(const mir::Program& p) {
@@ -674,6 +699,7 @@ CompiledModel::WriteArray Lowering::run_write_array(const mir::Program& p) {
   int_env["emit_transformed_parameters__"] = 1;
   int_env["emit_generated_quantities__"] = 1;
   CompiledModel::WriteArray wa;
+  DumpOnThrow guard{*this};
   const auto lower_time = prep.start();
   try {
     for (const auto& s : p.generate_quantities) lower_stmt(s);
@@ -689,6 +715,7 @@ CompiledModel::WriteArray Lowering::run_write_array(const mir::Program& p) {
   prep.graph(prep_graph, "lower", lower_time, g, out.fills, target_terms.size(),
              out.views.size(), PrepTrace::Extra::Truncated,
              !wa.truncated.empty());
+  dump("lower", roots);
 
   run_passes(roots, PassPlan{true, false, false, true, false});
 
@@ -699,9 +726,11 @@ CompiledModel::WriteArray Lowering::run_write_array(const mir::Program& p) {
   wa.n_unconstrained = out.n_unconstrained;
   prep.graph(prep_graph, "finalize", finalize_time, g, out.fills,
              target_terms.size(), out.views.size());
+  dump("finalize", roots);
   prep.graph(prep_graph, "total", total_time, g, out.fills, target_terms.size(),
              out.views.size(), PrepTrace::Extra::None, 0, 0, true,
              out.n_unconstrained);
+  guard.done = true;
   wa.graph = std::move(g);
   // A section stanc did not emit a guard for (or one lowering stopped
   // short of) has no columns of its own: it starts where the CSV ends.
@@ -715,16 +744,19 @@ CompiledModel::WriteArray Lowering::run_write_array(const mir::Program& p) {
   return wa;
 }
 CompiledModel Lowering::run(const mir::Program& p) {
+  DumpOnThrow guard{*this};
   const auto total_time = prep.start();
   for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
   const auto bind_time = prep.start();
   bind_data(p);
   prep.graph(prep_graph, "bind_data", bind_time, g, out.fills,
              target_terms.size(), out.views.size());
+  dump("bind_data", {});
   const auto lower_time = prep.start();
   for (const auto& s : p.log_prob) lower_stmt(s);
   prep.graph(prep_graph, "lower", lower_time, g, out.fills, target_terms.size(),
              out.views.size());
+  dump("lower", {});
   // Jacobian terms and constrained-parameter views are read straight out
   // of the arena, so no op consumes them and the pass cannot infer them.
   std::vector<int> roots = jac_slots;
@@ -738,9 +770,11 @@ CompiledModel Lowering::run(const mir::Program& p) {
   g.result_slot = reduce_terms(all);
   prep.graph(prep_graph, "reduce", reduce_time, g, out.fills,
              target_terms.size(), out.views.size());
+  dump("reduce", roots);
   prep.graph(prep_graph, "total", total_time, g, out.fills, target_terms.size(),
              out.views.size(), PrepTrace::Extra::None, 0, 0, true,
              out.n_unconstrained);
+  guard.done = true;
   out.graph = std::move(g);
   return std::move(out);
 }
@@ -751,6 +785,9 @@ using namespace lower_detail;
 CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
   const char* prep_env = std::getenv("STANLI_PROFILE_PREP");
   PrepTrace prep(prep_env && prep_env[0] != '0');
+  PassDumper dumper(std::getenv("STANLI_DUMP_PASSES"),
+                    std::getenv("STANLI_DUMP_STAGES"));
+  if (dumper.enabled()) dumper.write("mir", "mir.sexp", mir_text);
   const auto compile_time = prep.start();
   // Shared because the interpreted write_array fallback, when needed,
   // keeps the generate_quantities statements and UDF bodies alive for the
@@ -759,13 +796,13 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
   auto prog = std::make_shared<mir::Program>(decode_program(mir_text));
   prep.plain("compile", "parse_mir", parse_time, PrepTrace::Extra::MirBytes,
              static_cast<int64_t>(mir_text.size()));
-  Lowering lo(data, prep, "log_prob");
+  Lowering lo(data, prep, dumper, "log_prob");
   CompiledModel cm = lo.run(*prog);
   if (!prog->generate_quantities.empty()) {
     // A second lowering, over the transformed data the first one already
     // interpreted: re-running prepare_data would double preparation time on
     // the models where preparation is the cost (nn_rbm1bJ100, 20.7 s).
-    Lowering wa(data, prep, "write_array", lo.shape_pool);
+    Lowering wa(data, prep, dumper, "write_array", lo.shape_pool);
     const auto env_copy_time = prep.start();
     wa.td.env() = lo.td.env();
     wa.int_env = lo.int_env_data;
