@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import math
 import pathlib
 import subprocess
@@ -161,13 +162,22 @@ generated quantities {{
 """
 
 
-def write_or_check(path: pathlib.Path, content: str, check: bool) -> bool:
+def write_or_check(path: pathlib.Path, content: str, check: bool,
+                   touch_unchanged: bool = True) -> bool:
     if check:
         if not path.exists() or path.read_text() != content:
             print(f"stale generated file: {path}")
             return False
         return True
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.read_text() == content:
+        # The models are build-rule outputs whose timestamps must advance
+        # when the rule runs; the manifests are configure inputs whose
+        # timestamps must move only on real content changes, or every
+        # build would re-run configuration.
+        if touch_unchanged:
+            os.utime(path, None)
+        return True
     path.write_text(content)
     return True
 
@@ -210,4 +220,5 @@ def write_generated_outputs(
             for path in stale:
                 path.unlink()
     manifest_source = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    return write_or_check(manifest_path, manifest_source, check) and okay
+    return write_or_check(manifest_path, manifest_source, check,
+                          touch_unchanged=False) and okay

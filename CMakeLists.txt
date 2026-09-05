@@ -816,6 +816,86 @@ add_executable(dump_function_specs tools/dump_function_specs.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(dump_function_specs PRIVATE stanli)
 
+# --- generated signature models --------------------------------------------
+# The builtin and density signature models are build products, like the
+# legacy MIR corpus above: they derive entirely from the pinned stanc's
+# signature inventory and the registry dump, so committing them recorded
+# nothing but churn. The committed manifests stay as the reviewable coverage
+# record, and they also name every generated model, so the lit entries below
+# register at configure time before a fresh build has generated a file.
+# The --check generation tests still diff a fresh run against these outputs
+# and the manifests, gating drift and nondeterminism alike.
+set(STANLI_SIGNATURE_MODEL_MANIFESTS
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/function_coverage/builtin_signatures_manifest.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/function_coverage/density_signatures_manifest.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             ${STANLI_SIGNATURE_MODEL_MANIFESTS})
+execute_process(
+  COMMAND ${STANLI_FIXTURE_PYTHON} -c
+"import json, sys
+for path in sys.argv[1:]:
+    with open(path) as handle:
+        for model in json.load(handle)['models']:
+            print(model['file'])"
+          ${STANLI_SIGNATURE_MODEL_MANIFESTS}
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  RESULT_VARIABLE _stanli_signature_list_result
+  OUTPUT_VARIABLE _stanli_signature_list_output
+  ERROR_VARIABLE _stanli_signature_list_error
+  OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _stanli_signature_list_result EQUAL 0)
+  message(FATAL_ERROR
+    "Failed to enumerate signature models: ${_stanli_signature_list_error}")
+endif()
+string(REPLACE "\r\n" "\n" _stanli_signature_list_output
+       "${_stanli_signature_list_output}")
+string(REPLACE "\n" ";" _stanli_signature_model_files
+       "${_stanli_signature_list_output}")
+set(STANLI_BUILTIN_SIGNATURE_MODELS)
+set(STANLI_DENSITY_SIGNATURE_MODELS)
+foreach(_stanli_signature_model IN LISTS _stanli_signature_model_files)
+  if(_stanli_signature_model MATCHES "builtin_signatures_")
+    list(APPEND STANLI_BUILTIN_SIGNATURE_MODELS
+         "${CMAKE_CURRENT_SOURCE_DIR}/${_stanli_signature_model}")
+  else()
+    list(APPEND STANLI_DENSITY_SIGNATURE_MODELS
+         "${CMAKE_CURRENT_SOURCE_DIR}/${_stanli_signature_model}")
+  endif()
+endforeach()
+set(_stanli_signature_common_dependencies
+    dump_function_specs
+    "${STANLI_STANC_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/function_signature_common.py")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc.src")
+  list(APPEND _stanli_signature_common_dependencies
+       "${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/stanc.src")
+endif()
+add_custom_command(
+  OUTPUT ${STANLI_BUILTIN_SIGNATURE_MODELS}
+  COMMAND ${STANLI_FIXTURE_PYTHON}
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_builtin_signature_models.py"
+          --stanc "${STANLI_STANC_EXECUTABLE}"
+          --registry $<TARGET_FILE:dump_function_specs>
+  DEPENDS ${_stanli_signature_common_dependencies}
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_builtin_signature_models.py"
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Generating builtin signature models"
+  VERBATIM)
+add_custom_command(
+  OUTPUT ${STANLI_DENSITY_SIGNATURE_MODELS}
+  COMMAND ${STANLI_FIXTURE_PYTHON}
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_density_signature_model.py"
+          --stanc "${STANLI_STANC_EXECUTABLE}"
+          --registry $<TARGET_FILE:dump_function_specs>
+  DEPENDS ${_stanli_signature_common_dependencies}
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_density_signature_model.py"
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Generating density signature models"
+  VERBATIM)
+add_custom_target(stanli_signature_models ALL
+  DEPENDS ${STANLI_BUILTIN_SIGNATURE_MODELS}
+          ${STANLI_DENSITY_SIGNATURE_MODELS})
+
 # Installable: the native sampler, the parity checker, the shared
 # library the language bindings load, and the headers a C++ caller
 # needs. `cmake --install build-rel --prefix ...` is the whole story;
@@ -929,6 +1009,12 @@ if(Python3_Interpreter_FOUND)
   # test failure rather than a skip.
   file(GLOB_RECURSE STANLI_LIT_CANDIDATES CONFIGURE_DEPENDS
        "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.stan")
+  # The generated signature models register from their manifests below --
+  # they may not exist yet at configure time, are always PASS by
+  # construction, and regenerate on ordinary builds, so they must be
+  # neither glob candidates nor configure dependencies.
+  list(FILTER STANLI_LIT_CANDIDATES EXCLUDE
+       REGEX "tests/fixtures/(builtin|density)_signatures_[0-9]+\\.stan$")
   # The PASS/XFAIL marker controls the broken label below, so changing a
   # source's status must re-run configuration even though the file set did
   # not change.
@@ -958,6 +1044,21 @@ if(Python3_Interpreter_FOUND)
       set_tests_properties(${STANLI_LIT_TEST} PROPERTIES
         LABELS "${STANLI_LIT_LABELS}")
     endif()
+  endforeach()
+  # The generated signature models, named by the committed manifests so a
+  # fresh configure registers every case before the first build generates
+  # the files. All are PASS by construction; the generator writes the
+  # marker into every model it emits.
+  foreach(STANLI_LIT_MODEL IN LISTS STANLI_BUILTIN_SIGNATURE_MODELS
+          STANLI_DENSITY_SIGNATURE_MODELS)
+    get_filename_component(STANLI_LIT_STEM "${STANLI_LIT_MODEL}" NAME_WE)
+    set(STANLI_LIT_TEST "lit_fixtures_${STANLI_LIT_STEM}")
+    add_test(NAME ${STANLI_LIT_TEST}
+             COMMAND ${Python3_EXECUTABLE} tests/lit/run.py
+                     ${STANLI_LIT_MODEL}
+                     $<TARGET_FILE:stanli_check>
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    set_tests_properties(${STANLI_LIT_TEST} PROPERTIES LABELS "lit")
   endforeach()
   # Friendly local entry points. These deliberately invoke CTest rather than
   # duplicating discovery in a shell script, so a developer runs exactly the
