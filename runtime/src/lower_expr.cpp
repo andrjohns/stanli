@@ -290,7 +290,7 @@ long Lowering::eval_int(const mir::Expr& e) {
       if (scalar_shape_query(e) && e.args.size() == 1 &&
           e.args[0].kind == mir::Expr::Var) {
         auto sit = scope.find(e.args[0].name);
-        if (sit != scope.end())
+        if (sit != scope.end() && !has_runtime_shape(sit->second))
           return answer_shape_query(e, sit->second.si,
                                     g.slots[sit->second.slot].len);
         auto dl = decls.find(e.args[0].name);
@@ -326,6 +326,8 @@ long Lowering::eval_int(const mir::Expr& e) {
           e.args[0].kind != mir::Expr::Var) {
         CallArguments actuals(*this, e);
         const Val v = actuals.at(0).value();
+        if (has_runtime_shape(v))
+          fail(e.name + ": operand has no compile-time extent", e.raw);
         return answer_shape_query(e, v.si, g.slots[v.slot].len);
       }
       // Anything else data-only the td interpreter can evaluate (sum of an
@@ -1281,12 +1283,47 @@ Lowering::Val Lowering::emit_value(uint16_t opcode,
   op.n_in = 0;
   out_si.param_free = true;
   bool autodiff = false;
+  int extent = -1;
+  // Opcodes that already take every logical extent they need as an operand
+  // of their own.
+  const bool own_extents = opcode == OP_INDEX_DYNAMIC ||
+                           opcode == OP_SET_INDEX_DYNAMIC ||
+                           opcode == OP_MATRIX_EXP_DYNAMIC;
   for (const Val& in : ins) {
+    if (has_runtime_shape(in) && !own_extents) {
+      const int slot = one_runtime_extent(in, opcode_name(opcode));
+      if (extent >= 0 && extent != slot)
+        fail(std::string(opcode_name(opcode)) +
+             ": operands have different runtime extents");
+      extent = slot;
+      op.dyn_lengths |= static_cast<uint8_t>(1u << op.n_in);
+      if (op.dyn_capacity == 0) op.dyn_capacity = g.slots[in.slot].len;
+      if (op.dyn_capacity != g.slots[in.slot].len || is_matrix(in.si))
+        fail(std::string(opcode_name(opcode)) +
+             ": no form over this runtime-length operand");
+    }
     op.in[op.n_in++] = in.slot;
     out_si.param_free = out_si.param_free && in.si.param_free;
     autodiff = autodiff || in.autodiff;
   }
-  return finish_emit(op, out_len, out_si, std::move(idata), autodiff);
+  if (extent < 0)
+    return finish_emit(op, out_len, out_si, std::move(idata), autodiff);
+  for (const Val& in : ins)
+    if (!has_runtime_shape(in) && g.slots[in.slot].len != 1)
+      fail(std::string(opcode_name(opcode)) +
+           ": a full-extent operand beside a runtime-length one");
+  const bool elementwise = out_len == op.dyn_capacity;
+  if ((out_len != 1 && !elementwise) || out2 >= 0 || !idata.empty() ||
+      is_matrix(out_si))
+    fail(std::string(opcode_name(opcode)) +
+         ": no form over a runtime-length operand");
+  if (elementwise) op.dyn_lengths |= kDynamicLengthOutput;
+  check_fixed_input_count(static_cast<size_t>(op.n_in) + 1, opcode);
+  op.dyn_extent_in = static_cast<int8_t>(op.n_in);
+  op.in[op.n_in++] = extent;
+  Val result = finish_emit(op, out_len, out_si, std::move(idata), autodiff);
+  if (elementwise) result.runtime_dims = {extent};
+  return result;
 }
 // Ask only the MIR interpreter.  Static-shape specialization below uses
 // this for selector values and for path-sensitive short-circuit decisions;

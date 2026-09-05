@@ -3625,6 +3625,31 @@ int main() {
       expect_eq("csthres g" + std::to_string(i), ga[i], gb[i]);
   }
 
+  // A data-determined while whose body declares array[nobs[i]] int, the shape
+  // brms's unstr() autocorrelation lpdf writes, against the same arithmetic
+  // spelled as a for over the same groups.
+  {
+    DataMap d =
+        DataMap::from_json(slurp("tests/fixtures/whilegrouplocal.json"));
+    CompiledModel loop =
+        compile_model(slurp("tests/fixtures/whilegrouplocal.tmir.sexp"), d);
+    CompiledModel unrolled =
+        compile_model(slurp("tests/fixtures/whilegroupfor.tmir.sexp"), d);
+    check(loop.n_unconstrained == 5, "whilegrouplocal 5 unconstrained");
+    check(unrolled.n_unconstrained == 5, "whilegroupfor 5 unconstrained");
+    Executor ex(std::move(loop.graph)), bx(std::move(unrolled.graph));
+    loop.bind(ex);
+    unrolled.bind(bx);
+    for (int i = 0; i < 5; ++i) {
+      ex.params_data()[i] = 0.4 * i - 0.9;
+      bx.params_data()[i] = 0.4 * i - 0.9;
+    }
+    double ga[5], gb[5];
+    expect_eq("whilegroup lp", ex.gradient(ga), bx.gradient(gb));
+    for (int i = 0; i < 5; ++i)
+      expect_eq("whilegroup g" + std::to_string(i), ga[i], gb[i]);
+  }
+
   // multiply_lower_tri_self_transpose on a matrix parameter whose upper
   // triangle is not zero (unsupported_multiply_lower_tri_self_transpose).
   // The graph used to spell it TRANSPOSE + GEMM, which is A * A' and reads
@@ -6804,6 +6829,20 @@ int main() {
     acc.grad();
     expect_eq("int size: lp", lp, acc.val());
     expect_eq("int size: gradient", grad[0], y.adj());
+  }
+
+  // choose() sizing a parameter through a transformed data int, and sizing a
+  // generated quantities declaration directly. brms writes both for the
+  // correlation columns of a correlated group-level effect.
+  {
+    DataMap d = DataMap::from_json(R"({"M": 4})");
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/choosesize.tmir.sexp"), d);
+    check(cm.n_unconstrained == 22,
+          "choose size: choose(4, 2) sizes the parameter vector");
+    check(cm.write_array && !cm.write_array->columns.empty() &&
+              cm.write_array->truncated.empty(),
+          "choose size: the write_array graph carries the whole section");
   }
 
   // Declaration extents may use data-only conditional expressions.  The

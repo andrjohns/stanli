@@ -609,7 +609,7 @@ cmake --build build-rel --parallel "$build_jobs" && \
 python3 tools/verify_refs.py deps/posteriordb --check build-rel/stanli_check --jobs 8
 ```
 
-The second command is the corpus replay: 194 models, log density and
+The second command is the corpus replay: 254 models, log density and
 every gradient component, compared against recorded CmdStan values.
 That is the 119 runnable posteriordb posteriors, the language
 models in [`tests/stanc3/`](../tests/stanc3/README.md), which exercise

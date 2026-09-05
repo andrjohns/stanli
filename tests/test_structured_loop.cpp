@@ -5,6 +5,7 @@
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/structured_loop.hpp>
+#include <stanli/wa_interp.hpp>
 #include <stan/math.hpp>
 
 #include <algorithm>
@@ -3127,6 +3128,177 @@ static void direct_index_lowering_tests() {
                     "direct-index legacy gradient parity");
 }
 
+static DataMap runtime_slice_data(int op) {
+  DataMap data;
+  data.set_int("N", 5);
+  data.set_int_array("nobs", {3, 1, 2});
+  data.set_int("op", op);
+  return data;
+}
+
+// A slice whose upper bound is a loop-carried integer keeps the declared
+// capacity as its storage, so every consumer of one has to be told where the
+// live values stop. The flat model spells the same arithmetic over a
+// compile-time trip count, where the extents fold.
+static double written_s(const CompiledModel& model,
+                        const std::vector<double>& point) {
+  Executor ex(model.graph);
+  model.bind(ex);
+  std::copy(point.begin(), point.end(), ex.params_data());
+  ex.run_forward_only();
+  if (model.write_array && model.write_array->interp) {
+    WaRng rng(1234);
+    const std::vector<double> row =
+        model.write_array->interp->eval(model.constrained_env(ex), rng);
+    const std::vector<std::string> names =
+        CompiledModel::csv_names(model.write_array->interp->columns());
+    for (size_t i = 0; i < names.size() && i < row.size(); ++i)
+      if (names[i] == "s") return row[i];
+  } else if (model.write_array && model.write_array->truncated.empty()) {
+    Executor wex(model.write_array->graph);
+    model.write_array->bind(wex);
+    std::copy(point.begin(), point.end(), wex.params_data());
+    wex.run_forward_only();
+    for (const auto& column : model.write_array->columns)
+      if (column.name == "s") return wex.value_ptr(column.slot)[0];
+  }
+  check(false, "runtime slice write_array has s");
+  return 0;
+}
+
+static void runtime_slice_tests() {
+  static const char* const names[] = {"",
+                                      "log_sum_exp",
+                                      "extrema",
+                                      "num_elements",
+                                      "sum and prod",
+                                      "normal_lpdf",
+                                      "elementwise product",
+                                      "dot product",
+                                      "moments",
+                                      "reduction of an elementwise result",
+                                      "matrix_exp of a runtime submatrix"};
+  std::vector<double> point(14);
+  for (size_t i = 0; i < point.size(); ++i) point[i] = 0.2 * double(i) - 0.9;
+  for (int segments = 0; segments < 2; ++segments) {
+    if (segments)
+      test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
+    else
+      test_setenv("STANLI_NO_STRUCTURED_SEGMENTS", "1");
+    for (int op = 1; op <= 10; ++op) {
+      const auto loop =
+          compile_fixture("dynslice", runtime_slice_data(op), Mode::Auto);
+      const auto flat =
+          compile_fixture("dynsliceflat", runtime_slice_data(op), Mode::Auto);
+      check(retained(loop) != nullptr, "runtime slice model runs the loop");
+      check(retained(flat) == nullptr, "flat runtime slice model has no loop");
+      Executor a(loop.graph), b(flat.graph);
+      loop.bind(a);
+      flat.bind(b);
+      std::vector<double> ga(14), gb(14);
+      for (int again = 0; again < 2; ++again) {
+        std::vector<double> at = point;
+        if (again)
+          for (double& q : at) q = 0.3 - q;
+        std::copy(at.begin(), at.end(), a.params_data());
+        std::copy(at.begin(), at.end(), b.params_data());
+        const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
+        if (va != vb) {
+          std::printf("  %s: %.17g != %.17g\n", names[op], va, vb);
+          check(false, "runtime slice value");
+        }
+        for (size_t i = 0; i < ga.size(); ++i)
+          if (!near(ga[i], gb[i])) {
+            std::printf("  %s g%zu: %.17g != %.17g\n", names[op], i, ga[i],
+                        gb[i]);
+            check(false, "runtime slice gradient");
+          }
+        close(written_s(loop, at), written_s(flat, at),
+              "runtime slice write_array");
+      }
+    }
+  }
+  test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
+
+  // The series whose `while` advances k past two terms, against the value
+  // CmdStan computes for it.
+  DataMap theta;
+  theta.set_real("theta", std::exp(0.1));
+  const auto series =
+      compile_fixture("dynseries", std::move(theta), Mode::Force);
+  Executor ex(series.graph);
+  series.bind(ex);
+  ex.params_data()[0] = 0.5;
+  std::vector<double> g(static_cast<size_t>(series.n_unconstrained));
+  close(ex.gradient(g.data()), -0.81912447467137883, "runtime slice series");
+}
+
+// A runtime-length selector reaches the index kernel as a fixed-capacity
+// buffer with its live count beside it. The packing route and the direct one
+// have to agree about that.
+static void runtime_index_tests() {
+  static const char* const names[] = {"", "gather", "matrix slice shape",
+                                      "array slice size"};
+  std::vector<double> point(14);
+  for (size_t i = 0; i < point.size(); ++i) point[i] = 0.15 * double(i) - 0.8;
+  for (int packed = 0; packed < 2; ++packed) {
+    if (packed)
+      test_setenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS", "1");
+    else
+      test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+    for (int op = 1; op <= 3; ++op) {
+      const auto loop =
+          compile_fixture("dynindex", runtime_slice_data(op), Mode::Auto);
+      const auto flat =
+          compile_fixture("dynindexflat", runtime_slice_data(op), Mode::Auto);
+      check(retained(loop) != nullptr, "runtime index model runs the loop");
+      check(retained(flat) == nullptr, "flat runtime index model has no loop");
+      Executor a(loop.graph), b(flat.graph);
+      loop.bind(a);
+      flat.bind(b);
+      std::vector<double> ga(14), gb(14);
+      std::copy(point.begin(), point.end(), a.params_data());
+      std::copy(point.begin(), point.end(), b.params_data());
+      const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
+      if (va != vb) {
+        std::printf("  %s: %.17g != %.17g\n", names[op], va, vb);
+        check(false, "runtime index value");
+      }
+      for (size_t i = 0; i < ga.size(); ++i)
+        if (!near(ga[i], gb[i])) {
+          std::printf("  %s g%zu: %.17g != %.17g\n", names[op], i, ga[i],
+                      gb[i]);
+          check(false, "runtime index gradient");
+        }
+      close(written_s(loop, point), written_s(flat, point),
+            "runtime index write_array");
+    }
+  }
+  test_unsetenv("STANLI_NO_STRUCTURED_DIRECT_INDEX_INPUTS");
+
+  std::string leaf_width;
+  try {
+    (void)compile_fixture("dynindex", runtime_slice_data(7), Mode::Force);
+  } catch (const CompileError& e) {
+    leaf_width = e.what();
+  }
+  check(leaf_width.find("num_elements") != std::string::npos,
+        "num_elements declines a rank-2 runtime view");
+
+  for (int op = 4; op <= 6; ++op) {
+    std::string mixed;
+    try {
+      (void)compile_fixture("dynindex", runtime_slice_data(op), Mode::Force);
+    } catch (const CompileError& e) {
+      mixed = e.what();
+    }
+    if (mixed.find("full-extent operand") == std::string::npos) {
+      std::printf("  op %d: %s\n", op, mixed.c_str());
+      check(false, "a full-width operand beside a runtime-length one refuses");
+    }
+  }
+}
+
 static std::atomic<int> memo_int_calls{0};
 static std::atomic<int> memo_compare_calls{0};
 static std::atomic<int> memo_index_calls{0};
@@ -4516,6 +4688,8 @@ int main() {
   automatic_policy_tests();
   prefer_parent_tests();
   direct_index_lowering_tests();
+  runtime_slice_tests();
+  runtime_index_tests();
   memo_tests();
   trace_tests();
   for_trace_tests();

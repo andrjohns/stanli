@@ -233,8 +233,9 @@ struct ProgramCompiler {
     return r;
   }
 
-  int emit(Program::Code c, int dst, int a = 0, int b = 0, int cc = 0) {
-    p.code.push_back(Program::Instr{c, dst, a, b, cc, 0});
+  int emit(Program::Code c, int dst, int a = 0, int b = 0, int cc = 0,
+           int len = 0) {
+    p.code.push_back(Program::Instr{c, dst, a, b, cc, len});
     return (int)p.code.size() - 1;
   }
 
@@ -2087,12 +2088,16 @@ struct ProgramCompiler {
 
     Program::Code code = native_code;
     if (spec.opcode == OP_DIV && e.type_ == "UInt") code = Program::IDIV;
+    const int law =
+        code == Program::POW
+            ? mir::pow_zero_base_law(e.args[0], e.args[1], !e.args[1].data_only)
+            : 0;
     const int result = alloc(n);
     for (int i = 0; i < n; ++i) {
       const int a = args[0].reg + (is_scalar(args[0]) ? 0 : i);
       const int b =
           args.size() == 2 ? args[1].reg + (is_scalar(args[1]) ? 0 : i) : 0;
-      emit(code, result + i, a, b);
+      emit(code, result + i, a, b, 0, law);
     }
     out.reg = result;
     out.len = n;
@@ -3129,9 +3134,14 @@ struct ProgramCompiler {
         }
       } else
         bail("function " + e.name);
+      const int law = c == Program::POW
+                          ? mir::pow_zero_base_law(e.args[0], e.args[1],
+                                                   !e.args[1].data_only)
+                          : 0;
       const int r = alloc(n);
       for (int i = 0; i < n; ++i)
-        emit(c, r + i, a.reg + (a_scalar ? 0 : i), b.reg + (b_scalar ? 0 : i));
+        emit(c, r + i, a.reg + (a_scalar ? 0 : i), b.reg + (b_scalar ? 0 : i),
+             0, law);
       Range out{r, n};
       if (a_scalar && !b_scalar)
         out = b;

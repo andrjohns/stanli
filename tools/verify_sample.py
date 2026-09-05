@@ -40,9 +40,9 @@ from cmdstan_ref import compile_cmd
 # The deviation arithmetic and the reference format live in the replay
 # script, not here, so a change to either cannot land in the recorder
 # without landing in the CI gate.
-from verify_refs import (POINTS, REFS_PATH, SCHEMA, default_check_bin,
-                         load_refs, model_files, pair_dev, parse_status,
-                         parse_wa)
+from verify_refs import (POINTS, REFS_PATH, SCHEMA, accepted,
+                         default_check_bin, load_refs, model_files,
+                         pair_dev, parse_status, parse_wa)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 # Everything the recorded numbers depend on, by revision. Read from the
@@ -93,21 +93,6 @@ def inside_support(fields):
         return math.isfinite(float(fields[1]))
     except (IndexError, ValueError):
         return False
-
-
-def accepted(fields):
-    """Did this engine accept the point, per its own way of saying no?
-
-    The two spell a rejection differently. stanli_check prints EVAL_FAIL
-    and no OK line; CmdStan's log_prob hands back a row of nan and only
-    throws later, out of write_array, so ref_driver prints OK first. A
-    unit_vector at the origin is exactly this. Reading the all-nan row as
-    a value would record a reference no engine can be held to.
-    """
-    if not fields or fields[0] != "OK":
-        return False
-    values = [float(x) for x in fields[1:]]
-    return not (values and all(v != v for v in values))
 
 
 def write_results(results):

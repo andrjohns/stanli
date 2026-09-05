@@ -4,6 +4,7 @@
 
 #include <stanli/kernel_types.hpp>
 
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -91,7 +92,6 @@ namespace stanli {
   X(OP_COMPARE)                       \
   X(OP_INT_ARITH)                     \
   X(OP_REP_VEC_DYNAMIC)               \
-  X(OP_SUM_VEC_DYNAMIC)               \
   X(OP_INDEX_DYNAMIC)                 \
   X(OP_SET_INDEX_DYNAMIC)             \
   X(OP_MATRIX_EXP_DYNAMIC)            \
@@ -489,6 +489,26 @@ constexpr bool unary_has_pullback(UnaryTopology topology, double x) {
       return false;
   }
   return false;
+}
+
+// Which of stan-math's pow overloads a call resolves to, decided from the
+// static C++ types stanc3 emits and carried on the op.
+enum PowZeroBaseLaw : uint8_t {
+  kPowZeroBaseGuarded = 0,
+  kPowZeroBaseScalar = 1,
+  kPowZeroBaseMatrix = 2,
+};
+
+inline double pow_zero_base_partial(uint8_t law, double seed, double base,
+                                    double exponent) {
+  if (law == kPowZeroBaseGuarded) return 0.0;
+  if (exponent == 1.0) return seed;
+  if (exponent == -1.0) return -seed / (base * base);
+  if (exponent == -2.0)
+    return law == kPowZeroBaseMatrix ? std::numeric_limits<double>::quiet_NaN()
+                                     : -2.0 * seed / (base * base * base);
+  if (exponent == -0.5) return -0.5 * seed / (base * std::sqrt(base));
+  return 0.0;
 }
 
 // Scalar unary math, one line each: opcode, kernel, registration, lowering

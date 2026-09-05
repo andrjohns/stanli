@@ -102,7 +102,7 @@ inline RunResult run_one_op(uint16_t opcode,
 inline RunResult run_op_sum(uint16_t opcode, int64_t out_len,
                             const std::vector<std::vector<double>>& vals,
                             const std::vector<bool>& params,
-                            std::vector<int> idata = {}) {
+                            std::vector<int> idata = {}, uint8_t variant = 0) {
   Graph g;
   std::vector<int> slots;
   int64_t n_par = 0;
@@ -114,6 +114,7 @@ inline RunResult run_op_sum(uint16_t opcode, int64_t out_len,
   const int lp = g.add_slot(1, false);
   Op op;
   op.opcode = opcode;
+  op.variant = variant;
   op.out = out;
   op.n_in = 0;
   for (int s : slots) op.in[op.n_in++] = s;

@@ -3,6 +3,10 @@
 namespace stanli {
 namespace lower_detail {
 
+// A guard that stays decidable and never false is the model's own
+// nontermination. Stop unrolling and let it compile as a loop.
+constexpr long kWhileUnrollLimit = 1L << 16;
+
 bool Lowering::expr_has_jacobian(const mir::Expr& e) {
   if (e.kind == mir::Expr::FunApp) {
     CallableTransformSpec transform;
@@ -35,44 +39,90 @@ bool Lowering::has_target_pe(const mir::Stmt& s) {
     if (has_target_pe(k)) return true;
   return false;
 }
+static void bound_names(const mir::Stmt& s, std::set<std::string>* out) {
+  if (s.kind == mir::Stmt::Decl) out->insert(s.decl_id);
+  if (s.kind == mir::Stmt::Assignment) out->insert(s.lhs);
+  for (const auto& child : s.body) bound_names(child, out);
+}
+static bool sized_from(const mir::Stmt& s, const std::set<std::string>& names) {
+  if (s.kind == mir::Stmt::Decl)
+    for (const auto& extent : s.decl_type.dims)
+      for (const auto& name : names)
+        if (Lowering::expr_references(extent, name)) return true;
+  for (const auto& child : s.body)
+    if (sized_from(child, names)) return true;
+  return false;
+}
+// A local whose extent the body itself computes: brms sizes
+// `array[nobs[i]] int` from the while's own counter.
+bool Lowering::while_sizes_from_loop_state(const mir::Stmt& s) {
+  std::set<std::string> names;
+  for (const auto& child : s.body) bound_names(child, &names);
+  for (const auto& child : s.body)
+    if (sized_from(child, names)) return true;
+  return false;
+}
+// Unroll `s` while the data interpreter answers its guard.  Returns false
+// where the guard stopped being decidable, leaving the rest of the loop to
+// the caller.
+bool Lowering::unroll_while(const mir::Stmt& s) {
+  for (long trip = 0; trip < kWhileUnrollLimit; ++trip) {
+    auto evaluated = try_eval_pure(s.cond);
+    if (!evaluated) return false;
+    if (evaluated->r.at(0) == 0.0) return true;
+    try {
+      for (const auto& child : s.body) lower_stmt(child);
+    } catch (LoopContinue&) {
+    } catch (LoopBreak&) {
+      return true;
+    }
+  }
+  return false;
+}
+// Both control scans run before the block is lowered, but loop bounds and
+// conditions later in the block can depend on scalar-int locals established
+// by earlier statements.  Mirror just that compile-time environment in
+// statement order.  In particular, stanc spells `int d = rows(x)` as a
+// default declaration followed by an assignment, and UDFs commonly use d to
+// size locals, to bound a loop and to guard an early return.  Looking
+// through the whole block without this lexical state rejects an otherwise
+// static UDF.
+bool Lowering::scan_block(const mir::Stmt& s,
+                          const std::function<bool(const mir::Stmt&)>& stop) {
+  const auto saved = int_env;
+  std::set<std::string> local_ints;
+  bool found = false;
+  try {
+    for (const auto& child : s.body) {
+      if (stop(child)) {
+        found = true;
+        break;
+      }
+      if (child.kind == mir::Stmt::Decl && child.decl_type.base == "SInt") {
+        local_ints.insert(child.decl_id);
+        int_env.erase(child.decl_id);
+        if (child.has_init) int_env[child.decl_id] = eval_int(child.init);
+      } else if (child.kind == mir::Stmt::Assignment && child.lhs_idx.empty() &&
+                 local_ints.count(child.lhs)) {
+        int_env[child.lhs] = eval_int(child.rhs);
+      }
+    }
+  } catch (...) {
+    int_env = saved;
+    throw;
+  }
+  int_env = saved;
+  return found;
+}
 bool Lowering::needs_runtime_control(const mir::Stmt& s) {
   // A structured while owns every runtime decision in its body.  Promoting
   // its enclosing block would absorb UDF-local declarations and returns,
   // which are not live-outs of that outer region.
   if (s.kind == mir::Stmt::While) return false;
-  if (s.kind == mir::Stmt::Block || s.kind == mir::Stmt::SList) {
-    // This scan runs before the block is lowered, but loop bounds later in
-    // the block can depend on scalar-int locals established by earlier
-    // statements.  Mirror just that compile-time environment in statement
-    // order.  In particular, stanc spells `int d = rows(x)` as a default
-    // declaration followed by an assignment, and UDFs commonly use d to
-    // size locals and loops.  Looking through the whole block without this
-    // lexical state rejects an otherwise static write-array UDF.
-    const auto saved = int_env;
-    std::set<std::string> local_ints;
-    bool found = false;
-    try {
-      for (const auto& child : s.body) {
-        if (needs_runtime_control(child)) {
-          found = true;
-          break;
-        }
-        if (child.kind == mir::Stmt::Decl && child.decl_type.base == "SInt") {
-          local_ints.insert(child.decl_id);
-          int_env.erase(child.decl_id);
-          if (child.has_init) int_env[child.decl_id] = eval_int(child.init);
-        } else if (child.kind == mir::Stmt::Assignment &&
-                   child.lhs_idx.empty() && local_ints.count(child.lhs)) {
-          int_env[child.lhs] = eval_int(child.rhs);
-        }
-      }
-    } catch (...) {
-      int_env = saved;
-      throw;
-    }
-    int_env = saved;
-    return found;
-  }
+  if (s.kind == mir::Stmt::Block || s.kind == mir::Stmt::SList)
+    return scan_block(s, [&](const mir::Stmt& child) {
+      return needs_runtime_control(child);
+    });
   if (s.kind == mir::Stmt::IfElse) {
     // This is a speculative write_array scan, so follow an already-known
     // arm exactly as ordinary lowering will.  Besides avoiding needless
@@ -132,6 +182,16 @@ bool Lowering::runtime_loop_control(const mir::Stmt& s, bool runtime_path) {
     for (const auto& arm : s.body)
       if (runtime_loop_control(arm, true)) return true;
     return false;
+  }
+  if (s.kind == mir::Stmt::Block || s.kind == mir::Stmt::SList) {
+    try {
+      return scan_block(s, [&](const mir::Stmt& child) {
+        return runtime_loop_control(child, runtime_path);
+      });
+    } catch (const CompileError&) {
+      // A local this scan cannot fold leaves every later condition
+      // undecided, which is the answer the unmirrored walk below gives.
+    }
   }
   for (const auto& child : s.body)
     if (runtime_loop_control(child, runtime_path)) return true;
@@ -1429,9 +1489,22 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
           }
           base = &base->args[0];
         }
-        if (base->kind != mir::Expr::Var)
-          fail("FnWriteParam of a non-variable", s.raw);
-        std::string name = base->name;
+        std::string name;
+        if (base->kind == mir::Expr::Var) {
+          name = base->name;
+        } else {
+          size_t next = 0;
+          if (output_vars) {
+            const auto at = std::find(output_vars->begin(), output_vars->end(),
+                                      last_written);
+            if (at != output_vars->end())
+              next = (size_t)(at - output_vars->begin()) + 1;
+          }
+          if (!output_vars || next >= output_vars->size())
+            fail("cannot name a substituted FnWriteParam", s.raw);
+          name = (*output_vars)[next];
+        }
+        last_written = name;
         for (auto it = ixs.rbegin(); it != ixs.rend(); ++it)
           name += "." + std::to_string(*it);
         const Val v = lower_expr(s.fn_args[0]);
@@ -1563,6 +1636,23 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
       return;
     }
     case mir::Stmt::While: {
+      // A body that sizes a local from the loop's own state has no loop
+      // form: the island and the retained loop both hold the counter at
+      // runtime, and a declared extent has to be a compile-time integer.
+      // Where the guard is data the trip count is one too, so unroll it the
+      // way `for` unrolls and every such extent folds with it.
+      if (while_unroll_depth || while_sizes_from_loop_state(s)) {
+        ++while_unroll_depth;
+        bool complete = false;
+        try {
+          complete = unroll_while(s);
+        } catch (...) {
+          --while_unroll_depth;
+          throw;
+        }
+        --while_unroll_depth;
+        if (complete) return;
+      }
       if (try_lower_region(s)) return;
       // Unlike `for`, a `while` has no statically supplied trip count.
       // Compile it as one structured register-program island, which

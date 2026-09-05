@@ -10,6 +10,8 @@
 //   * csv_names on hand-built ParamViews, one per naming rule, and
 //   * the whole pipeline on tests/fixtures/wanames.stan, whose expected
 //     header was taken verbatim from a CmdStan run of the same model.
+#include "env_helpers.hpp"
+
 #include <stanli/compile.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/mir_interp.hpp>
@@ -94,6 +96,13 @@ std::map<std::string, stanli::DataMap::Entry> bound_check_env(
     env[flag] = one;
   }
   return env;
+}
+
+bool same_double_bytes(const std::vector<double>& a,
+                       const std::vector<double>& b) {
+  return a.size() == b.size() &&
+         (a.empty() ||
+          std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
 }
 
 std::string joined(const std::vector<stanli::CompiledModel::ParamView>& cols) {
@@ -1129,27 +1138,50 @@ void test_transformed_parameter_checks() {
 
 // A generated quantity the optimizer folds to a constant: --O1 replaces
 // the FnWriteParam's variable reference with the literal value, so the
-// column's name has to come from the program's output_vars instead.
+// column's name has to come from the program's output_vars instead. Both
+// engines name it that way; the graph lowers the value like any other
+// expression.
 void test_constant_folded_gq_column() {
   using namespace stanli;
   DataMap data;
   data.set_real_array("rectangular", {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, {3, 2});
-  CompiledModel cm =
-      compile_model(slurp("tests/fixtures/gqconst.tmir.sexp"), data);
-  if (!cm.write_array || !cm.write_array->interp) {
+  const std::string text = slurp("tests/fixtures/gqconst.tmir.sexp");
+  test_setenv("STANLI_WA_FORCE_INTERP", "1");
+  CompiledModel cm = compile_model(text, data);
+  test_unsetenv("STANLI_WA_FORCE_INTERP");
+  if (!cm.write_array || !cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
     ++failures;
-    std::printf("FAIL gqconst: no interpreted write_array\n");
+    std::printf(
+        "FAIL gqconst did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
     return;
   }
-  WaInterp& wi = *cm.write_array->interp;
-  std::map<std::string, DataMap::Entry> params;
-  DataMap::Entry x;
-  x.r = {0.25};
-  params["x"] = x;
-  WaRng rng(1);
-  const std::vector<double> row = wi.eval(params, rng);
-  expect_eq("gqconst header", joined(wi.columns()),
+  expect_eq("gqconst header", joined(cm.write_array->columns),
             "x,z,extracted.1,extracted.2");
+
+  Executor pex(cm.graph);
+  cm.bind(pex);
+  pex.params_data()[0] = 0.25;
+  pex.run_forward_only();
+
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  wex.params_data()[0] = 0.25;
+  WaRng graph_rng(1);
+  wex.run_forward_only(EvalState{&graph_rng});
+  std::vector<double> row;
+  for (const auto& c : cm.write_array->columns) {
+    const double* p = wex.value_ptr(c.slot);
+    for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+  }
+  WaRng interp_rng(1);
+  const std::vector<double> interp_row =
+      cm.write_array->interp->eval(cm.constrained_env(pex), interp_rng);
+  if (!same_double_bytes(row, interp_row)) {
+    ++failures;
+    std::printf("FAIL gqconst: graph and interpreter rows differ\n");
+  }
   if (row.size() != 4 || row[0] != 0.25 || row[1] != 3.0 || row[2] != 1.0 ||
       row[3] != 5.0) {
     ++failures;
@@ -1277,13 +1309,6 @@ static std::vector<double> direct_multi_normal_rng(
       multi_normal_location(mu),
       multi_normal_covariance(covariance, rows, cols), rng.gen());
   return std::vector<double>(draw.data(), draw.data() + draw.size());
-}
-
-static bool same_double_bytes(const std::vector<double>& a,
-                              const std::vector<double>& b) {
-  return a.size() == b.size() &&
-         (a.empty() ||
-          std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
 }
 
 // categorical_rng is unusual in this opcode family: one logical argument is
@@ -4714,6 +4739,120 @@ void test_runtime_int_sum_redeclaration_shadowing() {
   }
 }
 
+// choose() as a generated quantities extent and inside an index whose
+// argument is the enclosing loop variable, which is how brms lays out the
+// upper triangle of a group-level correlation matrix.
+void test_choose_index_gq() {
+  using namespace stanli;
+  DataMap data;
+  data.set_int("M", 4);
+  const std::string text = slurp("tests/fixtures/choosesize.tmir.sexp");
+  test_setenv("STANLI_WA_FORCE_INTERP", "1");
+  CompiledModel cm = compile_model(text, data);
+  test_unsetenv("STANLI_WA_FORCE_INTERP");
+  if (!cm.write_array || !cm.write_array->interp ||
+      !cm.write_array->truncated.empty()) {
+    ++failures;
+    std::printf(
+        "FAIL choosesize did not compile completely: %s\n",
+        cm.write_array ? cm.write_array->truncated.c_str() : "no write_array");
+    return;
+  }
+  std::vector<double> q(22);
+  for (size_t i = 0; i < q.size(); ++i) q[i] = 0.25 * (double)i - 1.0;
+
+  Executor pex(cm.graph);
+  cm.bind(pex);
+  std::copy(q.begin(), q.end(), pex.params_data());
+  pex.run_forward_only();
+
+  Executor wex(std::move(cm.write_array->graph));
+  cm.write_array->bind(wex);
+  std::copy(q.begin(), q.end(), wex.params_data());
+  WaRng graph_rng(5);
+  wex.run_forward_only(EvalState{&graph_rng});
+  std::vector<double> row;
+  for (const auto& c : cm.write_array->columns) {
+    const double* p = wex.value_ptr(c.slot);
+    for (int64_t i = 0; i < c.len; ++i) row.push_back(p[c.storage_index(i)]);
+  }
+  expect_eq("choosesize header", joined(cm.write_array->columns),
+            "z.1,z.2,z.3,z.4,z.5,z.6,A.1.1,A.2.1,A.3.1,A.4.1,A.1.2,A.2.2,"
+            "A.3.2,A.4.2,A.1.3,A.2.3,A.3.3,A.4.3,A.1.4,A.2.4,A.3.4,A.4.4,"
+            "cor.1,cor.2,cor.3,cor.4,cor.5,cor.6");
+
+  WaRng interp_rng(5);
+  const std::vector<double> interp_row =
+      cm.write_array->interp->eval(cm.constrained_env(pex), interp_rng);
+  if (!same_double_bytes(row, interp_row)) {
+    ++failures;
+    std::printf("FAIL choosesize: graph and interpreter rows differ\n");
+  }
+  // cor holds A's strict upper triangle, column by column.
+  const double want[6] = {q[10], q[14], q[15], q[18], q[19], q[20]};
+  for (int i = 0; i < 6; ++i)
+    if (row.at((size_t)(22 + i)) != want[i]) {
+      ++failures;
+      std::printf("FAIL choosesize cor.%d: got %.17g want %.17g\n", i + 1,
+                  row.at((size_t)(22 + i)), want[i]);
+    }
+}
+
+// The LKJ densities on the per-draw path. lkj_corr_cholesky is what brms
+// puts on every correlated group-level effect, so the interpreter meets it
+// whenever the rest of the section sends the graph home.
+void test_interpreted_lkj() {
+  using namespace stanli;
+  DataMap data = DataMap::from_json_file("tests/fixtures/gqlkj.json");
+  const std::string text = slurp("tests/fixtures/gqlkj.tmir.sexp");
+  test_setenv("STANLI_WA_FORCE_INTERP", "1");
+  CompiledModel cm = compile_model(text, data);
+  test_unsetenv("STANLI_WA_FORCE_INTERP");
+  if (!cm.write_array || !cm.write_array->interp) {
+    ++failures;
+    std::printf("FAIL gqlkj: expected an attached interpreter\n");
+    return;
+  }
+  const double q[4] = {0.3, -0.6, 0.45, std::log(1.4)};
+  Executor pex(cm.graph);
+  cm.bind(pex);
+  std::copy(q, q + 4, pex.params_data());
+  pex.run_forward_only();
+  WaRng rng(19);
+  const std::vector<double> row =
+      cm.write_array->interp->eval(cm.constrained_env(pex), rng);
+  const std::vector<std::string> names =
+      CompiledModel::csv_names(cm.write_array->interp->columns());
+  const auto column = [&](const std::string& name) {
+    for (size_t i = 0; i < names.size(); ++i)
+      if (names[i] == name) return row.at(i);
+    ++failures;
+    std::printf("FAIL gqlkj: no column %s\n", name.c_str());
+    return 0.0;
+  };
+  Eigen::MatrixXd L(3, 3);
+  for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r)
+      L(r, c) =
+          column("L." + std::to_string(r + 1) + "." + std::to_string(c + 1));
+  Eigen::MatrixXd R(3, 3);
+  for (int c = 0; c < 3; ++c)
+    for (int r = 0; r < 3; ++r)
+      R(r, c) =
+          column("R." + std::to_string(r + 1) + "." + std::to_string(c + 1));
+  const double eta = column("eta");
+  const double want_chol = stan::math::lkj_corr_cholesky_lpdf<false>(L, eta);
+  const double want_corr = stan::math::lkj_corr_lpdf<false>(R, eta);
+  const auto expect_close = [&](const char* what, double got, double want) {
+    if (std::abs(got - want) > 1e-13 * std::max(1.0, std::abs(want))) {
+      ++failures;
+      std::printf("FAIL gqlkj %s: got %.17g want %.17g\n", what, got, want);
+    }
+  };
+  expect_close("lkj_corr_cholesky_lpdf", column("lchol"), want_chol);
+  expect_close("lkj_corr_lpdf", column("lcorr"), want_corr);
+}
+
 void test_runtime_control_write_array() {
   using namespace stanli;
 
@@ -4872,6 +5011,8 @@ int main() {
   test_interpreted_gq_densities();
   test_interpreted_gq_gp_covariances();
   test_compiled_multiply_lower_tri();
+  test_choose_index_gq();
+  test_interpreted_lkj();
   test_constant_folded_gq_column();
   test_binomial_rng_helper_contract();
   test_categorical_rng_helper_contract();

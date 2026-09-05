@@ -16,10 +16,9 @@
 
 static int failures = 0;
 static void expect_eq(const std::string& what, double got, double want) {
-  if (got != want) {
-    ++failures;
-    std::printf("FAIL %-24s got %.17g want %.17g\n", what.c_str(), got, want);
-  }
+  if (got == want || (std::isnan(got) && std::isnan(want))) return;
+  ++failures;
+  std::printf("FAIL %-24s got %.17g want %.17g\n", what.c_str(), got, want);
 }
 
 using stan::math::var;
@@ -47,23 +46,40 @@ static void expect_near_ulp(const std::string& what, double got, double want,
   std::printf("FAIL %-24s got %.17g want %.17g\n", what.c_str(), got, want);
 }
 
+// `params` marks which inputs the graph makes parameters; the rest reach the
+// kernel with no adjoint, the way a data slot does. `ref_fn` gets every input
+// as a var and is expected to read the data ones through `.val()`, so the
+// reference picks stan-math's non-var overload for them.
 template <typename F>
-static void check_case(const std::string& tag, uint16_t opcode, int64_t out_len,
-                       const std::vector<std::vector<double>>& vals, F&& ref_fn,
-                       int lp_ulp = 0) {
-  auto r = stanli::testutil::run_op_sum(opcode, out_len, vals,
-                                        std::vector<bool>(vals.size(), true));
-  // Reference: promote all inputs to var, apply ref_fn, sum, grad.
+static void check_case_params(const std::string& tag, uint16_t opcode,
+                              int64_t out_len,
+                              const std::vector<std::vector<double>>& vals,
+                              const std::vector<bool>& params, F&& ref_fn,
+                              int lp_ulp = 0, uint8_t variant = 0) {
+  auto r =
+      stanli::testutil::run_op_sum(opcode, out_len, vals, params, {}, variant);
   std::vector<VecV> vs;
   for (const auto& v : vals) vs.push_back(mkv(v));
   var lp = ref_fn(vs);
   lp.grad();
   expect_near_ulp(tag + " lp", r.value, lp.val(), lp_ulp);
   size_t gi = 0;
-  for (auto& v : vs)
-    for (int i = 0; i < v.size(); ++i)
-      expect_eq(tag + " g" + std::to_string(gi), r.grad[gi], v(i).adj()), ++gi;
+  for (size_t k = 0; k < vs.size(); ++k) {
+    if (!params[k]) continue;
+    for (int i = 0; i < vs[k].size(); ++i)
+      expect_eq(tag + " g" + std::to_string(gi), r.grad[gi], vs[k](i).adj()),
+          ++gi;
+  }
   stan::math::recover_memory();
+}
+
+template <typename F>
+static void check_case(const std::string& tag, uint16_t opcode, int64_t out_len,
+                       const std::vector<std::vector<double>>& vals, F&& ref_fn,
+                       int lp_ulp = 0) {
+  check_case_params(tag, opcode, out_len, vals,
+                    std::vector<bool>(vals.size(), true),
+                    std::forward<F>(ref_fn), lp_ulp);
 }
 
 static uint64_t layout_bits(double value) {
@@ -416,6 +432,57 @@ int main() {
   });
   check_case("pow ss at zero", OP_POW, 1, {{0.0}, {U}},
              [](auto& v) { return stan::math::pow(v[0](0), v[1](0)); });
+  // The same zero base with a DATA exponent, where stan-math's non-var
+  // dispatch reaches sqrt, the base itself, square, inv_square, inv or
+  // inv_sqrt instead of the guard. Which of those three laws applies is the
+  // op's variant, from the static types stanc3 emitted. The nonzero lanes
+  // are powers of two so std::pow and the redirects agree to the bit there
+  // and only the zero lane is under test.
+  const std::vector<bool> data_exp{true, false};
+  const std::vector<double> ZP{0.0, 4.0, 0.25, 16.0};
+  const std::vector<double> DISPATCHED{1.0, 2.0, 0.5, -1.0, -2.0, -0.5, 3.0};
+  for (const double y : DISPATCHED) {
+    check_case_params(
+        "pow ss zero scalar law " + std::to_string(y), OP_POW, 1, {{0.0}, {y}},
+        data_exp,
+        [](auto& v) { return stan::math::pow(v[0](0), v[1](0).val()); }, 0,
+        stanli::kPowZeroBaseScalar);
+    // An Eigen base with a scalar exponent takes the matrix redirects, whose
+    // inv_square is prim's inv(square(x)) and is NaN rather than -inf at zero.
+    check_case_params(
+        "pow vs zero matrix law " + std::to_string(y), OP_POW, N, {ZP, {y}},
+        data_exp,
+        [](auto& v) {
+          return stan::math::sum(stan::math::pow(v[0], v[1](0).val()));
+        },
+        0, stanli::kPowZeroBaseMatrix);
+    // A widened lane keeps the scalar law: reroll turns a loop of scalar
+    // `pow(param, y)` into a vector base against a vector data exponent, and
+    // each of those lanes was its own scalar call.
+    check_case_params(
+        "pow vv zero scalar law " + std::to_string(y), OP_POW, N,
+        {ZP, std::vector<double>(ZP.size(), y)}, data_exp,
+        [](auto& v) {
+          var s = 0.0;
+          for (int i = 0; i < v[0].size(); ++i)
+            s += stan::math::pow(v[0](i), v[1](i).val());
+          return s;
+        },
+        0, stanli::kPowZeroBaseScalar);
+    // Written as `pow(vector, vector)` it is stan-math's Eigen/Eigen overload,
+    // which has no redirect and keeps the guard's zero.
+    check_case_params(
+        "pow vv zero eigen law " + std::to_string(y), OP_POW, N,
+        {ZP, std::vector<double>(ZP.size(), y)}, data_exp,
+        [](auto& v) {
+          return stan::math::sum(
+              stan::math::pow(v[0], stan::math::value_of(v[1]).eval()));
+        },
+        0, stanli::kPowZeroBaseGuarded);
+  }
+  check_case_params("pow ss at zero var exp 1", OP_POW, 1, {{0.0}, {1.0}},
+                    {true, true},
+                    [](auto& v) { return stan::math::pow(v[0](0), v[1](0)); });
 
   // Unaries, vector + scalar shapes.
   check_case("neg v", OP_NEG, N, {A},

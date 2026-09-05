@@ -770,12 +770,14 @@ Val region_index(const Val& base, const std::vector<mir::Expr>& selectors,
       axis.kind = DynamicIndexSpec::Axis::Multi;
       Val v = lower_expr(ix->args[0]);
       axis.count = g.slots[v.slot].len;
+      int runtime_count = -1;
+      if (has_runtime_shape(v))
+        runtime_count = one_runtime_extent(v, "multi-index");
+      v.runtime_dims.clear();
       index_offsets.push_back(index_width);
       indices.push_back(v);
       index_width += axis.count;
-      int runtime_count = -1;
-      if (has_runtime_shape(v)) {
-        runtime_count = one_runtime_extent(v, "multi-index");
+      if (runtime_count >= 0) {
         axis.count_input_offset = index_width;
         Val count{runtime_count, false, view_of("UInt")};
         count.si.param_free = true;
@@ -2195,6 +2197,8 @@ bool try_lower_region(
     value.runtime_dims = results[i].runtime_dims;
     for (int& dim : value.runtime_dims) {
       if (dim < 0) continue;
+      if (!region_current)
+        fail("structured live-out keeps a runtime logical extent: " + names[i]);
       const size_t index = output_index.at(dim);
       dim = emit_raw(OP_INDEX, {result.slot}, 1, view_of("UInt"),
                      {checked_immediate(output_offsets[index],

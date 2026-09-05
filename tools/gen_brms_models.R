@@ -1,5 +1,6 @@
 # Regenerates tests/brms: make_stancode and make_standata output, written
-# out unchanged. Needs brms >= 2.23, mgcv, and mice (the nhanes data).
+# out unchanged. Needs brms >= 2.23, mgcv, mice (the nhanes data) and
+# splines2 (the cox baseline hazard).
 #
 #   Rscript tools/gen_brms_models.R [outdir]
 
@@ -213,3 +214,204 @@ case("sw_re_bern",     bin ~ x + (1 | g), data = sim, family = bernoulli())
 case("sw_re_negbin",   cnt ~ x + (1 | g), data = sim, family = negbinomial())
 case("sw_re_gauss",    y ~ x + (1 | g), data = sim, family = gaussian())
 
+## ---------------- second sweep data ----------------
+set.seed(2026)
+N <- 40
+sim <- data.frame(
+  x = rnorm(N), z = rnorm(N),
+  g = factor(rep(1:5, each = 8)),
+  g2 = factor(rep(1:4, 10)),
+  tt = rep(1:8, 5),
+  y = rnorm(N), ypos = rexp(N) + 0.1, cnt = rpois(N, 3),
+  bin = rbinom(N, 1, 0.5), tr = rep(10L, N),
+  prop = runif(N, 0.05, 0.95),
+  wts = runif(N, 0.5, 1.5),
+  mono = factor(sample(1:4, N, TRUE), ordered = TRUE),
+  xme = rnorm(N), xsd = runif(N, 0.1, 0.3),
+  xme2 = rnorm(N), xsd2 = runif(N, 0.1, 0.3),
+  cat3 = factor(sample(1:3, N, TRUE)),
+  expo = runif(N, 1, 5)
+)
+sim$succ <- rbinom(N, sim$tr, 0.4)
+sim$gby <- factor(rep(c("a", "b", "a", "b", "a"), each = 8))  # constant in g
+# zero-one inflated beta / zero-inflated beta
+sim$p01 <- sim$prop; sim$p01[c(2, 5)] <- 0; sim$p01[c(7, 11)] <- 1
+sim$pzi <- sim$prop; sim$pzi[c(3, 8, 14)] <- 0
+# wiener
+sim$rt <- runif(N, 0.4, 1.5)
+sim$dec <- rbinom(N, 1, 0.5)
+# hurdle_cumulative: integers 0..3, 0 is the hurdle
+sim$hz <- sample(0:3, N, TRUE)
+# ordinal for the link sweep
+sim$ord <- sample(1:4, N, TRUE)
+# interval censoring
+sim$icens <- rep(c(0L, 0L, 2L, 0L), 10)         # 2 == "interval"
+sim$y2 <- sim$ypos + 0.5
+# multivariate subsetting
+sim$sub1 <- rep(c(TRUE, TRUE, TRUE, FALSE), 10)
+sim$sub2 <- rep(c(TRUE, FALSE, TRUE, TRUE), 10)
+sim$idx <- seq_len(N)
+sim$yposmi <- sim$ypos; sim$yposmi[c(4, 12, 25)] <- NA
+# multimembership
+sim$mg1 <- factor(rep(1:5, each = 8))
+sim$mg2 <- factor(rep(1:5, times = 8))
+sim$mw1 <- rep(0.6, N); sim$mw2 <- rep(0.4, N)
+sim$mc1 <- rnorm(N); sim$mc2 <- rnorm(N)
+# simplex / count matrix responses
+S <- matrix(runif(N * 3, 0.2, 1), N, 3)
+S <- S / rowSums(S)
+colnames(S) <- c("s1", "s2", "s3")
+sim$Ysim <- S
+Ycnt <- t(apply(S, 1, function(p) rmultinom(1, 10, p)))
+colnames(Ycnt) <- c("c1", "c2", "c3")
+storage.mode(Ycnt) <- "integer"
+sim$Ycnt <- Ycnt
+
+small <- sim[1:20, ]
+
+# spatial structures over the 5 levels of g
+Wg <- matrix(0L, 5, 5)
+for (i in 1:4) { Wg[i, i + 1] <- 1L; Wg[i + 1, i] <- 1L }
+dimnames(Wg) <- list(levels(sim$g), levels(sim$g))
+# sar needs an N x N neighbourhood
+Wn <- matrix(0, N, N)
+for (i in 1:(N - 1)) { Wn[i, i + 1] <- 1; Wn[i + 1, i] <- 1 }
+Wn <- Wn / pmax(rowSums(Wn), 1)
+# fcor needs a known N x N covariance
+Vfc <- outer(seq_len(N), seq_len(N), function(a, b) 0.5^abs(a - b))
+dimnames(Vfc) <- list(seq_len(N), seq_len(N))
+
+## ---- custom families (brms_customfamilies vignette) ----
+beta_binomial2 <- custom_family(
+  "beta_binomial2", dpars = c("mu", "phi"),
+  links = c("logit", "log"), lb = c(NA, 0),
+  type = "int", vars = "vint1[n]"
+)
+bb2_funs <- "
+  real beta_binomial2_lpmf(int y, real mu, real phi, int T) {
+    return beta_binomial_lpmf(y | T, mu * phi, (1 - mu) * phi);
+  }
+"
+bb2_sv <- stanvar(scode = bb2_funs, block = "functions")
+
+vreal_fam <- custom_family(
+  "gauss_off", dpars = c("mu", "sigma"), links = c("identity", "log"),
+  lb = c(NA, 0), type = "real", vars = "vreal1[n]"
+)
+vreal_funs <- "
+  real gauss_off_lpdf(real y, real mu, real sigma, real off) {
+    return normal_lpdf(y | mu + off, sigma);
+  }
+"
+vreal_sv <- stanvar(scode = vreal_funs, block = "functions")
+
+## ================= families =================
+case("s2_dirichlet",     Ysim ~ x, data = sim, family = dirichlet())
+case("s2_logistic_normal", Ysim ~ x, data = sim, family = logistic_normal())
+case("s2_multinomial",   Ycnt | trials(tr) ~ x, data = sim,
+     family = multinomial())
+case("s2_beta_binomial", succ | trials(tr) ~ x, data = sim,
+     family = beta_binomial())
+case("s2_zoi_beta",      p01 ~ x, data = sim,
+     family = zero_one_inflated_beta())
+case("s2_zi_beta",       pzi ~ x, data = sim, family = zero_inflated_beta())
+case("s2_zi_asymlaplace", y ~ x, data = sim,
+     family = brmsfamily("zero_inflated_asym_laplace"))
+case("s2_shifted_lognormal", ypos ~ x, data = sim,
+     family = shifted_lognormal())
+case("s2_wiener",        rt | dec(dec) ~ x, data = sim, family = wiener())
+case("s2_cox",           ypos ~ x, data = sim, family = cox())
+case("s2_cox_cens",      ypos | cens(bin) ~ x, data = sim, family = cox())
+case("s2_discrete_weibull", cnt ~ x, data = sim, family = brmsfamily("discrete_weibull"))
+case("s2_com_poisson",   cnt ~ x, data = small, family = brmsfamily("com_poisson"))
+case("s2_frechet",       ypos ~ x, data = sim, family = frechet())
+case("s2_gev",           y ~ x, data = sim, family = gen_extreme_value())
+case("s2_invgaussian",   ypos ~ x, data = sim, family = inverse.gaussian())
+case("s2_hurdle_cumulative", hz ~ x, data = sim, family = hurdle_cumulative())
+case("s2_hurdle_negbin", cnt ~ x, data = sim, family = hurdle_negbinomial())
+case("s2_cumulative_probit", ord ~ x, data = sim, family = cumulative("probit"))
+case("s2_cumulative_cloglog", ord ~ x, data = sim,
+     family = cumulative("cloglog"))
+case("s2_cumulative_cauchit", ord ~ x, data = sim,
+     family = cumulative("cauchit"))
+case("s2_categorical_re", cat3 ~ x + (1 | g), data = sim,
+     family = categorical())
+
+## ================= grouping / effect structures =================
+case("s2_mm",            y ~ x + (1 | mm(mg1, mg2)), data = sim)
+case("s2_mm_weights",    y ~ x + (1 | mm(mg1, mg2, weights = cbind(mw1, mw2))),
+     data = sim)
+case("s2_mmc",           y ~ x + (1 + mmc(mc1, mc2) | mm(mg1, mg2)), data = sim)
+case("s2_gr_by",         y ~ x + (1 | gr(g, by = gby)), data = sim)
+case("s2_gr_student",    y ~ x + (1 | gr(g, dist = "student")), data = sim)
+case("s2_mv_shared_re",
+     bf(y ~ x + (1 | p | g)) + bf(ypos ~ z + (1 | p | g)) + set_rescor(FALSE),
+     data = sim)
+case("s2_dist_sigma_re", bf(y ~ x, sigma ~ (1 | g)), data = sim)
+
+## ================= spatial / autocorrelation =================
+case("s2_car",           y ~ x + car(Wg, gr = g), data = sim,
+     data2 = list(Wg = Wg))
+case("s2_car_esicar",    y ~ x + car(Wg, gr = g, type = "esicar"), data = sim,
+     data2 = list(Wg = Wg))
+case("s2_car_icar",      y ~ x + car(Wg, gr = g, type = "icar"), data = sim,
+     data2 = list(Wg = Wg))
+case("s2_sar",           y ~ x + sar(Wn), data = sim, data2 = list(Wn = Wn))
+case("s2_sar_error",     y ~ x + sar(Wn, type = "error"), data = sim,
+     data2 = list(Wn = Wn))
+case("s2_fcor",          y ~ x + fcor(Vfc), data = sim,
+     data2 = list(Vfc = Vfc))
+case("s2_unstr",         y ~ x + unstr(tt, g), data = sim)
+case("s2_ar_cov",        y ~ x + ar(tt, g, cov = TRUE), data = sim)
+case("s2_cosy",          y ~ x + cosy(tt, g), data = sim)
+
+## ================= addition terms =================
+case("s2_cens_interval", ypos | cens(icens, y2) ~ x, data = sim)
+case("s2_weights_trunc", ypos | weights(wts) + trunc(lb = 0, ub = 20) ~ x,
+     data = sim)
+case("s2_rate",          cnt | rate(expo) ~ x, data = sim, family = poisson())
+case("s2_mv_subset",
+     bf(y | subset(sub1) ~ x) + bf(ypos | subset(sub2) ~ z) +
+       set_rescor(FALSE), data = sim)
+case("s2_index_mi",
+     bf(yposmi | mi() + index(idx) ~ x) + bf(y ~ mi(yposmi, idx = idx)) +
+       set_rescor(FALSE), data = sim)
+case("s2_mi_trunc_lb",   bf(yposmi | mi() + trunc(lb = 0) ~ x) + bf(x ~ z) +
+       set_rescor(FALSE), data = sim)
+case("s2_mi_lognormal",  bf(yposmi | mi() ~ x, family = lognormal()) +
+       bf(x ~ z) + set_rescor(FALSE), data = sim)
+
+## ================= custom families / stanvars =================
+case("s2_custom_vint",   succ | vint(tr) ~ x, data = sim,
+     family = beta_binomial2, stanvars = bb2_sv)
+case("s2_custom_vreal",  y | vreal(expo) ~ x, data = sim,
+     family = vreal_fam, stanvars = vreal_sv)
+
+## ================= nonlinear =================
+case("s2_nl_noloop",
+     bf(ypos ~ exp(a) - b, a + b ~ 1 + x, nl = TRUE, loop = FALSE), data = sim,
+     prior = c(prior(normal(0, 1), nlpar = "a"),
+               prior(normal(0, 1), nlpar = "b")))
+case("s2_nlf",
+     bf(ypos ~ a1 - a2^x, nlf(a1 ~ exp(l1)), a2 + l1 ~ 1, nl = TRUE),
+     data = sim,
+     prior = c(prior(normal(0, 1), nlpar = "a2"),
+               prior(normal(0, 1), nlpar = "l1")))
+
+## ================= smooths / GP =================
+case("s2_s_cc",          y ~ s(x, bs = "cc"), data = sim)
+case("s2_s_by",          y ~ s(x, by = g), data = sim)
+case("s2_t2_by",         y ~ t2(x, z, by = gby), data = sim)
+case("s2_gp_by_gr",      y ~ gp(x, by = g, gr = TRUE), data = sim)
+case("s2_gp_approx",     y ~ gp(x, k = 5), data = sim)
+case("s2_gp_by_approx",  y ~ gp(x, by = gby, k = 5), data = sim)
+
+## ================= priors / measurement error / misc =================
+case("s2_mo_simo_prior", y ~ mo(mono), data = sim,
+     prior = prior(dirichlet(c(1, 1, 1)), class = "simo", coef = "momono1"))
+case("s2_me2",           y ~ me(xme, xsd) + me(xme2, xsd2), data = sim)
+case("s2_me2_nomecor",   bf(y ~ me(xme, xsd) + me(xme2, xsd2)) +
+       set_mecor(FALSE), data = sim)
+case("s2_mixture_theta", bf(y ~ x, theta1 ~ x), data = sim,
+     family = mixture(gaussian, gaussian))
+case("s2_threading",     y ~ x + z, data = sim, threads = threading(2))

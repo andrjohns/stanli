@@ -63,13 +63,17 @@ struct Expr {
 };
 
 // stanc leaves these calls in MIR rather than folding them: four have
-// non-finite/platform values, while pi/e are still part of the same language
-// surface. Keep name recognition and values together so graph lowering, the
-// register compiler, and MirInterp cannot grow different subsets. FnNegInf is
-// the optimizer's internal spelling of the same negative-infinity constant.
+// non-finite/platform values, while the mathematical constants are still part
+// of the same language surface. Keep name recognition and values together so
+// graph lowering, the register compiler, and MirInterp cannot grow different
+// subsets. FnNegInf is the optimizer's internal spelling of the same
+// negative-infinity constant.
 enum class NullaryConstantKind : uint8_t {
   E,
   Pi,
+  Log2,
+  Log10,
+  Sqrt2,
   MachinePrecision,
   NegativeInfinity,
   PositiveInfinity,
@@ -85,6 +89,9 @@ inline std::optional<NullaryConstantKind> nullary_constant_kind(const Expr& e) {
   if (e.fn_lib != Expr::Lib::StanLib) return std::nullopt;
   if (e.name == "e") return NullaryConstantKind::E;
   if (e.name == "pi") return NullaryConstantKind::Pi;
+  if (e.name == "log2") return NullaryConstantKind::Log2;
+  if (e.name == "log10") return NullaryConstantKind::Log10;
+  if (e.name == "sqrt2") return NullaryConstantKind::Sqrt2;
   if (e.name == "machine_precision")
     return NullaryConstantKind::MachinePrecision;
   if (e.name == "negative_infinity")
@@ -101,6 +108,12 @@ inline double nullary_constant_value(NullaryConstantKind kind) {
       return 0x1.5bf0a8b145769p+1;
     case NullaryConstantKind::Pi:
       return 0x1.921fb54442d18p+1;
+    case NullaryConstantKind::Log2:
+      return 0x1.62e42fefa39efp-1;
+    case NullaryConstantKind::Log10:
+      return 0x1.26bb1bbb55516p+1;
+    case NullaryConstantKind::Sqrt2:
+      return 0x1.6a09e667f3bcdp+0;
     case NullaryConstantKind::MachinePrecision:
       return std::numeric_limits<double>::epsilon();
     case NullaryConstantKind::NegativeInfinity:
@@ -170,6 +183,19 @@ inline bool reduction_container(const Expr& e) {
 inline bool language_scalar(const Expr& e) {
   return e.unsized.depth == 0 && (e.unsized.leaf == UnsizedLeaf::Int ||
                                   e.unsized.leaf == UnsizedLeaf::Real);
+}
+
+inline bool eigen_leaf(const Expr& e) {
+  return e.unsized.leaf == UnsizedLeaf::Vector ||
+         e.unsized.leaf == UnsizedLeaf::RowVector ||
+         e.unsized.leaf == UnsizedLeaf::Matrix;
+}
+
+inline uint8_t pow_zero_base_law(const Expr& base, const Expr& exponent,
+                                 bool exponent_autodiff) {
+  if (exponent_autodiff) return kPowZeroBaseGuarded;
+  if (!eigen_leaf(base)) return kPowZeroBaseScalar;
+  return eigen_leaf(exponent) ? kPowZeroBaseGuarded : kPowZeroBaseMatrix;
 }
 
 inline bool source_unary_elementwise(const std::string& name) {

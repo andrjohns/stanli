@@ -26,6 +26,12 @@ static void expect(const char* what, bool ok) {
     std::printf("FAIL %s\n", what);
   }
 }
+static void expect_exact(const std::string& what, double got, double want) {
+  if (got == want) return;
+  ++failures;
+  std::printf("FAIL %-24s got %.17g want %.17g\n", what.c_str(), got, want);
+}
+
 static void expect_close(const std::string& what, double got, double want) {
   const double rel = std::abs(got - want) / std::max(std::abs(want), 1e-300);
   if (!(rel < 1e-12)) {
@@ -973,6 +979,87 @@ static void test_native_extras_carved() {
     expect_close("native extras v" + std::to_string(i), got[i], want[i]);
 }
 
+// pow at a base of exactly zero, over the exponents stan-math dispatches on
+// plus one that stays a parameter. Against the values, not just the ops:
+// both engines used to agree on the same wrong zero. `law` is what the
+// lowering would have read off the exponent's static type.
+static Graph build_pow_zero(Fills& fills, std::vector<int>& terms,
+                            uint8_t law) {
+  Graph g;
+  const int base = g.add_slot(1, true);
+  const int vexp = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  auto pw = [&](int e, uint8_t v) {
+    const int s = g.add_slot(1, false);
+    g.add_op(OP_POW, {base, e}, s);
+    g.ops.back().variant = v;
+    return s;
+  };
+  int acc = -1;
+  auto add = [&](int x) {
+    if (acc < 0) {
+      acc = x;
+      return;
+    }
+    const int s = g.add_slot(1, false);
+    g.add_op(OP_ADD, {acc, x}, s);
+    acc = s;
+  };
+  for (int t = 0; t < 8; ++t) {
+    add(pw(cslot(1.0), law));
+    add(pw(cslot(2.0), law));
+    add(pw(cslot(0.5), law));
+    add(pw(vexp, kPowZeroBaseGuarded));
+  }
+  g.result_slot = acc;
+  terms = {acc};
+  return g;
+}
+
+static void check_pow_zero_law(const std::string& tag, uint8_t law,
+                               const std::vector<double>& want) {
+  auto at_zero = [](int64_t) { return 0.0; };
+
+  Fills ref_fills;
+  std::vector<int> ref_terms;
+  Graph ref = build_pow_zero(ref_fills, ref_terms, law);
+  const std::vector<double> ops =
+      testutil::run_grad(std::move(ref), ref_fills, at_zero);
+  expect((tag + " ops sizes").c_str(), ops.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < ops.size(); ++i)
+    expect_close(tag + " ops v" + std::to_string(i), ops[i], want[i]);
+
+  // Both island engines: the generated adjoint reads the law off the
+  // instruction, the var replay off the overload it calls.
+  for (const bool replay : {false, true}) {
+    const std::string what = tag + (replay ? " replay" : " island");
+    Fills fills;
+    std::vector<int> terms;
+    Graph g = build_pow_zero(fills, terms, law);
+    test_setenv("STANLI_ISLAND_ALWAYS", "1", 1);
+    if (replay) test_setenv("STANLI_NO_NATIVE_ADJ", "1", 1);
+    const int carved = carve_islands(g, fills, terms, {});
+    test_unsetenv("STANLI_ISLAND_ALWAYS");
+    test_unsetenv("STANLI_NO_NATIVE_ADJ");
+    expect((what + " carved==1").c_str(), carved == 1);
+    const std::vector<double> got =
+        testutil::run_grad(std::move(g), fills, at_zero);
+    expect((what + " sizes").c_str(), got.size() == want.size());
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close(what + " v" + std::to_string(i), got[i], want[i]);
+  }
+}
+
+static void test_pow_zero_base_carved() {
+  check_pow_zero_law("pow zero scalar law", kPowZeroBaseScalar,
+                     {8.0, 8.0, 0.0});
+  check_pow_zero_law("pow zero guarded", kPowZeroBaseGuarded, {8.0, 0.0, 0.0});
+}
+
 // A recurrence threaded through ops the register machine has no
 // instruction for -- ATAN2, a unary from the generated list, a cdf, an
 // integer-outcome lpmf. Each compiles as a CALL to the graph's own
@@ -1358,11 +1445,46 @@ static void test_density_mask_gradient_identical() {
   expect_eq("mask: bitwise identical", wrong, 0);
 }
 
+// A parameter-dependent while loop holding poisson_log_lpmf and log2()
+// against the same terms written outside one, where the flat path unrolls a
+// data-bounded for. The trip count is 2 below zero and 3 above it.
+static void test_while_lpmf_region_matches_flat() {
+  const auto observations = [] {
+    DataMap data;
+    data.set_int("N", 3);
+    data.set_int_array("y", {2, 0, 5});
+    return data;
+  };
+  CompiledModel region = compile_model(
+      slurp("tests/fixtures/while_lpmf_region.tmir.sexp"), observations());
+  Executor region_ex(std::move(region.graph));
+  region.bind(region_ex);
+
+  for (double eta : {-0.3, -1.25, 0.4, 1.5}) {
+    DataMap data = observations();
+    data.set_int("reps", eta > 0 ? 3 : 2);
+    CompiledModel flat =
+        compile_model(slurp("tests/fixtures/while_lpmf_flat.tmir.sexp"), data);
+    Executor flat_ex(std::move(flat.graph));
+    flat.bind(flat_ex);
+
+    const std::string tag = "while lpmf eta=" + std::to_string(eta);
+    double region_grad = 0, flat_grad = 0;
+    region_ex.params_data()[0] = eta;
+    flat_ex.params_data()[0] = eta;
+    const double region_lp = region_ex.gradient(&region_grad);
+    const double flat_lp = flat_ex.gradient(&flat_grad);
+    expect_exact(tag + " lp", region_lp, flat_lp);
+    expect_exact(tag + " grad", region_grad, flat_grad);
+  }
+}
+
 int main() {
   // What the compiler does with a region, on graphs small enough to
   // reason about. The cost estimate would refuse most of them -- it is
   // policy, tested separately below, and these are about correctness.
   test_branch_bound_live_out();
+  test_while_lpmf_region_matches_flat();
   test_compact_copy_chain();
   test_compact_dead_fill();
   test_compact_rewritten_source_kept();
@@ -1400,6 +1522,7 @@ int main() {
   test_compact_adjoint_cost_boundary();
   test_scalar_chain_carved();
   test_native_extras_carved();
+  test_pow_zero_base_carved();
   test_inplace_slice_cost_refuses_wide_state();
   if (failures) {
     std::printf("%d failures\n", failures);

@@ -24,6 +24,7 @@
 #include <stanli/extrema_grouping.hpp>
 #include <stanli/kernel_types.hpp>
 #include <stanli/message.hpp>
+#include <stanli/optable.hpp>
 #include <stanli/program_density.hpp>
 
 #include <stan/math.hpp>
@@ -86,6 +87,7 @@ inline constexpr int32_t kProgramExtremaPhaseShift = 3;
   X(MUL, kProgramReadB | kProgramSaveA | kProgramSaveB)                      \
   X(DIV, kProgramReadB | kProgramSaveA | kProgramSaveB)                      \
   X(IDIV, kProgramReadB | kProgramNoAdjoint)                                 \
+  /* len holds the PowZeroBaseLaw; POW has no range. */                      \
   X(POW, kProgramReadB | kProgramSaveA | kProgramSaveB | kProgramSaveOut)    \
   X(FMAX, kProgramReadB | kProgramSaveA | kProgramSaveB)                     \
   X(FMIN, kProgramReadB | kProgramSaveA | kProgramSaveB)                     \
@@ -384,6 +386,28 @@ struct ProgramCallCtx<true> {
 void run_program_transform(const Program::Transform& tr, double* reg);
 void run_program_transform(const Program::Transform& tr, stan::math::var* reg);
 
+// pow through the overload the exponent's static type selects, keeping the
+// value std::pow gives so the double forward and the replay stay bitwise.
+template <typename T>
+inline T program_pow(uint8_t law, const T& a, const T& b) {
+  if constexpr (std::is_same_v<T, double>) {
+    return stan::math::pow(a, b);
+  } else {
+    if (law == kPowZeroBaseGuarded) return stan::math::pow(a, b);
+    T base = a;
+    const double av = stan::math::value_of(a);
+    const double exponent = stan::math::value_of(b);
+    return stan::math::make_callback_var(
+        std::pow(av, exponent), [base, av, exponent, law](auto&& vi) mutable {
+          if (av == 0.0) {
+            base.adj() += pow_zero_base_partial(law, vi.adj(), av, exponent);
+            return;
+          }
+          base.adj() += vi.adj() * vi.val() * exponent / av;
+        });
+  }
+}
+
 template <bool ReuseCallCtx, typename T>
 void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
   using VecT = Eigen::Matrix<T, Eigen::Dynamic, 1>;
@@ -433,7 +457,7 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
                                  static_cast<int>(stan::math::value_of(rb()))));
         break;
       case Program::POW:
-        d() = stan::math::pow(ra(), rb());
+        d() = program_pow(static_cast<uint8_t>(I.len), ra(), rb());
         break;
       case Program::FMAX:
         d() = stan::math::fmax(ra(), rb());

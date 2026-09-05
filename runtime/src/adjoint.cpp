@@ -521,7 +521,11 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
         break;
       case Program::POW: {
         adj[I.dst] = 0.0;
-        if (val[I.va] == 0.0) break;
+        if (val[I.va] == 0.0) {
+          adj[I.a] +=
+              pow_zero_base_partial((uint8_t)I.len, t, val[I.va], val[I.vb]);
+          break;
+        }
         const double m = t * val[I.vd];
         adj[I.a] += m * val[I.vb] / val[I.va];
         adj[I.b] += m * std::log(val[I.va]);

@@ -825,6 +825,10 @@ struct Lowering {
   // to emit, not values to differentiate.
   bool in_write_array = false;
   bool write_array_known_static = false;
+  // The declared emission order, and the last name emitted from it: what a
+  // write whose variable --O1 substituted away is called.
+  const std::vector<std::string>* output_vars = nullptr;
+  std::string last_written;
   // Read once per lowering. The automatic parent path stays legacy until its
   // cheap outer-loop hazard gate fires, so ordinary expressions and loops pay
   // no repeated environment lookup or recursive scan.
@@ -1350,6 +1354,14 @@ struct Lowering {
   // Does `s` increment the target, explicitly or through a Jacobian call?
   static bool has_target_pe(const mir::Stmt& s);
 
+  bool scan_block(const mir::Stmt& s,
+                  const std::function<bool(const mir::Stmt&)>& stop);
+  static bool while_sizes_from_loop_state(const mir::Stmt& s);
+  bool unroll_while(const mir::Stmt& s);
+  // A while inside a while being unrolled belongs to the same compile-time
+  // execution: leaving it as a loop puts the outer counter in a register
+  // and undoes the unroll around it.
+  int while_unroll_depth = 0;
   bool needs_runtime_control(const mir::Stmt& s);
 
   // A Break/Continue selected by a runtime condition cannot be lowered as a

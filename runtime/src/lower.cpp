@@ -694,6 +694,7 @@ CompiledModel::WriteArray Lowering::run_write_array(const mir::Program& p) {
   const auto total_time = prep.start();
   for (const auto& f : p.fun_defs) fun_defs[f.name] = &f;
   in_write_array = true;
+  output_vars = &p.output_vars;
   // stanc3 guards the two emission groups on these flags; the sampler wants
   // both, so pin them and let the data-only IfElse fold them away.
   int_env["emit_transformed_parameters__"] = 1;

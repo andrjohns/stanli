@@ -932,6 +932,20 @@ Lowering::Val Lowering::lower_funapp(const mir::Expr& e) {
       return constant((double)eval_int(e));
     } catch (const CompileError&) {
     }
+    const Val& a = actuals.at(0).value();
+    if (has_runtime_shape(a) &&
+        (e.name == "size" || e.name == "num_elements" || e.name == "rows" ||
+         e.name == "cols" || e.name == "FnLength")) {
+      if (e.name == "num_elements" && a.runtime_dims.size() != 1)
+        fail("num_elements: a runtime view of this rank has no single extent",
+             e.raw);
+      const size_t axis = e.name == "cols" ? 1 : 0;
+      if (axis < a.runtime_dims.size() && a.runtime_dims[axis] >= 0) {
+        Val extent{a.runtime_dims[axis], false, view_of("UInt")};
+        extent.si.param_free = true;
+        return with_layout(extent, ExpressionLayout::scalar());
+      }
+    }
   }
   if (auto v = fold_const(e)) return *v;
   fail("unsupported function " + e.name);
@@ -955,8 +969,12 @@ std::optional<Lowering::Val> Lowering::lower_density_fn(
     std::vector<int> ins;
     SlotInfo result_si{0, 0, true};
     bool result_autodiff = false;
+    int extent = -1;
+    uint8_t dyn_lengths = 0;
+    int64_t dyn_capacity = 0;
     std::vector<stanli::DensityCallArgument> plan_arguments;
     plan_arguments.reserve(actuals.size());
+    stanli::DensityCallPlan plan;
     if (spec.shape == stanli::DensityShape::Categorical) {
       const Val& outcome = actuals.at(0).value();
       const Val& arg = actuals.at(1).value();
@@ -1000,20 +1018,38 @@ std::optional<Lowering::Val> Lowering::lower_density_fn(
                                 ? value.autodiff
                                 : !source.data_only;
           argument.shape = builtin_argument_shape(source, value);
+          if (has_runtime_shape(value)) {
+            const int slot = one_runtime_extent(value, e.name);
+            if ((extent >= 0 && extent != slot) ||
+                (dyn_capacity != 0 && dyn_capacity != g.slots[value.slot].len))
+              fail(e.name + ": operands have different runtime extents", e.raw);
+            extent = slot;
+            dyn_capacity = g.slots[value.slot].len;
+            dyn_lengths |= (uint8_t)(1u << (i - spec.integer_args));
+          }
         }
         plan_arguments.push_back(std::move(argument));
       }
-      const stanli::DensityCallPlan plan =
-          stanli::density_call_plan(spec, plan_arguments, propto(e));
-      if (plan.empty_result) return constant(0.0);
-      Val dv = emit_raw(spec.opcode, ins, 1, result_si, plan.idata, -1,
-                        result_autodiff);
-      dv.layout = ExpressionLayout::scalar();
-      g.ops.back().variant = plan.variant;
-      return dv;
+      plan = stanli::density_call_plan(spec, plan_arguments, propto(e));
     } catch (const std::exception& error) {
       fail(e.name + ": " + error.what(), e.raw);
     }
+    if (plan.empty_result) return constant(0.0);
+    if (extent >= 0) {
+      if (!plan.idata.empty() || spec.shape != stanli::DensityShape::Plain)
+        fail(e.name + ": no form over a runtime-length operand", e.raw);
+      ins.push_back(extent);
+    }
+    Val dv = emit_raw(spec.opcode, ins, 1, result_si, plan.idata, -1,
+                      result_autodiff);
+    dv.layout = ExpressionLayout::scalar();
+    if (extent >= 0) {
+      g.ops.back().dyn_capacity = dyn_capacity;
+      g.ops.back().dyn_extent_in = (int8_t)(ins.size() - 1);
+      g.ops.back().dyn_lengths = dyn_lengths;
+    }
+    g.ops.back().variant = plan.variant;
+    return dv;
   }
 
   // gaussian_dlm_obs takes seven arguments and Op::in holds six, so it
@@ -1177,8 +1213,11 @@ std::optional<Lowering::Val> Lowering::lower_eltwise_fn(
     const BuiltinLayout layout = resolved_builtin_layout(e, *builtin, values);
     SlotInfo si = values[layout.result_argument].si;
     si.param_free = a.si.param_free && b.si.param_free;
-    return with_layout(emit_value(builtin->opcode, {a, b}, layout.lanes, si),
-                       elementwise_layout({a, b}));
+    Val v = emit_value(builtin->opcode, {a, b}, layout.lanes, si);
+    if (builtin->opcode == OP_POW)
+      g.ops.back().variant =
+          mir::pow_zero_base_law(e.args[0], e.args[1], b.autodiff);
+    return with_layout(v, elementwise_layout({a, b}));
   }
 
   if (elementwise_builtin && builtin->arity == 2 &&
@@ -1491,14 +1530,6 @@ std::optional<Lowering::Val> Lowering::lower_eltwise_fn(
     }
     actuals.require_arity(1);
     Val a = actuals.at(0).value();
-    if (e.name == "sum" && has_runtime_shape(a)) {
-      const int extent_slot = one_runtime_extent(a, "sum");
-      Val extent{extent_slot, false, view_of("UInt"),
-                 ExpressionLayout::scalar()};
-      extent.si.param_free = true;
-      return with_layout(emit_value(OP_SUM_VEC_DYNAMIC, {a, extent}, 1),
-                         ExpressionLayout::scalar());
-    }
     (void)resolved_builtin_layout(e, *reduction, std::vector<Val>{a});
     return with_layout(emit_value(reduction->opcode, {a}, 1),
                        ExpressionLayout::scalar());

@@ -979,3 +979,110 @@ What is not free:
 
 So the write_array path depends on the runtime-sized-cell work, and is worth
 starting only after it. Left for that change.
+
+## Addendum: region cell capacities revisited from brms
+
+Date: 2026-09-05.
+
+The open item above ("a region cell's capacity has to be a compile-time
+constant") was reached again from the other side: two brms 2.23.0 models fail
+to compile because a runtime-control region wants a local whose extent is not
+a compile-time integer. `normal_time_hom_flex_lpdf`, emitted for `unstr()`
+autocorrelation, declares `array[nobs[i]] int iobs` and `array[I-i+1] int
+lp_terms` inside a `while (i <= I)`. `log_Z_com_poisson` writes
+`log_Z_terms[k]` and reduces `log_Z_terms[1:k]` with `k` advanced by a
+parameter-sensitive `while`.
+
+They look like one problem and are two.
+
+The `unstr()` loop is entirely data-determined. `I` is `size(nobs)`, the
+skip-ahead is driven by `has_lp`, which is filled from `Jtime` comparisons,
+and nothing in the control flow reads a parameter. The region exists only
+because `while` had no compile-time form: `for` unrolls against `int_env` and
+`while` did not, so the loop became an island and its counter became a
+register, and from there every extent that mentions the counter is unknown.
+Giving `while` the same compile-time unroll `for` already has removes the
+region and with it the whole question of the capacity.
+
+That unroll is gated rather than unconditional. A `while` keeps its loop form
+unless its body declares a local whose extent the body itself computes, which
+is the only shape with no loop form at all; a data-controlled `while` over a
+million trips still lowers as one loop, which is what `whileloop.stan`
+asserts. A `while` nested inside one being unrolled unrolls with it, or the
+outer counter returns to a register and takes the unroll with it. The unroll
+stops after 65536 trips, so a decidable guard that never becomes false fails
+with the extent error it would have failed with before rather than running
+the compiler forever.
+
+Capacity bounds for the register program were not attempted: the
+program addresses registers statically, so `log_Z_terms[k] = ...` has no form
+there at any capacity, and a masked reduction over the bound would cost the
+bound per evaluation.
+
+Completing the structured-loop route for the `unstr()` loop was measured and
+rejected. Closing the two range-proof gaps it needs (an `int_env`-sourced
+cell carries a real range but no integer range, and the counter proof refuses
+a counter written by a nested `while`) leaves `matrix[nobs[i], nobs[i]] L_i`,
+which is a two-dimensional runtime-sized declaration, then `Cov[iobs, iobs]`,
+`cholesky_decompose` of a runtime-shaped matrix and a
+`multi_normal_cholesky_lpdf` over runtime-shaped stacked vectors. That is a
+much larger change than the unroll, for a model the unroll already lowers as
+ordinary graph ops.
+
+`log_Z_com_poisson` is the real instance of the open item and stays refused.
+Its `while` cannot be unrolled: the condition compares `log_Z_terms[k]` to
+`log_Z_terms[k-1]`, both parameter-dependent. Under
+`STANLI_STRUCTURED_LOOPS=1` the model does compile, so the executor's runtime
+indexing covers the shape, but its answer is wrong, which is why the selector
+was not extended to reach it. A reduction over a runtime-length slice ignores
+the length and reads the whole capacity:
+
+```stan
+functions {
+  real series(real theta) {
+    int M = 8;
+    int k = 2;
+    vector[M] t;
+    if (theta == 1) return -1;
+    t[1] = -theta;
+    t[2] = -2 * theta;
+    while (t[k] >= t[k - 1] - 1 && k < M) { k += 1; t[k] = -k * theta; }
+    return log_sum_exp(t[1:k]);
+  }
+}
+```
+
+With `theta = exp(0.1)` the loop exits at `k = 2` and CmdStan returns
+`log_sum_exp([-1.105, -2.210]) = -0.819`. Under `STANLI_STRUCTURED_LOOPS=1`
+the same call returns `1.863`, which is `log_sum_exp` over the eight-element
+capacity with the unwritten tail read as zero. `num_elements(t[1:k])` returns
+8 rather than 2 and `max(t[1:k])` returns 0; `sum` and `min` happen to
+survive because zero is their identity here. The slice publishes its live
+length in `runtime_dims` (`lower_structured_loop.inc:787`) and the reductions
+do not consult it. Fixing that is the prerequisite for offering the selector
+to this shape.
+
+## Addendum: what is in the tail of a runtime-length value
+
+A runtime-length value keeps its declared capacity as storage, so every one of
+them has a tail past the live extent, and the four writers of that storage do
+not agree on what is in it:
+
+- An elementwise kernel with a dynamic-length output writes only the live
+  prefix and leaves the tail holding whatever the slot held before.
+- `OP_INDEX_DYNAMIC` zero-fills the part of its output the selection does not
+  reach, so a gather's tail is zeros.
+- A runtime-sized declaration fills its capacity with NaN (an integer array
+  with `INT_MIN`), so an unwritten element is loud rather than plausible.
+- Nothing rewrites a tail when the extent shrinks between iterations.
+
+So the tail is not a defined value, and no consumer may read it. What keeps
+consumers off it is entirely a compile-time property: a kernel that spans a
+runtime-length operand must take the extent as an operand of its own, and
+`emit_value` refuses to lower any other shape over one. That is why the
+refusals matter as much as the forms that work. `append_row` and `head` have
+no extent operand and decline; `num_elements` of a rank-two runtime view
+declines because a single extent cannot express the leaf width; a full-extent
+operand beside a runtime-length one declines because narrowing it to the live
+extent would answer a question Stan itself rejects. Adding a form here means
+adding the extent operand with it, never widening what may read the tail.

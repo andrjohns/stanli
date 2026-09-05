@@ -499,8 +499,9 @@ void Executor::bind_() {
   fwd_fn_.resize(graph_.ops.size());
   bwd_.clear();
   bwd_.reserve(graph_.ops.size());
-  for (size_t i = 0; i < graph_.ops.size(); ++i)
+  for (size_t i = 0; i < graph_.ops.size(); ++i) {
     fwd_fn_[i] = resolve_forward_fn(graph_.ops[i]);
+  }
   for (size_t i = graph_.ops.size(); i-- > 0;) {
     void (*b)(KernelCtx&) = kernel(graph_.ops[i].opcode).backward;
     if (b) bwd_.push_back(BwdStep{b, &ctx_[i], out2_adj_ptr_[i]});
