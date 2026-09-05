@@ -6394,23 +6394,42 @@ int main() {
     stan::math::recover_memory();
   }
 
-  // multi_student_t shares the shape derivation but not the kernel, whose
-  // location is one vector.
+  // multi_student_t shares the shape derivation and, through the encoded
+  // per-argument layout, the array-location kernel path: stan-math's
+  // vectorized overload takes the array of locations directly.
   {
     DataMap d;
     d.set_int("N", 3);
     d.set_int("K", 2);
     d.set_real_array("y", {1, 3, 5, 2, 4, 6}, {3, 2});
     d.set_real_array("S", {2.0, 0.5, 0.5, 1.0}, {2, 2});
-    std::string msg;
-    try {
-      compile_model(slurp("tests/fixtures/mstarrmu.tmir.sexp"), d);
-    } catch (const CompileError& e) {
-      msg = e.what();
-    }
-    check(msg.find("multi_student_t_lpdf") != std::string::npos &&
-              msg.find("array-valued location") != std::string::npos,
-          "multi_student_t refuses an array-valued location");
+    CompiledModel am =
+        compile_model(slurp("tests/fixtures/mstarrmu.tmir.sexp"), d);
+    check(am.n_unconstrained == 6, "mstarrmu 6 unconstrained");
+    Executor aex(std::move(am.graph));
+    am.bind(aex);
+    const double q[6] = {0.4, -0.7, -0.3, 0.9, 0.15, -0.55};
+    for (int k = 0; k < 6; ++k) aex.params_data()[k] = q[k];
+    double grad[6];
+    const double lp = aex.gradient(grad);
+
+    using stan::math::var;
+    std::vector<Eigen::Matrix<var, -1, 1>> mus(3, Eigen::Matrix<var, -1, 1>(2));
+    for (int n = 0; n < 3; ++n)
+      for (int i = 0; i < 2; ++i) mus[(size_t)n](i) = q[n * 2 + i];
+    std::vector<Eigen::VectorXd> ys(3, Eigen::VectorXd(2));
+    ys[0] << 1, 2;
+    ys[1] << 3, 4;
+    ys[2] << 5, 6;
+    Eigen::MatrixXd Sd(2, 2);
+    Sd << 2.0, 0.5, 0.5, 1.0;
+    var acc = stan::math::multi_student_t_lpdf<false>(ys, 3.0, mus, Sd);
+    acc.grad();
+    expect_ulp("mstarrmu lp", lp, acc.val());
+    for (int k = 0; k < 6; ++k)
+      expect_ulp("mstarrmu g" + std::to_string(k), grad[k],
+                 mus[(size_t)(k / 2)](k % 2).adj());
+    stan::math::recover_memory();
   }
 
   // `p ~ dirichlet(a)` over an array of simplexes. See

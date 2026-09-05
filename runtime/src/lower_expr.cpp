@@ -1413,13 +1413,20 @@ Lowering::StaticProbe<Lowering::StaticView> Lowering::try_static_view(
         base.value.si.kind = ViewKind::Vector;
       return base;
     }
-    const auto regular = resolve_regular_builtin(e.name, e.args.size());
-    if (regular && regular->kind == RegularKind::Unary)
+    // Elementwise and WholeValue calls preserve their argument's geometry,
+    // so a unary one answers with its argument's view and a binary one with
+    // the broadcast of its arguments' views.
+    const BuiltinSpec* elementwise = shaped_builtin_spec(
+        e.name, e.args.size(), BuiltinShapePolicy::Elementwise);
+    if (elementwise == nullptr && e.args.size() == 1)
+      elementwise =
+          shaped_builtin_spec(e.name, 1, BuiltinShapePolicy::WholeValue);
+    if (elementwise != nullptr && e.args.size() == 1)
       return try_static_view(e.args[0]);
     const bool scalar_factor =
         e.args.size() == 2 &&
         (is_scalar_type(e.args[0].type_) || is_scalar_type(e.args[1].type_));
-    if (regular || (e.name == "fma" && e.args.size() == 3) ||
+    if (elementwise != nullptr || (e.name == "fma" && e.args.size() == 3) ||
         ((e.name == "Times__" || e.name == "multiply") && scalar_factor))
       return try_static_broadcast_view(e);
   }

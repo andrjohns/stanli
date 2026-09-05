@@ -140,6 +140,9 @@
     "gamma_q",
     "gamma_rng",
     "gp_exp_quad_cov",
+    "gp_exponential_cov",
+    "gp_matern32_cov",
+    "gp_matern52_cov",
     "gumbel_cdf",
     "gumbel_lccdf",
     "gumbel_lcdf",
@@ -467,6 +470,9 @@
         "eigenvalues_sym",
         "eigenvectors_sym",
         "gp_exp_quad_cov",
+        "gp_exponential_cov",
+        "gp_matern32_cov",
+        "gp_matern52_cov",
         "logical_negation",
         "head",
         "inverse",
@@ -1171,13 +1177,13 @@
       ]
     }
   },
-  "name_count": 425,
+  "name_count": 428,
   "recognized_but_unsupported": {
     "gaussian_dlm_obs_lpdf": "Explicitly refused: seven inputs exceed the graph's six-input operation layout."
   },
   "schema": 1,
   "scope": {
-    "gp_exp_quad_cov": "Coordinates are data; scale and length-scale are active.",
+    "gp covariance": "Coordinates are data; scale and length-scale are active.",
     "map_rect": "The integrated probe covers empty jobs; tests/fixtures/map_rect_region.stan covers nonempty serial graph and runtime-control lowering.",
     "overloads": "At least one supported signature per name, not every overload.",
     "predicates": "logical_negation also exercises a parameter-dependent region."
