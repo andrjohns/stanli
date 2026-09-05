@@ -3284,6 +3284,22 @@ static void runtime_index_tests() {
   }
   check(leaf_width.find("num_elements") != std::string::npos,
         "num_elements declines a rank-2 runtime view");
+
+  // CmdStan and the unrolled path both reject these as a size mismatch, so
+  // narrowing the full-width operand to the live extent would be an answer
+  // nothing else agrees with.
+  for (int op = 4; op <= 6; ++op) {
+    std::string mixed;
+    try {
+      (void)compile_fixture("dynindex", runtime_slice_data(op), Mode::Force);
+    } catch (const CompileError& e) {
+      mixed = e.what();
+    }
+    if (mixed.find("full-extent operand") == std::string::npos) {
+      std::printf("  op %d: %s\n", op, mixed.c_str());
+      check(false, "a full-width operand beside a runtime-length one refuses");
+    }
+  }
 }
 
 static std::atomic<int> memo_int_calls{0};

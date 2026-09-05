@@ -1308,6 +1308,10 @@ Lowering::Val Lowering::emit_value(uint16_t opcode,
   }
   if (extent < 0)
     return finish_emit(op, out_len, out_si, std::move(idata), autodiff);
+  for (const Val& in : ins)
+    if (!has_runtime_shape(in) && g.slots[in.slot].len != 1)
+      fail(std::string(opcode_name(opcode)) +
+           ": a full-extent operand beside a runtime-length one");
   const bool elementwise = out_len == op.dyn_capacity;
   if ((out_len != 1 && !elementwise) || out2 >= 0 || !idata.empty() ||
       is_matrix(out_si))
