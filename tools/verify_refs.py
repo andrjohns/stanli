@@ -80,15 +80,9 @@ POINTS = (0, 1, 2)
 #
 # Nothing may be added here on an argument. Every entry names the live
 # CmdStan run that settled it: tools/ref_driver.cpp compiled for that
-# model and run at that point.
-QUARANTINED = {
-    ("s2_ar_cov", 1): "pow(x, n) reports a zero derivative at x == 0, so "
-                      "the ar gradient is 0 where CmdStan gives "
-                      "-4.1658099670210404",
-    ("s2_ar_cov", 2): "pow(x, n) reports a zero derivative at x == 0, so "
-                      "the ar gradient is 0 where CmdStan gives "
-                      "-4.1935902986959563",
-}
+# model and run at that point. Empty since the pow-at-zero derivative that
+# held s2_ar_cov's two points was fixed.
+QUARANTINED = {}
 
 # Models stanli does not run at all, mapped to what stops them. The
 # references are recorded from CmdStan the same way every other model's
@@ -97,11 +91,9 @@ QUARANTINED = {
 # and the run stays red until the entry is deleted. A crash is never
 # excused: a segfault and a refusal are different bugs.
 KNOWN_GAPS = {
-    "s2_com_poisson": "poisson_log_lpmf is not one of the densities a "
-                      "runtime-control region can hold, and the region "
-                      "behind it needs a runtime-length local",
-    "s2_logistic_normal": "choose in an int size expression",
-    "s2_unstr": "a runtime-length local inside a runtime-control region",
+    "s2_com_poisson": "parameter-dependent while with a runtime-length "
+                      "local; needs the structured executor to take a "
+                      "statement region the island refuses",
 }
 
 # (model, point) pairs excused from probe_point's finite-gradient rule,
