@@ -1,5 +1,5 @@
 functions {
-  real acc_lpdf(vector y, array[] int nobs, int op) {
+  real acc_lpdf(vector y, matrix a, array[] int nobs, int op) {
     real lp = 0;
     for (i in 1 : size(nobs)) {
       int k = nobs[i];
@@ -38,6 +38,9 @@ functions {
       if (op == 9) {
         lp += log_sum_exp(exp(t[1 : k]));
       }
+      if (op == 10) {
+        lp += matrix_exp(a[1 : k, 1 : k])[1, 1];
+      }
     }
     return lp;
   }
@@ -49,11 +52,13 @@ data {
 }
 parameters {
   vector[N] y;
+  matrix[3, 3] a;
 }
 transformed parameters {
-  real s = acc_lpdf(y | nobs, op);
+  real s = acc_lpdf(y | a, nobs, op);
 }
 model {
   target += s;
   y ~ std_normal();
+  to_vector(a) ~ std_normal();
 }

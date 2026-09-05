@@ -1204,10 +1204,13 @@ Lowering::Val Lowering::emit_value(uint16_t opcode,
   out_si.param_free = true;
   bool autodiff = false;
   int extent = -1;
-  const bool indexed =
-      opcode == OP_INDEX_DYNAMIC || opcode == OP_SET_INDEX_DYNAMIC;
+  // Opcodes that already take every logical extent they need as an operand
+  // of their own.
+  const bool own_extents = opcode == OP_INDEX_DYNAMIC ||
+                           opcode == OP_SET_INDEX_DYNAMIC ||
+                           opcode == OP_MATRIX_EXP_DYNAMIC;
   for (const Val& in : ins) {
-    if (has_runtime_shape(in) && !indexed) {
+    if (has_runtime_shape(in) && !own_extents) {
       const int slot = one_runtime_extent(in, opcode_name(opcode));
       if (extent >= 0 && extent != slot)
         fail(std::string(opcode_name(opcode)) +

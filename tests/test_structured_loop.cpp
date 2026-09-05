@@ -3176,14 +3176,16 @@ static void runtime_slice_tests() {
                                       "elementwise product",
                                       "dot product",
                                       "moments",
-                                      "reduction of an elementwise result"};
-  const std::vector<double> point{-0.9, -0.5, -0.1, 0.3, 0.7};
+                                      "reduction of an elementwise result",
+                                      "matrix_exp of a runtime submatrix"};
+  std::vector<double> point(14);
+  for (size_t i = 0; i < point.size(); ++i) point[i] = 0.2 * double(i) - 0.9;
   for (int segments = 0; segments < 2; ++segments) {
     if (segments)
       test_unsetenv("STANLI_NO_STRUCTURED_SEGMENTS");
     else
       test_setenv("STANLI_NO_STRUCTURED_SEGMENTS", "1");
-    for (int op = 1; op <= 9; ++op) {
+    for (int op = 1; op <= 10; ++op) {
       const auto loop =
           compile_fixture("dynslice", runtime_slice_data(op), Mode::Auto);
       const auto flat =
@@ -3193,7 +3195,7 @@ static void runtime_slice_tests() {
       Executor a(loop.graph), b(flat.graph);
       loop.bind(a);
       flat.bind(b);
-      std::vector<double> ga(5), gb(5);
+      std::vector<double> ga(14), gb(14);
       std::copy(point.begin(), point.end(), a.params_data());
       std::copy(point.begin(), point.end(), b.params_data());
       const double va = a.gradient(ga.data()), vb = b.gradient(gb.data());
