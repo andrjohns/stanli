@@ -87,7 +87,9 @@ python3 harnesses/vectorize_ab.py deps/posteriordb \
   --dump build-rel/dump_ops --output-dir build-rel/vectorize-ab
 ```
 
-CI runs the complete run shown by the "MIR vectorization A/B" workflow step.
+The "MIR vectorization A/B" workflow step runs the complete run on every
+push to main and on the schedule; a pull request runs a 35-model slice
+listed in the workflow, about 90 s, so the full run is a post-submit gate.
 The hard gates cover command/status consistency, result and write-array
 categories, error parity, per-element finite/NaN/infinity classes, shapes and
 names, and both pass modes against the existing CmdStan references. Finite
