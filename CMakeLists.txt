@@ -1023,7 +1023,8 @@ if(Python3_Interpreter_FOUND)
   # construction, and regenerate on ordinary builds, so they must be
   # neither glob candidates nor configure dependencies.
   list(FILTER STANLI_LIT_CANDIDATES EXCLUDE
-       REGEX "tests/fixtures/(builtin|density)_signatures_[0-9]+\\.stan$")
+       REGEX
+       "tests/fixtures/(builtin|density)_signatures_[0-9]+\\.stan$")
   # The PASS/XFAIL marker controls the broken label below, so changing a
   # source's status must re-run configuration even though the file set did
   # not change.
@@ -1068,6 +1069,25 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:stanli_check>
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     set_tests_properties(${STANLI_LIT_TEST} PROPERTIES LABELS "lit")
+  endforeach()
+  # The same generated models replay against recorded CmdStan references:
+  # log density, gradient, output names and values at the three corpus
+  # points. The committed artifact makes this run without a CmdStan
+  # checkout; tools/check_signature_models.py --record refreshes it when
+  # coverage moves.
+  foreach(STANLI_SIGNATURE_MODEL IN LISTS STANLI_BUILTIN_SIGNATURE_MODELS
+          STANLI_DENSITY_SIGNATURE_MODELS)
+    get_filename_component(STANLI_SIGNATURE_STEM
+                           "${STANLI_SIGNATURE_MODEL}" NAME_WE)
+    set(STANLI_SIGNATURE_TEST "signature_refs_${STANLI_SIGNATURE_STEM}")
+    add_test(NAME ${STANLI_SIGNATURE_TEST}
+             COMMAND ${Python3_EXECUTABLE} tools/check_signature_models.py
+                     --build ${CMAKE_CURRENT_BINARY_DIR}
+                     --stanc ${STANLI_STANC_EXECUTABLE}
+                     --model ${STANLI_SIGNATURE_STEM}
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    set_tests_properties(${STANLI_SIGNATURE_TEST} PROPERTIES
+      LABELS "signature_refs")
   endforeach()
   # Friendly local entry points. These deliberately invoke CTest rather than
   # duplicating discovery in a shell script, so a developer runs exactly the

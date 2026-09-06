@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate exhaustive, balanced probability-function execution fixtures.
+"""Generate exhaustive probability-function execution fixtures.
 
 The unified runtime registry is joined to stanc's authoritative signature
 inventory. Every compatible registered density, mass, CDF, LCDF, and LCCDF
-overload is emitted once, partitioned by rendered size, and called from
+overload is emitted once, in models of a fixed number of calls, called from
 transformed data, the ordinary model graph, runtime control, and generated
 quantities.
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import sys
 
 
@@ -27,9 +28,10 @@ from conformance.signatures import (  # noqa: E402
 )
 from function_signature_common import (  # noqa: E402
     all_context_model,
-    balanced_partitions,
+    by_reason,
     generated_model_record,
     numeric_leaf_kind,
+    partitions,
     portable_build_id,
     registry_by_name,
     resolve_registry_spec,
@@ -43,7 +45,7 @@ DEFAULT_REGISTRY = ROOT / "build/dump_function_specs"
 DEFAULT_OUTPUT_DIR = ROOT / "tests/fixtures"
 DEFAULT_MANIFEST = ROOT / "tests/function_coverage/density_signatures_manifest.json"
 FILE_GLOB = "density_signatures_*.stan"
-TARGET_SIGNATURES_PER_MODEL = 240
+CASES_PER_MODEL = 1440
 PROBABILITY_SUFFIXES = ("_lpdf", "_lpmf", "_lccdf", "_lcdf", "_cdf")
 
 
@@ -89,6 +91,26 @@ def density_signatures(stanc: pathlib.Path, registry: pathlib.Path) \
 def role(name: str, index: int) -> str:
     """Return a support-safe semantic role for a density argument."""
     base = probability_base(name)
+    # Two suffix-specific repairs keep every compared aggregate finite and
+    # informative; one nonfinite term would absorb every other signature's
+    # contribution to the partition's log density or gradient.
+    # bernoulli_lccdf(1 | p) is log P(Y > 1) = log 0 = -inf identically, so
+    # its outcome must sit below the top of the support. The student_t CDF
+    # family's degrees-of-freedom derivative is 0/0 at y == mu (CmdStan
+    # reports the same nan), and the generic roles render y and mu from the
+    # same expression, so y gets an offset value instead.
+    overrides = {
+        "bernoulli_lccdf": ("count_zero", "prob"),
+        "student_t_cdf": ("tail_y", "df", "any", "positive"),
+        "student_t_lcdf": ("tail_y", "df", "any", "positive"),
+        "student_t_lccdf": ("tail_y", "df", "any", "positive"),
+    }
+    if name in overrides:
+        try:
+            return overrides[name][index]
+        except IndexError as exc:
+            raise ValueError(
+                f"no argument roles for {name} argument {index}") from exc
     roles = {
         "bernoulli": ("count", "prob"),
         "bernoulli_logit": ("count", "any"),
@@ -170,7 +192,8 @@ def role(name: str, index: int) -> str:
 
 def expression(type_name: str, semantic_role: str) -> str:
     integer = {
-        "count": "i_count", "category": "i_category", "trials": "i_trials",
+        "count": "i_count", "count_zero": "i_count_zero",
+        "category": "i_category", "trials": "i_trials",
         "positive": "i_positive",
         "range_value": "i_range_value", "range_lower": "i_range_lower",
         "range_upper": "i_range_upper", "hyper_n": "i_hyper_n",
@@ -189,6 +212,7 @@ def expression(type_name: str, semantic_role: str) -> str:
         "pareto_min": "r_pareto_min", "pareto2_y": "r_pareto2_y",
         "pareto2_min": "r_pareto2_min", "wiener_y": "r_wiener_y",
         "wiener_alpha": "r_wiener_alpha", "wiener_tau": "r_wiener_tau",
+        "tail_y": "r_tail_y",
     }
     matrix_role = {
         "design": "m_design", "any": "m_design", "positive": "m_positive",
@@ -212,11 +236,13 @@ def expression(type_name: str, semantic_role: str) -> str:
         "pareto_min": "pareto_min", "pareto2_y": "pareto2_y",
         "pareto2_min": "pareto2_min", "wiener_y": "wiener_y",
         "wiener_alpha": "wiener_alpha", "wiener_tau": "wiener_tau",
+        "tail_y": "tail_y",
     }
     return prefix + container_role[semantic_role]
 
 
 BODY_DECLARATIONS = """    int i_count = 1;
+    int i_count_zero = 0;
     int i_category = 1;
     int i_trials = 2;
     int i_positive = 2;
@@ -228,6 +254,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     int i_hyper_a = 2;
     int i_hyper_b = 2;
     array[2] int a_i_count = {1, 1};
+    array[2] int a_i_count_zero = {0, 0};
     array[2] int a_i_category = {1, 2};
     array[2] int a_i_trials = {2, 2};
     array[2] int a_i_positive = {2, 2};
@@ -255,6 +282,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     real r_wiener_y = 1.5 + 0.01 * seed;
     real r_wiener_alpha = 1.2 + 0.01 * seed;
     real r_wiener_tau = 0.2 + 0.001 * seed;
+    real r_tail_y = 0.7 + 0.01 * seed;
 
     vector[2] v_any = [r_any, r_any + 0.1]';
     vector[2] v_positive = [r_positive, r_positive + 0.1]';
@@ -272,6 +300,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     vector[2] v_wiener_y = [r_wiener_y, r_wiener_y + 0.05]';
     vector[2] v_wiener_alpha = [r_wiener_alpha, r_wiener_alpha + 0.05]';
     vector[2] v_wiener_tau = [r_wiener_tau, r_wiener_tau + 0.01]';
+    vector[2] v_tail_y = [r_tail_y, r_tail_y + 0.1]';
     vector[1] v_any_one = [r_any]';
     vector[1] v_positive_one = [r_positive]';
     row_vector[2] rv_any = [r_any, r_any + 0.1];
@@ -290,6 +319,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     row_vector[2] rv_wiener_y = [r_wiener_y, r_wiener_y + 0.05];
     row_vector[2] rv_wiener_alpha = [r_wiener_alpha, r_wiener_alpha + 0.05];
     row_vector[2] rv_wiener_tau = [r_wiener_tau, r_wiener_tau + 0.01];
+    row_vector[2] rv_tail_y = [r_tail_y, r_tail_y + 0.1];
 
     array[2] real a_r_any = {r_any, r_any + 0.1};
     array[2] real a_r_positive = {r_positive, r_positive + 0.1};
@@ -305,6 +335,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     array[2] real a_r_wiener_y = {r_wiener_y, r_wiener_y + 0.05};
     array[2] real a_r_wiener_alpha = {r_wiener_alpha, r_wiener_alpha + 0.05};
     array[2] real a_r_wiener_tau = {r_wiener_tau, r_wiener_tau + 0.01};
+    array[2] real a_r_tail_y = {r_tail_y, r_tail_y + 0.1};
 
     array[2] vector[2] a_v_any = {v_any, v_any};
     array[2] vector[2] a_v_positive = {v_positive, v_positive};
@@ -325,7 +356,32 @@ BODY_DECLARATIONS = """    int i_count = 1;
 """
 
 
-def render_case(signature: Signature) -> str:
+# Role variables, longest prefix first so `a_r_any` never half-matches `r_`.
+ROLE_VARIABLE = re.compile(
+    r"\b(a_rv_|a_i_|a_r_|a_v_|rv_|i_|r_|v_|m_|corr\b)")
+
+
+def data_twin_declarations() -> str:
+    """BODY_DECLARATIONS with every role variable renamed d_* and seed
+    replaced by a literal zero. A literal-only local constant-folds to a
+    data argument in both runtimes, which is what lets one call activate a
+    single argument while every other one takes the data instantiation."""
+    body = BODY_DECLARATIONS.replace("    real lp = 0;\n", "")
+    body = re.sub(r"\bseed\b", "0.0", body)
+    return ROLE_VARIABLE.sub(lambda m: "d_" + m.group(1), body)
+
+
+def as_data(argument: str) -> str:
+    return ROLE_VARIABLE.sub(lambda m: "d_" + m.group(1), argument)
+
+
+def real_argument_positions(signature: Signature) -> list[int]:
+    """Indices whose surface type carries real values (gradient-capable)."""
+    return [index for index, value in enumerate(signature.arguments)
+            if "int" not in surface_type(value)]
+
+
+def render_case(signature: Signature, active_index: int | None = None) -> str:
         name = signature.name
         argument_types = [surface_type(value) for value in signature.arguments]
         arguments = [
@@ -364,22 +420,35 @@ def render_case(signature: Signature) -> str:
                 argument_types[2] == "array[] vector"):
             arguments[0] = "{i_category}"
             arguments[2] = "{v_cutpoints}"
+        # Per-argument activity: every other argument takes its constant
+        # data twin, so the call reaches the same single-active
+        # instantiation CmdStan's generated code selects.
+        identity = signature.canonical_id
+        if active_index is not None:
+            arguments = [argument if index == active_index
+                         else as_data(argument)
+                         for index, argument in enumerate(arguments)]
+            identity += f"@{active_index}"
         # Stan requires probability-function syntax for densities, mass
         # functions, and every CDF spelling alike.
         call = f"{name}({arguments[0]} | {', '.join(arguments[1:])})"
-        return f"    lp += {call};  // {signature.canonical_id}\n"
+        return f"    lp += {call};  // {identity}\n"
 
 
 def render_model(index: int, count: int,
-                 cases: list[tuple[Signature, str]]) -> str:
+                 cases: list[tuple[str, str]]) -> str:
     function = f"density_signatures_{index:02d}"
     calls = "".join(source for _, source in cases)
-    body = BODY_DECLARATIONS + calls + "    return lp;"
+    body = (data_twin_declarations() + BODY_DECLARATIONS + calls
+            + "    return lp;")
     return all_context_model(
         function, body,
         "Generated by tools/generate_density_signature_model.py from the "
         "unified FunctionSpec registry",
-        f"Partition {index} of {count}; {len(cases)} overloads.")
+        f"Partition {index} of {count}; {len(cases)} overload instantiations.",
+        # A beta_neg_binomial partition needs over two minutes of
+        # hypergeometric series under a loaded ctest.
+        timeout=600)
 
 
 def main() -> int:
@@ -412,20 +481,27 @@ def main() -> int:
                       if args.filter in signature.name]
     signatures = signatures[args.start:None if args.count is None
                              else args.start + args.count]
-    rendered = [(signature, render_case(signature))
-                for signature in signatures]
-    groups = balanced_partitions(rendered, TARGET_SIGNATURES_PER_MODEL)
-    for group in groups:
-        group.sort(key=lambda value: value[0].canonical_id)
+    # Every overload once with all its real arguments parameter-dependent,
+    # then, when it has at least two such arguments, once per argument
+    # with only that one parameter-dependent: the mixed data/parameter
+    # instantiations the all-active call never reaches. An overload with
+    # fewer than two would only repeat its all-active instantiation.
+    rendered = [
+        (signature.canonical_id + ("" if position is None else f"@{position}"),
+         render_case(signature, position))
+        for signature in signatures
+        for positions in [real_argument_positions(signature)]
+        for position in [None] + (positions if len(positions) >= 2 else [])
+    ]
+    groups = partitions(rendered, CASES_PER_MODEL)
     expected = {
         args.output_dir / f"density_signatures_{index:02d}.stan":
             render_model(index, len(groups), group)
         for index, group in enumerate(groups, 1)
     }
-    models = []
-    for index, (path, source) in enumerate(expected.items()):
-        ids = [signature.canonical_id for signature, _ in groups[index]]
-        models.append(generated_model_record(path, source, ids, ROOT))
+    models = [generated_model_record(path, source,
+                                     [identity for identity, _ in group], ROOT)
+              for (path, source), group in zip(expected.items(), groups)]
     registered_names = registry_by_name(args.registry, "density")
     dumped_names = {signature.name for signature in inventory.signatures}
     tested_names = {signature.name for signature in signatures}
@@ -455,16 +531,17 @@ def main() -> int:
             partially_excluded_names),
         "unaccounted_registry_names": sorted(unaccounted_names),
         "tested_signature_count": len(signatures),
+        "tested_case_count": len(rendered),
         "excluded_signature_count": len(excluded),
         "missing_from_stanc": sorted(set(registered_names) - dumped_names),
-        "excluded": excluded,
+        "excluded": by_reason(excluded),
         "models": models,
     }
     okay = write_generated_outputs(expected, args.output_dir, FILE_GLOB,
-                                    args.manifest, manifest, args.check, ROOT)
+                                   args.manifest, manifest, args.check, ROOT)
     if not args.check:
-        print(f"generated {len(groups)} models covering {len(signatures)} "
-              "density signatures")
+        print(f"generated {len(groups)} models covering {len(rendered)} "
+              "density cases")
     return 0 if okay else 1
 
 

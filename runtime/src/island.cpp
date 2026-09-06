@@ -437,13 +437,15 @@ struct Compiler {
         return ok;
       }
       case OP_FMAX: {
+        // The variant is the operands' activity, set at lowering; ties and
+        // NaN adjoints depend on the instantiation (adjoint.cpp).
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(Program::FMAX, write_reg(op.out), a, b);
+        emit(Program::FMAX, write_reg(op.out), a, b, 0, op.variant);
         return ok;
       }
       case OP_FMIN: {
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(Program::FMIN, write_reg(op.out), a, b);
+        emit(Program::FMIN, write_reg(op.out), a, b, 0, op.variant);
         return ok;
       }
       case OP_LOG_MIX: {

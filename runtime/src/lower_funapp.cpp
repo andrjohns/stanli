@@ -1214,9 +1214,17 @@ std::optional<Lowering::Val> Lowering::lower_eltwise_fn(
     SlotInfo si = values[layout.result_argument].si;
     si.param_free = a.si.param_free && b.si.param_free;
     Val v = emit_value(builtin->opcode, {a, b}, layout.lanes, si);
-    if (builtin->opcode == OP_POW)
+    if (builtin->opcode == OP_POW) {
       g.ops.back().variant =
           mir::pow_zero_base_law(e.args[0], e.args[1], b.autodiff);
+    } else if (builtin->opcode == OP_FMAX || builtin->opcode == OP_FMIN) {
+      // Operand activity selects the stan-math overload: ties and NaN
+      // adjoints differ between the var,var and mixed instantiations, and
+      // the register-machine backward needs the same bits the kernel path
+      // reads from its adjoint slots.
+      g.ops.back().variant =
+          (uint8_t)((a.autodiff ? 0x1u : 0u) | (b.autodiff ? 0x2u : 0u));
+    }
     return with_layout(v, elementwise_layout({a, b}));
   }
 

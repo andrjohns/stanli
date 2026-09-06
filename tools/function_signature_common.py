@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
-import math
 import pathlib
 import re
 import subprocess
@@ -112,20 +112,20 @@ def resolve_registry_spec(
 T = TypeVar("T")
 
 
-def balanced_partitions(items: Sequence[tuple[T, str]], target_count: int) \
+def partitions(items: Sequence[tuple[T, str]], size: int) \
         -> list[list[tuple[T, str]]]:
-    if not items:
-        return []
-    group_count = math.ceil(len(items) / target_count)
-    groups: list[list[tuple[T, str]]] = [[] for _ in range(group_count)]
-    sizes = [0] * group_count
-    for item in sorted(items, key=lambda value: -len(value[1])):
-        candidates = [index for index, group in enumerate(groups)
-                      if len(group) < target_count]
-        selected = min(candidates, key=lambda index: (sizes[index], index))
-        groups[selected].append(item)
-        sizes[selected] += len(item[1])
-    return groups
+    """Sort the cases by id and split them into models of `size` cases.
+
+    Ids sort by function name, so one function lands in as few models as
+    possible and the ledger's per-model scoping stays tight.
+    """
+    items = sorted(items, key=lambda value: value[0])
+    return [items[start:start + size] for start in range(0, len(items), size)]
+
+
+# The data every generated model reads; the replay gate writes it to a
+# file for stanli_check and the CmdStan reference driver.
+CONTEXT_DATA = {"context_seed": 0.0}
 
 
 def all_context_model(function_name: str, body: str, provenance: str,
@@ -133,7 +133,7 @@ def all_context_model(function_name: str, body: str, provenance: str,
     partition_line = f"// {partition}\n" if partition else ""
     return f"""// STANLI-LIT: PASS
 // STANLI-LIT-EXPECT: OK
-// STANLI-LIT-DATA: {{\"context_seed\": 0.0}}
+// STANLI-LIT-DATA: {json.dumps(CONTEXT_DATA)}
 // STANLI-LIT-TIMEOUT: {timeout}
 // {provenance}
 // and `stanc --dump-stan-math-signatures`. Do not edit by hand.
@@ -184,6 +184,14 @@ def write_or_check(path: pathlib.Path, content: str, check: bool,
     return True
 
 
+def by_reason(excluded: Sequence[dict[str, str]]) -> dict[str, list[str]]:
+    """Exclusions keyed by reason, so a manifest diff reads by cause."""
+    grouped: dict[str, list[str]] = {}
+    for item in excluded:
+        grouped.setdefault(item["reason"], []).append(item["signature"])
+    return {reason: sorted(ids) for reason, ids in sorted(grouped.items())}
+
+
 def display_path(path: pathlib.Path, root: pathlib.Path) -> str:
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
@@ -199,15 +207,17 @@ def portable_build_id(build_id: str) -> str:
 
 
 def generated_model_record(path: pathlib.Path, source: str,
-                           signatures: Sequence[str], root: pathlib.Path) \
+                           ids: Sequence[str], root: pathlib.Path) \
         -> dict[str, object]:
-    import hashlib
+    # The cases themselves live in the fixture and the source hash already
+    # detects any change to them; the replay gate needs only the function
+    # names, to scope ledger entries to the models that contain them.
     return {
         "file": display_path(path, root),
-        "signature_count": len(signatures),
         "source_bytes": len(source.encode("utf-8")),
         "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-        "signatures": list(signatures),
+        "case_count": len(ids),
+        "functions": sorted({value.split("(", 1)[0] for value in ids}),
     }
 
 

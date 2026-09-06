@@ -532,26 +532,40 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
         break;
       }
       // fmax/fmin build no node at all: they return whichever operand won,
-      // so the whole adjoint routes to it. Ties go to b. NaN needs saying
-      // separately -- `a > b` is false when either is NaN, so the plain
-      // comparison would hand fmax(x, NaN) to the NaN, where stan-math
-      // returns x. A local declared and never assigned is NaN
-      // (mir_prog.hpp), so this is reachable and not hypothetical.
+      // so the whole adjoint routes to it. Which operand wins a tie is an
+      // instantiation property: the var,var overloads compare `a > b`
+      // (ties to b) where var,double compares `a >= b` (ties to the var),
+      // and a mixed call whose constant side wins returns a fresh constant
+      // that carries no adjoint at all. I.len holds the operands' activity
+      // from lowering (bit 0: a, bit 1: b; 0 is the legacy all-var form),
+      // matching program_extremum's replay. NaN needs saying separately --
+      // `a > b` is false when either is NaN, so the plain comparison would
+      // hand fmax(x, NaN) to the NaN, where stan-math returns x. A local
+      // declared and never assigned is NaN (mir_prog.hpp), so this is
+      // reachable and not hypothetical.
       case Program::FMAX:
       case Program::FMIN: {
         adj[I.dst] = 0.0;
         const double x = val[I.va], y = val[I.vb];
+        const uint8_t law = static_cast<uint8_t>(I.len);
+        const bool a_active = law == 0 || (law & 0x1u) != 0;
+        const bool b_active = law == 0 || (law & 0x2u) != 0;
         if (std::isnan(x) && std::isnan(y)) {
-          adj[I.a] = std::numeric_limits<double>::quiet_NaN();
-          adj[I.b] = std::numeric_limits<double>::quiet_NaN();
+          if (a_active) adj[I.a] = std::numeric_limits<double>::quiet_NaN();
+          if (b_active) adj[I.b] = std::numeric_limits<double>::quiet_NaN();
         } else if (std::isnan(y)) {
-          adj[I.a] += t;
+          if (a_active) adj[I.a] += t;
         } else if (std::isnan(x)) {
-          adj[I.b] += t;
-        } else if (I.code == Program::FMAX ? x > y : x < y) {
-          adj[I.a] += t;
+          if (b_active) adj[I.b] += t;
         } else {
-          adj[I.b] += t;
+          const bool a_wins = a_active && !b_active
+                                  ? (I.code == Program::FMAX ? x >= y : x <= y)
+                                  : (I.code == Program::FMAX ? x > y : x < y);
+          if (a_wins) {
+            if (a_active) adj[I.a] += t;
+          } else if (b_active) {
+            adj[I.b] += t;
+          }
         }
         break;
       }

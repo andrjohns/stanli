@@ -386,6 +386,29 @@ struct ProgramCallCtx<true> {
 void run_program_transform(const Program::Transform& tr, double* reg);
 void run_program_transform(const Program::Transform& tr, stan::math::var* reg);
 
+// fmax/fmin through the overload the operands' data-only classification
+// selects. `law` carries operand activity (bit 0: a, bit 1: b; 0 is the
+// legacy all-var form of a manually built payload). stan-math's rule is
+// one and consistent -- a tie prefers the autodiff argument, the second
+// when both are, and a double side never carries an adjoint (so a winning
+// or NaN-poisoned constant routes nothing) -- but the rule is expressed
+// over the operands' STATIC types, so an all-var replay of a mixed call
+// answers differently than the mixed instantiation CmdStan's generated
+// code compiles. value_of detaches the data side to run the same one.
+template <typename T>
+inline T program_extremum(bool maximum, uint8_t law, const T& a, const T& b) {
+  const auto call = [maximum](const auto& x, const auto& y) -> T {
+    return maximum ? T(stan::math::fmax(x, y)) : T(stan::math::fmin(x, y));
+  };
+  if constexpr (std::is_same_v<T, double>) {
+    return call(a, b);
+  } else {
+    if (law == 0x1) return call(a, stan::math::value_of(b));
+    if (law == 0x2) return call(stan::math::value_of(a), b);
+    return call(a, b);
+  }
+}
+
 // pow through the overload the exponent's static type selects, keeping the
 // value std::pow gives so the double forward and the replay stay bitwise.
 template <typename T>
@@ -460,10 +483,10 @@ void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
         d() = program_pow(static_cast<uint8_t>(I.len), ra(), rb());
         break;
       case Program::FMAX:
-        d() = stan::math::fmax(ra(), rb());
+        d() = program_extremum(true, static_cast<uint8_t>(I.len), ra(), rb());
         break;
       case Program::FMIN:
-        d() = stan::math::fmin(ra(), rb());
+        d() = program_extremum(false, static_cast<uint8_t>(I.len), ra(), rb());
         break;
       case Program::NEG:
         d() = -ra();

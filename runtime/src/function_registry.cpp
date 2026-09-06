@@ -726,9 +726,9 @@ const std::vector<FunctionSpec>& function_specs() {
     density("multi_normal_prec_lpdf",
             vectorized_mvt_spec(OP_MULTI_NORMAL_PREC_LPDF, 3, 0x3));
     density("lkj_corr_cholesky_lpdf", {OP_LKJ_CORR_CHOL_LPDF, 2, 0, false,
-                                       DensityShape::FirstMatrixRows, 0x1});
-    density("lkj_corr_lpdf", {OP_LKJ_CORR_LPDF, 2, 0, false,
-                              DensityShape::FirstMatrixRows, 0x1});
+                                       DensityShape::FirstMatrixRows, -1});
+    density("lkj_corr_lpdf",
+            {OP_LKJ_CORR_LPDF, 2, 0, false, DensityShape::FirstMatrixRows, -1});
     density("lkj_cov_lpdf",
             {OP_LKJ_COV_LPDF, 4, 0, false, DensityShape::FirstMatrixRows, 0xf});
     density("multi_gp_lpdf", {OP_MULTI_GP_LPDF, 3, 0, false,

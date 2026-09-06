@@ -2,6 +2,7 @@
 // an in-process var-path evaluation of the same call, bitwise.
 #include "graph_helpers.hpp"
 
+#include <stanli/density_registry.hpp>
 #include <stanli/graph.hpp>
 #include <stanli/optable.hpp>
 
@@ -1500,6 +1501,95 @@ int main() {
         expect_eq(std::string(c.tag) + " ss dphi", r.grad[1], p.adj());
         stan::math::recover_memory();
       }
+    }
+  }
+
+  // lkj_corr(_cholesky): eta is a differentiable shape parameter. The fixed
+  // registry mask used to exclude it, and the kernel bound it as a plain
+  // double, so d(lp)/d(eta) was silently zero -- found as a 0.5% CmdStan
+  // gradient divergence by the signature-reference gate. Both arguments
+  // active; every partial must match the var reference bitwise.
+  {
+    using stan::math::var;
+    const double c = 0.3, s = std::sqrt(1.0 - 0.09);
+    const std::vector<double> Lc = {1, c, 0, s};  // column-major 2x2 lower
+    const std::vector<double> R = {1, c, c, 1};   // the correlation itself
+    const std::vector<double> eta = {1.4};
+    struct Lkj {
+      uint16_t opcode;
+      const char* tag;
+      const std::vector<double>* m;
+      bool chol;
+    };
+    const Lkj kLkj[] = {{stanli::OP_LKJ_CORR_CHOL_LPDF, "lkj_chol", &Lc, true},
+                        {stanli::OP_LKJ_CORR_LPDF, "lkj_corr", &R, false}};
+    for (const Lkj& k : kLkj) {
+      for (const bool propto : {false, true}) {
+        const uint8_t variant = (uint8_t)((propto ? 0x80u : 0u) | 0x3u);
+        auto r = stanli::testutil::run_one_op(k.opcode, {*k.m, eta},
+                                              {true, true}, {2}, variant);
+        stan::math::nested_rev_autodiff nested;
+        Eigen::Matrix<var, -1, -1> Mv(2, 2);
+        for (int i = 0; i < 4; ++i) Mv.data()[i] = (*k.m)[(size_t)i];
+        var etav = eta[0];
+        var lp;
+        if (k.chol) {
+          lp = propto ? stan::math::lkj_corr_cholesky_lpdf<true>(Mv, etav)
+                      : stan::math::lkj_corr_cholesky_lpdf<false>(Mv, etav);
+        } else {
+          lp = propto ? stan::math::lkj_corr_lpdf<true>(Mv, etav)
+                      : stan::math::lkj_corr_lpdf<false>(Mv, etav);
+        }
+        stan::math::grad(lp.vi_);
+        const std::string tag = std::string(k.tag) + (propto ? " propto" : "");
+        expect_eq(tag + " value", r.value, lp.val());
+        for (int i = 0; i < 4; ++i)
+          expect_eq(tag + " dM" + std::to_string(i), r.grad[(size_t)i],
+                    Mv.data()[i].adj());
+        expect_eq(tag + " deta", r.grad[4], etav.adj());
+      }
+    }
+  }
+
+  // The plan choke point must refuse parameter-dependent input outside a
+  // fixed activity mask rather than let a kernel drop its partial silently.
+  // Every backend builds its plan here, so this one guard covers them all.
+  {
+    using namespace stanli;
+    DensitySpec spec;
+    spec.opcode = OP_LKJ_CORR_LPDF;
+    spec.arity = 2;
+    spec.integer_args = 0;
+    spec.shape = DensityShape::FirstMatrixRows;
+    spec.activity_mask = 0x1;
+    std::vector<DensityCallArgument> args(2);
+    args[0].shape.container = FunctionContainerKind::Matrix;
+    args[0].shape.dimensions = {2, 2};
+    args[0].shape.storage_size = 4;
+    args[0].data_only = false;
+    args[0].active = true;
+    args[1].shape.container = FunctionContainerKind::Scalar;
+    args[1].scalar = true;
+    args[1].data_only = false;
+    args[1].active = true;  // outside the 0x1 mask: must refuse
+    bool threw = false;
+    try {
+      density_call_plan(spec, args, false);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    if (!threw) {
+      ++failures;
+      std::printf("FAIL activity guard: out-of-mask activity was planned\n");
+    }
+    args[1].data_only = true;
+    args[1].active = false;  // within the mask: must still plan
+    try {
+      density_call_plan(spec, args, false);
+    } catch (const std::exception& error) {
+      ++failures;
+      std::printf("FAIL activity guard: in-mask plan threw: %s\n",
+                  error.what());
     }
   }
 
