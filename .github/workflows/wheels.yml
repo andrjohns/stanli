@@ -422,10 +422,16 @@ jobs:
           fi
           ccache -s
 
+      # Every core, not matrix.build_jobs. That number is a memory ceiling
+      # for the compile phase (one densities shard peaks near 3 GB); the
+      # tests are 200-odd small processes with no such constraint. The
+      # generated signature models alone are ~280 s of work, which -j2
+      # served in 150 s on a 4-core runner.
       - name: Tests
-        run: >-
-          ctest --test-dir build-rel
-          --parallel ${{ matrix.build_jobs }} --output-on-failure
+        run: |
+          cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+          echo "runner: $cores cores, testing -j$cores"
+          ctest --test-dir build-rel --parallel "$cores" --output-on-failure
 
       # The models and data the corpus check reads: ~24 MB out of
       # posteriordb's 2 GB, via sparse checkout, cached on the pinned SHA.
