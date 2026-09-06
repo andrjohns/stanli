@@ -3,8 +3,11 @@
 # incompatibilities that the standalone R package cannot see: stanr embeds
 # Stanli directly and adapts it to Stan's model_base interface.
 #
-# The release workflow calls this workflow and makes every v* publisher wait
-# for it. Keep workflow_dispatch as an on-demand compatibility check.
+# The release workflow calls this workflow before the v* publishers run.
+# stanr's vendoring script patches stanli sources by exact string match and
+# its pinned revision predates the lower.cpp split, so the job reports but
+# does not block until stanr can take a current runtime. Keep
+# workflow_dispatch as an on-demand compatibility check.
 name: stanr downstream
 
 on:
@@ -18,6 +21,7 @@ jobs:
   backend:
     name: current runtime in stanr
     runs-on: ubuntu-24.04
+    continue-on-error: true
     timeout-minutes: 60
     env:
       # Pin the downstream source so unrelated upstream changes cannot make a
