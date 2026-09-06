@@ -60,6 +60,7 @@ struct stanli_model {
   // Seeded rather than default-constructed so a caller who never calls
   // stanli_wa_seed still gets the same rows every run.
   stanli::WaRng wa_rng{1};
+  std::string warnings;
 };
 
 namespace {
@@ -88,6 +89,7 @@ stanli_model* stanli_model_new(const char* tmir_sexp, const char* data_json,
     m->cm.bind(*m->ex);
     for (const auto& v : m->cm.views) m->n_con += v.len;
     m->flat_names = stanli::CompiledModel::csv_names(m->cm.views);
+    std::string probe_failure;
     if (m->cm.write_array) {
       auto& wa = *m->cm.write_array;
       if (wa.interp) {
@@ -111,10 +113,14 @@ stanli_model* stanli_model_new(const char* tmir_sexp, const char* data_json,
             m->wa_gq_start = scalar_column_start(m->wa_interp->columns(),
                                                  m->wa_interp->n_gq_start());
             found = true;
-          } catch (const std::exception&) {
+          } catch (const std::exception& e) {
+            probe_failure = e.what();
           }
         }
-        if (!found) m->wa_interp.reset();
+        if (found)
+          probe_failure.clear();
+        else
+          m->wa_interp.reset();
       } else if (!wa.columns.empty()) {
         m->wa_ex = std::make_unique<stanli::Executor>(std::move(wa.graph));
         wa.bind(*m->wa_ex);
@@ -124,6 +130,7 @@ stanli_model* stanli_model_new(const char* tmir_sexp, const char* data_json,
         m->wa_gq_start = scalar_column_start(wa.columns, wa.n_gq_start);
       }
     }
+    m->warnings = stanli::interpreter_warning(m->cm, probe_failure);
     return m.release();
   } catch (const std::exception& e) {
     put_err(err, err_len, e.what());
@@ -739,6 +746,10 @@ const char* stanli_constrained_name(const stanli_model* m, int64_t i) {
 }
 
 int64_t stanli_wa_n_columns(const stanli_model* m) { return m->wa_n; }
+
+const char* stanli_warnings(const stanli_model* m) {
+  return m->warnings.c_str();
+}
 
 int64_t stanli_wa_n_generated_start(const stanli_model* m) {
   return m->wa_n > 0 ? m->wa_gq_start : 0;

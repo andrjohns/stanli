@@ -285,3 +285,22 @@ test_that("data reaches the model in the right shape", {
   g <- log_prob_grad(m, c(0.1, 0.2, 0.3))
   expect_true(is.finite(g$lp))
 })
+
+test_that("a part with no compiled path warns, or errors when refused", {
+  skip_without_runtime()
+  code <- "
+    parameters { real mu; }
+    model { mu ~ normal(0, 1); }
+    generated quantities {
+      real s = 0;
+      if (mu > 0) {
+        matrix[1100, 1000] big = rep_matrix(mu, 1100, 1000);
+        s = big[1, 1];
+      }
+    }"
+  expect_warning(stanli_model(code = code), "interpreter")
+  expect_warning(es_model(), NA)
+  Sys.setenv(STANLI_NO_INTERPRETER = "1")
+  on.exit(Sys.unsetenv("STANLI_NO_INTERPRETER"), add = TRUE)
+  expect_error(stanli_model(code = code), "STANLI_NO_INTERPRETER")
+})

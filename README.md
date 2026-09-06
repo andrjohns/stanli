@@ -133,9 +133,10 @@ NUTS (stan::mcmc::adapt_diag_e_nuts) -> draws
 
 7. **Writing draws.** A second, forward-only graph lowers the MIR's
    `generate_quantities` section and produces every CSV column CmdStan
-   would write, in CmdStan's order and under CmdStan's naming. Models
-   using unsupported/container-result RNGs or dynamic geometry still have a
-   per-draw interpreter fallback (`runtime/src/wa_interp.cpp`). Fixed-shape
+   would write, in CmdStan's order and under CmdStan's naming. A section the
+   graph cannot lower runs through the per-draw interpreter
+   (`runtime/src/wa_interp.cpp`) with a warning naming the reason;
+   `STANLI_NO_INTERPRETER=1` makes that a compile error. Fixed-shape
    draw-dependent branches, checked one-level runtime indexing, and Viterbi
    backtracking now compile, so all 119 compiling corpus models have complete,
    graph-backed write arrays.

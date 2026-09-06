@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -820,7 +821,58 @@ void expect_streaming_stats() {
 
 }  // namespace
 
+void expect_interpreter_policy(const char* fixture,
+                               const char* expected_reason) {
+  const std::string mir = slurp(fixture);
+  const std::string tag(fixture);
+  char err[8192]{};
+  setenv("STANLI_NO_INTERPRETER", "1", 1);
+  stanli_model* model = stanli_model_new(mir.c_str(), "{}", err, sizeof err);
+  unsetenv("STANLI_NO_INTERPRETER");
+  if (expected_reason == nullptr) {
+    if (model == nullptr) {
+      ++failures;
+      std::printf("FAIL model construction for %s: %s\n", fixture, err);
+      return;
+    }
+    expect_eq((tag + " no warning").c_str(), stanli_warnings(model), "");
+    stanli_model_free(model);
+    return;
+  }
+  const std::string error(err);
+  expect_true(tag + " refused under STANLI_NO_INTERPRETER: " + error,
+              model == nullptr);
+  if (model != nullptr) stanli_model_free(model);
+  expect_true(tag + " error carries the reason: " + error,
+              error.find(expected_reason) != std::string::npos);
+  expect_true(tag + " error names the variable: " + error,
+              error.find("STANLI_NO_INTERPRETER") != std::string::npos);
+  expect_true(
+      tag + " error points at the issue tracker: " + error,
+      error.find("github.com/seantalts/stanli/issues") != std::string::npos);
+
+  model = stanli_model_new(mir.c_str(), "{}", err, sizeof err);
+  if (model == nullptr) {
+    ++failures;
+    std::printf("FAIL default model construction for %s: %s\n", fixture, err);
+    return;
+  }
+  const std::string text = stanli_warnings(model);
+  expect_true(tag + " warning carries the reason: " + text,
+              text.find(expected_reason) != std::string::npos);
+  expect_true(tag + " warning names the build: " + text,
+              text.find(stanli_build_id()) != std::string::npos);
+  stanli_model_free(model);
+}
+
 int main() {
+  expect_interpreter_policy("tests/fixtures/wanames.tmir.sexp", nullptr);
+  expect_interpreter_policy("tests/fixtures/wa_literal_write.tmir.sexp",
+                            nullptr);
+  expect_interpreter_policy("tests/fixtures/interp_fallback_region.tmir.sexp",
+                            "oversized shape");
+  expect_interpreter_policy("tests/fixtures/interp_fallback_ode.tmir.sexp",
+                            "the ODE right-hand side rhs");
   expect_unconstrain_inits_round_trip();
   expect_parameterless_unconstrain();
 

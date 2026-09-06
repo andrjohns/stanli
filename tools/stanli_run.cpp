@@ -214,10 +214,10 @@ int main(int argc, char** argv) {
                                : nullptr;
     const bool have_wa =
         !wi && cm.write_array && !cm.write_array->columns.empty();
-    if (cm.write_array && !cm.write_array->truncated.empty())
-      std::fprintf(stderr, "stanli_run: write_array %s: %s\n",
-                   wi ? "interpreted (graph could not express)" : "truncated",
-                   cm.write_array->truncated.c_str());
+    {
+      const std::string note = stanli::interpreter_warning(cm);
+      if (!note.empty()) std::fprintf(stderr, "%s\n", note.c_str());
+    }
     std::unique_ptr<stanli::Executor> wex;
     if (have_wa) {
       wex =

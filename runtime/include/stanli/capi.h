@@ -398,6 +398,10 @@ const char* stanli_wa_column_name(const stanli_model* m, int64_t i);
 void stanli_wa_seed(stanli_model* m, uint32_t seed);
 void stanli_wa_seed_chain(stanli_model* m, uint32_t seed, uint32_t chain);
 int stanli_wa_row(stanli_model* m, const double* q, double* out);
+/* Empty unless parts of the model have no compiled path and run through
+ * the MIR interpreter. Then a message to show once per model: which parts,
+ * why, and where to report it. Owned by the model. */
+const char* stanli_warnings(const stanli_model* m);
 
 #ifdef __cplusplus
 }

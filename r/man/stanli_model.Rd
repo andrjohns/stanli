@@ -17,7 +17,11 @@ stanli_model(file = NULL, code = NULL, data = NULL, mir = NULL)
 compiler. Rarely needed.}
 }
 \value{
-An object of class `stanli_model`.
+An object of class `stanli_model`. Warns, naming the part and the
+  reason, when part of the model has no compiled path and runs through
+  the much slower MIR interpreter; with the environment variable
+  `STANLI_NO_INTERPRETER` set that is an error instead. Either message is
+  what to include in a bug report.
 }
 \description{
 Compile a Stan model

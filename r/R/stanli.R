@@ -50,7 +50,11 @@ read_utf8_file <- function(path) {
 #' @param data A named list of data, or a path to a JSON data file.
 #' @param mir Transformed MIR text, for a build without the embedded
 #'   compiler. Rarely needed.
-#' @return An object of class `stanli_model`.
+#' @return An object of class `stanli_model`. Warns, naming the part and the
+#'   reason, when part of the model has no compiled path and runs through
+#'   the much slower MIR interpreter; with the environment variable
+#'   `STANLI_NO_INTERPRETER` set that is an error instead. Either message is
+#'   what to include in a bug report.
 #' @export
 stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL) {
   load_runtime()
@@ -77,6 +81,8 @@ stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL) {
   }
   ptr <- .Call("stanli_r_model_new", if (is_mir) mir else code, data_json,
                is_mir)
+  note <- .Call("stanli_r_warnings", ptr)
+  if (nzchar(note)) warning(note, call. = FALSE)
   structure(list(ptr = ptr,
                  n_unconstrained = .Call("stanli_r_n_unconstrained", ptr),
                  columns = .Call("stanli_r_column_names", ptr)),

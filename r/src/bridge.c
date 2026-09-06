@@ -147,6 +147,7 @@ static int64_t (*p_wa_n_columns)(const void*);
 static const char* (*p_wa_column_name)(const void*, int64_t);
 static void (*p_wa_seed_chain)(void*, uint32_t, uint32_t);
 static int (*p_wa_row)(void*, const double*, double*);
+static const char* (*p_warnings)(const void*);
 static void (*p_optimize_opts_init)(stanli_optimize_opts*);
 static int (*p_optimize)(void*, const stanli_optimize_opts*, double*, double*,
                          double*, char*, size_t);
@@ -225,6 +226,7 @@ SEXP stanli_bridge_load(SEXP path) {
   BIND("stanli_wa_column_name", p_wa_column_name);
   BIND("stanli_wa_seed_chain", p_wa_seed_chain);
   BIND("stanli_wa_row", p_wa_row);
+  *(void**)(&p_warnings) = dl_sym(g_lib, "stanli_warnings");
   BIND("stanli_optimize_opts_init", p_optimize_opts_init);
   BIND("stanli_optimize", p_optimize);
   return mkString("");
@@ -308,6 +310,13 @@ SEXP stanli_r_column_names(SEXP m) {
   }
   UNPROTECT(1);
   return out;
+}
+
+SEXP stanli_r_warnings(SEXP m) {
+  require_loaded();
+  if (p_warnings == NULL) return mkString("");
+  const char* s = p_warnings(model_ptr(m));
+  return mkString(s ? s : "");
 }
 
 SEXP stanli_r_unconstrain_inits(SEXP m, SEXP json) {

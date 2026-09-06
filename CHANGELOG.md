@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### A model that leaves the compiled path says so
+
+When the graph could not lower a model's transformed parameters and generated
+quantities, or the register program could not compile an ODE, DAE, algebraic
+or quadrature callback, the MIR interpreter took over that part, around a
+hundred times slower per evaluation, and nothing said so. The model now
+carries a warning that quotes the lowering's reason and asks for a bug report:
+the R package raises it with `warning()`, the Python package as a
+`RuntimeWarning`, `stanli_run` prints it to stderr, and `stanli_warnings`
+returns it from the C ABI. A model whose interpreted section fails at every
+probe point, which used to drop its columns silently, gets the same text.
+Setting `STANLI_NO_INTERPRETER=1` turns the warning into a compile error.
+
+A runtime-control region may now use 2^20 registers rather than 2^16. The
+generated quantities of `hmm_gaussian` and `iohmm_reg`, the two posteriordb
+models that reached the interpreter, lower to the graph within that and match
+the CmdStan references; their write_array row costs the same either way.
+
 ### Fixes
 
 A retained loop no longer answers a reduction from a slice's storage capacity.

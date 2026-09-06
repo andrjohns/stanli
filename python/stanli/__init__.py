@@ -14,6 +14,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import warnings
 
 import numpy as np
 
@@ -141,6 +142,8 @@ def _load_lib():
     lib.stanli_wa_n_columns.argtypes = [ctypes.c_void_p]
     lib.stanli_wa_column_name.restype = ctypes.c_char_p
     lib.stanli_wa_column_name.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+    lib.stanli_warnings.restype = ctypes.c_char_p
+    lib.stanli_warnings.argtypes = [ctypes.c_void_p]
     lib.stanli_wa_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.stanli_wa_seed_chain.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                          ctypes.c_uint32]
@@ -739,6 +742,9 @@ class Model:
             _lib.stanli_constrained_name(self._m, i).decode()
             for i in range(n_con)
         ]
+        note = _lib.stanli_warnings(self._m)
+        if note:
+            warnings.warn(note.decode(), RuntimeWarning, stacklevel=3)
 
     def __del__(self):
         if getattr(self, "_m", None):
