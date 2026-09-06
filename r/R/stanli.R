@@ -50,7 +50,9 @@ read_utf8_file <- function(path) {
 #' @param data A named list of data, or a path to a JSON data file.
 #' @param mir Transformed MIR text, for a build without the embedded
 #'   compiler. Rarely needed.
-#' @return An object of class `stanli_model`. Warns, naming the part and the
+#' @return An object of class `stanli_model` whose `columns` name every
+#'   output the way the posterior package reads them, `theta[1,2]` for an
+#'   indexed value. Warns, naming the part and the
 #'   reason, when part of the model has no compiled path and runs through
 #'   the much slower MIR interpreter; with the environment variable
 #'   `STANLI_NO_INTERPRETER` set that is an error instead. Either message is
@@ -85,8 +87,18 @@ stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL) {
   if (nzchar(note)) warning(note, call. = FALSE)
   structure(list(ptr = ptr,
                  n_unconstrained = .Call("stanli_r_n_unconstrained", ptr),
-                 columns = .Call("stanli_r_column_names", ptr)),
+                 columns = stan_variable_names(
+                   .Call("stanli_r_column_names", ptr))),
             class = "stanli_model")
+}
+
+stan_variable_names <- function(x) {
+  vapply(strsplit(x, ".", fixed = TRUE), function(parts) {
+    if (length(parts) > 1L && all(grepl("^[0-9]+$", parts[-1L])))
+      paste0(parts[1L], "[", paste(parts[-1L], collapse = ","), "]")
+    else
+      paste(parts, collapse = ".")
+  }, character(1))
 }
 
 #' @export

@@ -30,7 +30,22 @@ test_that("a model compiles and reports its shape", {
   m <- es_model()
   expect_s3_class(m, "stanli_model")
   expect_equal(m$n_unconstrained, 10L)
-  expect_true(all(c("mu", "tau", "theta.1") %in% m$columns))
+  expect_true(all(c("mu", "tau", "theta[1]") %in% m$columns))
+})
+
+test_that("columns index with brackets the way posterior reads them", {
+  skip_without_runtime()
+  m <- stanli_model(code = "
+    parameters { real s; vector[2] v; matrix[2, 3] M; }
+    model { s ~ std_normal(); v ~ std_normal(); to_vector(M) ~ std_normal(); }")
+  expect_equal(m$columns, c("s", "v[1]", "v[2]", "M[1,1]", "M[2,1]",
+                            "M[1,2]", "M[2,2]", "M[1,3]", "M[2,3]"))
+  fit <- sample_model(m, chains = 1, warmup = 20, samples = 5, refresh = 0)
+  expect_equal(dimnames(fit$draws)[[3]], m$columns)
+  skip_if_not_installed("posterior")
+  rv <- posterior::as_draws_rvars(as_draws_array(fit))
+  expect_equal(dim(rv$M), c(2L, 3L))
+  expect_equal(length(rv$v), 2L)
 })
 
 test_that("log_prob_grad returns lp and a gradient of the right length", {

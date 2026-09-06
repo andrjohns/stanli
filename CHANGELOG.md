@@ -11,6 +11,13 @@ the session down. The C ABI gains `stanli_sample_multi_interruptible`, the
 progress sampler plus a poll callback asked on the calling thread about every
 100 ms; the R package uses it when the runtime provides it. (#327)
 
+### R names indexed values with brackets
+
+`model$columns`, and with it every draw, summary and diagnostic name, now
+spells an indexed value `theta[1,2]`, the form the posterior package and the
+rest of the R Stan tooling read, instead of the CSV header's `theta.1.2`.
+(#328)
+
 ### A model that leaves the compiled path says so
 
 When the graph could not lower a model's transformed parameters and generated
