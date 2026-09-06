@@ -80,6 +80,23 @@ class VectorizeAbTest(unittest.TestCase):
         self.assertFalse(result["off"]["reference"]["referenced"])
         self.assertTrue(result["ab"]["error_match"])
 
+    def test_all_nan_row_agrees_with_recorded_evaluation_failure(self):
+        nan_row = ["OK", "nan", "nan", "nan"]
+        result = vectorize_ab.reference_comparison(
+            "s2_invgaussian", nan_row, {"lp": None}, 1e-9)
+        self.assertTrue(result["ok"])
+        finite_row = ["OK", "1.5", "2.5"]
+        result = vectorize_ab.reference_comparison(
+            "s2_invgaussian", finite_row, {"lp": None}, 1e-9)
+        self.assertFalse(result["ok"])
+
+    def test_default_selection_skips_known_gaps(self):
+        refs = {"eight_schools": {}, "s2_com_poisson": {}}
+        self.assertEqual(
+            vectorize_ab.default_selection(refs, {"eight_schools": None},
+                                           {"s2_com_poisson": "why"}),
+            ["eight_schools"])
+
     def test_ab_only_matching_compile_failure_fails(self):
         failed = {
             "returncode": 1,

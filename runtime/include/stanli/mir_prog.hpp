@@ -556,6 +556,7 @@ struct ProgramCompiler {
       }
       return false;
     }
+    if (e.kind == mir::Expr::Indexed) return static_indexed_view(e, out);
     if (e.kind != mir::Expr::Var) return false;
     if (deferred_shapes.count(e.name)) return false;
     auto rt = reals.find(e.name);
@@ -591,6 +592,62 @@ struct ProgramCompiler {
       extern_bound.insert(e.name);
       *out = ext;
       return true;
+    }
+    return false;
+  }
+
+  bool static_indexed_view(const mir::Expr& e, Range* out) {
+    if (e.args.size() == 1 && e.args[0].kind == mir::Expr::Indexed) {
+      mir::Expr composed = e.args[0];
+      composed.type_ = e.type_;
+      composed.unsized = e.unsized;
+      composed.data_only = e.data_only;
+      composed.promoted = e.promoted;
+      composed.raw = e.raw;
+      return static_view(composed, out);
+    }
+    if (e.args.empty()) return false;
+    Range b;
+    if (!static_view(e.args[0], &b)) return false;
+    if (e.args.size() == 2 && e.args[1].name == "IndexAll") {
+      *out = b;
+      return true;
+    }
+    try {
+      if (b.kind == ViewKind::Matrix && e.args.size() == 3) {
+        const int64_t nr =
+            (int64_t)matrix_positions(e.args[1], b.rows, "row").size();
+        const int64_t nc =
+            (int64_t)matrix_positions(e.args[2], b.cols, "column").size();
+        const int64_t width = nr * nc;
+        Range r{0, (int)width};
+        if (width == 1 && e.type_ != "UMatrix" && e.type_ != "UVector" &&
+            e.type_ != "URowVector") {
+          *out = r;
+          return true;
+        }
+        if (e.type_ == "UVector") {
+          r.kind = ViewKind::Vector;
+        } else if (e.type_ == "URowVector") {
+          r.kind = ViewKind::RowVector;
+        } else {
+          r.kind = ViewKind::Matrix;
+          r.rows = nr;
+          r.cols = nc;
+        }
+        *out = r;
+        return true;
+      }
+      if ((b.kind == ViewKind::Vector || b.kind == ViewKind::RowVector ||
+           b.kind == ViewKind::Flat) &&
+          e.args.size() == 2) {
+        const int64_t n =
+            (int64_t)matrix_positions(e.args[1], b.len, "index").size();
+        *out = typed(Range{0, (int)n}, e.type_);
+        return true;
+      }
+    } catch (Bail&) {
+      return false;
     }
     return false;
   }

@@ -481,16 +481,17 @@ jobs:
       # Semantic/reference parity gates the job; graph sizes, re-roll
       # dispositions, and preparation timings are published as measurements.
       #
-      # Gated on compiler/runtime/harness changes to avoid 79s overhead on every
-      # PR, especially docs-only ones. The check catches silent semantic drift
-      # from lowering and source-pass changes, so it must run on anything that
-      # could alter MIR or the compiled output; see changes.vectorize for paths.
-      - name: Bounded MIR vectorization A/B
+      # Gated on compiler/runtime/harness changes to avoid several minutes of
+      # overhead on every PR, especially docs-only ones. The check catches
+      # silent semantic drift from lowering and source-pass changes, so it
+      # must run on anything that could alter MIR or the compiled output; see
+      # changes.vectorize for paths.
+      - name: MIR vectorization A/B
         if: >-
           matrix.runtime == 'linux-x86_64' &&
           (github.event_name != 'pull_request' ||
            needs.changes.outputs.vectorize == 'true')
-        timeout-minutes: 15
+        timeout-minutes: 25
         shell: bash
         run: |
           test -x deps/stanc3/stanli-vectorize-probe
@@ -499,9 +500,6 @@ jobs:
             deps/stanc3/stanli-vectorize-probe \
             "$STANC3_SRC_SHA" stanc3-55
           python3 harnesses/vectorize_ab.py deps/posteriordb \
-            normal_mixture radon_pooled soil_incubation arK \
-            low_dim_gauss_mix hmm_example \
-            eight_schools_noncentered \
             --compiler deps/stanc3/stanli-vectorize-probe \
             --check build-rel/stanli_check \
             --bench build-rel/bench_grad --dump build-rel/dump_ops \

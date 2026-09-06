@@ -4299,6 +4299,51 @@ int main() {
     check_case("runtime int-array UDF empty", empty, {}, 0.5, 1.0);
   }
 
+  // A gather of a parameter matrix inside a runtime-control region: the
+  // inlined UDF takes rows() of x[idx, idx] as its own local extent.
+  for (const bool force_register : {false, true}) {
+    if (force_register) test_setenv("STANLI_STRUCTURED_LOOPS", "0", 1);
+    CompiledModel cm = compile_model(
+        slurp("tests/fixtures/gather_rows_udf.tmir.sexp"),
+        DataMap::from_json(slurp("tests/fixtures/gather_rows_udf.json")));
+    if (force_register) test_unsetenv("STANLI_STRUCTURED_LOOPS");
+    const std::string tag =
+        std::string("gather rows udf ") + (force_register ? "register " : "");
+    check(cm.n_unconstrained == 10, tag + "unconstrained count");
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    const double xv[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    double grad[10];
+
+    ex.params_data()[0] = 0.5;
+    std::copy(xv, xv + 9, ex.params_data() + 1);
+    const double positive_lp = ex.gradient(grad);
+
+    using stan::math::var;
+    Eigen::Matrix<var, -1, -1> x(3, 3);
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k) x(r, c) = xv[k];
+    var theta = 0.5;
+    var sum_m = x(0, 0) + x(2, 0) + x(0, 2) + x(2, 2);
+    var acc = (2.0 + sum_m) * theta + theta;
+    acc.grad();
+    expect_eq(tag + "positive lp", positive_lp, acc.val());
+    expect_eq(tag + "positive theta grad", grad[0], theta.adj());
+    for (int c = 0, k = 0; c < 3; ++c)
+      for (int r = 0; r < 3; ++r, ++k)
+        expect_eq(tag + "positive x grad " + std::to_string(k), grad[1 + k],
+                  x(r, c).adj());
+    stan::math::recover_memory();
+
+    ex.params_data()[0] = -0.5;
+    std::copy(xv, xv + 9, ex.params_data() + 1);
+    const double negative_lp = ex.gradient(grad);
+    expect_eq(tag + "negative lp", negative_lp, -0.5);
+    expect_eq(tag + "negative theta grad", grad[0], 1.0);
+    for (int k = 0; k < 9; ++k)
+      expect_eq(tag + "negative x grad " + std::to_string(k), grad[1 + k], 0.0);
+  }
+
   // rep_vector inside a region: a run the compiler fills, at an extent it
   // knows. The repeated parameter is the part worth checking -- the
   // gradient is the broadcast's, every element adding into the one cell

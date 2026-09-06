@@ -1353,6 +1353,51 @@ int main(int argc, char** argv) {
     check(exponents.dims == std::vector<int64_t>({3}) &&
               exponents.r == std::vector<double>({4, 8, 16}),
           "EltPow__ broadcasts a scalar base over a container");
+
+    // vectorize_loops rewrites for (i in 1:N) check(county[i]) into one
+    // Indexed(county, []) over the whole container.
+    DataMap::Entry whole_value_vector;
+    whole_value_vector.dims = {3};
+    whole_value_vector.r = {5, 6, 7};
+    interp.env()["whole_value_vector"] = whole_value_vector;
+    mir::Expr whole_value_base;
+    whole_value_base.kind = mir::Expr::Var;
+    whole_value_base.name = "whole_value_vector";
+    whole_value_base.type_ = "UVector";
+    whole_value_base.unsized = {0, mir::UnsizedLeaf::Vector};
+    whole_value_base.data_only = true;
+    mir::Expr whole_value_indexed;
+    whole_value_indexed.kind = mir::Expr::Indexed;
+    whole_value_indexed.args = {whole_value_base};
+    const DataMap::Entry whole_value = interp.eval(whole_value_indexed);
+    check(whole_value.dims == std::vector<int64_t>({3}) &&
+              whole_value.r == std::vector<double>({5, 6, 7}),
+          "zero-index Indexed returns the whole value");
+
+    DataMap::Entry column_int_target;
+    column_int_target.is_int = true;
+    column_int_target.dims = {2, 3};
+    column_int_target.i = {1, 2, 3, 4, 5, 6};
+    column_int_target.r.assign(column_int_target.i.begin(),
+                               column_int_target.i.end());
+    interp.env()["column_int_target"] = std::move(column_int_target);
+    mir::Stmt column_int_write;
+    column_int_write.kind = mir::Stmt::Assignment;
+    column_int_write.lhs = "column_int_target";
+    column_int_write.lhs_idx = {all(), single(2)};
+    column_int_write.rhs = int_array({integer(90), integer(80)}, 1);
+    interp.run({column_int_write});
+    const DataMap::Entry& column_int_written =
+        interp.env().at("column_int_target");
+    check(column_int_written.i == std::vector<int>({1, 2, 90, 80, 5, 6}) &&
+              column_int_written.r == std::vector<double>({1, 2, 90, 80, 5, 6}),
+          "column write into an integer array updates both int and real "
+          "mirrors");
+
+    mir::Stmt column_int_out_of_bounds = column_int_write;
+    column_int_out_of_bounds.lhs_idx = {all(), single(4)};
+    check(assignment_refused(column_int_out_of_bounds),
+          "column write into an integer array checks the column index");
   }
 
   // The write-array fallback evaluates ctsem's likelihood contribution in

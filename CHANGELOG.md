@@ -127,6 +127,12 @@ as a log density that sizes its locals with `num_elements(thres)` and passes
 `Intercept - transpose(mucs[n])` for `thres`, so those sizes stayed unknown
 and the models failed to compile with a runtime-control region error.
 
+A shape query is now also answered for a gathered submatrix, such as
+`x[idx, idx]` with `idx` a data array. Before, only a subview at a position
+known when the model compiled answered, so a user-defined function that
+takes `rows()` of its gathered-matrix argument bailed the whole
+runtime-control region as an unknown compile-time integer.
+
 Real data may be infinite or not-a-number, as it may in CmdStan. The JSON
 reader accepts `Infinity`, `-Infinity`, `Inf`, `-Inf` and `NaN` both bare and
 quoted, the two spellings CmdStan's reader takes. brms writes these routinely:
@@ -172,6 +178,21 @@ written with `ar(cov = TRUE)` at two of its three points. And a
 whose gradients were right had been producing an empty CSV from
 `stanli_run` unnoticed. Both are fixed above, and one of the new models
 is refused today: `s2_com_poisson` is listed in `KNOWN_GAPS`.
+
+The interpreter accepts whole-value index nodes and column writes into
+integer arrays produced by loop vectorization; before this stanli_run failed
+on eight corpus models that stanli_check passed.
+
+### Faster
+
+NUTS calls the executor's gradient directly. The model adapter used to
+answer every leapfrog step through a var tape, and that round trip was
+12 to 30 percent of sampling time on models whose gradient is cheap
+relative to their parameter count. `bym2_offset_only` (1000 warmup, 1000
+draws) went from 15.2 s to 12.6 s over the same 189728 gradient
+evaluations. `tools/bench_grad.cpp` now times the sampler's real gradient
+call, `stan::model::gradient`, so the stanli gradient column is comparable
+with the sampler and slightly different in kind from earlier tables.
 
 ## 0.11.1
 

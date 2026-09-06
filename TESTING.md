@@ -87,13 +87,12 @@ python3 harnesses/vectorize_ab.py deps/posteriordb \
   --dump build-rel/dump_ops --output-dir build-rel/vectorize-ab
 ```
 
-CI runs the bounded seven-model selection shown by the "Bounded MIR
-vectorization A/B" workflow step. It includes three models whose MIR must
-change and four controls. The hard gates cover command/status consistency,
-result and write-array categories, error parity, per-element finite/NaN/
-infinity classes, shapes and names, and both pass modes against the existing
-CmdStan references. Finite bit differences that remain within those gates are
-listed separately with bit patterns and ULP distances.
+CI runs the complete run shown by the "MIR vectorization A/B" workflow step.
+The hard gates cover command/status consistency, result and write-array
+categories, error parity, per-element finite/NaN/infinity classes, shapes and
+names, and both pass modes against the existing CmdStan references. Finite
+bit differences that remain within those gates are listed separately with
+bit patterns and ULP distances.
 
 The output directory contains `manifest.json`, `corpus.jsonl`,
 `graphs.jsonl`, `bench.tsv`, `summary.json`, and `summary.md`. The manifest

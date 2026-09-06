@@ -1,8 +1,8 @@
-// Adapter satisfying the slice of the stan model concept the mcmc samplers
-// use. The samplers reach the model through stan::model::gradient, which
-// instantiates log_prob<propto, jacobian, var>; we answer that with a single
-// precomputed_gradients node wrapping the executor's double gradient, so the
-// sampler-side var tape holds exactly one vari per gradient evaluation.
+// Adapter satisfying the slice of the stan model concept the samplers and
+// the point-estimate services use. The samplers reach the executor through
+// the stan::model::gradient and log_prob_propto specializations at the end
+// of this file; initialize and the optimizers still go through
+// log_prob<propto, jacobian, var>.
 //
 // propto and jacobian template flags are ignored: the graph is fixed at
 // compile time, Jacobian terms included and each density's propto choice
@@ -13,6 +13,8 @@
 #include <stanli/graph.hpp>
 
 #include <stan/math.hpp>
+#include <stan/model/gradient.hpp>
+#include <stan/model/log_prob_propto.hpp>
 
 #include <functional>
 #include <limits>
@@ -44,6 +46,7 @@ class ExecutorModel {
       : ex_(&ex), wa_(wa) {}
 
   size_t num_params_r() const { return static_cast<size_t>(ex_->n_params()); }
+  Executor& executor() const { return *ex_; }
 
   template <bool propto, bool jacobian, typename T>
   T log_prob(Eigen::Matrix<T, -1, 1>& q, std::ostream* /*msgs*/) const {
@@ -188,5 +191,35 @@ class ExecutorModel {
 };
 
 }  // namespace stanli
+
+namespace stan {
+namespace model {
+
+template <>
+inline void gradient<stanli::ExecutorModel>(const stanli::ExecutorModel& model,
+                                            const Eigen::VectorXd& x, double& f,
+                                            Eigen::VectorXd& grad_f,
+                                            callbacks::logger& /*logger*/) {
+  stanli::Executor& ex = model.executor();
+  const int64_t n = ex.n_params();
+  Eigen::Map<Eigen::VectorXd>(ex.params_data(), n) = x;
+  grad_f.resize(n);
+  try {
+    f = ex.gradient(grad_f.data());
+  } catch (const std::exception&) {
+    f = -std::numeric_limits<double>::infinity();
+    grad_f.setZero();
+  }
+}
+
+template <>
+inline double log_prob_propto<true, stanli::ExecutorModel>(
+    const stanli::ExecutorModel& model, Eigen::VectorXd& params_r,
+    std::ostream* msgs) {
+  return model.template log_prob<true, true, double>(params_r, msgs);
+}
+
+}  // namespace model
+}  // namespace stan
 
 #endif
