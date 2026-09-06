@@ -114,7 +114,7 @@ int main() {
     const double lp_propto =
         stan::model::log_prob_propto<true>(model, q, &std::cerr);
     expect("rejected direct propto is -inf",
-          std::isinf(lp_propto) && lp_propto < 0);
+           std::isinf(lp_propto) && lp_propto < 0);
   }
 
   if (failures == 0) std::printf("test_model_adapter OK\n");

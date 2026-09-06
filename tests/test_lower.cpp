@@ -4341,8 +4341,7 @@ int main() {
     expect_eq(tag + "negative lp", negative_lp, -0.5);
     expect_eq(tag + "negative theta grad", grad[0], 1.0);
     for (int k = 0; k < 9; ++k)
-      expect_eq(tag + "negative x grad " + std::to_string(k), grad[1 + k],
-                0.0);
+      expect_eq(tag + "negative x grad " + std::to_string(k), grad[1 + k], 0.0);
   }
 
   // rep_vector inside a region: a run the compiler fills, at an extent it
