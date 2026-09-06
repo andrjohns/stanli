@@ -5,6 +5,7 @@
 // carry row/column indices in column-major order. This test is intentionally
 // at the ABI boundary so a second flattening policy in capi.cpp cannot drift.
 #include "categorical_check_mir.hpp"
+#include "env_helpers.hpp"
 #include "structured_array_oracles.hpp"
 
 #include <stanli/capi.h>
@@ -895,9 +896,9 @@ void expect_interpreter_policy(const char* fixture,
   const std::string mir = slurp(fixture);
   const std::string tag(fixture);
   char err[8192]{};
-  setenv("STANLI_NO_INTERPRETER", "1", 1);
+  test_setenv("STANLI_NO_INTERPRETER", "1", 1);
   stanli_model* model = stanli_model_new(mir.c_str(), "{}", err, sizeof err);
-  unsetenv("STANLI_NO_INTERPRETER");
+  test_unsetenv("STANLI_NO_INTERPRETER");
   if (expected_reason == nullptr) {
     if (model == nullptr) {
       ++failures;
