@@ -41,11 +41,13 @@ EXPORTS
   stanli_wa_seed
   stanli_wa_seed_chain
   stanli_wa_row
+  stanli_warnings
   stanli_sample_opts_init
   stanli_n_stored_draws
   stanli_thread_safe
   stanli_sample_multi
   stanli_sample_multi_progress
+  stanli_sample_multi_interruptible
   stanli_sampler_column_name
   stanli_summary_stats
   stanli_diagnose_text

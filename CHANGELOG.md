@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### Sampling can be interrupted
+
+Ctrl-C in R, or the stop button in RStudio, now stops every chain after its
+current transition and raises the usual interrupt, on every platform. Before,
+the interrupt could only land between chains, and on Windows it could take
+the session down. The C ABI gains `stanli_sample_multi_interruptible`, the
+progress sampler plus a poll callback asked on the calling thread about every
+100 ms; the R package uses it when the runtime provides it. (#327)
+
+### R names indexed values with brackets
+
+`model$columns`, and with it every draw, summary and diagnostic name, now
+spells an indexed value `theta[1,2]`, the form the posterior package and the
+rest of the R Stan tooling read, instead of the CSV header's `theta.1.2`.
+(#328)
+
+### Python reads variables by shape
+
+The Python package spells indexed values the same way: `Model.constrained_names`,
+`Fit.names`, summaries and `optimize()` results all use bracket names now.
+`Fit` and `OptimizeResult` also index by variable name: `fit["theta"]`
+returns an array with the declared dims rather than one flat column, and
+`to_arviz()` passes those dims through to the posterior group.
+Dot names like `theta.1` are still accepted wherever a name is looked up.
+
+### A model that leaves the compiled path says so
+
+When the graph could not lower a model's transformed parameters and generated
+quantities, or the register program could not compile an ODE, DAE, algebraic
+or quadrature callback, the MIR interpreter took over that part, around a
+hundred times slower per evaluation, and nothing said so. The model now
+carries a warning that quotes the lowering's reason and asks for a bug report:
+the R package raises it with `warning()`, the Python package as a
+`RuntimeWarning`, `stanli_run` prints it to stderr, and `stanli_warnings`
+returns it from the C ABI. A model whose interpreted section fails at every
+probe point, which used to drop its columns silently, gets the same text.
+Setting `STANLI_NO_INTERPRETER=1` turns the warning into a compile error.
+
+A runtime-control region may now use 2^20 registers rather than 2^16. The
+generated quantities of `hmm_gaussian` and `iohmm_reg`, the two posteriordb
+models that reached the interpreter, lower to the graph within that and match
+the CmdStan references; their write_array row costs the same either way.
+
 ### Fixes
 
 A retained loop no longer answers a reduction from a slice's storage capacity.

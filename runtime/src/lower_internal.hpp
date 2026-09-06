@@ -912,6 +912,13 @@ struct Lowering {
   }
   void forget_observation(const Val& v) { observations.erase({v.slot, v.si}); }
   int add_slot(int64_t len, bool is_param) { return g.add_slot(len, is_param); }
+  void note_interpreter_fallback(const std::string& what,
+                                 const std::string& why) {
+    const std::string note = what + " (" + why + ")";
+    auto& all = out.interpreter_fallbacks;
+    if (std::find(all.begin(), all.end(), note) == all.end())
+      all.push_back(note);
+  }
   [[noreturn]] void fail(const std::string& msg, const std::string& raw = "") {
     throw CompileError("stanli compile: " + msg +
                        (raw.empty() ? "" : " | in: " + raw));

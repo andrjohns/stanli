@@ -12,6 +12,7 @@ extern SEXP stanli_r_exact_lp(void);
 extern SEXP stanli_r_thread_safe(void);
 extern SEXP stanli_r_n_unconstrained(SEXP);
 extern SEXP stanli_r_column_names(SEXP);
+extern SEXP stanli_r_warnings(SEXP);
 extern SEXP stanli_r_grad(SEXP, SEXP);
 extern SEXP stanli_r_unconstrain_inits(SEXP, SEXP);
 extern SEXP stanli_r_pathfinder_inits(SEXP, SEXP, SEXP, SEXP);
@@ -30,6 +31,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"stanli_r_thread_safe", (DL_FUNC)&stanli_r_thread_safe, 0},
     {"stanli_r_n_unconstrained", (DL_FUNC)&stanli_r_n_unconstrained, 1},
     {"stanli_r_column_names", (DL_FUNC)&stanli_r_column_names, 1},
+    {"stanli_r_warnings", (DL_FUNC)&stanli_r_warnings, 1},
     {"stanli_r_grad", (DL_FUNC)&stanli_r_grad, 2},
     {"stanli_r_unconstrain_inits", (DL_FUNC)&stanli_r_unconstrain_inits, 2},
     {"stanli_r_pathfinder_inits", (DL_FUNC)&stanli_r_pathfinder_inits, 4},

@@ -94,6 +94,9 @@ bool Lowering::lower_program_variadic_algebra(ProgramCompiler& c,
     c.bail(e.name + ": initial guess must be a vector");
   spec->prog = compile_rhs_args(with_leading_time(*spec->system()),
                                 *spec->funs(), x.len, spec->args);
+  if (!spec->prog.ok)
+    note_interpreter_fallback("the algebraic system " + spec->system_name,
+                              spec->prog.why);
 
   Range result{0, x.len};
   result.kind = ViewKind::Vector;
@@ -152,6 +155,9 @@ bool Lowering::lower_program_quadrature(ProgramCompiler& c, const mir::Expr& e,
                              *spec, &spec->parameter_count);
   spec->prog =
       compile_rhs_args(*spec->callback(), *spec->funs(), 1, spec->args);
+  if (!spec->prog.ok)
+    note_interpreter_fallback("the quadrature integrand " + spec->callback_name,
+                              spec->prog.why);
 
   const Range a = c.expr(e.args[1]);
   const Range b = c.expr(e.args[2]);
@@ -239,6 +245,9 @@ bool Lowering::lower_program_ode(ProgramCompiler& c, const mir::Expr& e,
                                    e.args.size(), *spec, &parameter_count);
     theta_active = parameter_count != 0;
     spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), S, spec->args);
+    if (!spec->prog.ok)
+      note_interpreter_fallback("the ODE right-hand side " + spec->rhs_name,
+                                spec->prog.why);
   }
 
   Range result{0, (int)(N * S)};
@@ -319,6 +328,9 @@ bool Lowering::lower_program_ode_adjoint(ProgramCompiler& c, const mir::Expr& e,
   const Range theta = program_callback_theta(
       c, e, call->callback_args_begin, e.args.size(), *spec, &parameter_count);
   spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), S, spec->args);
+  if (!spec->prog.ok)
+    note_interpreter_fallback(
+        "the adjoint ODE right-hand side " + spec->rhs_name, spec->prog.why);
 
   Range result{0, N * S};
   result.kind = ViewKind::Array;
@@ -370,6 +382,9 @@ bool Lowering::lower_program_dae(ProgramCompiler& c, const mir::Expr& e,
       c, e, call->callback_args_begin, e.args.size(), *spec, &parameter_count);
   spec->prog =
       compile_dae_args(*spec->residual(), *spec->funs(), S, spec->args);
+  if (!spec->prog.ok)
+    note_interpreter_fallback("the DAE residual " + spec->residual_name,
+                              spec->prog.why);
 
   Range result{0, (int)(N * S)};
   result.kind = ViewKind::Array;
@@ -451,6 +466,9 @@ bool Lowering::lower_program_higher_order(ProgramCompiler& c,
   args[2].ints = spec->x_i;
   spec->prog = compile_rhs_args(with_leading_time(*spec->system()),
                                 *spec->funs(), x.len, args);
+  if (!spec->prog.ok)
+    note_interpreter_fallback("the algebraic system " + spec->system_name,
+                              spec->prog.why);
 
   Range result{0, x.len};
   result.kind = ViewKind::Vector;
@@ -768,6 +786,9 @@ Lowering::Val Lowering::lower_quadrature_fn(const mir::Expr& e,
   }
   spec->prog =
       compile_rhs_args(*spec->callback(), *spec->funs(), 1, spec->args);
+  if (!spec->prog.ok)
+    note_interpreter_fallback("the quadrature integrand " + spec->callback_name,
+                              spec->prog.why);
 
   Val a = actuals.at(1).value();
   Val b = actuals.at(2).value();
@@ -857,6 +878,9 @@ Lowering::Val Lowering::lower_algebra_fn(const mir::Expr& e,
   args[2].ints = spec->x_i;
   spec->prog = compile_rhs_args(with_leading_time(*spec->system()),
                                 *spec->funs(), (int)n, args);
+  if (!spec->prog.ok)
+    note_interpreter_fallback("the algebraic system " + spec->system_name,
+                              spec->prog.why);
   if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ALGEBRA"))
     std::fprintf(stderr,
                  "stanli: algebraic system %s falls back to the "
@@ -1045,6 +1069,9 @@ std::optional<Lowering::Val> Lowering::lower_ode_variadic(
 
   spec->args = rargs;
   spec->prog = compile_rhs_args(*spec->rhs(), *spec->funs(), (int)S, rargs);
+  if (!spec->prog.ok)
+    note_interpreter_fallback("the ODE right-hand side " + spec->rhs_name,
+                              spec->prog.why);
   if (runtime_times)
     return emit_ode(std::move(spec), z0, theta, N, S, ode_result_view(e, N, S),
                     t0, ts);

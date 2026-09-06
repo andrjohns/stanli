@@ -215,6 +215,10 @@ int main(int argc, char** argv) {
   try {
     stanli::DataMap data = stanli::DataMap::from_json_file(argv[2]);
     cm = stanli::compile_model(mir, data);
+    {
+      const std::string note = stanli::interpreter_warning(cm);
+      if (!note.empty()) std::fprintf(stderr, "INTERP %s\n", note.c_str());
+    }
   } catch (const std::exception& e) {
     std::string what = e.what();
     const size_t nl = what.find('\n');

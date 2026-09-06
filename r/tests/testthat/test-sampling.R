@@ -30,7 +30,22 @@ test_that("a model compiles and reports its shape", {
   m <- es_model()
   expect_s3_class(m, "stanli_model")
   expect_equal(m$n_unconstrained, 10L)
-  expect_true(all(c("mu", "tau", "theta.1") %in% m$columns))
+  expect_true(all(c("mu", "tau", "theta[1]") %in% m$columns))
+})
+
+test_that("columns index with brackets the way posterior reads them", {
+  skip_without_runtime()
+  m <- stanli_model(code = "
+    parameters { real s; vector[2] v; matrix[2, 3] M; }
+    model { s ~ std_normal(); v ~ std_normal(); to_vector(M) ~ std_normal(); }")
+  expect_equal(m$columns, c("s", "v[1]", "v[2]", "M[1,1]", "M[2,1]",
+                            "M[1,2]", "M[2,2]", "M[1,3]", "M[2,3]"))
+  fit <- sample_model(m, chains = 1, warmup = 20, samples = 5, refresh = 0)
+  expect_equal(dimnames(fit$draws)[[3]], m$columns)
+  skip_if_not_installed("posterior")
+  rv <- posterior::as_draws_rvars(as_draws_array(fit))
+  expect_equal(dim(rv$M), c(2L, 3L))
+  expect_equal(length(rv$v), 2L)
 })
 
 test_that("log_prob_grad returns lp and a gradient of the right length", {
@@ -284,4 +299,23 @@ test_that("data reaches the model in the right shape", {
   expect_equal(m$n_unconstrained, 3L)
   g <- log_prob_grad(m, c(0.1, 0.2, 0.3))
   expect_true(is.finite(g$lp))
+})
+
+test_that("a part with no compiled path warns, or errors when refused", {
+  skip_without_runtime()
+  code <- "
+    parameters { real mu; }
+    model { mu ~ normal(0, 1); }
+    generated quantities {
+      real s = 0;
+      if (mu > 0) {
+        matrix[1100, 1000] big = rep_matrix(mu, 1100, 1000);
+        s = big[1, 1];
+      }
+    }"
+  expect_warning(stanli_model(code = code), "interpreter")
+  expect_warning(es_model(), NA)
+  Sys.setenv(STANLI_NO_INTERPRETER = "1")
+  on.exit(Sys.unsetenv("STANLI_NO_INTERPRETER"), add = TRUE)
+  expect_error(stanli_model(code = code), "STANLI_NO_INTERPRETER")
 })

@@ -12,8 +12,10 @@ import math
 import operator
 import os
 import pathlib
+import re
 import subprocess
 import sys
+import warnings
 
 import numpy as np
 
@@ -141,6 +143,8 @@ def _load_lib():
     lib.stanli_wa_n_columns.argtypes = [ctypes.c_void_p]
     lib.stanli_wa_column_name.restype = ctypes.c_char_p
     lib.stanli_wa_column_name.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+    lib.stanli_warnings.restype = ctypes.c_char_p
+    lib.stanli_warnings.argtypes = [ctypes.c_void_p]
     lib.stanli_wa_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.stanli_wa_seed_chain.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                          ctypes.c_uint32]
@@ -207,6 +211,70 @@ SAMPLER_COLUMNS = tuple(_lib.stanli_sampler_column_name(i).decode()
 
 def _dptr(a):
     return a.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+
+
+def _bracket(name):
+    """CmdStan's dot form to CmdStanPy's bracket form: theta.1.2 -> theta[1,2]."""
+    if "[" in name:
+        return name
+    parts = name.split(".")
+    if len(parts) < 2 or not all(p.isdigit() for p in parts[1:]):
+        return name
+    return parts[0] + "[" + ",".join(parts[1:]) + "]"
+
+
+_VARIABLE_INDEX_RE = re.compile(r"^(.+?)\[(\d+(?:,\d+)*)\]$")
+
+
+def _group_variables(names):
+    """{variable: (dims, index_array)} from bracket-form flat names.
+
+    First-appearance order. A column with no bracket suffix is a scalar
+    variable under its own name.
+    """
+    groups = {}
+    for col, name in enumerate(names):
+        m = _VARIABLE_INDEX_RE.match(name)
+        if m is None:
+            base, idx = name, ()
+        else:
+            base = m.group(1)
+            idx = tuple(int(i) - 1 for i in m.group(2).split(","))
+        groups.setdefault(base, []).append((idx, col))
+
+    out = {}
+    for base, entries in groups.items():
+        ndim = len(entries[0][0])
+        if ndim == 0:
+            out[base] = ((), np.array(entries[0][1], dtype=np.int64))
+            continue
+        if any(len(idx) != ndim for idx, _ in entries):
+            for _, col in entries:
+                out[names[col]] = ((), np.array(col, dtype=np.int64))
+            continue
+        dims = tuple(max(idx[d] for idx, _ in entries) + 1
+                     for d in range(ndim))
+        arr = np.full(dims, -1, dtype=np.int64)
+        for idx, col in entries:
+            arr[idx] = col
+        if (arr >= 0).all() and arr.size == len(entries):
+            out[base] = (dims, arr)
+        else:
+            for _, col in entries:
+                out[names[col]] = ((), np.array(col, dtype=np.int64))
+    return out
+
+
+def _resolve(name, variables, columns):
+    """(dims, index_array) for a variable, flat bracket, or dot name."""
+    if name in variables:
+        return variables[name]
+    bracketed = _bracket(name)
+    if bracketed in variables:
+        return variables[bracketed]
+    if bracketed in columns:
+        return (), np.array(columns[bracketed], dtype=np.int64)
+    raise ValueError(f"{name!r} is not a column or variable of this fit")
 
 
 _PATHFINDER_INIT_DEFAULTS = {
@@ -502,7 +570,9 @@ class Summary:
         return len(self.names)
 
     def __getitem__(self, name):
-        """The row for one parameter, as a dict."""
+        """The row for one parameter, as a dict. Dot names are also accepted."""
+        if name not in self.names:
+            name = _bracket(name)
         i = self.names.index(name)
         return {k: self.stats[i, j] for j, k in enumerate(_SUMMARY_STATS)}
 
@@ -531,11 +601,13 @@ class Summary:
 class Fit:
     """Draws from one sampling run, plus the sampler's own diagnostics.
 
-    Indexing by name gives every draw of that column with the chains
-    concatenated, which is what an estimate wants and what ``sample()``
-    returned before it grew chains::
+    Indexing by name gives every draw with the chains concatenated, which
+    is what an estimate wants and what ``sample()`` returned before it grew
+    chains::
 
         fit["mu"].mean()
+        fit["theta"]        # (chains*draws, 8), the declared shape
+        fit["theta[1]"]     # (chains*draws,), one column
 
     ``fit.draws("mu")`` keeps the chain axis -- shape (chains, draws) --
     which is what a trace plot or a per-chain check wants.
@@ -544,6 +616,8 @@ class Fit:
     def __init__(self, names, draws, sampler_stats, max_depth, seed,
                  reports=None):
         self.names = list(names)
+        self._columns = {n: i for i, n in enumerate(self.names)}
+        self._variables = _group_variables(self.names)
         self._draws = draws               # (chains, draws, cols)
         self.sampler_stats = sampler_stats  # (chains, draws, 7)
         self.max_depth = max_depth
@@ -564,23 +638,35 @@ class Fit:
     def n_draws(self):
         return self._draws.shape[1]
 
+    @property
+    def variables(self):
+        """{name: dims} for every declared variable, in declaration order."""
+        return {name: dims for name, (dims, idx) in self._variables.items()}
+
     def draws(self, name=None):
-        """(chains, draws) for one column, or (chains, draws, cols) for all."""
+        """(chains, draws, *dims) for one variable, or all columns if None.
+
+        A scalar variable, or a flat or dot column name, keeps the plain
+        (chains, draws) shape.
+        """
         if name is None:
             return self._draws
-        return self._draws[:, :, self.names.index(name)]
+        _, idx = _resolve(name, self._variables, self._columns)
+        return self._draws[:, :, idx]
 
     def __getitem__(self, name):
-        """Every draw of one column, chains concatenated.
+        """Every draw of one variable or column, chains concatenated.
 
-        Sampler columns (lp__, divergent__, ...) are reachable by name
-        here too, so `fit["lp__"]` works the way a CSV reader would
+        A variable name keeps its declared shape; a flat or dot name gives
+        one column. Sampler columns (lp__, divergent__, ...) are reachable
+        by name here too, so `fit["lp__"]` works the way a CSV reader would
         expect even though they are not posterior columns.
         """
         if name in SAMPLER_COLUMNS:
             col = SAMPLER_COLUMNS.index(name)
             return self.sampler_stats[:, :, col].reshape(-1)
-        return self._draws[:, :, self.names.index(name)].reshape(-1)
+        dims, idx = _resolve(name, self._variables, self._columns)
+        return self._draws[:, :, idx].reshape(-1, *dims)
 
     # The dict protocol the pre-chains API returned, so `fit["mu"]` and
     # `for k, v in fit.items()` keep working unchanged.
@@ -600,7 +686,11 @@ class Fit:
         return len(self.names)
 
     def __contains__(self, name):
-        return name in self.names
+        try:
+            _resolve(name, self._variables, self._columns)
+        except ValueError:
+            return False
+        return True
 
     @property
     def divergences(self):
@@ -641,9 +731,18 @@ class Fit:
             return np.where(den > 0, num / den, np.nan)
 
     def summary(self, params=None):
-        """Per-parameter summary. `params` selects columns by name."""
-        cols = (list(range(len(self.names))) if params is None
-                else [self.names.index(p) for p in params])
+        """Per-parameter summary. `params` selects columns by name.
+
+        Each entry in `params` may be a variable, flat, or dot name; a
+        variable name expands to all of its columns in column order.
+        """
+        if params is None:
+            cols = list(range(len(self.names)))
+        else:
+            cols = []
+            for p in params:
+                _, idx = _resolve(p, self._variables, self._columns)
+                cols.extend(int(c) for c in np.atleast_1d(idx).flatten("F"))
         sub = np.ascontiguousarray(self._draws[:, :, cols], dtype=np.float64)
         n_chains, n_draws, n_cols = sub.shape
         out = np.empty((n_cols, _N_SUMMARY_STATS))
@@ -679,7 +778,7 @@ class Fit:
         arviz is not a dependency; this raises ImportError without it.
         """
         import arviz as az
-        posterior = {n: self._draws[:, :, i] for i, n in enumerate(self.names)}
+        posterior = {var: self.draws(var) for var in self.variables}
         stats = {n.rstrip("_"): self.sampler_stats[:, :, i]
                  for i, n in enumerate(SAMPLER_COLUMNS)}
         return az.from_dict(posterior=posterior, sample_stats=stats)
@@ -694,9 +793,43 @@ class OptimizeResult(dict):
 
     A dict so `result["mu"]` reads the way a draw does, with the
     unconstrained point and lp attached for handing to `sample(inits=)`.
+    A variable name instead returns an array with its declared shape, e.g.
+    `result["theta"]` for a `vector[8]`; flat and dot names still give a
+    single float.
     """
     unconstrained = None
     lp = None
+
+    def __init__(self, data):
+        super().__init__(data)
+        self._names = list(data)
+        self._columns = {n: i for i, n in enumerate(self._names)}
+        self._variables = _group_variables(self._names)
+
+    @property
+    def variables(self):
+        """{name: dims} for every declared variable, in declaration order."""
+        return {name: dims for name, (dims, idx) in self._variables.items()}
+
+    def __missing__(self, key):
+        try:
+            dims, idx = _resolve(key, self._variables, self._columns)
+        except ValueError:
+            raise KeyError(key) from None
+        if dims == ():
+            return self[self._names[int(idx)]]
+        cols = idx.flatten("F")
+        return np.array([self[self._names[int(c)]] for c in cols]) \
+            .reshape(dims)
+
+    def __contains__(self, key):
+        if super().__contains__(key):
+            return True
+        try:
+            _resolve(key, self._variables, self._columns)
+        except ValueError:
+            return False
+        return True
 
 
 class Model:
@@ -736,9 +869,12 @@ class Model:
         self.n_unconstrained = _lib.stanli_n_unconstrained(self._m)
         n_con = _lib.stanli_n_constrained(self._m)
         self.constrained_names = [
-            _lib.stanli_constrained_name(self._m, i).decode()
+            _bracket(_lib.stanli_constrained_name(self._m, i).decode())
             for i in range(n_con)
         ]
+        note = _lib.stanli_warnings(self._m)
+        if note:
+            warnings.warn(note.decode(), RuntimeWarning, stacklevel=3)
 
     def __del__(self):
         if getattr(self, "_m", None):
@@ -795,7 +931,7 @@ class Model:
         """
         n_wa = _lib.stanli_wa_n_columns(self._m)
         if n_wa > 0:
-            return [_lib.stanli_wa_column_name(self._m, i).decode()
+            return [_bracket(_lib.stanli_wa_column_name(self._m, i).decode())
                     for i in range(n_wa)], True
         return list(self.constrained_names), False
 

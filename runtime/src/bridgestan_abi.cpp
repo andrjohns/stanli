@@ -330,6 +330,7 @@ bs_model* bs_model_from_mir(const char* mir, const char* data,
     m->cm.bind(*m->ex);
     m->pool.reset(new stanli::ExecutorPool(*m->ex));
 
+    std::string probe_failure;
     if (m->cm.write_array) {
       auto& wa = *m->cm.write_array;
       if (wa.interp) {
@@ -352,10 +353,12 @@ bs_model* bs_model_from_mir(const char* mir, const char* data,
             lease->run_forward_only();
             (void)m->wa_interp->eval(m->cm.constrained_env(*lease), probe);
             found = true;
-          } catch (const std::exception&) {
+          } catch (const std::exception& e) {
+            probe_failure = e.what();
           }
         }
         if (found) {
+          probe_failure.clear();
           m->cols = m->wa_interp->columns();
           m->n_tp_start = m->wa_interp->n_tp_start();
           m->n_gq_start = m->wa_interp->n_gq_start();
@@ -370,6 +373,11 @@ bs_model* bs_model_from_mir(const char* mir, const char* data,
         m->n_tp_start = wa.n_tp_start;
         m->n_gq_start = wa.n_gq_start;
       }
+    }
+    {
+      const std::string note =
+          stanli::interpreter_warning(m->cm, probe_failure);
+      if (!note.empty()) stanli::emit_message(note);
     }
     if (m->cols.empty()) {
       // No write_array (or none that could be evaluated): the constrained

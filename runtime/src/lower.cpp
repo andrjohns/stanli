@@ -1,5 +1,7 @@
 #include "lower_internal.hpp"
 
+#include "build_id.hpp"
+
 namespace stanli {
 namespace lower_detail {
 
@@ -783,6 +785,28 @@ CompiledModel Lowering::run(const mir::Program& p) {
 
 using namespace lower_detail;
 
+namespace {
+
+void add_interpreter_fallback(CompiledModel& cm, const std::string& note) {
+  auto& all = cm.interpreter_fallbacks;
+  if (std::find(all.begin(), all.end(), note) == all.end()) all.push_back(note);
+}
+
+std::string fallback_items(const CompiledModel& cm) {
+  std::string items;
+  for (const std::string& note : cm.interpreter_fallbacks)
+    items += (items.empty() ? "" : "; ") + note;
+  return items;
+}
+
+std::string report_request() {
+  return "Please report this at https://github.com/seantalts/stanli/issues "
+         "with this message and the model. stanli build " +
+         std::string(runtime_build_id()) + ".";
+}
+
+}  // namespace
+
 CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
   const char* prep_env = std::getenv("STANLI_PROFILE_PREP");
   PrepTrace prep(prep_env && prep_env[0] != '0');
@@ -813,6 +837,8 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
     wa.decls = lo.decls;
     prep.plain("write_array", "env_copy", env_copy_time);
     CompiledModel::WriteArray w = wa.run_write_array(*prog);
+    for (const std::string& note : wa.out.interpreter_fallbacks)
+      add_interpreter_fallback(cm, note);
     if (w.n_unconstrained != cm.n_unconstrained) {
       // The two graphs read the same draw; if they disagree on its length the
       // write_array cannot be driven at all. Keep the model, drop the columns,
@@ -849,6 +875,11 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
       w.interp = std::make_shared<WaInterp>(prog, std::move(env));
     }
     cm.write_array = std::move(w);
+    if (!cm.write_array->truncated.empty())
+      add_interpreter_fallback(cm,
+                               "transformed parameters and generated "
+                               "quantities (" +
+                                   cm.write_array->truncated + ")");
   }
   if (prog->has_transform_inits) {
     // The inverse parameter transforms. Nothing is interpreted here: the
@@ -901,9 +932,36 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
           std::make_shared<InitInterp>(prog, lo.td.env(), std::move(params));
     cm.transform_inits = std::move(ti);
   }
+  if (!cm.interpreter_fallbacks.empty() && std::getenv("STANLI_NO_INTERPRETER"))
+    throw CompileError(interpreter_error(cm));
   prep.plain("compile", "total", compile_time);
   prep.report();
   return cm;
+}
+
+std::string interpreter_error(const CompiledModel& cm) {
+  return "stanli: STANLI_NO_INTERPRETER is set and parts of this model have "
+         "no compiled path: " +
+         fallback_items(cm) +
+         ". Unset it to run them through the MIR interpreter, which is far "
+         "slower. " +
+         report_request();
+}
+
+std::string interpreter_warning(const CompiledModel& cm,
+                                const std::string& probe_failure) {
+  if (cm.interpreter_fallbacks.empty()) return "";
+  std::string text =
+      "stanli: parts of this model have no compiled path and run through the "
+      "MIR interpreter, which is far slower: " +
+      fallback_items(cm) + ".";
+  if (!probe_failure.empty())
+    text += " The interpreter also failed at every probe point (" +
+            probe_failure +
+            "), so transformed parameters and generated quantities are "
+            "unavailable and draws carry only the constrained parameters.";
+  return text + " " + report_request() +
+         " Set STANLI_NO_INTERPRETER=1 to refuse such models.";
 }
 
 }  // namespace stanli

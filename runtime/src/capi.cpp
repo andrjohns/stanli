@@ -12,6 +12,7 @@
 #include "build_id.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -60,6 +61,7 @@ struct stanli_model {
   // Seeded rather than default-constructed so a caller who never calls
   // stanli_wa_seed still gets the same rows every run.
   stanli::WaRng wa_rng{1};
+  std::string warnings;
 };
 
 namespace {
@@ -88,6 +90,7 @@ stanli_model* stanli_model_new(const char* tmir_sexp, const char* data_json,
     m->cm.bind(*m->ex);
     for (const auto& v : m->cm.views) m->n_con += v.len;
     m->flat_names = stanli::CompiledModel::csv_names(m->cm.views);
+    std::string probe_failure;
     if (m->cm.write_array) {
       auto& wa = *m->cm.write_array;
       if (wa.interp) {
@@ -111,10 +114,14 @@ stanli_model* stanli_model_new(const char* tmir_sexp, const char* data_json,
             m->wa_gq_start = scalar_column_start(m->wa_interp->columns(),
                                                  m->wa_interp->n_gq_start());
             found = true;
-          } catch (const std::exception&) {
+          } catch (const std::exception& e) {
+            probe_failure = e.what();
           }
         }
-        if (!found) m->wa_interp.reset();
+        if (found)
+          probe_failure.clear();
+        else
+          m->wa_interp.reset();
       } else if (!wa.columns.empty()) {
         m->wa_ex = std::make_unique<stanli::Executor>(std::move(wa.graph));
         wa.bind(*m->wa_ex);
@@ -124,6 +131,7 @@ stanli_model* stanli_model_new(const char* tmir_sexp, const char* data_json,
         m->wa_gq_start = scalar_column_start(wa.columns, wa.n_gq_start);
       }
     }
+    m->warnings = stanli::interpreter_warning(m->cm, probe_failure);
     return m.release();
   } catch (const std::exception& e) {
     put_err(err, err_len, e.what());
@@ -498,7 +506,18 @@ int stanli_sample_multi_progress(
     stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
     double* stats, stanli_sample_progress_cb progress, void* progress_user,
     stanli_sample_report* reports, char* err, size_t err_len) {
+  return stanli_sample_multi_interruptible(
+      m, opts, refresh, draws, stats, progress, progress_user, nullptr, nullptr,
+      nullptr, reports, err, err_len);
+}
+
+int stanli_sample_multi_interruptible(
+    stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
+    double* stats, stanli_sample_progress_cb progress, void* progress_user,
+    stanli_sample_poll_cb poll, void* poll_user, int* interrupted,
+    stanli_sample_report* reports, char* err, size_t err_len) {
   try {
+    if (interrupted != nullptr) *interrupted = 0;
     if (opts == nullptr) {
       put_err(err, err_len, "null options");
       return 1;
@@ -542,11 +561,16 @@ int stanli_sample_multi_progress(
       };
     }
 
+    std::function<bool()> poll_fn;
+    if (poll != nullptr)
+      poll_fn = [poll, poll_user] { return poll(poll_user) != 0; };
+
     std::vector<stanli::ChainResult> res;
     if (opts->inits == nullptr) {
       res = stanli::run_nuts_chains(execs, cfg, opts->num_threads, {},
-                                    progress_observer, refresh);
+                                    progress_observer, refresh, poll_fn);
     } else {
+      std::atomic<bool> stop{false};
       // Per-chain inits mean per-chain configs, which run_nuts_chains
       // does not take (it varies only the chain id). Run them one at a
       // time; explicit inits are a debugging and Pathfinder-handoff path,
@@ -556,6 +580,8 @@ int stanli_sample_multi_progress(
         stanli::NutsConfig cc = cfg;
         cc.chain_id = cfg.chain_id + c;
         cc.init = opts->inits + (int64_t)c * n;
+        cc.stop = &stop;
+        cc.poll = poll_fn;
         try {
           stanli::ProgressObserver one_progress;
           if (progress_observer)
@@ -582,6 +608,7 @@ int stanli_sample_multi_progress(
         reports[c].n_divergent = r.report.n_divergent;
         reports[c].n_max_treedepth = r.report.n_max_treedepth;
       }
+      if (interrupted != nullptr && r.report.interrupted) *interrupted = 1;
       if (!r.error.empty()) {
         if (failed++ == 0)
           first_error =
@@ -739,6 +766,10 @@ const char* stanli_constrained_name(const stanli_model* m, int64_t i) {
 }
 
 int64_t stanli_wa_n_columns(const stanli_model* m) { return m->wa_n; }
+
+const char* stanli_warnings(const stanli_model* m) {
+  return m->warnings.c_str();
+}
 
 int64_t stanli_wa_n_generated_start(const stanli_model* m) {
   return m->wa_n > 0 ? m->wa_gq_start : 0;

@@ -4,6 +4,7 @@
 #include <stanli/graph.hpp>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -45,6 +46,12 @@ struct NutsConfig {
   // (CompiledModel::transform_inits), rather than teaching every sampler
   // entry point a second kind of start.
   const double* init = nullptr;
+  // Cooperative interruption. A chain reads `stop` before every transition
+  // and returns the draws it has once it is set. `poll`, when present, is
+  // asked on the chain's own thread about every 100 ms; a true answer sets
+  // `stop` and ends the run.
+  std::atomic<bool>* stop = nullptr;
+  std::function<bool()> poll;
 };
 
 // One row per stored draw, in CmdStan's column order:
@@ -67,6 +74,7 @@ struct SamplingReport {
   double sampling_seconds = 0;
   int64_t n_divergent = 0;
   int64_t n_max_treedepth = 0;
+  bool interrupted = false;
 };
 
 // Optional per-transition observer for streaming consumers (the browser
@@ -129,10 +137,14 @@ bool thread_safe_build();
 // n_threads <= 1 runs sequentially. Larger values are honoured only on a
 // thread_safe_build(); elsewhere they are clamped to 1, because the
 // alternative is a wrong answer rather than a slow one.
+//
+// `poll` is asked on the calling thread about every 100 ms; a true answer
+// stops every chain after its current transition.
 std::vector<ChainResult> run_nuts_chains(
     const std::vector<Executor*>& execs, const NutsConfig& cfg,
     int n_threads = 1, const DrawObserver& observe = {},
-    const ChainProgressObserver& progress = {}, int progress_refresh = 1);
+    const ChainProgressObserver& progress = {}, int progress_refresh = 1,
+    const std::function<bool()>& poll = {});
 
 // Build `n` executors over the same compiled graph, copying it out of an
 // already-bound one. The caller keeps ownership; `src` is not modified.

@@ -66,3 +66,8 @@ Four chains by default, run in parallel: R-hat needs more than one
 chain, and a single-chain run cannot be checked for convergence at
 all. Chain `c` uses CmdStan's stream for `(seed, chain id c + 1)`.
 }
+\details{
+Interrupting R (Ctrl-C, or the stop button in RStudio) stops
+  every chain after its current transition and raises the usual
+  interrupt; no fit is returned.
+}

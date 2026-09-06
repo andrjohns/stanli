@@ -254,13 +254,14 @@ model = stanli.Model(stan_file="model.stan", data="data.json")
 model = stanli.Model(stan_code=src, data={"J": 8, "y": y, "sigma": sigma})
 
 model.n_unconstrained               # length of the unconstrained vector
-model.constrained_names             # ['mu', 'tau', 'theta.1', ...]
+model.constrained_names             # ['mu', 'tau', 'theta[1]', ...]
 
 lp, grad = model.log_prob_grad(q)   # sampling log density and its gradient
 
 fit = model.sample(seed=1, warmup=1000, samples=1000, delta=0.8,
                    refresh=100)
-fit["theta.1"]                      # ndarray, chains concatenated
+fit["theta"]                        # (chains*draws, 8) ndarray
+fit["theta[1]"]                     # one column, chains concatenated
 ```
 
 Pathfinder can generate one initialization per chain before NUTS. The
@@ -282,9 +283,11 @@ single-path Pathfinder does not perform PSIS resampling.
 `data` accepts a path to a JSON file or a dict of Python scalars,
 lists, and numpy arrays. `sample` returns every column CmdStan's CSV
 would carry (constrained parameters, transformed parameters, generated
-quantities, with RNG draws streamed per chain), named the way CmdStan
-names them, so `theta` declared as `vector[8]` arrives as `theta.1`
-through `theta.8`. Sampler columns (`lp__`, `divergent__`, ...) are
+quantities, with RNG draws streamed per chain); a `theta` declared as
+`vector[8]` gets columns `theta[1]` through `theta[8]`, the way CmdStanPy
+names them. Indexing by the variable name, `fit["theta"]`, returns an
+array with the declared shape; dot names like `theta.1` are still
+accepted when indexing. Sampler columns (`lp__`, `divergent__`, ...) are
 reachable by name too.
 
 ## Platforms

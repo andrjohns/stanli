@@ -201,6 +201,20 @@ int stanli_sample_multi_progress(
     double* stats, stanli_sample_progress_cb progress, void* progress_user,
     stanli_sample_report* reports, char* err, size_t err_len);
 
+/* Asked on the calling thread about every 100 ms while chains run. A nonzero
+ * answer stops every chain after its current transition. */
+typedef int (*stanli_sample_poll_cb)(void* user);
+
+/* stanli_sample_multi_progress plus cooperative interruption. A stopped run
+ * returns 0 with `*interrupted` set to 1 and only the rows stored before the
+ * stop written; the binding raises its language's interrupt from that. `poll`
+ * and `interrupted` may be null. Additive, like the progress entry point. */
+int stanli_sample_multi_interruptible(
+    stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
+    double* stats, stanli_sample_progress_cb progress, void* progress_user,
+    stanli_sample_poll_cb poll, void* poll_user, int* interrupted,
+    stanli_sample_report* reports, char* err, size_t err_len);
+
 /* The seven sampler columns, in order: lp__, accept_stat__, stepsize__,
  * treedepth__, n_leapfrog__, divergent__, energy__. */
 #define STANLI_N_SAMPLER_COLS 7
@@ -398,6 +412,10 @@ const char* stanli_wa_column_name(const stanli_model* m, int64_t i);
 void stanli_wa_seed(stanli_model* m, uint32_t seed);
 void stanli_wa_seed_chain(stanli_model* m, uint32_t seed, uint32_t chain);
 int stanli_wa_row(stanli_model* m, const double* q, double* out);
+/* Empty unless parts of the model have no compiled path and run through
+ * the MIR interpreter. Then a message to show once per model: which parts,
+ * why, and where to report it. Owned by the model. */
+const char* stanli_warnings(const stanli_model* m);
 
 #ifdef __cplusplus
 }

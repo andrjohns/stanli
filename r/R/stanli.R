@@ -50,7 +50,13 @@ read_utf8_file <- function(path) {
 #' @param data A named list of data, or a path to a JSON data file.
 #' @param mir Transformed MIR text, for a build without the embedded
 #'   compiler. Rarely needed.
-#' @return An object of class `stanli_model`.
+#' @return An object of class `stanli_model` whose `columns` name every
+#'   output the way the posterior package reads them, `theta[1,2]` for an
+#'   indexed value. Warns, naming the part and the
+#'   reason, when part of the model has no compiled path and runs through
+#'   the much slower MIR interpreter; with the environment variable
+#'   `STANLI_NO_INTERPRETER` set that is an error instead. Either message is
+#'   what to include in a bug report.
 #' @export
 stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL) {
   load_runtime()
@@ -77,10 +83,22 @@ stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL) {
   }
   ptr <- .Call("stanli_r_model_new", if (is_mir) mir else code, data_json,
                is_mir)
+  note <- .Call("stanli_r_warnings", ptr)
+  if (nzchar(note)) warning(note, call. = FALSE)
   structure(list(ptr = ptr,
                  n_unconstrained = .Call("stanli_r_n_unconstrained", ptr),
-                 columns = .Call("stanli_r_column_names", ptr)),
+                 columns = stan_variable_names(
+                   .Call("stanli_r_column_names", ptr))),
             class = "stanli_model")
+}
+
+stan_variable_names <- function(x) {
+  vapply(strsplit(x, ".", fixed = TRUE), function(parts) {
+    if (length(parts) > 1L && all(grepl("^[0-9]+$", parts[-1L])))
+      paste0(parts[1L], "[", paste(parts[-1L], collapse = ","), "]")
+    else
+      paste(parts, collapse = ".")
+  }, character(1))
 }
 
 #' @export
@@ -154,6 +172,9 @@ unconstrain <- function(model, values) {
 #' @param refresh Print a progress update every `refresh` transitions within
 #'   each phase, plus the first and last transition of the phase. Set to 0 to
 #'   suppress all automatic sampling output.
+#' @details Interrupting R (Ctrl-C, or the stop button in RStudio) stops
+#'   every chain after its current transition and raises the usual
+#'   interrupt; no fit is returned.
 #' @return An object of class `stanli_fit`. Its `report` element contains
 #'   per-chain warmup and sampling times plus exact divergence and
 #'   maximum-treedepth counts. With a compatible older runtime that predates
@@ -202,6 +223,12 @@ sample_model <- function(model, chains = 4, seed = 1, warmup = 1000,
                as.integer(max_depth), isTRUE(save_warmup),
                as.double(init_radius), as.integer(parallel_chains))
   res <- .Call("stanli_r_sample", model$ptr, opts, init_vec, refresh)
+  if (isTRUE(res$interrupted)) {
+    signalCondition(structure(class = c("interrupt", "condition"),
+                              list(message = "sampling interrupted",
+                                   call = NULL)))
+    invokeRestart("abort")
+  }
 
   nchain <- res$chains
   ndraw <- res$draws
