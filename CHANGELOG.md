@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+The runtime can now be built with `STANLI_NO_STDIO` defined, for R
+packaging: the object library then contains no stdout, stderr, abort, or
+assert-failure symbols. Debug traces that used to write directly to stderr
+(island carving, structured-loop diagnostics, the preparation profiler) now
+go through `emit_diagnostic`, a sink-backed channel parallel to `print()`'s
+existing `emit_message`. The preparation profiler no longer aborts if a
+model exceeds its previous fixed row count; it grows instead.
+
 ## 0.12.0
 
 ### Sampling can be interrupted
