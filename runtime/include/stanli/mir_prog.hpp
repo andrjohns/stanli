@@ -217,11 +217,10 @@ struct ProgramCompiler {
     int_decl_at.erase(name);
   }
 
-  // Registers are never recycled. Right-hand sides are a few lines over a
-  // handful of states, so the count stays in the dozens; the cap is a
-  // backstop against a pathological unroll, and trips into the interpreter
-  // rather than into a huge allocation.
-  static constexpr int kMaxRegs = 1 << 16;
+  // Registers are never recycled, so an unrolled generated-quantities
+  // region over a long series (hmm_gaussian, T=500) needs well over 2^16.
+  // The cap is a backstop against a pathological unroll.
+  static constexpr int kMaxRegs = 1 << 20;
 
   [[noreturn]] void bail(const std::string& why) { throw Bail{why}; }
 
