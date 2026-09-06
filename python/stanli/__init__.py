@@ -13,8 +13,10 @@ import operator
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
+import threading
 import warnings
 
 import numpy as np
@@ -95,6 +97,7 @@ class _SampleReport(ctypes.Structure):
 _SampleProgressCallback = ctypes.CFUNCTYPE(
     None, ctypes.c_int32, ctypes.c_int64, ctypes.c_int64, ctypes.c_int32,
     ctypes.c_void_p)
+_SamplePollCallback = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
 
 
 def _load_lib():
@@ -168,6 +171,13 @@ def _load_lib():
         ctypes.c_void_p, ctypes.POINTER(_SampleOpts), ctypes.c_int,
         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
         _SampleProgressCallback, ctypes.c_void_p,
+        ctypes.POINTER(_SampleReport), ctypes.c_char_p, ctypes.c_size_t]
+    lib.stanli_sample_multi_interruptible.restype = ctypes.c_int
+    lib.stanli_sample_multi_interruptible.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(_SampleOpts), ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        _SampleProgressCallback, ctypes.c_void_p, _SamplePollCallback,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(_SampleReport), ctypes.c_char_p, ctypes.c_size_t]
     lib.stanli_pathfinder_inits.restype = ctypes.c_int
     lib.stanli_pathfinder_inits.argtypes = [
@@ -275,6 +285,42 @@ def _resolve(name, variables, columns):
     if bracketed in columns:
         return (), np.array(columns[bracketed], dtype=np.int64)
     raise ValueError(f"{name!r} is not a column or variable of this fit")
+
+
+class _InterruptWatch:
+    """Turns Ctrl-C during a native call into a stop the sampler polls.
+
+    Python only runs its SIGINT handler when the main thread executes
+    bytecode, which during a foreign call is exactly the poll callback. A
+    handler that raised there would be swallowed by ctypes, so this one
+    records the signal and the poll answers it; the caller raises once the
+    sampler has returned. Off the main thread no handler can be installed
+    and the poll simply never fires.
+    """
+
+    def __init__(self):
+        self.tripped = False
+        self.previous = None
+        self.poll = _SamplePollCallback(lambda _user: 1 if self.tripped else 0)
+
+    def _handle(self, _signum, _frame):
+        self.tripped = True
+
+    def __enter__(self):
+        if threading.current_thread() is threading.main_thread():
+            self.previous = signal.signal(signal.SIGINT, self._handle)
+        return self
+
+    def __exit__(self, *_exc):
+        if self.previous is not None:
+            signal.signal(signal.SIGINT, self.previous)
+        return False
+
+    def raise_interrupt(self):
+        previous = self.previous
+        if callable(previous) and previous is not signal.default_int_handler:
+            previous(signal.SIGINT, None)
+        raise KeyboardInterrupt
 
 
 _PATHFINDER_INIT_DEFAULTS = {
@@ -1114,10 +1160,16 @@ class Model:
             # leave the sampler calling freed memory.
             progress_cb = _SampleProgressCallback(progress)
 
-        failed = _lib.stanli_sample_multi_progress(
-            self._m, ctypes.byref(opts), refresh, _dptr(raw), _dptr(stats),
-            progress_cb, None, reports, err, len(err))
+        interrupted = ctypes.c_int(0)
+        watch = _InterruptWatch()
+        with watch:
+            failed = _lib.stanli_sample_multi_interruptible(
+                self._m, ctypes.byref(opts), refresh, _dptr(raw),
+                _dptr(stats), progress_cb, None, watch.poll, None,
+                ctypes.byref(interrupted), reports, err, len(err))
         del init_arr
+        if interrupted.value:
+            watch.raise_interrupt()
         if failed:
             raise RuntimeError(
                 f"{failed} of {opts.chains} chains failed; first: "
