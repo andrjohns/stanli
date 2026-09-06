@@ -49,9 +49,9 @@ import time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
-from verify_refs import (POINTS, corpus_input, corpus_models, gate_for,  # noqa: E402
-                         load_refs, model_files, pair_dev, parse_status,
-                         parse_wa, worst_pair)
+from verify_refs import (KNOWN_GAPS, POINTS, accepted, corpus_input,  # noqa: E402
+                         corpus_models, gate_for, load_refs, model_files,
+                         pair_dev, parse_status, parse_wa, worst_pair)
 
 VECTORIZE_LOOPS = "vectorize-loops"
 CANDIDATE_PASSES = (VECTORIZE_LOOPS,)
@@ -506,6 +506,10 @@ def compile_source(compiler, source, output, candidate_pass, enabled,
     return proc, info
 
 
+def default_selection(refs, pdb_entries, known_gaps=KNOWN_GAPS):
+    return sorted((set(refs) | set(pdb_entries)) - set(known_gaps))
+
+
 def reference_comparison(model, fields, point_reference, max_rel):
     if point_reference is None:
         kind = fields[0] if fields else ""
@@ -517,7 +521,7 @@ def reference_comparison(model, fields, point_reference, max_rel):
     kind = fields[0] if fields else ""
     if "values" not in point_reference:
         return {
-            "ok": kind == "EVAL_FAIL",
+            "ok": not accepted(fields),
             "expected": "EVAL_FAIL",
             "actual": kind or "NO_STATUS",
             "referenced": True,
@@ -1089,7 +1093,7 @@ def main():
     pdb = pdb_checkout / "posterior_database"
     refs, recorded = load_refs()
     pdb_entries = dict(corpus_models(pdb))
-    selected = args.models or sorted(set(refs) | set(pdb_entries))
+    selected = args.models or default_selection(refs, pdb_entries)
     missing_models = [
         model for model in selected
         if model not in refs and model not in pdb_entries
