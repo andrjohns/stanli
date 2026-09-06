@@ -22,13 +22,14 @@
 #include <stanli/island.hpp>
 
 #include <stanli/graph.hpp>
+#include <stanli/message_sink.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/program_density.hpp>
 
-#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -633,10 +634,9 @@ int carve_islands(Graph& g,
       // difference between a region that is fast and one that merely
       // works, and nothing else about the model would show it.
       if (!priced_gen && std::getenv("STANLI_DEBUG_ISLAND"))
-        std::fprintf(stderr,
-                     "island: no adjoint generated for a %zu-op region; "
-                     "it will replay under var\n",
-                     j - i);
+        emit_diagnostic("island: no adjoint generated for a " +
+                        std::to_string(j - i) +
+                        "-op region; it will replay under var");
     }
     // Is the island cheaper than the ops it replaces? The graph's side is
     // what its ops move (an in-place element update moves one element, not
@@ -683,8 +683,9 @@ int carve_islands(Graph& g,
           adj_regs + (int64_t)cc.prog.code.size() +
           (int64_t)cc.prog.adj.code.size() + (kOpCost - 1) * 2 * n_calls;
       if (std::getenv("STANLI_DEBUG_ISLAND"))
-        std::fprintf(stderr, "island? ops=%zu graph=%lld island=%lld\n", j - i,
-                     (long long)graph_cost, (long long)island_cost);
+        emit_diagnostic("island? ops=" + std::to_string(j - i) +
+                        " graph=" + std::to_string(graph_cost) +
+                        " island=" + std::to_string(island_cost));
       if (graph_cost < island_cost) compiled = false;
     }
     if (compiled && destination_source && priced_gen) {
@@ -701,9 +702,9 @@ int carve_islands(Graph& g,
         if (usable) {
           cc.prog = std::move(optimized);
         } else if (std::getenv("STANLI_DEBUG_ISLAND")) {
-          std::fprintf(stderr,
-                       "island: destination forwarding kept the priced "
-                       "program because its optimized adjoint was refused\n");
+          emit_diagnostic(
+              "island: destination forwarding kept the priced program "
+              "because its optimized adjoint was refused");
         }
       }
     }
@@ -771,22 +772,25 @@ int carve_islands(Graph& g,
       }
       if (std::getenv("STANLI_DEBUG_ISLAND")) {
         const IslandProg& p = *static_cast<const IslandProg*>(is.udata);
-        std::fprintf(stderr,
-                     "island: ops=%zu instr=%zu regs=%d ins=%zu outs=%zu "
-                     "adj=%zu adj_regs=%d\n",
-                     j - i, p.code.size(), p.n_regs, p.ins.size(),
-                     p.out_regs.size(), p.adj.code.size(), p.adj.n_regs);
+        emit_diagnostic("island: ops=" + std::to_string(j - i) +
+                        " instr=" + std::to_string(p.code.size()) +
+                        " regs=" + std::to_string(p.n_regs) +
+                        " ins=" + std::to_string(p.ins.size()) +
+                        " outs=" + std::to_string(p.out_regs.size()) +
+                        " adj=" + std::to_string(p.adj.code.size()) +
+                        " adj_regs=" + std::to_string(p.adj.n_regs));
         // Which instructions the region is made of, so a disagreement
         // with the replay can be attributed to an opcode rather than
         // guessed at.
         std::vector<int> hist(64, 0);
         for (const auto& I : p.code)
           if ((int)I.code < 64) ++hist[(size_t)I.code];
-        std::fprintf(stderr, "island opcodes:");
+        std::string opcodes = "island opcodes:";
         for (int c = 0; c < 64; ++c)
           if (hist[(size_t)c])
-            std::fprintf(stderr, " %d:%d", c, hist[(size_t)c]);
-        std::fprintf(stderr, "\n");
+            opcodes +=
+                " " + std::to_string(c) + ":" + std::to_string(hist[(size_t)c]);
+        emit_diagnostic(opcodes);
       }
       ++carved;
       i = j;

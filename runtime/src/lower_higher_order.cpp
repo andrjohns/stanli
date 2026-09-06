@@ -882,10 +882,8 @@ Lowering::Val Lowering::lower_algebra_fn(const mir::Expr& e,
     note_interpreter_fallback("the algebraic system " + spec->system_name,
                               spec->prog.why);
   if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ALGEBRA"))
-    std::fprintf(stderr,
-                 "stanli: algebraic system %s falls back to the "
-                 "interpreter: %s\n",
-                 spec->system_name.c_str(), spec->prog.why.c_str());
+    emit_diagnostic("stanli: algebraic system " + spec->system_name +
+                    " falls back to the interpreter: " + spec->prog.why);
 
   SlotInfo si = view_of(e.type_);
   si.param_free = x.si.param_free && y.si.param_free;
@@ -905,10 +903,8 @@ Lowering::Val Lowering::emit_ode(std::shared_ptr<OdeSpec> spec, const Val& z0,
   // Falling back to the interpreter is correct but ~30x slower, so make
   // it findable rather than silent.
   if (!spec->prog.ok && std::getenv("STANLI_DEBUG_ODE"))
-    std::fprintf(stderr,
-                 "stanli: ODE right-hand side %s falls back to the "
-                 "interpreter: %s\n",
-                 spec->rhs_name.c_str(), spec->prog.why.c_str());
+    emit_diagnostic("stanli: ODE right-hand side " + spec->rhs_name +
+                    " falls back to the interpreter: " + spec->prog.why);
   if (spec->prog.ok &&
       (spec->solver == OdeSpec::RK45 || spec->solver == OdeSpec::CKRK)) {
     spec->direct_rk =
@@ -920,14 +916,12 @@ Lowering::Val Lowering::emit_ode(std::shared_ptr<OdeSpec> spec, const Val& z0,
       (spec->solver == OdeSpec::RK45 || spec->solver == OdeSpec::CKRK) &&
       std::getenv("STANLI_DEBUG_ODE")) {
     if (spec->direct_rk)
-      std::fprintf(stderr,
-                   "stanli: ODE right-hand side %s is direct-RK eligible%s\n",
-                   spec->rhs_name.c_str(),
-                   spec->direct_rk_enabled ? "" : " (oracle selected)");
+      emit_diagnostic("stanli: ODE right-hand side " + spec->rhs_name +
+                      " is direct-RK eligible" +
+                      (spec->direct_rk_enabled ? "" : " (oracle selected)"));
     else
-      std::fprintf(stderr,
-                   "stanli: ODE right-hand side %s keeps the RK oracle: %s\n",
-                   spec->rhs_name.c_str(), spec->direct_rk_why.c_str());
+      emit_diagnostic("stanli: ODE right-hand side " + spec->rhs_name +
+                      " keeps the RK oracle: " + spec->direct_rk_why);
   }
   Val v = t0 && ts ? emit_value(OP_ODE, {z0, theta, *t0, *ts}, N * S, result_si,
                                 {(int)N, (int)S})
