@@ -14,11 +14,13 @@ import pathlib
 import pickle
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from unittest import mock
 
 import numpy as np
@@ -523,6 +525,32 @@ def test_multichain_shapes_and_dict_protocol():
     # Sampler columns are reachable by name too.
     assert fit["lp__"].shape == (600,)
     assert fit.sampler_stats.shape == (3, 200, len(stanli.SAMPLER_COLUMNS))
+
+
+def test_ctrl_c_stops_sampling():
+    m = _es()
+    timer = threading.Timer(0.5, lambda: signal.raise_signal(signal.SIGINT))
+    timer.start()
+    started = time.perf_counter()
+    try:
+        m.sample(chains=2, seed=1, warmup=500000, samples=500000, refresh=0)
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("sampling ran to completion through a SIGINT")
+    finally:
+        timer.cancel()
+    assert time.perf_counter() - started < 60, "the stop took too long"
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, \
+        "the SIGINT handler was not restored"
+
+
+def test_sampling_off_the_main_thread_still_works():
+    m = _es()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        fit = pool.submit(m.sample, chains=1, seed=1, warmup=50, samples=20,
+                          refresh=0).result()
+    assert fit.n_draws == 20
 
 
 def test_chains_are_different_streams_and_seeds_reproduce():

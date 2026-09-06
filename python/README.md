@@ -264,6 +264,9 @@ fit["theta"]                        # (chains*draws, 8) ndarray
 fit["theta[1]"]                     # one column, chains concatenated
 ```
 
+Ctrl-C while `sample()` runs stops every chain after its current
+transition and raises `KeyboardInterrupt`.
+
 Pathfinder can generate one initialization per chain before NUTS. The
 sampling seed controls both stages; an empty options object uses CmdStan's
 single-path defaults:
