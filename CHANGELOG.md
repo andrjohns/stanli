@@ -18,6 +18,15 @@ spells an indexed value `theta[1,2]`, the form the posterior package and the
 rest of the R Stan tooling read, instead of the CSV header's `theta.1.2`.
 (#328)
 
+### Python reads variables by shape
+
+The Python package spells indexed values the same way: `Model.constrained_names`,
+`Fit.names`, summaries and `optimize()` results all use bracket names now.
+`Fit` and `OptimizeResult` also index by variable name: `fit["theta"]`
+returns an array with the declared dims rather than one flat column, and
+`to_arviz()` passes those dims through to the posterior group.
+Dot names like `theta.1` are still accepted wherever a name is looked up.
+
 ### A model that leaves the compiled path says so
 
 When the graph could not lower a model's transformed parameters and generated

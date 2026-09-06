@@ -304,7 +304,7 @@ def test_unconstrain_round_trip():
 
     values = {}
     for name, value in zip(names, row):
-        values.setdefault(name.split(".")[0], []).append(float(value))
+        values.setdefault(name.split("[")[0], []).append(float(value))
     values = {k: (v[0] if len(v) == 1 else v) for k, v in values.items()}
 
     back = m.unconstrain(values)
@@ -571,6 +571,82 @@ def test_summary_and_diagnostics():
     assert one["mu"]["mean"] == s["mu"]["mean"]
 
 
+SHAPES_SOURCE = """
+parameters {
+  real s;
+  vector[3] v;
+  matrix[2,3] M;
+  array[2] vector[3] a;
+  array[2,2] real r;
+  array[2] matrix[2,2] Q;
+}
+model {
+  s ~ std_normal();
+  v ~ std_normal();
+  to_vector(M) ~ std_normal();
+  for (i in 1:2) {
+    a[i] ~ std_normal();
+    to_vector(Q[i]) ~ std_normal();
+  }
+  for (i in 1:2) {
+    for (j in 1:2) {
+      r[i, j] ~ std_normal();
+    }
+  }
+}
+generated quantities {
+  real g = s;
+  array[2] vector[2] ag = a[:, 1:2];
+}
+"""
+
+
+def test_variables_are_shaped():
+    m = stanli.Model(stan_code=SHAPES_SOURCE)
+    fit = m.sample(chains=2, seed=1, warmup=100, samples=50, refresh=0)
+
+    assert fit.names[:6] == ["s", "v[1]", "v[2]", "v[3]", "M[1,1]", "M[2,1]"]
+    assert "Q[1,1,1]" in fit.names and "ag[1,1]" in fit.names
+    assert fit.variables == {
+        "s": (), "v": (3,), "M": (2, 3), "a": (2, 3), "r": (2, 2),
+        "Q": (2, 2, 2), "g": (), "ag": (2, 2),
+    }
+
+    assert fit["M"].shape == (100, 2, 3)
+    assert np.array_equal(fit["M"][:, 0, 1], fit["M[1,2]"])
+    assert np.array_equal(fit["M[1,2]"], fit["M.1.2"])
+
+    assert fit.draws("Q").shape == (2, 50, 2, 2, 2)
+    assert np.array_equal(fit.draws("Q")[:, :, 1, 0, 1], fit.draws("Q[2,1,2]"))
+
+    assert fit["s"].shape == (100,)
+    assert "M" in fit and "M[1,2]" in fit and "M.1.2" in fit
+
+    assert fit.summary(params=["M"]).names == [
+        "M[1,1]", "M[2,1]", "M[1,2]", "M[2,2]", "M[1,3]", "M[2,3]"]
+    assert fit.summary()["M.1.2"] == fit.summary()["M[1,2]"]
+
+
+def test_to_arviz_keeps_dims():
+    try:
+        import arviz  # noqa: F401
+    except ImportError:
+        return
+    m = stanli.Model(stan_code=SHAPES_SOURCE)
+    fit = m.sample(chains=2, seed=1, warmup=100, samples=50, refresh=0)
+    assert fit.to_arviz().posterior["M"].shape == (2, 50, 2, 3)
+
+
+def test_group_variables_incomplete_and_non_numeric():
+    variables = stanli._group_variables(["x[1]", "x[3]"])
+    assert set(variables) == {"x[1]", "x[3]"}
+    assert variables["x[1]"][0] == () and variables["x[3]"][0] == ()
+
+    variables = stanli._group_variables(["z.real"])
+    assert set(variables) == {"z.real"}
+    assert variables["z.real"][0] == ()
+
+
 def test_diagnostics_report_a_broken_fit():
     # A funnel sampled with a loose target and short warmup diverges
     # reliably. The point is not the model, it is that the checks come
@@ -690,7 +766,9 @@ def test_optimize_finds_a_mode_and_feeds_sample():
     m = _es()
     r = m.optimize(seed=1)
     # Every CSV column, the way one draw of sample() comes back.
-    assert "mu" in r and "tau" in r and "theta.1" in r
+    assert "mu" in r and "tau" in r and "theta[1]" in r
+    assert r["theta"].shape == (8,)
+    assert r["theta.1"] == r["theta[1]"]
     assert r.unconstrained.shape == (m.n_unconstrained,)
     # The reported lp must be the model's lp at that point, not the
     # objective the optimizer minimizes -- that sign slip is silent.
