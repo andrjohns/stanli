@@ -30,7 +30,7 @@ and `remotes::install_github()` or a checkout installs from source (see
 keeping installation small and avoiding a local stan-math build.
 
 - Performance vs CmdStan: [docs/benchmarks.md](docs/benchmarks.md).
-  Median gradient <!--gen:corpus_median-->2.93x<!--/gen--> across
+  Median gradient <!--gen:corpus_median-->3.02x<!--/gen--> across
   <!--gen:corpus_n_grad-->119<!--/gen--> posteriordb models,
   <!--gen:corpus_at_par-->117<!--/gen--> of them at or above CmdStan;
   <!--gen:bench_span-->0.8x-10.9x<!--/gen--> across the representative slice;

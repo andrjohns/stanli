@@ -190,7 +190,9 @@ answer every leapfrog step through a var tape, and that round trip was
 12 to 30 percent of sampling time on models whose gradient is cheap
 relative to their parameter count. `bym2_offset_only` (1000 warmup, 1000
 draws) went from 15.2 s to 12.6 s over the same 189728 gradient
-evaluations.
+evaluations. `tools/bench_grad.cpp` now times the sampler's real gradient
+call, `stan::model::gradient`, so the stanli gradient column is comparable
+with the sampler and slightly different in kind from earlier tables.
 
 ## 0.11.1
 
