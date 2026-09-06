@@ -19,6 +19,7 @@
 #include <stanli/mir_prog.hpp>
 #include <stanli/mir.hpp>
 #include <stanli/mir_decode.hpp>
+#include <stanli/message_sink.hpp>
 #include <stanli/mir_interp.hpp>
 #include <stanli/ode.hpp>
 #include <stanli/ode_adjoint.hpp>
@@ -36,7 +37,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #ifdef _WIN32
 #include <direct.h>
 #else
@@ -111,7 +111,9 @@ struct PrepTrace {
     int64_t udata = 0;
   };
 
-  explicit PrepTrace(bool enabled) : enabled_(enabled) {}
+  explicit PrepTrace(bool enabled) : enabled_(enabled) {
+    if (enabled_) rows_.reserve(32);
+  }
 
   bool enabled() const { return enabled_; }
 
@@ -173,8 +175,7 @@ struct PrepTrace {
 
   void report() const {
     if (!enabled_) return;
-    for (size_t i = 0; i < size_; ++i) {
-      const Row& r = rows_[i];
+    for (const Row& r : rows_) {
       std::string line = "stanli_prep graph=" + std::string(r.graph) +
                          " stage=" + r.stage + " ns=" + std::to_string(r.ns);
       const auto field = [&](const char* name, int64_t value) {
@@ -238,14 +239,13 @@ struct PrepTrace {
         field("idata_elems", r.idata_elems);
         field("udata", r.udata);
       }
-      std::fprintf(stderr, "%s\n", line.c_str());
+      emit_diagnostic(line);
     }
   }
 
  private:
   bool enabled_ = false;
-  std::array<Row, 32> rows_{};
-  size_t size_ = 0;
+  std::vector<Row> rows_;
 
   int64_t elapsed(Time from) const {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
@@ -254,10 +254,8 @@ struct PrepTrace {
   }
 
   Row& next() {
-    // There are currently 20 rows with a write_array graph. Keep this a fixed
-    // buffer so the profiler itself cannot show up as allocator work.
-    if (size_ >= rows_.size()) std::abort();
-    return rows_[size_++];
+    rows_.emplace_back();
+    return rows_.back();
   }
 };
 
@@ -309,11 +307,10 @@ struct PassDumper {
     const int n = n_++;
     if (!unfiltered && !selects(label)) return;
     if (to_stdout()) {
-      std::printf(";; %s\n", label.c_str());
-      std::fwrite(text.data(), 1, text.size(), stdout);
-      if (!text.empty() && text.back() != '\n') std::fputc('\n', stdout);
-      std::printf(";; end %s\n", label.c_str());
-      std::fflush(stdout);
+      std::string dump = ";; " + label + "\n" + text;
+      if (!text.empty() && text.back() != '\n') dump += '\n';
+      dump += ";; end " + label;
+      emit_message(dump);
       return;
     }
     char prefix[8];

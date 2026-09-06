@@ -156,6 +156,34 @@ jobs:
           node --check "$inline"
           node --check web/index.mjs
 
+  # Any runtime file can regress this, so it runs unconditionally rather
+  # than behind the `changes` classification.
+  no-stdio:
+    name: runtime without stdio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the vendored dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/math
+            deps/stan
+          key: deps-${{ runner.os }}-sources3-${{ hashFiles('deps/fetch.sh') }}
+      - run: ./deps/fetch.sh
+      - run: which ccache || sudo apt-get install -y ccache
+      - name: Restore the compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: >-
+            ccache-no-stdio-${{ hashFiles('CMakeLists.txt', 'runtime/**', 'tools/check_no_stdio.sh', 'deps/fetch.sh') }}
+          restore-keys: ccache-no-stdio-
+      - name: Build stanli_runtime_objects under STANLI_NO_STDIO
+        run: |
+          export CCACHE_DIR="$PWD/.ccache" CCACHE_COMPRESS=1 CCACHE_MAXSIZE=300M
+          ./tools/check_no_stdio.sh
+
   build:
     name: build (${{ matrix.plat }})
     needs: changes

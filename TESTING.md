@@ -634,6 +634,18 @@ counter in a regression test for maximum tree depth: `ar1` must average more
 than 40 leapfrog steps per iteration, which cannot occur with a depth-5 limit
 of 31.
 
+## Building without stdio
+
+The R package stanr vendors this repository's runtime sources into a
+CRAN-style package, and `R CMD check` rejects compiled code that references
+stdout, stderr, `printf`, `puts`, `abort`, `exit`, or the assert failure
+path. [`tools/check_no_stdio.sh`](tools/check_no_stdio.sh) configures the
+runtime object library with `-DSTANLI_NO_STDIO`, builds it, and scans every
+object file's undefined symbols for that list, failing with the offending
+file and symbol if any appear. The `no-stdio` job in
+[`.github/workflows/wheels.yml`](.github/workflows/wheels.yml) runs it on
+every pull request.
+
 ## Memory safety
 
 Memory errors do not always terminate the process; they can also produce

@@ -1,10 +1,10 @@
 #include <stanli/structured_loop.hpp>
+#include <stanli/message_sink.hpp>
 #include <stanli/optable.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -606,14 +606,16 @@ struct Segmenter {
         std::any_of(segment.program.ins.begin(), segment.program.ins.end(),
                     [](const IslandProg::LiveIn& in) { return in.active; });
     if (std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS"))
-      std::fprintf(stderr,
-                   "stanli_structured segment: items=%zu instr=%zu calls=%zu "
-                   "regs=%d ins=%zu outs=%zu adj=%zu adj_regs=%d active=%d\n",
-                   items.size(), segment.program.code.size(),
-                   segment.program.calls.size(), segment.program.n_regs,
-                   segment.ins.size(), segment.outs.size(),
-                   segment.program.adj.code.size(), segment.program.adj.n_regs,
-                   result.active ? 1 : 0);
+      emit_diagnostic(
+          "stanli_structured segment: items=" + std::to_string(items.size()) +
+          " instr=" + std::to_string(segment.program.code.size()) +
+          " calls=" + std::to_string(segment.program.calls.size()) +
+          " regs=" + std::to_string(segment.program.n_regs) +
+          " ins=" + std::to_string(segment.ins.size()) +
+          " outs=" + std::to_string(segment.outs.size()) +
+          " adj=" + std::to_string(segment.program.adj.code.size()) +
+          " adj_regs=" + std::to_string(segment.program.adj.n_regs) +
+          " active=" + std::to_string(result.active ? 1 : 0));
     p.segments.push_back(std::move(segment));
     return true;
   }
@@ -2111,19 +2113,25 @@ void structured_loop_forward(KernelCtx& ctx) {
       segment_records += r.kind == Record::Segment;
     }
     for (const auto& tape : s.memo_tape) memo_tape += tape.size();
-    std::fprintf(stderr,
-                 "stanli_structured tape: arena=%zu adjoints=%lld versions=%zu "
-                 "handles=%zu kernel_records=%zu updates=%zu undo=%zu "
-                 "copies=%zu targets=%zu workspace=%zu memo_nodes=%zu "
-                 "memo_restores=%zu memo_tape=%zu traces=%zu trace=%zu "
-                 "visits=%zu segments=%zu segment_records=%zu "
-                 "record_arena=%zu record_versions=%zu\n",
-                 arena_used, static_cast<long long>(s.adjoint_size),
-                 s.versions.size(), s.handles.size(), kernel_records, updates,
-                 s.undo.size() / 2, copies, s.target_refs.size(),
-                 s.workspace.size(), p.memo_count, s.memo_restores, memo_tape,
-                 p.trace_count, s.trace.size(), s.visits, p.segments.size(),
-                 segment_records, s.record_arena, s.record_versions);
+    emit_diagnostic(
+        "stanli_structured tape: arena=" + std::to_string(arena_used) +
+        " adjoints=" + std::to_string(s.adjoint_size) +
+        " versions=" + std::to_string(s.versions.size()) +
+        " handles=" + std::to_string(s.handles.size()) + " kernel_records=" +
+        std::to_string(kernel_records) + " updates=" + std::to_string(updates) +
+        " undo=" + std::to_string(s.undo.size() / 2) +
+        " copies=" + std::to_string(copies) +
+        " targets=" + std::to_string(s.target_refs.size()) +
+        " workspace=" + std::to_string(s.workspace.size()) +
+        " memo_nodes=" + std::to_string(p.memo_count) +
+        " memo_restores=" + std::to_string(s.memo_restores) + " memo_tape=" +
+        std::to_string(memo_tape) + " traces=" + std::to_string(p.trace_count) +
+        " trace=" + std::to_string(s.trace.size()) +
+        " visits=" + std::to_string(s.visits) +
+        " segments=" + std::to_string(p.segments.size()) +
+        " segment_records=" + std::to_string(segment_records) +
+        " record_arena=" + std::to_string(s.record_arena) +
+        " record_versions=" + std::to_string(s.record_versions));
   }
   s.memo_ready = true;
   s.reverse_ready = true;

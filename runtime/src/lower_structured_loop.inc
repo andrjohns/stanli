@@ -9,6 +9,13 @@ int region_control_depth = 0;
 bool region_control_active = false;
 unsigned structured_outer_depth = 0;
 
+// Matches ostream's default floating-point formatting.
+static std::string fmt_g(double v) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%g", v);
+  return buf;
+}
+
 void region_flush() {
   while (region_emitted < g.ops.size()) {
     RegionNode n;
@@ -1179,24 +1186,26 @@ std::optional<int64_t> region_while_capacity(const mir::Stmt& s,
   auto real_end = region_real_range(guard->args[1]);
   if (integer_counter ? (!int_start || !int_end) : (!real_start || !real_end)) {
     if (std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS")) {
-      std::cerr << "stanli_structured while capacity ranges counter=" << counter
-                << " integer=" << integer_counter << " start="
-                << bool(integer_counter ? bool(int_start) : bool(real_start))
-                << " end="
-                << bool(integer_counter ? bool(int_end) : bool(real_end))
-                << " real_slots=" << real_ranges.size() << "\n";
+      emit_diagnostic(
+          "stanli_structured while capacity ranges counter=" + counter +
+          " integer=" + std::to_string(integer_counter) + " start=" +
+          std::to_string(integer_counter ? bool(int_start) : bool(real_start)) +
+          " end=" +
+          std::to_string(integer_counter ? bool(int_end) : bool(real_end)) +
+          " real_slots=" + std::to_string(real_ranges.size()));
       std::function<void(const mir::Expr&)> show = [&](const mir::Expr& x) {
         if (x.kind == mir::Expr::Var) {
           auto sv = scope.find(x.name);
-          std::cerr << "  var " << x.name
-                    << " slot=" << (sv == scope.end() ? -1 : sv->second.slot);
+          std::string line =
+              "  var " + x.name +
+              " slot=" + std::to_string(sv == scope.end() ? -1 : sv->second.slot);
           if (sv != scope.end()) {
             auto rr = real_ranges.find(sv->second.slot);
             if (rr != real_ranges.end())
-              std::cerr << " range=[" << rr->second.lo << "," << rr->second.hi
-                        << "]";
+              line += " range=[" + fmt_g(rr->second.lo) + "," +
+                      fmt_g(rr->second.hi) + "]";
           }
-          std::cerr << "\n";
+          emit_diagnostic(line);
         }
         for (const auto& a : x.args) show(a);
       };
@@ -1268,8 +1277,9 @@ std::optional<int64_t> region_while_capacity(const mir::Stmt& s,
   for (const auto& st : s.body) advances(st, true);
   if (!valid) {
     if (std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS"))
-      std::cerr << "stanli_structured while capacity invalid update counter="
-                << counter << "\n";
+      emit_diagnostic(
+          "stanli_structured while capacity invalid update counter=" +
+          counter);
     return {};
   }
   int64_t count = 0;
@@ -1302,11 +1312,12 @@ std::optional<int64_t> region_while_capacity(const mir::Stmt& s,
           real_start->lo,
           std::max(real_start->hi, real_end->hi + real_step_hi)};
     if (std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS"))
-      std::cerr << "stanli_structured real while counter=" << counter
-                << " start=[" << real_start->lo << "," << real_start->hi
-                << "] end=[" << real_end->lo << "," << real_end->hi
-                << "] step=[" << real_step_lo << "," << real_step_hi
-                << "] capacity=" << count << "\n";
+      emit_diagnostic(
+          "stanli_structured real while counter=" + counter + " start=[" +
+          fmt_g(real_start->lo) + "," + fmt_g(real_start->hi) + "] end=[" +
+          fmt_g(real_end->lo) + "," + fmt_g(real_end->hi) + "] step=[" +
+          fmt_g(real_step_lo) + "," + fmt_g(real_step_hi) +
+          "] capacity=" + std::to_string(count));
   }
   *proven_counter = counter;
   return count;
@@ -1964,7 +1975,7 @@ bool try_lower_region(
   if (!force && profitable_unroll) return false;
   const auto refuse = [&](const std::string& reason) {
     if (std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS"))
-      std::fprintf(stderr, "stanli_structured refused: %s\n", reason.c_str());
+      emit_diagnostic("stanli_structured refused: " + reason);
     if (force)
       fail("compact loop lowering unavailable: " + reason +
            "; forced structured lowering cannot use the legacy path");
@@ -2147,8 +2158,8 @@ bool try_lower_region(
     }
     if (!candidate_ready) native_refusal = refusal;
     if (!candidate_ready && std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS"))
-      std::fprintf(stderr, "stanli_structured native candidate (%s): %s\n",
-                   s.loopvar.c_str(), refusal.c_str());
+      emit_diagnostic("stanli_structured native candidate (" + s.loopvar +
+                      "): " + refusal);
   }
   const bool diagnostics = std::getenv("STANLI_STRUCTURED_LOOP_DIAGNOSTICS") ||
                            std::getenv("STANLI_PROFILE_PREP");
@@ -2225,7 +2236,8 @@ bool try_lower_region(
             .slot);
   }
   if (diagnostics)
-    std::fprintf(stderr, "stanli_structured selected nodes=%zu kernels=%zu\n",
-                 plan->node_count, plan->body.ops.size());
+    emit_diagnostic("stanli_structured selected nodes=" +
+                    std::to_string(plan->node_count) +
+                    " kernels=" + std::to_string(plan->body.ops.size()));
   return true;
 }
