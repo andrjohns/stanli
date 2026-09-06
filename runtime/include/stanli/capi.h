@@ -201,6 +201,20 @@ int stanli_sample_multi_progress(
     double* stats, stanli_sample_progress_cb progress, void* progress_user,
     stanli_sample_report* reports, char* err, size_t err_len);
 
+/* Asked on the calling thread about every 100 ms while chains run. A nonzero
+ * answer stops every chain after its current transition. */
+typedef int (*stanli_sample_poll_cb)(void* user);
+
+/* stanli_sample_multi_progress plus cooperative interruption. A stopped run
+ * returns 0 with `*interrupted` set to 1 and only the rows stored before the
+ * stop written; the binding raises its language's interrupt from that. `poll`
+ * and `interrupted` may be null. Additive, like the progress entry point. */
+int stanli_sample_multi_interruptible(
+    stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
+    double* stats, stanli_sample_progress_cb progress, void* progress_user,
+    stanli_sample_poll_cb poll, void* poll_user, int* interrupted,
+    stanli_sample_report* reports, char* err, size_t err_len);
+
 /* The seven sampler columns, in order: lp__, accept_stat__, stepsize__,
  * treedepth__, n_leapfrog__, divergent__, energy__. */
 #define STANLI_N_SAMPLER_COLS 7

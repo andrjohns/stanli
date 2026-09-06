@@ -119,19 +119,44 @@ std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg,
   // Match Stan's timing boundary: initialization and stepsize search are
   // setup, not warmup transitions. In particular, warmup=0 should not report
   // model initialization as warmup time.
+  constexpr auto poll_period = std::chrono::milliseconds(100);
+  auto last_poll = Clock::now() - poll_period;
+  const auto stopping = [&]() {
+    if (cfg.stop && cfg.stop->load()) return true;
+    if (!cfg.poll) return false;
+    const auto now = Clock::now();
+    if (now - last_poll < poll_period) return false;
+    last_poll = now;
+    if (!cfg.poll()) return false;
+    if (cfg.stop) cfg.stop->store(true);
+    return true;
+  };
+  bool interrupted = false;
+
   const auto warmup_started = Clock::now();
-  for (int i = 0; i < cfg.warmup; ++i)
-    step(i, true, cfg.save_warmup && (i % thin == 0));
+  for (int i = 0; i < cfg.warmup && !interrupted; ++i) {
+    if (stopping())
+      interrupted = true;
+    else
+      step(i, true, cfg.save_warmup && (i % thin == 0));
+  }
   const auto warmup_finished = Clock::now();
   if (report)
     report->warmup_seconds =
         std::chrono::duration<double>(warmup_finished - warmup_started).count();
   sampler.disengage_adaptation();
   const auto sampling_started = Clock::now();
-  for (int i = 0; i < cfg.samples; ++i) step(i, false, i % thin == 0);
-  if (report)
+  for (int i = 0; i < cfg.samples && !interrupted; ++i) {
+    if (stopping())
+      interrupted = true;
+    else
+      step(i, false, i % thin == 0);
+  }
+  if (report) {
     report->sampling_seconds =
         std::chrono::duration<double>(Clock::now() - sampling_started).count();
+    report->interrupted = interrupted;
+  }
   return draws;
 }
 
@@ -173,17 +198,23 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
                                          const NutsConfig& cfg, int n_threads,
                                          const DrawObserver& observe,
                                          const ChainProgressObserver& progress,
-                                         int progress_refresh) {
+                                         int progress_refresh,
+                                         const std::function<bool()>& poll) {
   const size_t n_chains = execs.size();
   std::vector<ChainResult> out(n_chains);
+  std::atomic<bool> local_stop{false};
+  std::atomic<bool>* const stop = cfg.stop ? cfg.stop : &local_stop;
 
   // One chain's work, by index. A chain that throws records its message
   // and leaves its draws empty rather than taking the run down: CmdStan
   // reports a failed chain and keeps the others, and a three-of-four run
   // is something the caller can decide about.
-  const auto run_one = [&](size_t c, const ProgressObserver& one_progress) {
+  const auto run_one = [&](size_t c, const ProgressObserver& one_progress,
+                           const std::function<bool()>& chain_poll) {
     NutsConfig cc = cfg;
     cc.chain_id = cfg.chain_id + (int)c;
+    cc.stop = stop;
+    cc.poll = chain_poll;
     try {
       out[c].draws = run_nuts(*execs[c], cc, &out[c].stats,
                               n_chains == 1 ? observe : DrawObserver{},
@@ -216,7 +247,7 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
             progress_error = std::current_exception();
           }
         };
-      run_one(c, one_progress);
+      run_one(c, one_progress, poll);
     }
     if (progress_error) std::rethrow_exception(progress_error);
     return out;
@@ -266,7 +297,7 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
             }
             progress_ready.notify_one();
           };
-        run_one(c, one_progress);
+        run_one(c, one_progress, {});
       }
       {
         // Completion is part of the condition-variable predicate, so mutate
@@ -279,15 +310,31 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
     });
 
   std::exception_ptr progress_error;
-  if (progress) {
+  // The caller's poll runs here, between events, so a busy progress stream
+  // and a silent one both see it about every period.
+  using Clock = std::chrono::steady_clock;
+  constexpr auto poll_period = std::chrono::milliseconds(100);
+  auto last_poll = Clock::now() - poll_period;
+  const auto maybe_poll = [&] {
+    if (!poll || stop->load()) return;
+    const auto now = Clock::now();
+    if (now - last_poll < poll_period) return;
+    last_poll = now;
+    if (poll()) stop->store(true);
+  };
+  if (progress || poll) {
     for (;;) {
+      maybe_poll();
       ProgressEvent event{};
       {
         std::unique_lock<std::mutex> lock(progress_mutex);
-        progress_ready.wait(lock, [&] {
+        progress_ready.wait_for(lock, poll_period, [&] {
           return !progress_events.empty() || live_workers == 0;
         });
-        if (progress_events.empty()) break;
+        if (progress_events.empty()) {
+          if (live_workers == 0) break;
+          continue;
+        }
         event = progress_events.front();
         progress_events.pop_front();
       }

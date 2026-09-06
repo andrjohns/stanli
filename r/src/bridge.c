@@ -93,6 +93,7 @@ typedef struct {
 typedef void (*stanli_sample_progress_cb)(int32_t, int64_t, int64_t, int32_t,
                                           void*);
 typedef void (*stanli_path_cb)(int32_t, double, void*);
+typedef int (*stanli_sample_poll_cb)(void*);
 
 typedef struct {
   uint32_t seed;
@@ -134,6 +135,12 @@ static int (*p_sample_multi_progress)(void*, const stanli_sample_opts*, int,
                                       double*, double*,
                                       stanli_sample_progress_cb, void*,
                                       stanli_sample_report*, char*, size_t);
+static int (*p_sample_multi_interruptible)(void*, const stanli_sample_opts*,
+                                           int, double*, double*,
+                                           stanli_sample_progress_cb, void*,
+                                           stanli_sample_poll_cb, void*, int*,
+                                           stanli_sample_report*, char*,
+                                           size_t);
 static int (*p_pathfinder_inits)(void*, uint32_t, int, int, int, int, int,
                                  double, double*, stanli_path_cb, void*, char*,
                                  size_t);
@@ -216,6 +223,8 @@ SEXP stanli_bridge_load(SEXP path) {
    * than making an optional feature prevent the library loading. */
   *(void**)(&p_sample_multi_progress) =
       dl_sym(g_lib, "stanli_sample_multi_progress");
+  *(void**)(&p_sample_multi_interruptible) =
+      dl_sym(g_lib, "stanli_sample_multi_interruptible");
   /* Pathfinder initialization is also additive. Only callers that request it
    * require a runtime new enough to provide the symbol. */
   *(void**)(&p_pathfinder_inits) = dl_sym(g_lib, "stanli_pathfinder_inits");
@@ -398,6 +407,20 @@ static void sample_progress(int32_t chain_id, int64_t iteration, int64_t total,
   R_FlushConsole();
 }
 
+static void check_interrupt(void* unused) {
+  (void)unused;
+  R_CheckUserInterrupt();
+}
+
+/* A pending interrupt would longjmp straight through the runtime's C++
+ * frames. R_ToplevelExec catches it instead and answers FALSE, which the
+ * runtime turns into a stop; the R side raises the interrupt again once the
+ * sampler has returned. */
+static int sample_poll(void* user) {
+  (void)user;
+  return R_ToplevelExec(check_interrupt, NULL) ? 0 : 1;
+}
+
 static void print_sample_reports(const stanli_sample_opts* o, int64_t nchain,
                                  const stanli_sample_report* reports) {
   int64_t n_divergent = 0;
@@ -488,8 +511,14 @@ SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits, SEXP refresh) {
         "stanli_install(overwrite = TRUE) to update.\n");
     R_FlushConsole();
   }
+  int interrupted = 0;
   const int failed =
-      have_reports
+      p_sample_multi_interruptible != NULL
+          ? p_sample_multi_interruptible(
+                mm, &o, refresh_rate, REAL(raw), REAL(stats),
+                refresh_rate > 0 ? sample_progress : NULL, NULL, sample_poll,
+                NULL, &interrupted, reports, err, sizeof err)
+      : have_reports
           ? p_sample_multi_progress(mm, &o, refresh_rate, REAL(raw),
                                     REAL(stats),
                                     refresh_rate > 0 ? sample_progress : NULL,
@@ -499,6 +528,13 @@ SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits, SEXP refresh) {
     UNPROTECT(2);
     error("%d of %d chains failed; first: %s", failed, (int)nchain,
           err[0] ? err : "(no message)");
+  }
+  if (interrupted) {
+    const char* names[] = {"interrupted", ""};
+    SEXP out = PROTECT(mkNamed(VECSXP, names));
+    SET_VECTOR_ELT(out, 0, ScalarLogical(1));
+    UNPROTECT(3);
+    return out;
   }
   if (have_reports && refresh_rate > 0)
     print_sample_reports(&o, nchain, reports);

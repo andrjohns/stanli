@@ -661,6 +661,75 @@ void capture_progress(int32_t chain_id, int64_t iteration, int64_t total,
   capture->events.push_back({chain_id, iteration, total, warmup});
 }
 
+int poll_stop_at_once(void* user) {
+  ++*static_cast<int*>(user);
+  return 1;
+}
+
+int poll_keep_going(void* user) {
+  ++*static_cast<int*>(user);
+  return 0;
+}
+
+// The interruptible entry point is the progress sampler plus a poll: a stop
+// answer ends the run cleanly with the flag set, and a run whose poll never
+// stops it produces the same bytes as the plain sampler.
+void expect_interruptible_sampling() {
+  const std::string mir = slurp("tests/fixtures/gqconst.tmir.sexp");
+  const char* data = R"({"rectangular":[[1,4],[2,5],[3,6]]})";
+  char err[8192]{};
+  stanli_model* model = stanli_model_new(mir.c_str(), data, err, sizeof err);
+  expect_true("interruptible sampling model builds", model != nullptr);
+  if (model == nullptr) return;
+  stanli_sample_opts opts;
+  stanli_sample_opts_init(&opts);
+  opts.seed = 7;
+  opts.chains = 2;
+  opts.warmup = 40;
+  opts.samples = 40;
+  const int64_t n = stanli_n_unconstrained(model);
+  const int64_t rows = stanli_n_stored_draws(&opts);
+  const size_t n_draws = (size_t)(opts.chains * rows * n);
+  const size_t n_stats = (size_t)(opts.chains * rows * STANLI_N_SAMPLER_COLS);
+  for (int threads : {1, 2}) {
+    opts.num_threads = threads;
+    const std::string mode = threads == 1 ? " (sequential)" : " (threaded)";
+    std::vector<double> draws(n_draws, -1.0);
+    std::vector<double> stats(n_stats, -1.0);
+    stanli_sample_report reports[2];
+    int polls = 0;
+    int interrupted = -1;
+    err[0] = '\0';
+    int rc = stanli_sample_multi_interruptible(
+        model, &opts, 0, draws.data(), stats.data(), nullptr, nullptr,
+        poll_stop_at_once, &polls, &interrupted, reports, err, sizeof err);
+    expect_true("a stop answer ends sampling cleanly" + mode,
+                rc == 0 && interrupted == 1 && polls >= 1);
+    if (threads == 1)
+      expect_true("a stop before the first transition stores nothing" + mode,
+                  draws[0] == -1.0 && stats[0] == -1.0);
+
+    std::vector<double> plain_draws(n_draws), plain_stats(n_stats);
+    stanli_sample_report plain_reports[2];
+    rc = stanli_sample_multi_progress(model, &opts, 0, plain_draws.data(),
+                                      plain_stats.data(), nullptr, nullptr,
+                                      plain_reports, err, sizeof err);
+    expect_true("plain sampling succeeds" + mode, rc == 0);
+    polls = 0;
+    interrupted = -1;
+    rc = stanli_sample_multi_interruptible(
+        model, &opts, 0, draws.data(), stats.data(), nullptr, nullptr,
+        poll_keep_going, &polls, &interrupted, reports, err, sizeof err);
+    expect_true(
+        "a poll that never stops is observational" + mode,
+        rc == 0 && interrupted == 0 && polls >= 1 && draws == plain_draws &&
+            stats == plain_stats &&
+            reports[0].n_divergent == plain_reports[0].n_divergent &&
+            reports[1].n_max_treedepth == plain_reports[1].n_max_treedepth);
+  }
+  stanli_model_free(model);
+}
+
 // The additive progress entry point must be the old sampler plus observation:
 // same bytes, caller-thread callbacks, exact refresh schedule and reports.
 void expect_sampling_progress() {
@@ -915,6 +984,7 @@ int main() {
   expect_necessity_effects();
   expect_pathfinder();
   expect_sampling_progress();
+  expect_interruptible_sampling();
   expect_streaming_stats();
 
   if (failures == 0) std::printf("test_capi OK\n");

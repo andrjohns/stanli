@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Sampling can be interrupted
+
+Ctrl-C in R, or the stop button in RStudio, now stops every chain after its
+current transition and raises the usual interrupt, on every platform. Before,
+the interrupt could only land between chains, and on Windows it could take
+the session down. The C ABI gains `stanli_sample_multi_interruptible`, the
+progress sampler plus a poll callback asked on the calling thread about every
+100 ms; the R package uses it when the runtime provides it. (#327)
+
 ### A model that leaves the compiled path says so
 
 When the graph could not lower a model's transformed parameters and generated

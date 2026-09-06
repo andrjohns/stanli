@@ -160,6 +160,9 @@ unconstrain <- function(model, values) {
 #' @param refresh Print a progress update every `refresh` transitions within
 #'   each phase, plus the first and last transition of the phase. Set to 0 to
 #'   suppress all automatic sampling output.
+#' @details Interrupting R (Ctrl-C, or the stop button in RStudio) stops
+#'   every chain after its current transition and raises the usual
+#'   interrupt; no fit is returned.
 #' @return An object of class `stanli_fit`. Its `report` element contains
 #'   per-chain warmup and sampling times plus exact divergence and
 #'   maximum-treedepth counts. With a compatible older runtime that predates
@@ -208,6 +211,12 @@ sample_model <- function(model, chains = 4, seed = 1, warmup = 1000,
                as.integer(max_depth), isTRUE(save_warmup),
                as.double(init_radius), as.integer(parallel_chains))
   res <- .Call("stanli_r_sample", model$ptr, opts, init_vec, refresh)
+  if (isTRUE(res$interrupted)) {
+    signalCondition(structure(class = c("interrupt", "condition"),
+                              list(message = "sampling interrupted",
+                                   call = NULL)))
+    invokeRestart("abort")
+  }
 
   nchain <- res$chains
   ndraw <- res$draws

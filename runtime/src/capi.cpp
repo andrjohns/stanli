@@ -12,6 +12,7 @@
 #include "build_id.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -505,7 +506,18 @@ int stanli_sample_multi_progress(
     stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
     double* stats, stanli_sample_progress_cb progress, void* progress_user,
     stanli_sample_report* reports, char* err, size_t err_len) {
+  return stanli_sample_multi_interruptible(
+      m, opts, refresh, draws, stats, progress, progress_user, nullptr, nullptr,
+      nullptr, reports, err, err_len);
+}
+
+int stanli_sample_multi_interruptible(
+    stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
+    double* stats, stanli_sample_progress_cb progress, void* progress_user,
+    stanli_sample_poll_cb poll, void* poll_user, int* interrupted,
+    stanli_sample_report* reports, char* err, size_t err_len) {
   try {
+    if (interrupted != nullptr) *interrupted = 0;
     if (opts == nullptr) {
       put_err(err, err_len, "null options");
       return 1;
@@ -549,11 +561,16 @@ int stanli_sample_multi_progress(
       };
     }
 
+    std::function<bool()> poll_fn;
+    if (poll != nullptr)
+      poll_fn = [poll, poll_user] { return poll(poll_user) != 0; };
+
     std::vector<stanli::ChainResult> res;
     if (opts->inits == nullptr) {
       res = stanli::run_nuts_chains(execs, cfg, opts->num_threads, {},
-                                    progress_observer, refresh);
+                                    progress_observer, refresh, poll_fn);
     } else {
+      std::atomic<bool> stop{false};
       // Per-chain inits mean per-chain configs, which run_nuts_chains
       // does not take (it varies only the chain id). Run them one at a
       // time; explicit inits are a debugging and Pathfinder-handoff path,
@@ -563,6 +580,8 @@ int stanli_sample_multi_progress(
         stanli::NutsConfig cc = cfg;
         cc.chain_id = cfg.chain_id + c;
         cc.init = opts->inits + (int64_t)c * n;
+        cc.stop = &stop;
+        cc.poll = poll_fn;
         try {
           stanli::ProgressObserver one_progress;
           if (progress_observer)
@@ -589,6 +608,7 @@ int stanli_sample_multi_progress(
         reports[c].n_divergent = r.report.n_divergent;
         reports[c].n_max_treedepth = r.report.n_max_treedepth;
       }
+      if (interrupted != nullptr && r.report.interrupted) *interrupted = 1;
       if (!r.error.empty()) {
         if (failed++ == 0)
           first_error =
