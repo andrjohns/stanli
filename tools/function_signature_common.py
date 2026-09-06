@@ -129,13 +129,9 @@ CONTEXT_DATA = {"context_seed": 0.0}
 
 
 def all_context_model(function_name: str, body: str, provenance: str,
-                      partition: str = "", timeout: int = 180) -> str:
+                      partition: str = "") -> str:
     partition_line = f"// {partition}\n" if partition else ""
-    return f"""// STANLI-LIT: PASS
-// STANLI-LIT-EXPECT: OK
-// STANLI-LIT-DATA: {json.dumps(CONTEXT_DATA)}
-// STANLI-LIT-TIMEOUT: {timeout}
-// {provenance}
+    return f"""// {provenance}
 // and `stanc --dump-stan-math-signatures`. Do not edit by hand.
 {partition_line}functions {{
   real {function_name}(real seed) {{

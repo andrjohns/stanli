@@ -35,6 +35,7 @@ import concurrent.futures
 import gzip
 import hashlib
 import json
+import os
 import pathlib
 import platform
 import subprocess
@@ -61,8 +62,8 @@ POINTS = 3
 GATE = 1e-8
 
 
-def run(argv, timeout=600):
-    result = subprocess.run([str(x) for x in argv], cwd=REPO,
+def run(argv, timeout=600, env=None):
+    result = subprocess.run([str(x) for x in argv], cwd=REPO, env=env,
                             text=True, capture_output=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError(f"{argv[0]} failed ({result.returncode}):\n"
@@ -214,9 +215,13 @@ def compare(name, source, manifest_sha, functions, reference, ledger,
     worst = 0.0
 
     def evaluate(point):
+        # The models exist to exercise the compiled paths; a section the
+        # MIR interpreter took over would replay correctly and prove
+        # nothing, so make that a compile error instead of a warning.
         return parse(run([args.build / "stanli_check", source, args.data,
                           "--stanc", args.stanc, "--point", point,
-                          "--wa-values"]))
+                          "--wa-values"],
+                         env={**os.environ, "STANLI_NO_INTERPRETER": "1"}))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=POINTS) as pool:
         evaluations = list(pool.map(evaluate, range(POINTS)))

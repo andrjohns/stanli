@@ -34,8 +34,8 @@
         "beta_lccdf",
         "beta_lcdf"
       ],
-      "source_bytes": 196794,
-      "source_sha256": "340606b2debbf7ed693b760cd04a673bba51c8acf5ff02e28829b7561f138471"
+      "source_bytes": 196680,
+      "source_sha256": "1bfb9ec7a587fd30efb6ac5ecd275b228eabdb7d0df97757065f08c557fd242d"
     },
     {
       "case_count": 1440,
@@ -46,8 +46,8 @@
         "beta_neg_binomial_cdf",
         "beta_neg_binomial_lccdf"
       ],
-      "source_bytes": 217834,
-      "source_sha256": "924f177d2f8d6abab0d1f3293b8e2ee7c4349033e91b8bfb30677d9837b06f11"
+      "source_bytes": 217720,
+      "source_sha256": "a6ce566dc7c2c7dbd1154237edaae69019b7b2ccf0213f1d6c180fd6968ef0be"
     },
     {
       "case_count": 1440,
@@ -58,8 +58,8 @@
         "beta_proportion_lccdf",
         "beta_proportion_lcdf"
       ],
-      "source_bytes": 226339,
-      "source_sha256": "1c200c79930161dfd518cb2f3a79bd4941c736d72f4246fc74006e9cb1828ba5"
+      "source_bytes": 226225,
+      "source_sha256": "9c82e7ecc4881aa1e2da6f8cfc4f8841e9112e1720108c9f575c56196ef87448"
     },
     {
       "case_count": 1440,
@@ -80,8 +80,8 @@
         "cauchy_lccdf",
         "cauchy_lcdf"
       ],
-      "source_bytes": 179769,
-      "source_sha256": "69e390a25600626cc134bafa4c87c00568d8a43f4edde81aa6e8efe14000dd4a"
+      "source_bytes": 179655,
+      "source_sha256": "d05adf5f5d38481193aecc2747a4e1a4ddae4fd4caacb7ebb1f3cc2e9eb7235c"
     },
     {
       "case_count": 1440,
@@ -101,8 +101,8 @@
         "double_exponential_lcdf",
         "double_exponential_lpdf"
       ],
-      "source_bytes": 183252,
-      "source_sha256": "be7c5f16ae44d6ab36f63cf5c1a209ab7ff8137f3dba5083d8016d40ca0e49f2"
+      "source_bytes": 183138,
+      "source_sha256": "b97a3d394523b9d3b2436cdc98079c3843bd92eced26a8b29e3021fa3b3695cd"
     },
     {
       "case_count": 1440,
@@ -111,8 +111,8 @@
         "double_exponential_lpdf",
         "exp_mod_normal_cdf"
       ],
-      "source_bytes": 216114,
-      "source_sha256": "70eac37b859ec546b24654c1d3ef2be28a82d2a87ef7eaaec72db5e63610974b"
+      "source_bytes": 216000,
+      "source_sha256": "b609525dd4bcb14618bb940c73b6478487e94855a54388a5a26a86bc399d98bf"
     },
     {
       "case_count": 1440,
@@ -122,8 +122,8 @@
         "exp_mod_normal_lccdf",
         "exp_mod_normal_lcdf"
       ],
-      "source_bytes": 224735,
-      "source_sha256": "9e7c8b6f39bee8b584cabcb39121d3b4e817a1146b1c92ccc79e3f99c9470b02"
+      "source_bytes": 224621,
+      "source_sha256": "57bd33839ffac4e5ceef2e162157dc07772deec94f2e1a4e9adc3c4d7a1e82ca"
     },
     {
       "case_count": 1440,
@@ -132,8 +132,8 @@
         "exp_mod_normal_lcdf",
         "exp_mod_normal_lpdf"
       ],
-      "source_bytes": 222320,
-      "source_sha256": "02398a6c8f5d07ad22dde008e04945fe158aa59aa5ce2e63960621f55fd18368"
+      "source_bytes": 222206,
+      "source_sha256": "8f2a5a95f4583e0873388761b36993cd65b9bdc7d2c6f3e14a72ebf14e986537"
     },
     {
       "case_count": 1440,
@@ -147,8 +147,8 @@
         "frechet_cdf",
         "frechet_lccdf"
       ],
-      "source_bytes": 204484,
-      "source_sha256": "60d9eb8381607aac96ab2fc90dc9566d041e75824b404364069471cfa30517d7"
+      "source_bytes": 204370,
+      "source_sha256": "762c2b4899d8c1f2f76e3670a085833669670abf7bac28c3e6c0ad6c659fdc5c"
     },
     {
       "case_count": 1440,
@@ -161,8 +161,8 @@
         "gamma_lccdf",
         "gamma_lcdf"
       ],
-      "source_bytes": 180077,
-      "source_sha256": "346c9974ff8946b80a9006eac5a140bc34b6b784caefc4099046b1c6d417161d"
+      "source_bytes": 179963,
+      "source_sha256": "d16232941818bea917f9563b3a89e7439861a5422e86d4f851b6f8aec0d19190"
     },
     {
       "case_count": 1440,
@@ -178,8 +178,8 @@
         "inv_chi_square_cdf",
         "inv_chi_square_lccdf"
       ],
-      "source_bytes": 167372,
-      "source_sha256": "cbac52e64576f88ca4ff5fa44509dce0a41122b13ee509456b0d93f420210e9e"
+      "source_bytes": 167258,
+      "source_sha256": "962d3dd679a2223618ca85ce873d3ee799d9b2a1cf76707807530b83bcc4fe1e"
     },
     {
       "case_count": 1440,
@@ -200,8 +200,8 @@
         "logistic_cdf",
         "logistic_lccdf"
       ],
-      "source_bytes": 181733,
-      "source_sha256": "7034053ffc6aa6b25c6b6c33d7418395a5f4b1cdc6b2b4d417f18b5b79310177"
+      "source_bytes": 181619,
+      "source_sha256": "b66adbbeb28826be980712620cfd9a17d75a39268ceef7e7b3cda1d8f6998355"
     },
     {
       "case_count": 1440,
@@ -214,8 +214,8 @@
         "loglogistic_lpdf",
         "lognormal_cdf"
       ],
-      "source_bytes": 179740,
-      "source_sha256": "1cffccae00f380da5082a18f8a5fec2bd0e1dbc0cd5b13fdb9090cddc479ea20"
+      "source_bytes": 179626,
+      "source_sha256": "627459b650da237a01fdc64a2ae9024f792512c5f0af0bc5c6f8ad821cd087b9"
     },
     {
       "case_count": 1440,
@@ -238,8 +238,8 @@
         "neg_binomial_2_lccdf",
         "neg_binomial_2_lcdf"
       ],
-      "source_bytes": 190788,
-      "source_sha256": "9eeff4489b1f73965734ca294b54b9e2f7c9c986b8ddb32823d957494bbfbabe"
+      "source_bytes": 190674,
+      "source_sha256": "421890aeb6ad121d52342772f1e9689b3c6c2726591aca6b4168a95616b3e9be"
     },
     {
       "case_count": 1440,
@@ -258,8 +258,8 @@
         "normal_lccdf",
         "normal_lcdf"
       ],
-      "source_bytes": 182188,
-      "source_sha256": "234000218c019f3542d866de4ab577a558dd2759e6b34de7d44ee1b5e1b65714"
+      "source_bytes": 182074,
+      "source_sha256": "bf17c6e4eb740febfc8df1fb41cc73523268cb761346cd11d00e779799dfd83d"
     },
     {
       "case_count": 1440,
@@ -276,8 +276,8 @@
         "pareto_lpdf",
         "pareto_type_2_cdf"
       ],
-      "source_bytes": 181591,
-      "source_sha256": "5e17335230242f74fe047db46745a980eb516ee7a21a28d8b66d4e21a3d1d344"
+      "source_bytes": 181477,
+      "source_sha256": "1f7bef770ea452d17cb6f04d74243ab3c9e5c4dd7e2b646dc0b4687491db4f61"
     },
     {
       "case_count": 1440,
@@ -286,8 +286,8 @@
         "pareto_type_2_cdf",
         "pareto_type_2_lccdf"
       ],
-      "source_bytes": 237529,
-      "source_sha256": "939f38779a2f9da3762f8648c4b819cb0e61cb6536c0c1dd9956eb68add162ca"
+      "source_bytes": 237415,
+      "source_sha256": "5205b010b7642d7e9cc350984d8442dc74e51dd455780fede21de0440944143f"
     },
     {
       "case_count": 1440,
@@ -296,8 +296,8 @@
         "pareto_type_2_lccdf",
         "pareto_type_2_lcdf"
       ],
-      "source_bytes": 241404,
-      "source_sha256": "f4889045199d5ec4b22ee09f933fbd772daf861c38fa2ac6157017d4a02af437"
+      "source_bytes": 241290,
+      "source_sha256": "ac09d014aaa5a09998ba62bb1951a634f69727487685b5b6edd0bf251449c095"
     },
     {
       "case_count": 1440,
@@ -306,8 +306,8 @@
         "pareto_type_2_lcdf",
         "pareto_type_2_lpdf"
       ],
-      "source_bytes": 238109,
-      "source_sha256": "7c96d5aec193fe87e3845de31673a99f7c98fbe535f7ce24644237f396cfdfdf"
+      "source_bytes": 237995,
+      "source_sha256": "4cbd59a243542b3debdc20f5d7b0e40d62408cda13f41fa455c55190135e9884"
     },
     {
       "case_count": 1440,
@@ -327,8 +327,8 @@
         "scaled_inv_chi_square_cdf",
         "scaled_inv_chi_square_lccdf"
       ],
-      "source_bytes": 215715,
-      "source_sha256": "ad6fef18a0bed63084e40bb8b06cf6f5037e3a23fefc18aea0e03cff3394cb90"
+      "source_bytes": 215601,
+      "source_sha256": "b25184a71fd24faca238134478da161ec2a1349ad93998f143051ca5bc441fea"
     },
     {
       "case_count": 1440,
@@ -339,8 +339,8 @@
         "scaled_inv_chi_square_lpdf",
         "skew_double_exponential_cdf"
       ],
-      "source_bytes": 229468,
-      "source_sha256": "87d895e38bb70322388d42bcf413eef8a7e2d91b34944f04187ba0639ebc761f"
+      "source_bytes": 229354,
+      "source_sha256": "718c93757ac2cff57b3dd5be72c99fa0c684b515ad49a38ccd8fa6d1114befed"
     },
     {
       "case_count": 1440,
@@ -349,8 +349,8 @@
         "skew_double_exponential_cdf",
         "skew_double_exponential_lccdf"
       ],
-      "source_bytes": 243234,
-      "source_sha256": "867a47bd32818246b48298f3d9912d18acb6d7fa0c4f3a54c276d622c432d7e5"
+      "source_bytes": 243120,
+      "source_sha256": "e7548ecdbbb828ec133c552406c56a55f2c95cf3e1179efba4647e349ab8695e"
     },
     {
       "case_count": 1440,
@@ -359,8 +359,8 @@
         "skew_double_exponential_lccdf",
         "skew_double_exponential_lcdf"
       ],
-      "source_bytes": 241839,
-      "source_sha256": "003df0fa55fbd7e269391871f9d613a1ab3de3ac131d1a85f0fc961323ed3bbc"
+      "source_bytes": 241725,
+      "source_sha256": "b3348c46d6939ce7fc2eaeefa8a8a27456ebfeadb424bfccbcd1ffe6164ab820"
     },
     {
       "case_count": 1440,
@@ -370,8 +370,8 @@
         "skew_double_exponential_lpdf",
         "skew_normal_cdf"
       ],
-      "source_bytes": 240429,
-      "source_sha256": "1533fbdc70dccb4f3decb61bb29198a4c93cecbf76d782960dc17b7170326bd9"
+      "source_bytes": 240315,
+      "source_sha256": "4241b4331cd36c062d42cf57cad006ccefb59489524bd983957c1edff501e9e4"
     },
     {
       "case_count": 1440,
@@ -380,8 +380,8 @@
         "skew_normal_cdf",
         "skew_normal_lccdf"
       ],
-      "source_bytes": 204409,
-      "source_sha256": "50e4bf34bfce91816f7db8cdf43791bcd87a0682bb4f4dc7bc86424656517e62"
+      "source_bytes": 204295,
+      "source_sha256": "7aca5c3f426e484a022faee6edfe5841d788f95fa942dc9b8340730ecea5446a"
     },
     {
       "case_count": 1440,
@@ -390,8 +390,8 @@
         "skew_normal_lccdf",
         "skew_normal_lcdf"
       ],
-      "source_bytes": 208284,
-      "source_sha256": "b38ac861cdfa43aac0c518c323c792c6b1f71674ed733af169779bbf738ba0e0"
+      "source_bytes": 208170,
+      "source_sha256": "cb2f4a9afb7bf5320376f12695124a3993313a5909a8b83892e5cb9d29697016"
     },
     {
       "case_count": 1440,
@@ -400,8 +400,8 @@
         "skew_normal_lcdf",
         "skew_normal_lpdf"
       ],
-      "source_bytes": 204989,
-      "source_sha256": "fbdd422743fa47662a0bb05dedd19946b167930bd12a5ac3d5167a99e874f381"
+      "source_bytes": 204875,
+      "source_sha256": "279ae4d10d8f6386f894a8796b8f458323d4c9335128ee6c21989089727a1712"
     },
     {
       "case_count": 1440,
@@ -414,8 +414,8 @@
         "std_normal_lpdf",
         "student_t_cdf"
       ],
-      "source_bytes": 201747,
-      "source_sha256": "40767978ae2d209e495f0a8e05fee4cd015d97b7658f365c3f7c6ff95860631b"
+      "source_bytes": 201633,
+      "source_sha256": "365d244e64b9c49374013ce23efc12f7d9eddc60a7934a42121cfff0bd8398ea"
     },
     {
       "case_count": 1440,
@@ -424,8 +424,8 @@
         "student_t_cdf",
         "student_t_lccdf"
       ],
-      "source_bytes": 203737,
-      "source_sha256": "76106d74bfa33c69c0266040aadb7e9cef539cb0365d103025f2bbb48c169e23"
+      "source_bytes": 203623,
+      "source_sha256": "2df81a526d717636755925e145ca2f1aa0855c834070432d70256210c86ff0c8"
     },
     {
       "case_count": 1440,
@@ -434,8 +434,8 @@
         "student_t_lccdf",
         "student_t_lcdf"
       ],
-      "source_bytes": 204104,
-      "source_sha256": "e53c8a3a22de4fba54151ac7f8c424f272d226eee45fd775675ccdc1d822631a"
+      "source_bytes": 203990,
+      "source_sha256": "ef74859163fdd4c8a0c76ebc7d8543fd69e89226c3f0763c66f644995c0cf7c8"
     },
     {
       "case_count": 1440,
@@ -444,8 +444,8 @@
         "student_t_lcdf",
         "student_t_lpdf"
       ],
-      "source_bytes": 198984,
-      "source_sha256": "3cf01b9b7030eae0bfe1b8d6a8050cbff8f3569946c71d578f98c04a6c1ac769"
+      "source_bytes": 198870,
+      "source_sha256": "32819436db2c8e58b7425bbde908969568c156f217f2766553e99cc55f7d5d8a"
     },
     {
       "case_count": 1440,
@@ -459,8 +459,8 @@
         "von_mises_cdf",
         "von_mises_lccdf"
       ],
-      "source_bytes": 192433,
-      "source_sha256": "248fb8fbde3811bf9eea98cac095f8ef4ae66af0d54f02eed2442de67f40ace3"
+      "source_bytes": 192319,
+      "source_sha256": "0187d8e742d5dc338e1904dfa5fa1ae2dfce28e984c8bde632dcb2b79ce96dbc"
     },
     {
       "case_count": 1440,
@@ -473,8 +473,8 @@
         "weibull_lccdf",
         "weibull_lcdf"
       ],
-      "source_bytes": 178244,
-      "source_sha256": "57162de008c9aee77ff6ad77d96e296c85eb78380224f3345919906e10b0e1be"
+      "source_bytes": 178130,
+      "source_sha256": "eb97a1429058e0b688f368b82cac3fa7e1947a96dff18a66e3069c773fa69a45"
     },
     {
       "case_count": 1440,
@@ -484,8 +484,8 @@
         "weibull_lpdf",
         "wiener_lpdf"
       ],
-      "source_bytes": 235262,
-      "source_sha256": "69e070c06f54a3bb64eeda6ad59f22105d3a2f41a668eaf63367e63dbcaa49dd"
+      "source_bytes": 235148,
+      "source_sha256": "1961a7ade92bfd40e8cd036de19e9cd38acbab92d2a2cd006b4b1e85513bbedd"
     },
     {
       "case_count": 1440,
@@ -493,8 +493,8 @@
       "functions": [
         "wiener_lpdf"
       ],
-      "source_bytes": 239519,
-      "source_sha256": "f7798201dc3cc0dbe47e9de874dfa1c6b5c576d694dc79b46eb50c4151a1e707"
+      "source_bytes": 239405,
+      "source_sha256": "ddd4e88c0d1248483bb7a968d96138ae9b8fa7af83638fa577f24839d7ca79a3"
     },
     {
       "case_count": 1440,
@@ -502,8 +502,8 @@
       "functions": [
         "wiener_lpdf"
       ],
-      "source_bytes": 242203,
-      "source_sha256": "6384b59bd4a2e1e717c1c850b7fb019e12d32308164decd056b0ca4f7b94cdbf"
+      "source_bytes": 242089,
+      "source_sha256": "a28194eff7fff6103bdaeaea200a6a307bf4da63c358bb60f0c288633c3b4867"
     },
     {
       "case_count": 1440,
@@ -511,8 +511,8 @@
       "functions": [
         "wiener_lpdf"
       ],
-      "source_bytes": 241815,
-      "source_sha256": "f8879073046b91028179b3ff0e8638537d8b2e44b254ba10c334098cbda42b19"
+      "source_bytes": 241701,
+      "source_sha256": "ab535c74538961adef7374470f986149d808b8089d9c7a1251c22e80127700f1"
     },
     {
       "case_count": 737,
@@ -526,8 +526,8 @@
         "yule_simon_lcdf",
         "yule_simon_lpmf"
       ],
-      "source_bytes": 125216,
-      "source_sha256": "6ee40713107b9ef2a009715c3b13ae679ab6aba74e26bda5c04490010cd1aef2"
+      "source_bytes": 125102,
+      "source_sha256": "afa03dcb3a342a08244f5217a90ccf9823769a7739955ffc02fff162b4aeb493"
     }
   ],
   "partial": false,

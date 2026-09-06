@@ -235,7 +235,7 @@ def observe_result(value: StanType, expression: str, weight: float,
     value, _ = unwrap_data(value)
     if isinstance(value, ArrayType):
         # Keep the assignment live without adding size/index operations to
-        # the overload test. The condition is false at every lit point but is
+        # the overload test. The condition is false at every replay point but is
         # parameter-dependent in model/generated-quantities lowering, so O1
         # cannot discard the typed value or its builtin call.
         return ["if (seed > 1e100)", f"  print({expression});"]

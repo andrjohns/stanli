@@ -91,6 +91,22 @@ bool Lowering::scan_block(const mir::Stmt& s,
                           const std::function<bool(const mir::Stmt&)>& stop) {
   const auto saved = int_env;
   std::set<std::string> local_ints;
+  // The container locals passed so far, with what decls held for each name
+  // before, so `int n = rows(x)` on a local declared earlier in the block
+  // answers from x's declared type the way the lowering that follows will.
+  // --O1 inlining declares every callee local this way, and without the
+  // view the query threw here and sent the whole write_array section to
+  // the interpreter.
+  std::vector<std::pair<std::string, std::optional<DeclView>>> local_views;
+  const auto restore = [&] {
+    int_env = saved;
+    for (auto it = local_views.rbegin(); it != local_views.rend(); ++it) {
+      if (it->second)
+        decls[it->first] = *it->second;
+      else
+        decls.erase(it->first);
+    }
+  };
   bool found = false;
   try {
     for (const auto& child : s.body) {
@@ -105,13 +121,29 @@ bool Lowering::scan_block(const mir::Stmt& s,
       } else if (child.kind == mir::Stmt::Assignment && child.lhs_idx.empty() &&
                  local_ints.count(child.lhs)) {
         int_env[child.lhs] = eval_int(child.rhs);
+      } else if (child.kind == mir::Stmt::Decl &&
+                 !child.decl_type.base.empty()) {
+        try {
+          DeclView sh;
+          sh.len = sized_len(child.decl_type);
+          sh.si = view_of(child.decl_type);
+          const auto old = decls.find(child.decl_id);
+          local_views.emplace_back(child.decl_id,
+                                   old == decls.end()
+                                       ? std::nullopt
+                                       : std::optional<DeclView>(old->second));
+          decls[child.decl_id] = sh;
+        } catch (const CompileError&) {
+          // A runtime-sized local answers nothing here; the scan went on
+          // without it before and still does.
+        }
       }
     }
   } catch (...) {
-    int_env = saved;
+    restore();
     throw;
   }
-  int_env = saved;
+  restore();
   return found;
 }
 bool Lowering::needs_runtime_control(const mir::Stmt& s) {

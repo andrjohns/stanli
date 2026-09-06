@@ -600,8 +600,8 @@ if(NOT EXISTS "${STANLI_STANC_EXECUTABLE}")
     "run tools/dev_setup.sh --no-build or set STANLI_STANC_EXECUTABLE")
 endif()
 # Keep additions and removals configuration-visible, then ask the fixture
-# generator for the authoritative subset. Generated signature models are lit
-# inputs that stanc compiles on demand and must not inflate this legacy corpus.
+# generator for the authoritative subset. Generated signature models replay
+# against CmdStan references below and must not inflate this legacy corpus.
 file(GLOB STANLI_FIXTURE_CANDIDATES CONFIGURE_DEPENDS
      "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/*.stan")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -1018,10 +1018,10 @@ if(Python3_Interpreter_FOUND)
   # test failure rather than a skip.
   file(GLOB_RECURSE STANLI_LIT_CANDIDATES CONFIGURE_DEPENDS
        "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.stan")
-  # The generated signature models register from their manifests below --
-  # they may not exist yet at configure time, are always PASS by
-  # construction, and regenerate on ordinary builds, so they must be
-  # neither glob candidates nor configure dependencies.
+  # The generated signature models are replay tests registered from their
+  # manifests below -- they may not exist yet at configure time and
+  # regenerate on ordinary builds, so they must be neither lit candidates
+  # nor configure dependencies.
   list(FILTER STANLI_LIT_CANDIDATES EXCLUDE
        REGEX
        "tests/fixtures/(builtin|density)_signatures_[0-9]+\\.stan$")
@@ -1057,24 +1057,11 @@ if(Python3_Interpreter_FOUND)
   endforeach()
   # The generated signature models, named by the committed manifests so a
   # fresh configure registers every case before the first build generates
-  # the files. All are PASS by construction; the generator writes the
-  # marker into every model it emits.
-  foreach(STANLI_LIT_MODEL IN LISTS STANLI_BUILTIN_SIGNATURE_MODELS
-          STANLI_DENSITY_SIGNATURE_MODELS)
-    get_filename_component(STANLI_LIT_STEM "${STANLI_LIT_MODEL}" NAME_WE)
-    set(STANLI_LIT_TEST "lit_fixtures_${STANLI_LIT_STEM}")
-    add_test(NAME ${STANLI_LIT_TEST}
-             COMMAND ${Python3_EXECUTABLE} tests/lit/run.py
-                     ${STANLI_LIT_MODEL}
-                     $<TARGET_FILE:stanli_check>
-             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    set_tests_properties(${STANLI_LIT_TEST} PROPERTIES LABELS "lit")
-  endforeach()
-  # The same generated models replay against recorded CmdStan references:
-  # log density, gradient, output names and values at the three corpus
-  # points. The committed artifact makes this run without a CmdStan
-  # checkout; tools/check_signature_models.py --record refreshes it when
-  # coverage moves.
+  # the files, replay against recorded CmdStan references: log density,
+  # gradient, output names and values at the three corpus points. The
+  # committed artifact makes this run without a CmdStan checkout;
+  # tools/check_signature_models.py --record refreshes it when coverage
+  # moves.
   foreach(STANLI_SIGNATURE_MODEL IN LISTS STANLI_BUILTIN_SIGNATURE_MODELS
           STANLI_DENSITY_SIGNATURE_MODELS)
     get_filename_component(STANLI_SIGNATURE_STEM
