@@ -1,5 +1,7 @@
-// ExecutorModel's var log_prob against the bare Executor::gradient it
-// wraps: same value, same adjoints, bitwise, plus the rejected-point path.
+// ExecutorModel's var log_prob and the direct stan::model::gradient /
+// log_prob_propto specializations against the bare Executor::gradient they
+// all wrap: same value, same adjoints, bitwise, plus the rejected-point
+// path.
 #include "models.hpp"
 
 #include <stanli/compile.hpp>
@@ -66,6 +68,19 @@ int main() {
       for (int i = 0; i < NP; ++i)
         expect_eq(tag + " g" + std::to_string(i), qv(i).adj(), grad_bare[i]);
       stan::math::recover_memory();
+
+      Eigen::VectorXd q(NP);
+      for (int i = 0; i < NP; ++i) q(i) = qs[c][i];
+      double f;
+      Eigen::VectorXd g;
+      stan::callbacks::logger logger;
+      stan::model::gradient(model, q, f, g, logger);
+      expect_eq(tag + " direct lp", f, lp_bare);
+      for (int i = 0; i < NP; ++i)
+        expect_eq(tag + " direct g" + std::to_string(i), g(i), grad_bare[i]);
+      const double lp_propto =
+          stan::model::log_prob_propto<true>(model, q, &std::cerr);
+      expect_eq(tag + " direct propto", lp_propto, lp_bare);
     }
   }
 
@@ -86,6 +101,20 @@ int main() {
     for (int64_t i = 0; i < n; ++i)
       expect_eq("rejected g" + std::to_string(i), qv(i).adj(), 0.0);
     stan::math::recover_memory();
+
+    Eigen::VectorXd q(n);
+    for (int64_t i = 0; i < n; ++i) q(i) = 0.1;
+    double f;
+    Eigen::VectorXd g;
+    stan::callbacks::logger logger;
+    stan::model::gradient(model, q, f, g, logger);
+    expect("rejected direct lp is -inf", std::isinf(f) && f < 0);
+    for (int64_t i = 0; i < n; ++i)
+      expect_eq("rejected direct g" + std::to_string(i), g(i), 0.0);
+    const double lp_propto =
+        stan::model::log_prob_propto<true>(model, q, &std::cerr);
+    expect("rejected direct propto is -inf",
+          std::isinf(lp_propto) && lp_propto < 0);
   }
 
   if (failures == 0) std::printf("test_model_adapter OK\n");

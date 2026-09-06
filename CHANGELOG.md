@@ -183,6 +183,15 @@ The interpreter accepts whole-value index nodes and column writes into
 integer arrays produced by loop vectorization; before this stanli_run failed
 on eight corpus models that stanli_check passed.
 
+### Faster
+
+NUTS calls the executor's gradient directly. The model adapter used to
+answer every leapfrog step through a var tape, and that round trip was
+12 to 30 percent of sampling time on models whose gradient is cheap
+relative to their parameter count. `bym2_offset_only` (1000 warmup, 1000
+draws) went from 15.2 s to 12.6 s over the same 189728 gradient
+evaluations.
+
 ## 0.11.1
 
 ### Fixes
