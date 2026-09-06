@@ -28,14 +28,19 @@ FORBIDDEN=(
   rand srand random srandom
 )
 
-LAUNCHER_FLAG=()
+EXTRA_FLAGS=()
 if command -v ccache >/dev/null 2>&1; then
-  LAUNCHER_FLAG=(-DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+  EXTRA_FLAGS+=(-DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+fi
+# Configuration insists on the pinned compiler, but the runtime objects never
+# run it; a stub keeps this check independent of the OCaml build.
+if [ ! -x deps/stanc3/stanc ]; then
+  EXTRA_FLAGS+=(-DSTANLI_STANC_EXECUTABLE=/usr/bin/true)
 fi
 
 cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_FLAGS="-DSTANLI_NO_STDIO -DNDEBUG" \
-  "${LAUNCHER_FLAG[@]}"
+  "${EXTRA_FLAGS[@]}"
 cmake --build "$BUILD_DIR" --target stanli_runtime_objects \
   --parallel "$(tools/build_jobs.sh)"
 
