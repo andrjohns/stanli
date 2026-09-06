@@ -485,7 +485,8 @@ jobs:
       # overhead on every PR, especially docs-only ones. The check catches
       # silent semantic drift from lowering and source-pass changes, so it
       # must run on anything that could alter MIR or the compiled output; see
-      # changes.vectorize for paths.
+      # changes.vectorize for paths. Pull requests run a bounded slice; pushes
+      # to main and scheduled runs cover every recorded model.
       - name: MIR vectorization A/B
         if: >-
           matrix.runtime == 'linux-x86_64' &&
@@ -499,12 +500,25 @@ jobs:
           stanc_embed_artifact_matches \
             deps/stanc3/stanli-vectorize-probe \
             "$STANC3_SRC_SHA" stanc3-55
+          models=()
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            models=(eight_schools_noncentered normal_mixture radon_pooled
+              soil_incubation arK low_dim_gauss_mix hmm_example
+              election88_full iohmm_reg log10earn_height losscurve_sislob
+              lsat_model pilots radon_county
+              gpcm_latent_reg_irt dogs GLM_Poisson_model Mth_model
+              logistic_regression_rhs lotka_volterra garch11 hierarchical_gp
+              gp_regr one_comp_mm_elim_abs bym2_offset_only kronecker_gp
+              multi_occupancy state_space_stochastic_level_stochastic_seasonal
+              mother multidim_var_param_ar45_mat23 reductions_allowed
+              s2_ar_cov s2_invgaussian s2_logistic_normal sw_mv_rescor)
+          fi
           python3 harnesses/vectorize_ab.py deps/posteriordb \
             --compiler deps/stanc3/stanli-vectorize-probe \
             --check build-rel/stanli_check \
             --bench build-rel/bench_grad --dump build-rel/dump_ops \
             --timeout 30 --gradient-timeout 20 --prep-samples 2 \
-            --output-dir build-rel/vectorize-ab
+            --output-dir build-rel/vectorize-ab "${models[@]}"
 
       - name: Publish MIR vectorization measurements
         if: >-
