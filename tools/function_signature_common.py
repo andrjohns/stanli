@@ -112,8 +112,8 @@ def resolve_registry_spec(
 T = TypeVar("T")
 
 
-def partitions(items: Sequence[tuple[T, str]], size: int) \
-        -> list[list[tuple[T, str]]]:
+def partitions(items: Sequence[tuple[str, T]], size: int) \
+        -> list[list[tuple[str, T]]]:
     """Sort the cases by id and split them into models of `size` cases.
 
     Ids sort by function name, so one function lands in as few models as
@@ -128,33 +128,35 @@ def partitions(items: Sequence[tuple[T, str]], size: int) \
 CONTEXT_DATA = {"context_seed": 0.0}
 
 
-def all_context_model(function_name: str, body: str, provenance: str,
-                      partition: str = "") -> str:
+def all_context_model(function_name: str, case_count: int, body: str,
+                      provenance: str, partition: str = "") -> str:
     partition_line = f"// {partition}\n" if partition else ""
     return f"""// {provenance}
 // and `stanc --dump-stan-math-signatures`. Do not edit by hand.
 {partition_line}functions {{
-  real {function_name}(real seed) {{
+  vector {function_name}(vector probe) {{
+    vector[{case_count}] out = rep_vector(0, {case_count});
 {body}
+    return out;
   }}
 }}
 data {{
   real context_seed;
 }}
 transformed data {{
-  real transformed_data_result = {function_name}(context_seed);
+  vector[{case_count}] transformed_data_result = {function_name}(rep_vector(context_seed, {case_count}));
 }}
 parameters {{
-  real probe;
+  vector[{case_count}] probe;
 }}
 model {{
   probe ~ std_normal();
-  target += {function_name}(probe);
-  if (probe > -1e100)
-    target += {function_name}(probe);
+  target += sum({function_name}(probe));
+  if (probe[1] > -1e100)
+    target += sum({function_name}(probe));
 }}
 generated quantities {{
-  real generated_quantities_result = {function_name}(probe);
+  vector[{case_count}] generated_quantities_result = {function_name}(probe);
 }}
 """
 

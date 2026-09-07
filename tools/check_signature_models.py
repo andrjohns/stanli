@@ -6,10 +6,9 @@ the pinned stanc inventory and the runtime registry; the committed manifests
 name every model and its source SHA-256. This gate replays each generated
 model against a recorded CmdStan reference at the same three deterministic
 points as the corpus replay: log density, the full gradient, the output
-column schema, and every output value. Every rendered signature contributes
-to the log density or a retained output through a nonuniform weight, so a
-numerical divergence in any single overload moves at least one compared
-number.
+column schema, and every output value. Case k of a partition reads its
+probe from parameter k and writes output k, so gradient element k and
+generated_quantities_result.k compare that one overload on its own.
 
 --record compiles every reference from the pinned CmdStan checkout
 (tools/dev_setup.sh --corpus provisions it) and is incremental: a model
@@ -22,8 +21,8 @@ coverage moved and the reference must be re-recorded with the change.
 Recording is independent of stanli's answers and a mismatch still fails;
 never re-record to hide a stanli regression.
 
-A failing model names only the aggregate; its fixture lists the cases
-and the manifest their function names. Bisect densities with
+A failure names the model and the case whose gradient element or output
+column diverged. Replay a subset of densities with
 tools/generate_density_signature_model.py --filter/--start/--count into a
 scratch --output-dir/--manifest, then point this script's --manifest and
 --reference at those scratch files and --record.
@@ -38,6 +37,7 @@ import json
 import os
 import pathlib
 import platform
+import re
 import subprocess
 import sys
 
@@ -53,13 +53,10 @@ MANIFESTS = (REPO / "tests/function_coverage/builtin_signatures_manifest.json",
 REFERENCE = REPO / "tests/function_coverage/signature_references.json.gz"
 LEDGER = REPO / "tests/function_coverage/signature_ledger.json"
 POINTS = 3
-# Wider than the corpus replay's 1e-9: a single-active case's mixed
-# data/parameter instantiation may legitimately reassociate and drift by a
-# few ULP per call (TESTING.md documents the same allowance for unit
-# tests), and each partition sums hundreds of such calls. The measured
-# honest drift tops out near 5e-9; the real defects this gate exists to
-# catch sit orders of magnitude above it.
-GATE = 1e-8
+# The corpus replay's gate (check_function_models.py).
+GATE = 1e-9
+# Case comments in the generated sources, one per case block in order.
+CASE = re.compile(r"// (\S+\(\S*=>\S+)$", re.MULTILINE)
 
 
 def run(argv, timeout=600, env=None):
@@ -202,6 +199,20 @@ def record(models, complete, args):
                            + ", ".join(failed))
 
 
+def case_of(cases, field, index, label):
+    """The case behind lp_grad element index (0 is lp itself) or output
+    column label, or None for anything that is not one case's own."""
+    if field == "lp_grad":
+        position = index
+    elif label.startswith("generated_quantities_result."):
+        position = int(label.rsplit(".", 1)[1])
+    else:
+        return None
+    if not 1 <= position <= len(cases):
+        return None
+    return cases[position - 1]
+
+
 def compare(name, source, manifest_sha, functions, reference, ledger,
             args):
     checked_source(name, source, manifest_sha)
@@ -214,12 +225,14 @@ def compare(name, source, manifest_sha, functions, reference, ledger,
     used = set()
     worst = 0.0
 
-    # stanc's --O1 pass dominates a replay (over 30 s on a wiener partition
-    # against 0.2 s of evaluation), so compile once and hand the three
-    # points the MIR. The flags mirror tools/stanc_process.cpp.
+    # Compile once and hand the three points the MIR. stanli inlines user
+    # functions itself at lowering, so --O0 replays to the digit like --O1
+    # and takes 0.4 s instead of 30 s on a wiener partition.
     mir = args.build / "signature-mir" / (name + ".mir")
     mir.parent.mkdir(parents=True, exist_ok=True)
-    mir.write_text(run([args.stanc, "--O1", "--debug-optimized-mir", source]))
+    mir.write_text(run([args.stanc, "--" + args.opt, "--debug-optimized-mir",
+                        source]))
+    cases = CASE.findall(source.read_text())
 
     def evaluate(point):
         # The models exist to exercise the compiled paths; a section the
@@ -246,6 +259,9 @@ def compare(name, source, manifest_sha, functions, reference, ledger,
                 covering = {fn for fn, bound in excused.items()
                             if error <= bound}
                 label = want["names"][i] if field == "values" else str(i)
+                case = case_of(cases, field, i, label)
+                if case:
+                    label += " " + case
                 if not covering:
                     raise ValueError(
                         f"{name} point {point} {field}[{label}]: "
@@ -275,6 +291,8 @@ def main():
     parser.add_argument("--model", action="append",
                         help="restrict to these model stems")
     parser.add_argument("--record", action="store_true")
+    parser.add_argument("--opt", choices=("O0", "O1"), default="O0",
+                        help="stanc optimization level for the replay")
     parser.add_argument("--jobs", type=int, default=32)
     args = parser.parse_args()
     args.build, args.stanc, args.cmdstan, args.reference = (

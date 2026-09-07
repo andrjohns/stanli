@@ -11,9 +11,11 @@ quantities.
 from __future__ import annotations
 
 import argparse
+import functools
 import pathlib
 import re
 import sys
+from typing import Callable
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -91,9 +93,10 @@ def density_signatures(stanc: pathlib.Path, registry: pathlib.Path) \
 def role(name: str, index: int) -> str:
     """Return a support-safe semantic role for a density argument."""
     base = probability_base(name)
-    # Two suffix-specific repairs keep every compared aggregate finite and
-    # informative; one nonfinite term would absorb every other signature's
-    # contribution to the partition's log density or gradient.
+    # Suffix-specific repairs. Two keep the log density finite, since one
+    # nonfinite case would absorb every other case's contribution to the
+    # partition's log density and gradient; the beta_binomial CDFs get a
+    # cheap series (see r_shallow).
     # bernoulli_lccdf(1 | p) is log P(Y > 1) = log 0 = -inf identically, so
     # its outcome must sit below the top of the support. The student_t CDF
     # family's degrees-of-freedom derivative is 0/0 at y == mu (CmdStan
@@ -104,6 +107,9 @@ def role(name: str, index: int) -> str:
         "student_t_cdf": ("tail_y", "df", "any", "positive"),
         "student_t_lcdf": ("tail_y", "df", "any", "positive"),
         "student_t_lccdf": ("tail_y", "df", "any", "positive"),
+        "beta_binomial_cdf": ("count", "trials", "shallow", "shallow"),
+        "beta_binomial_lcdf": ("count", "trials", "shallow", "shallow"),
+        "beta_binomial_lccdf": ("count", "trials", "shallow", "shallow"),
     }
     if name in overrides:
         try:
@@ -206,7 +212,7 @@ def expression(type_name: str, semantic_role: str) -> str:
 
     scalar_role = {
         "any": "r_any", "design": "r_any", "positive": "r_positive",
-        "steep": "r_steep",
+        "steep": "r_steep", "shallow": "r_shallow",
         "df": "r_df", "prob": "r_prob", "simplex": "r_prob",
         "uniform_y": "r_uniform_y", "uniform_lower": "r_uniform_lower",
         "uniform_upper": "r_uniform_upper", "pareto_y": "r_pareto_y",
@@ -231,7 +237,7 @@ def expression(type_name: str, semantic_role: str) -> str:
     }[type_name]
     container_role = {
         "any": "any", "design": "any", "positive": "positive",
-        "steep": "steep", "df": "df",
+        "steep": "steep", "shallow": "shallow", "df": "df",
         "prob": "prob", "simplex": "simplex", "cutpoints": "cutpoints",
         "uniform_y": "uniform_y", "uniform_lower": "uniform_lower",
         "uniform_upper": "uniform_upper", "pareto_y": "pareto_y",
@@ -278,6 +284,10 @@ BODY_DECLARATIONS = """    int i_count = 1;
     // 3F2 tail decays like k^-alpha and Boost's pFq at z = 1 sums to machine
     // precision, so a call costs 19 ms at alpha 2.2 and 0.07 ms at 6.2.
     real r_steep = 5.2 + exp(0.01 * seed);
+    // beta_binomial's CDF sums a 3F2 whose terms grow like k^(alpha+beta-2)
+    // until a 1e-6 log tolerance, so alpha + beta >= 2 runs every one of
+    // its 1e5 steps; well below 2 the series stops within a few.
+    real r_shallow = 0.15 + 0.01 * seed;
     real r_df = 3 + exp(0.01 * seed);
     real r_prob = inv_logit(0.01 * seed);
     real r_uniform_y = 0.01 * seed;
@@ -295,6 +305,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     vector[2] v_any = [r_any, r_any + 0.1]';
     vector[2] v_positive = [r_positive, r_positive + 0.1]';
     vector[2] v_steep = [r_steep, r_steep + 0.1]';
+    vector[2] v_shallow = [r_shallow, r_shallow + 0.1]';
     vector[2] v_df = [r_df, r_df + 0.1]';
     vector[2] v_prob = [r_prob, inv_logit(0.02 * seed)]';
     vector[2] v_simplex = softmax([0.01 * seed, 0]');
@@ -315,6 +326,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     row_vector[2] rv_any = [r_any, r_any + 0.1];
     row_vector[2] rv_positive = [r_positive, r_positive + 0.1];
     row_vector[2] rv_steep = [r_steep, r_steep + 0.1];
+    row_vector[2] rv_shallow = [r_shallow, r_shallow + 0.1];
     row_vector[2] rv_df = [r_df, r_df + 0.1];
     row_vector[2] rv_prob = [r_prob, inv_logit(0.02 * seed)];
     row_vector[2] rv_simplex = [r_prob, 1 - r_prob];
@@ -334,6 +346,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     array[2] real a_r_any = {r_any, r_any + 0.1};
     array[2] real a_r_positive = {r_positive, r_positive + 0.1};
     array[2] real a_r_steep = {r_steep, r_steep + 0.1};
+    array[2] real a_r_shallow = {r_shallow, r_shallow + 0.1};
     array[2] real a_r_df = {r_df, r_df + 0.1};
     array[2] real a_r_prob = {r_prob, inv_logit(0.02 * seed)};
     array[2] real a_r_uniform_y = {r_uniform_y, r_uniform_y};
@@ -365,13 +378,26 @@ BODY_DECLARATIONS = """    int i_count = 1;
     real corr = tanh(0.01 * seed);
     matrix[2, 2] m_corr_chol = [[1, 0], [corr, sqrt(1 - square(corr))]];
     matrix[2, 2] m_corr = multiply_lower_tri_self_transpose(m_corr_chol);
-    real lp = 0;
 """
 
 
 # Role variables, longest prefix first so `a_r_any` never half-matches `r_`.
 ROLE_VARIABLE = re.compile(
     r"\b(a_rv_|a_i_|a_r_|a_v_|rv_|i_|r_|v_|m_|corr\b)")
+IDENTIFIER = re.compile(r"\b[A-Za-z_]\w*\b")
+
+
+@functools.lru_cache(maxsize=None)
+def declarations() -> dict[str, str]:
+    """Role variable name -> its declaration, in BODY_DECLARATIONS order."""
+    result = {}
+    for line in BODY_DECLARATIONS.splitlines():
+        line = line.strip()
+        if not line or line.startswith("//"):
+            continue
+        head, _ = line.split(" = ", 1)
+        result[head.split()[-1]] = line
+    return result
 
 
 def data_twin_declarations() -> str:
@@ -379,9 +405,42 @@ def data_twin_declarations() -> str:
     replaced by a literal zero. A literal-only local constant-folds to a
     data argument in both runtimes, which is what lets one call activate a
     single argument while every other one takes the data instantiation."""
-    body = BODY_DECLARATIONS.replace("    real lp = 0;\n", "")
+    body = "".join(f"    {line}\n" for line in declarations().values())
     body = re.sub(r"\bseed\b", "0.0", body)
     return ROLE_VARIABLE.sub(lambda m: "d_" + m.group(1), body)
+
+
+@functools.lru_cache(maxsize=None)
+def seed_dependent() -> dict[str, set[str]]:
+    """Seed-dependent role variables -> the role variables they reference."""
+    uses = {name: set(IDENTIFIER.findall(line.split(" = ", 1)[1]))
+            for name, line in declarations().items()}
+    dependent = {}
+    for name, used in uses.items():
+        if "seed" in used or used & set(dependent):
+            dependent[name] = used & set(dependent)
+    return dependent
+
+
+def prelude() -> str:
+    dependent = seed_dependent()
+    hoisted = "".join(f"    {line}\n"
+                      for name, line in declarations().items()
+                      if name not in dependent)
+    return data_twin_declarations() + hoisted
+
+
+def case_declarations(arguments: list[str]) -> list[str]:
+    dependent = seed_dependent()
+    needed = set()
+    pending = [name for argument in arguments
+               for name in IDENTIFIER.findall(argument)]
+    while pending:
+        name = pending.pop()
+        if name in dependent and name not in needed:
+            needed.add(name)
+            pending.extend(dependent[name])
+    return [line for name, line in declarations().items() if name in needed]
 
 
 def as_data(argument: str) -> str:
@@ -394,7 +453,8 @@ def real_argument_positions(signature: Signature) -> list[int]:
             if "int" not in surface_type(value)]
 
 
-def render_case(signature: Signature, active_index: int | None = None) -> str:
+def render_case(signature: Signature, active_index: int | None,
+                position: int) -> str:
         name = signature.name
         argument_types = [surface_type(value) for value in signature.arguments]
         arguments = [
@@ -445,17 +505,21 @@ def render_case(signature: Signature, active_index: int | None = None) -> str:
         # Stan requires probability-function syntax for densities, mass
         # functions, and every CDF spelling alike.
         call = f"{name}({arguments[0]} | {', '.join(arguments[1:])})"
-        return f"    lp += {call};  // {identity}\n"
+        lines = ([f"real seed = probe[{position}];"]
+                 + case_declarations(arguments)
+                 + [f"out[{position}] = {call};"])
+        return (f"    {{  // {identity}\n"
+                + "".join(f"      {line}\n" for line in lines)
+                + "    }\n")
 
 
 def render_model(index: int, count: int,
-                 cases: list[tuple[str, str]]) -> str:
+                 cases: list[tuple[str, Callable[[int], str]]]) -> str:
     function = f"density_signatures_{index:02d}"
-    calls = "".join(source for _, source in cases)
-    body = (data_twin_declarations() + BODY_DECLARATIONS + calls
-            + "    return lp;")
+    body = prelude() + "".join(
+        render(position) for position, (_, render) in enumerate(cases, 1))
     return all_context_model(
-        function, body,
+        function, len(cases), body.rstrip("\n"),
         "Generated by tools/generate_density_signature_model.py from the "
         "unified FunctionSpec registry",
         f"Partition {index} of {count}; {len(cases)} overload instantiations.")
@@ -498,7 +562,7 @@ def main() -> int:
     # fewer than two would only repeat its all-active instantiation.
     rendered = [
         (signature.canonical_id + ("" if position is None else f"@{position}"),
-         render_case(signature, position))
+         functools.partial(render_case, signature, position))
         for signature in signatures
         for positions in [real_argument_positions(signature)]
         for position in [None] + (positions if len(positions) >= 2 else [])

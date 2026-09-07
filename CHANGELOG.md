@@ -20,9 +20,12 @@ runtime-control region and generated quantities alike. Each overload is
 called once with every real argument a parameter and, when it has two or
 more, once per argument with only that one a parameter, so the mixed
 data/parameter instantiations CmdStan's generated code selects are
-exercised too. `tools/check_signature_models.py --record` refreshes the
-references from a CmdStan checkout; a partition whose source moved refuses
-to replay until it is re-recorded. The sweep found the three fixes below.
+exercised too. Every case reads its own parameter and writes its own
+output, so each gradient element and output column is compared for one
+overload at the corpus replay's 1e-9 gate and a failure names the overload.
+`tools/check_signature_models.py --record` refreshes the references from a
+CmdStan checkout; a partition whose source moved refuses to replay until it
+is re-recorded. The sweep found the three fixes below.
 
 ### Fixes
 
