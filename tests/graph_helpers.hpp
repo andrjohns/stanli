@@ -61,10 +61,12 @@ struct RunResult {
 };
 
 // One op, scalar output at result_slot. vals[i]/params[i] describe inputs.
+// variant is the op's plan byte (densities: propto bit 0x80 and the
+// per-argument activity mask in the low bits).
 inline RunResult run_one_op(uint16_t opcode,
                             const std::vector<std::vector<double>>& vals,
                             const std::vector<bool>& params,
-                            std::vector<int> idata = {}) {
+                            std::vector<int> idata = {}, uint8_t variant = 0) {
   Graph g;
   std::vector<int> slots;
   int64_t n_par = 0;
@@ -77,6 +79,7 @@ inline RunResult run_one_op(uint16_t opcode,
   op.opcode = opcode;
   op.out = lp;
   op.n_in = 0;
+  op.variant = variant;
   for (int s : slots) op.in[op.n_in++] = s;
   if (!idata.empty()) {
     g.idata_pool.push_back(std::move(idata));

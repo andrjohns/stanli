@@ -10,6 +10,51 @@ go through `emit_diagnostic`, a sink-backed channel parallel to `print()`'s
 existing `emit_message`. The preparation profiler no longer aborts if a
 model exceeds its previous fixed row count; it grows instead.
 
+### Every stanc signature replays against CmdStan
+
+The generated builtin and density signature models used to prove only that
+each overload compiled and ran. They now replay against recorded CmdStan
+references at the three corpus points: log density, the full gradient, and
+every output value, from transformed data, the model graph, a
+runtime-control region and generated quantities alike. Each overload is
+called once with every real argument a parameter and, when it has two or
+more, once per argument with only that one a parameter, so the mixed
+data/parameter instantiations CmdStan's generated code selects are
+exercised too. Every case reads its own parameter and writes its own
+output, so each gradient element and output column is compared for one
+overload at the corpus replay's 1e-9 gate and a failure names the overload.
+`tools/check_signature_models.py --record` refreshes the references from a
+CmdStan checkout; a partition whose source moved refuses to replay until it
+is re-recorded. The sweep found the three fixes below.
+
+### Fixes
+
+`bernoulli_logit_glm`, `poisson_log_glm` and `neg_binomial_2_log_glm`
+dropped the gradient of a parameter design matrix: the log density was
+right and `x`'s adjoint came back zero.
+
+`lkj_corr_lpdf` and `lkj_corr_cholesky_lpdf` ignored a parameter `eta`,
+returning no gradient for it and, with `propto`, the wrong value, because
+the kernel's differentiable set excluded the argument the model activated.
+A density plan whose active arguments fall outside its kernel's
+differentiable set is now refused at lowering rather than silently treated
+as data.
+
+`fmax` and `fmin` inside a runtime-control region followed the `var, var`
+overload whatever the operands' types. stan-math breaks a tie towards the
+autodiff argument, the second when both are, and a data side never carries
+an adjoint; the register program now compiles each call to the instantiation
+its operands select, so ties and NaN operands route the gradient the way
+CmdStan does.
+
+A shape query on a local declared earlier in the same block, `int n =
+rows(m)` with `m` a local matrix, sent a model's transformed parameters
+and generated quantities to the MIR interpreter. `--O1` inlining declares
+every user-defined function's locals this way, so any generated-quantities
+call of a function that asks the extent of its own local paid the
+interpreter's cost. The write_array scan now answers such a query from the
+local's declared type, as the lowering after it does.
+
 ## 0.12.0
 
 ### Sampling can be interrupted

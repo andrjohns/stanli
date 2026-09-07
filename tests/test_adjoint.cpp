@@ -1089,6 +1089,81 @@ static void test_nan_operands() {
   }
 }
 
+// ---- fmax/fmin instantiations ------------------------------------------
+// stan-math's three overloads disagree at ties and around NaN: fmax(var,
+// var) hands a tie to b, fmax(var, double) hands it to the var, and
+// fmax(double, var) hands it to b -- and when the constant side of a mixed
+// call wins, the result is a fresh constant and no adjoint flows at all.
+// The instruction's len byte carries operand activity (bit 0: a, bit 1: b;
+// 0 is the legacy all-var form), set at lowering from the arguments'
+// data-only classification, so the forward, the var replay, and the
+// generated backward all run the instantiation CmdStan's generated code
+// selects. The single-active signature gate found the old unconditional
+// ties-to-b rule as a halved fmax(vector, vector) gradient.
+static void check_extremum(const std::string& tag, Program::Code code, int law,
+                           double x, double y, double want_da, double want_db) {
+  const double s = 2.0;
+  {
+    Build b({x, y});
+    const int d = b.emit(code, 0, 1, 0, law);
+    if (!check(tag, b.done({d}, {s}))) return;
+  }
+  Build b({x, y});
+  const int d = b.emit(code, 0, 1, 0, law);
+  Case c = b.done({d}, {s});
+  if (!gen_adjoint(c.p)) {
+    ++failures;
+    std::printf("FAIL %s: gen_adjoint refused the program\n", tag.c_str());
+    return;
+  }
+  std::vector<double> values;
+  const std::vector<double> got = native_adjoints(c.p, c.in, c.seed, &values);
+  const double want[2] = {want_da, want_db};
+  for (int k = 0; k < 2; ++k) {
+    const bool same = got[(size_t)k] == want[k] ||
+                      (std::isnan(got[(size_t)k]) && std::isnan(want[k]));
+    if (!same) {
+      ++failures;
+      std::printf("FAIL %s: adj[%d] got %.17g want %.17g\n", tag.c_str(), k,
+                  got[(size_t)k], want[k]);
+    }
+  }
+}
+
+static void test_extremum_instantiations() {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double s = 2.0;
+  // Ties: b unless only a is active.
+  check_extremum("fmax tie var,var", Program::FMAX, 0x3, 0.95, 0.95, 0, s);
+  check_extremum("fmax tie legacy", Program::FMAX, 0, 0.95, 0.95, 0, s);
+  check_extremum("fmax tie var,data", Program::FMAX, 0x1, 0.95, 0.95, s, 0);
+  check_extremum("fmax tie data,var", Program::FMAX, 0x2, 0.95, 0.95, 0, s);
+  check_extremum("fmin tie var,var", Program::FMIN, 0x3, 0.95, 0.95, 0, s);
+  check_extremum("fmin tie var,data", Program::FMIN, 0x1, 0.95, 0.95, s, 0);
+  check_extremum("fmin tie data,var", Program::FMIN, 0x2, 0.95, 0.95, 0, s);
+  // A winning constant side carries no adjoint in the mixed overloads.
+  check_extremum("fmax const a wins", Program::FMAX, 0x2, 1.0, 0.5, 0, 0);
+  check_extremum("fmax const b wins", Program::FMAX, 0x1, 0.5, 1.0, 0, 0);
+  check_extremum("fmin const b wins", Program::FMIN, 0x1, 1.0, 0.5, 0, 0);
+  check_extremum("fmin const a wins", Program::FMIN, 0x2, 0.5, 1.0, 0, 0);
+  check_extremum("fmax var a wins", Program::FMAX, 0x1, 1.0, 0.5, s, 0);
+  check_extremum("fmin var b wins", Program::FMIN, 0x2, 1.0, 0.5, 0, s);
+  // NaN: only active operands are poisoned, and a NaN data side returns
+  // the var while a NaN var side returns a fresh constant.
+  check_extremum("fmax nan both var,var", Program::FMAX, 0x3, nan, nan, nan,
+                 nan);
+  check_extremum("fmax nan both var,data", Program::FMAX, 0x1, nan, nan, nan,
+                 0);
+  check_extremum("fmax nan both data,var", Program::FMAX, 0x2, nan, nan, 0,
+                 nan);
+  check_extremum("fmax nan a var,data", Program::FMAX, 0x1, nan, 0.5, 0, 0);
+  check_extremum("fmax nan a data,var", Program::FMAX, 0x2, nan, 0.5, 0, s);
+  check_extremum("fmax nan b var,data", Program::FMAX, 0x1, 0.5, nan, s, 0);
+  check_extremum("fmax nan b data,var", Program::FMAX, 0x2, 0.5, nan, 0, 0);
+  check_extremum("fmin nan a var,data", Program::FMIN, 0x1, nan, 0.5, 0, 0);
+  check_extremum("fmin nan b data,var", Program::FMIN, 0x2, 0.5, nan, 0, 0);
+}
+
 // ---- scalar probability functions -------------------------------------
 
 static void test_densities() {
@@ -1466,6 +1541,7 @@ int main() {
   test_softmax3_double_exact();
   test_in_place_ranges();
   test_nan_operands();
+  test_extremum_instantiations();
   test_reductions();
   test_densities();
   test_density_masked_partials();

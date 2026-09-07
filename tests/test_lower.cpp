@@ -8532,6 +8532,37 @@ int main() {
     stan::math::recover_memory();
   }
 
+  // A shape query on a local declared earlier in the same block, the form
+  // --O1 inlining gives every callee local. The write_array scan that
+  // decides on runtime control used to throw on it and hand the whole
+  // section to the interpreter.
+  {
+    stanli::CompiledModel cm =
+        compile_model(slurp("tests/fixtures/wa_local_shape_query.tmir.sexp"),
+                      DataMap::from_json("{}"));
+    check(cm.interpreter_fallbacks.empty(),
+          "local shape query stays on the compiled path");
+    Executor ex(std::move(cm.graph));
+    cm.bind(ex);
+    ex.params_data()[0] = 0.5;
+    double grad[1] = {};
+    expect_eq("local shape query lp", ex.gradient(grad), 423.5);
+    expect_eq("local shape query grad", grad[0], 1.0);
+    check(cm.write_array && !cm.write_array->interp,
+          "local shape query write_array lowers to the graph");
+    if (cm.write_array && !cm.write_array->interp) {
+      Executor wx(std::move(cm.write_array->graph));
+      cm.write_array->bind(wx);
+      wx.params_data()[0] = 0.5;
+      wx.run_forward_only();
+      check(cm.write_array->columns.size() == 2,
+            "local shape query writes theta and q");
+      if (cm.write_array->columns.size() == 2)
+        expect_eq("local shape query q",
+                  wx.value_ptr(cm.write_array->columns[1].slot)[0], 423.5);
+    }
+  }
+
   if (failures == 0) std::printf("test_lower OK\n");
   return failures == 0 ? 0 : 1;
 }

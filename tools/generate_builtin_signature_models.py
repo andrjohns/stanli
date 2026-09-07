@@ -5,16 +5,16 @@ The name/kind contract comes from the unified runtime registry's JSON dump,
 so the generator never parses C++ or maintains a second name list. It joins
 those source names against
 stanc's authoritative ``--dump-stan-math-signatures`` inventory, then every
-compatible overload is emitted once.  Calls are partitioned by rendered size
-so high-rank array signatures do not make one fixture disproportionately long.
+compatible overload is emitted once, in models of a fixed number of calls.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import pathlib
 import sys
-from typing import Sequence
+from typing import Callable, Sequence
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -37,9 +37,10 @@ from conformance.signatures import (  # noqa: E402
 from function_signature_common import (  # noqa: E402
     RegistrySpec,
     all_context_model,
-    balanced_partitions,
+    by_reason,
     generated_model_record,
     numeric_leaf_kind,
+    partitions,
     portable_build_id,
     registry_by_name,
     resolve_registry_spec,
@@ -53,7 +54,9 @@ DEFAULT_REGISTRY = ROOT / "build/dump_function_specs"
 DEFAULT_OUTPUT_DIR = ROOT / "tests/fixtures"
 DEFAULT_MANIFEST = ROOT / "tests/function_coverage/builtin_signatures_manifest.json"
 FILE_GLOB = "builtin_signatures_*.stan"
-TARGET_SIGNATURES_PER_MODEL = 240
+# A quarter of the density cap: clang takes about 20 minutes per
+# reference compile of a 360-case builtin partition, twice that at 720.
+CASES_PER_MODEL = 360
 
 def scalar_profile(signature: Signature, descriptor: RegistrySpec) \
         -> tuple[tuple[object, ...], float, tuple[int, ...]]:
@@ -119,14 +122,41 @@ def scalar_profile(signature: Signature, descriptor: RegistrySpec) \
     return tuple(centers), perturbation, tuple(sorted(data_positions))
 
 
+def activity_positions(signature: Signature,
+                       descriptor: RegistrySpec) -> list[int]:
+    """Real-typed argument positions that render parameter-dependent."""
+    _, _, data_positions = scalar_profile(signature, descriptor)
+    positions = []
+    for index, wrapped in enumerate(signature.arguments):
+        argument, explicitly_data = unwrap_data(wrapped)
+        if (index not in data_positions and not explicitly_data
+                and numeric_leaf_kind(argument) == "real"):
+            positions.append(index)
+    return positions
+
+
 def render_case(signature: Signature, descriptor: RegistrySpec,
-                case_index: int) -> str:
+                active_index: int | None, position: int) -> str:
     # Signature compatibility is dimension-independent. Unit extents keep
     # rank-eight overloads executable in the same shard without turning this
     # inventory test into a duplicate multi-lane/indexing stress test.
     dimensions = tuple(1 for _ in _shape_dimensions(signature))
     centers, perturbation, data_positions = scalar_profile(signature, descriptor)
-    declarations: list[str] = []
+    identity = signature.canonical_id
+    if active_index is not None:
+        # Single-active instantiation: every other argument renders as a
+        # literal, so the call takes the data instantiation for it on both
+        # runtimes -- the mixed data/parameter template the all-active
+        # case never reaches. Same-center arguments coincide exactly at
+        # the all-zero probe point; that tie is deliberate coverage, since
+        # stan-math's mixed overloads break fmax/fmin ties differently
+        # from their var,var forms and stanli must follow suit
+        # (runtime/src/adjoint.cpp).
+        data_positions = tuple(index
+                               for index in range(len(signature.arguments))
+                               if index != active_index)
+        identity += f"@{active_index}"
+    declarations = [f"real seed = probe[{position}];"]
     arguments: list[str] = []
     for index, (wrapped_argument, center) in enumerate(
             zip(signature.arguments, centers)):
@@ -182,19 +212,28 @@ def render_case(signature: Signature, descriptor: RegistrySpec,
             for index in range(max(len(dimensions), axis + 1)))
     declarations.append(
         f"{_type_declaration(result, 'value', result_dimensions)} = {call};")
-    weight = 1.0 + ((case_index * 7) % 17) / 64.0
-    declarations.extend(observe_result(result, "value", weight))
+    # These maps carry every integer onto the closed boundary of an open
+    # range, so the int overload's one evaluable input is exactly +/-inf:
+    # a data-only constant with no value or gradient information to
+    # compare. Keep the call live through the print guard instead.
+    int_boundary_infinite = {"inv_Phi", "lambert_wm1", "logit",
+                             "std_normal_qf"}
+    if (signature.name in int_boundary_infinite
+            and numeric_leaf_kind(signature.arguments[0]) == "int"):
+        declarations.extend(["if (seed > 1e100)", "  print(value);"])
+    else:
+        declarations.extend(observe_result(result, "value", position))
     body = "\n".join(f"      {line}" for line in declarations)
-    return (f"    // {signature.canonical_id}\n"
+    return (f"    // {identity}\n"
             f"    {{\n{body}\n    }}")
 
 
-def observe_result(value: StanType, expression: str, weight: float,
-                   depth: int = 0) -> list[str]:
+def observe_result(value: StanType, expression: str,
+                   position: int) -> list[str]:
     value, _ = unwrap_data(value)
     if isinstance(value, ArrayType):
         # Keep the assignment live without adding size/index operations to
-        # the overload test. The condition is false at every lit point but is
+        # the overload test. The condition is false at every replay point but is
         # parameter-dependent in model/generated-quantities lowering, so O1
         # cannot discard the typed value or its builtin call.
         return ["if (seed > 1e100)", f"  print({expression});"]
@@ -202,28 +241,19 @@ def observe_result(value: StanType, expression: str, weight: float,
         raise ValueError(f"cannot observe {value.canonical()}")
     reduced = f"sum({expression})" if value.name in {
         "vector", "row_vector", "matrix"} else expression
-    return [f"total += {weight:.17g} * {reduced};"]
-
-
-def partition(cases: Sequence[tuple[Signature, str]]) \
-        -> list[list[tuple[Signature, str]]]:
-    groups = balanced_partitions(cases, TARGET_SIGNATURES_PER_MODEL)
-    for group in groups:
-        group.sort(key=lambda value: value[0].canonical_id)
-    return groups
+    return [f"out[{position}] = {reduced};"]
 
 
 def render_model(index: int, count: int,
-                 cases: Sequence[tuple[Signature, str]]) -> str:
+                 cases: Sequence[tuple[str, Callable[[int], str]]]) -> str:
     function = f"builtin_signatures_{index:02d}"
-    body = ("    real total = 0;\n" +
-            "\n".join(source for _, source in cases) +
-            "\n    return total;")
+    body = "\n".join(render(position)
+                     for position, (_, render) in enumerate(cases, 1))
     return all_context_model(
-        function, body,
+        function, len(cases), body,
         "Generated by tools/generate_builtin_signature_models.py from the "
         "unified FunctionSpec registry",
-        f"Partition {index} of {count}; {len(cases)} overloads.")
+        f"Partition {index} of {count}; {len(cases)} overload instantiations.")
 
 
 def generate(stanc: pathlib.Path, registry: pathlib.Path,
@@ -256,19 +286,52 @@ def generate(stanc: pathlib.Path, registry: pathlib.Path,
             excluded.append({"signature": signature.canonical_id,
                              "reason": reason})
     selected.sort(key=lambda value: value[0].canonical_id)
-    rendered = [(signature, render_case(signature, descriptor, index))
-                for index, (signature, descriptor) in enumerate(selected, 1)]
-    groups = partition(rendered)
-    expected: dict[pathlib.Path, str] = {}
-    for index, group in enumerate(groups, 1):
-        path = output_dir / f"builtin_signatures_{index:02d}.stan"
-        expected[path] = render_model(index, len(groups), group)
-
-    models = []
-    for path, source in expected.items():
-        ids = [signature.canonical_id for signature, _ in
-               groups[int(path.stem.rsplit('_', 1)[1]) - 1]]
-        models.append(generated_model_record(path, source, ids, ROOT))
+    # Every overload once with all its real arguments parameter-dependent,
+    # then, when it has at least two such arguments, once per argument
+    # with only that one parameter-dependent: the mixed data/parameter
+    # instantiations the all-active call never reaches. An overload with
+    # fewer than two would only repeat its all-active instantiation.
+    #
+    # stan-math's columns_dot_product segfaults when its first matrix is
+    # data and the second is a parameter (reproduced on the pinned 2.39
+    # checkout and on develop math 29e4630d93; the vector and row_vector
+    # overloads and the reversed order are fine, and stanli evaluates the
+    # case correctly), so no CmdStan reference exists for it. The pinned
+    # stan-math predates to_matrix(array[] vector) (math bf25cddfee), which
+    # the pinned stanc already lists. Delete an entry when the pin moves
+    # past its problem.
+    cmdstan_crashes = {
+        "columns_dot_product(matrix,matrix)=>row_vector@1":
+            "cmdstan reference segfaults: stan-math "
+            "columns_dot_product(data matrix, var matrix)",
+        "to_matrix(array[]vector)=>matrix":
+            "cmdstan reference does not compile: the pinned stan-math has "
+            "no to_matrix(array[] vector)",
+    }
+    rendered: list[tuple[str, Callable[[int], str]]] = []
+    for signature, descriptor in selected:
+        positions = activity_positions(signature, descriptor)
+        for position in [None] + (positions if len(positions) >= 2 else []):
+            identity = signature.canonical_id + (
+                "" if position is None else f"@{position}")
+            if identity in cmdstan_crashes:
+                excluded.append({"signature": identity,
+                                 "reason": cmdstan_crashes.pop(identity)})
+                continue
+            rendered.append((identity, functools.partial(
+                render_case, signature, descriptor, position)))
+    if cmdstan_crashes:
+        raise RuntimeError("stale cmdstan-crash exclusions: "
+                           + ", ".join(sorted(cmdstan_crashes)))
+    groups = partitions(rendered, CASES_PER_MODEL)
+    expected = {
+        output_dir / f"builtin_signatures_{index:02d}.stan":
+            render_model(index, len(groups), group)
+        for index, group in enumerate(groups, 1)
+    }
+    models = [generated_model_record(path, source,
+                                     [identity for identity, _ in group], ROOT)
+              for (path, source), group in zip(expected.items(), groups)]
     manifest = {
         "generator": "tools/generate_builtin_signature_models.py",
         "stanc_build_id": portable_build_id(inventory.stanc_build_id),
@@ -276,15 +339,17 @@ def generate(stanc: pathlib.Path, registry: pathlib.Path,
         "registry_name_count": len(descriptors),
         "dumped_registry_name_count": len(dumped_names),
         "tested_signature_count": len(selected),
+        "tested_case_count": len(rendered),
         "excluded_signature_count": len(excluded),
         "missing_from_stanc": sorted(set(descriptors) - dumped_names),
-        "excluded": excluded,
+        "excluded": by_reason(excluded),
         "models": models,
     }
     okay = write_generated_outputs(expected, output_dir, FILE_GLOB,
                                     manifest_path, manifest, check, ROOT)
     if not check:
-        print(f"generated {len(groups)} models covering {len(selected)} signatures")
+        print(f"generated {len(groups)} models covering {len(rendered)} "
+              "builtin cases")
     return okay
 
 
@@ -300,8 +365,8 @@ def main() -> int:
     parser.add_argument("--check", action="store_true")
     arguments = parser.parse_args()
     return 0 if generate(arguments.stanc, arguments.registry,
-                         arguments.output_dir,
-                         arguments.manifest, arguments.check) else 1
+                         arguments.output_dir, arguments.manifest,
+                         arguments.check) else 1
 
 
 if __name__ == "__main__":

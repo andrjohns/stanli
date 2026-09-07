@@ -910,7 +910,12 @@ void solve_bwd(KernelCtx& ctx) {
 }
 
 // ---- lkj_corr_cholesky_lpdf(L | eta) --------------------------------------
-// in = {L, eta}; idata = {K}. eta is a data scalar in practice.
+// in = {L, eta}; idata = {K}. eta is an ordinary differentiable shape
+// parameter (variant bit 1); binding it as data used to zero d(lp)/d(eta)
+// silently and, under propto, drop normalization terms that are not
+// constant when eta is a parameter -- a 0.5% CmdStan gradient divergence
+// found by the signature-reference gate. The double binding remains the
+// data fast path and keeps that instantiation's tape unchanged.
 template <bool Grad, bool Chol = true>
 double lkj_eval(KernelCtx& ctx) {
   const int64_t K = ctx.idata[0];
@@ -920,16 +925,22 @@ double lkj_eval(KernelCtx& ctx) {
   VarM L(K, K);
   for (int64_t j = 0; j < K; ++j)
     for (int64_t i = 0; i < K; ++i) L(i, j) = ctx.in[0].data[j * K + i];
-  const double eta = ctx.in[1].data[0];
+  var eta(ctx.in[1].data[0]);
   var out;
-  if constexpr (Chol) {
-    out = propto ? stan::math::lkj_corr_cholesky_lpdf<true>(L, eta)
-                 : stan::math::lkj_corr_cholesky_lpdf<false>(L, eta);
-  } else {
-    out = propto ? stan::math::lkj_corr_lpdf<true>(L, eta)
-                 : stan::math::lkj_corr_lpdf<false>(L, eta);
-  }
-  return finish_tail_density<Grad>(ctx, out, L);
+  const auto call = [&](const auto& shape) {
+    if constexpr (Chol) {
+      return propto ? stan::math::lkj_corr_cholesky_lpdf<true>(L, shape)
+                    : stan::math::lkj_corr_cholesky_lpdf<false>(L, shape);
+    } else {
+      return propto ? stan::math::lkj_corr_lpdf<true>(L, shape)
+                    : stan::math::lkj_corr_lpdf<false>(L, shape);
+    }
+  };
+  if (ctx.variant & 0x2u)
+    out = call(eta);
+  else
+    out = call(ctx.in[1].data[0]);
+  return finish_tail_density<Grad>(ctx, out, L, eta);
 }
 void lkj_fwd(KernelCtx& ctx) { ctx.out.data[0] = lkj_eval<false>(ctx); }
 void lkj_bwd(KernelCtx& ctx) { lkj_eval<true>(ctx); }

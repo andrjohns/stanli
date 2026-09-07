@@ -2144,9 +2144,14 @@ struct ProgramCompiler {
 
     Program::Code code = native_code;
     if (spec.opcode == OP_DIV && e.type_ == "UInt") code = Program::IDIV;
+    // fmax/fmin ties and NaN adjoints depend on which operands are data
+    // (adjoint.cpp, program_extremum), the same way pow's zero-base law
+    // depends on the exponent's.
     const int law =
         code == Program::POW
             ? mir::pow_zero_base_law(e.args[0], e.args[1], !e.args[1].data_only)
+        : code == Program::FMAX || code == Program::FMIN
+            ? (e.args[0].data_only ? 0 : 0x1) | (e.args[1].data_only ? 0 : 0x2)
             : 0;
     const int result = alloc(n);
     for (int i = 0; i < n; ++i) {
@@ -3193,6 +3198,9 @@ struct ProgramCompiler {
       const int law = c == Program::POW
                           ? mir::pow_zero_base_law(e.args[0], e.args[1],
                                                    !e.args[1].data_only)
+                      : c == Program::FMAX || c == Program::FMIN
+                          ? (e.args[0].data_only ? 0 : 0x1) |
+                                (e.args[1].data_only ? 0 : 0x2)
                           : 0;
       const int r = alloc(n);
       for (int i = 0; i < n; ++i)

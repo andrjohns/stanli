@@ -187,6 +187,110 @@ static void check_vector_alphas() {
   }
 }
 
+// The design matrix is an ordinary differentiable argument, and a model may
+// build it from parameters. Dropping its pullback surfaced as a 2-3.5%
+// CmdStan gradient divergence in the signature-reference gate: the kernels
+// bound X as a plain double map, so d(lp)/dX was silently zero while alpha
+// and beta stayed exact.
+static void check_active_design(const std::string& tag, uint16_t opcode,
+                                bool propto, int alpha_len) {
+  using namespace stanli;
+  using stan::math::var;
+  const int rows = 6, cols = 3;
+  const bool has_phi = opcode == OP_NEG_BINOMIAL_2_LOG_GLM_LPMF;
+  const bool bern = opcode == OP_BERNOULLI_LOGIT_GLM_LPMF;
+
+  std::vector<double> X((size_t)rows * cols), a((size_t)alpha_len),
+      b((size_t)cols);
+  for (int j = 0; j < cols; ++j)
+    for (int i = 0; i < rows; ++i)
+      X[(size_t)j * rows + i] = std::sin(0.31 * i + 0.7 * j);
+  for (int i = 0; i < alpha_len; ++i) a[(size_t)i] = 0.15 - 0.08 * i;
+  for (int i = 0; i < cols; ++i) b[(size_t)i] = 0.2 + 0.11 * i;
+  std::vector<int> idata;
+  for (int i = 0; i < rows; ++i) idata.push_back(bern ? i % 2 : 1 + (i % 4));
+  idata.push_back(rows);
+  idata.push_back(cols);
+
+  const double seed = -0.73;
+  Graph g;
+  const int Xs = g.add_slot(rows * cols, true);
+  const int as = g.add_slot(alpha_len, true);
+  const int bs = g.add_slot(cols, true);
+  const int ps = has_phi ? g.add_slot(1, true) : -1;
+  const int lp = g.add_slot(1, false);
+  const int ss = g.add_slot(1, false);
+  const int total = g.add_slot(1, false);
+  const int op = has_phi ? g.add_op(opcode, {Xs, as, bs, ps}, lp, idata)
+                         : g.add_op(opcode, {Xs, as, bs}, lp, idata);
+  g.ops[(size_t)op].variant =
+      (uint8_t)((propto ? 0x80u : 0u) | (has_phi ? 0x0fu : 0x07u));
+  g.add_op(OP_MUL, {lp, ss}, total);
+  g.result_slot = total;
+
+  Executor ex(std::move(g));
+  std::copy(X.begin(), X.end(), ex.param_ptr(Xs));
+  std::copy(a.begin(), a.end(), ex.param_ptr(as));
+  std::copy(b.begin(), b.end(), ex.param_ptr(bs));
+  if (has_phi) ex.param_ptr(ps)[0] = 1.7;
+  ex.value_ptr(ss)[0] = seed;
+  std::vector<double> grad(X.size() + a.size() + b.size() + (has_phi ? 1 : 0),
+                           0.0);
+  const double got = ex.gradient(grad.data());
+
+  stan::math::nested_rev_autodiff nested;
+  Eigen::Matrix<var, -1, -1> Xv(rows, cols);
+  for (size_t i = 0; i < X.size(); ++i) Xv.data()[i] = X[i];
+  Eigen::Matrix<var, -1, 1> av(alpha_len), bv(cols);
+  for (int i = 0; i < alpha_len; ++i) av(i) = a[(size_t)i];
+  for (int i = 0; i < cols; ++i) bv(i) = b[(size_t)i];
+  var phi = 1.7;
+  std::vector<int> y(idata.begin(), idata.begin() + rows);
+  auto with_alpha = [&](const auto& alpha) {
+    if (bern) {
+      return propto
+                 ? stan::math::bernoulli_logit_glm_lpmf<true>(y, Xv, alpha, bv)
+                 : stan::math::bernoulli_logit_glm_lpmf<false>(y, Xv, alpha,
+                                                               bv);
+    } else if (opcode == OP_POISSON_LOG_GLM_LPMF) {
+      return propto ? stan::math::poisson_log_glm_lpmf<true>(y, Xv, alpha, bv)
+                    : stan::math::poisson_log_glm_lpmf<false>(y, Xv, alpha, bv);
+    }
+    return propto ? stan::math::neg_binomial_2_log_glm_lpmf<true>(y, Xv, alpha,
+                                                                  bv, phi)
+                  : stan::math::neg_binomial_2_log_glm_lpmf<false>(y, Xv, alpha,
+                                                                   bv, phi);
+  };
+  var ref = alpha_len == 1 ? with_alpha(av(0)) : with_alpha(av);
+  var scaled = ref * seed;
+  stan::math::grad(scaled.vi_);
+  expect_eq(tag + " total", got, scaled.val());
+  size_t at = 0;
+  for (size_t i = 0; i < X.size(); ++i)
+    expect_eq(tag + " dX" + std::to_string(i), grad[at++], Xv.data()[i].adj());
+  for (int i = 0; i < alpha_len; ++i)
+    expect_eq(tag + " da" + std::to_string(i), grad[at++], av(i).adj());
+  for (int i = 0; i < cols; ++i)
+    expect_eq(tag + " db" + std::to_string(i), grad[at++], bv(i).adj());
+  if (has_phi) expect_eq(tag + " dphi", grad[at], phi.adj());
+}
+
+static void check_active_designs() {
+  using namespace stanli;
+  for (bool propto : {false, true}) {
+    for (int alpha_len : {1, 6}) {
+      const std::string s = (propto ? std::string(" propto") : std::string()) +
+                            (alpha_len == 1 ? "" : " valpha");
+      check_active_design("bern glm dX" + s, OP_BERNOULLI_LOGIT_GLM_LPMF,
+                          propto, alpha_len);
+      check_active_design("pois glm dX" + s, OP_POISSON_LOG_GLM_LPMF, propto,
+                          alpha_len);
+      check_active_design("nb2 glm dX" + s, OP_NEG_BINOMIAL_2_LOG_GLM_LPMF,
+                          propto, alpha_len);
+    }
+  }
+}
+
 // The three GLMs that take the var tape rather than the recorder, each with
 // a non-unit output adjoint: their kernels seed the tape with 1.0 in the
 // forward and scale in the backward.
@@ -370,6 +474,7 @@ int main() {
 
   check_tail_glms();
   check_vector_alphas();
+  check_active_designs();
 
   check_empty_glm(OP_BERNOULLI_LOGIT_GLM_LPMF, "bernoulli_logit_glm");
   check_empty_glm(OP_POISSON_LOG_GLM_LPMF, "poisson_log_glm");

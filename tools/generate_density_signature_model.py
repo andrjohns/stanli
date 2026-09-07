@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate exhaustive, balanced probability-function execution fixtures.
+"""Generate exhaustive probability-function execution fixtures.
 
 The unified runtime registry is joined to stanc's authoritative signature
 inventory. Every compatible registered density, mass, CDF, LCDF, and LCCDF
-overload is emitted once, partitioned by rendered size, and called from
+overload is emitted once, in models of a fixed number of calls, called from
 transformed data, the ordinary model graph, runtime control, and generated
 quantities.
 """
@@ -11,8 +11,11 @@ quantities.
 from __future__ import annotations
 
 import argparse
+import functools
 import pathlib
+import re
 import sys
+from typing import Callable
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -27,9 +30,10 @@ from conformance.signatures import (  # noqa: E402
 )
 from function_signature_common import (  # noqa: E402
     all_context_model,
-    balanced_partitions,
+    by_reason,
     generated_model_record,
     numeric_leaf_kind,
+    partitions,
     portable_build_id,
     registry_by_name,
     resolve_registry_spec,
@@ -43,7 +47,7 @@ DEFAULT_REGISTRY = ROOT / "build/dump_function_specs"
 DEFAULT_OUTPUT_DIR = ROOT / "tests/fixtures"
 DEFAULT_MANIFEST = ROOT / "tests/function_coverage/density_signatures_manifest.json"
 FILE_GLOB = "density_signatures_*.stan"
-TARGET_SIGNATURES_PER_MODEL = 240
+CASES_PER_MODEL = 1440
 PROBABILITY_SUFFIXES = ("_lpdf", "_lpmf", "_lccdf", "_lcdf", "_cdf")
 
 
@@ -89,13 +93,37 @@ def density_signatures(stanc: pathlib.Path, registry: pathlib.Path) \
 def role(name: str, index: int) -> str:
     """Return a support-safe semantic role for a density argument."""
     base = probability_base(name)
+    # Suffix-specific repairs. Two keep the log density finite, since one
+    # nonfinite case would absorb every other case's contribution to the
+    # partition's log density and gradient; the beta_binomial CDFs get a
+    # cheap series (see r_shallow).
+    # bernoulli_lccdf(1 | p) is log P(Y > 1) = log 0 = -inf identically, so
+    # its outcome must sit below the top of the support. The student_t CDF
+    # family's degrees-of-freedom derivative is 0/0 at y == mu (CmdStan
+    # reports the same nan), and the generic roles render y and mu from the
+    # same expression, so y gets an offset value instead.
+    overrides = {
+        "bernoulli_lccdf": ("count_zero", "prob"),
+        "student_t_cdf": ("tail_y", "df", "any", "positive"),
+        "student_t_lcdf": ("tail_y", "df", "any", "positive"),
+        "student_t_lccdf": ("tail_y", "df", "any", "positive"),
+        "beta_binomial_cdf": ("count", "trials", "shallow", "shallow"),
+        "beta_binomial_lcdf": ("count", "trials", "shallow", "shallow"),
+        "beta_binomial_lccdf": ("count", "trials", "shallow", "shallow"),
+    }
+    if name in overrides:
+        try:
+            return overrides[name][index]
+        except IndexError as exc:
+            raise ValueError(
+                f"no argument roles for {name} argument {index}") from exc
     roles = {
         "bernoulli": ("count", "prob"),
         "bernoulli_logit": ("count", "any"),
         "bernoulli_logit_glm": ("count", "design", "any", "any"),
         "beta_binomial": ("count", "trials", "positive", "positive"),
         "beta": ("prob", "positive", "positive"),
-        "beta_neg_binomial": ("count", "positive", "positive", "positive"),
+        "beta_neg_binomial": ("count", "positive", "steep", "positive"),
         "beta_proportion": ("prob", "prob", "positive"),
         "binomial": ("count", "trials", "prob"),
         "binomial_logit": ("count", "trials", "any"),
@@ -170,8 +198,9 @@ def role(name: str, index: int) -> str:
 
 def expression(type_name: str, semantic_role: str) -> str:
     integer = {
-        "count": "i_count", "category": "i_category", "trials": "i_trials",
-        "positive": "i_positive",
+        "count": "i_count", "count_zero": "i_count_zero",
+        "category": "i_category", "trials": "i_trials",
+        "positive": "i_positive", "steep": "i_steep",
         "range_value": "i_range_value", "range_lower": "i_range_lower",
         "range_upper": "i_range_upper", "hyper_n": "i_hyper_n",
         "hyper_N": "i_hyper_N", "hyper_a": "i_hyper_a", "hyper_b": "i_hyper_b",
@@ -183,12 +212,14 @@ def expression(type_name: str, semantic_role: str) -> str:
 
     scalar_role = {
         "any": "r_any", "design": "r_any", "positive": "r_positive",
+        "steep": "r_steep", "shallow": "r_shallow",
         "df": "r_df", "prob": "r_prob", "simplex": "r_prob",
         "uniform_y": "r_uniform_y", "uniform_lower": "r_uniform_lower",
         "uniform_upper": "r_uniform_upper", "pareto_y": "r_pareto_y",
         "pareto_min": "r_pareto_min", "pareto2_y": "r_pareto2_y",
         "pareto2_min": "r_pareto2_min", "wiener_y": "r_wiener_y",
         "wiener_alpha": "r_wiener_alpha", "wiener_tau": "r_wiener_tau",
+        "tail_y": "r_tail_y",
     }
     matrix_role = {
         "design": "m_design", "any": "m_design", "positive": "m_positive",
@@ -205,21 +236,25 @@ def expression(type_name: str, semantic_role: str) -> str:
         "array[] vector": "a_v_", "array[] row_vector": "a_rv_",
     }[type_name]
     container_role = {
-        "any": "any", "design": "any", "positive": "positive", "df": "df",
+        "any": "any", "design": "any", "positive": "positive",
+        "steep": "steep", "shallow": "shallow", "df": "df",
         "prob": "prob", "simplex": "simplex", "cutpoints": "cutpoints",
         "uniform_y": "uniform_y", "uniform_lower": "uniform_lower",
         "uniform_upper": "uniform_upper", "pareto_y": "pareto_y",
         "pareto_min": "pareto_min", "pareto2_y": "pareto2_y",
         "pareto2_min": "pareto2_min", "wiener_y": "wiener_y",
         "wiener_alpha": "wiener_alpha", "wiener_tau": "wiener_tau",
+        "tail_y": "tail_y",
     }
     return prefix + container_role[semantic_role]
 
 
 BODY_DECLARATIONS = """    int i_count = 1;
+    int i_count_zero = 0;
     int i_category = 1;
     int i_trials = 2;
     int i_positive = 2;
+    int i_steep = 6;
     int i_range_value = 1;
     int i_range_lower = 0;
     int i_range_upper = 2;
@@ -228,9 +263,11 @@ BODY_DECLARATIONS = """    int i_count = 1;
     int i_hyper_a = 2;
     int i_hyper_b = 2;
     array[2] int a_i_count = {1, 1};
+    array[2] int a_i_count_zero = {0, 0};
     array[2] int a_i_category = {1, 2};
     array[2] int a_i_trials = {2, 2};
     array[2] int a_i_positive = {2, 2};
+    array[2] int a_i_steep = {6, 6};
     array[2] int a_i_range_value = {1, 1};
     array[2] int a_i_range_lower = {0, 0};
     array[2] int a_i_range_upper = {2, 2};
@@ -243,6 +280,14 @@ BODY_DECLARATIONS = """    int i_count = 1;
     // Stay away from positive integers where beta_neg_binomial_cdf's
     // hypergeometric representation can contain singular denominator terms.
     real r_positive = 1.2 + exp(0.01 * seed);
+    // beta_neg_binomial's alpha sets how fast its CDF series converge: the
+    // 3F2 tail decays like k^-alpha and Boost's pFq at z = 1 sums to machine
+    // precision, so a call costs 19 ms at alpha 2.2 and 0.07 ms at 6.2.
+    real r_steep = 5.2 + exp(0.01 * seed);
+    // beta_binomial's CDF sums a 3F2 whose terms grow like k^(alpha+beta-2)
+    // until a 1e-6 log tolerance, so alpha + beta >= 2 runs every one of
+    // its 1e5 steps; well below 2 the series stops within a few.
+    real r_shallow = 0.15 + 0.01 * seed;
     real r_df = 3 + exp(0.01 * seed);
     real r_prob = inv_logit(0.01 * seed);
     real r_uniform_y = 0.01 * seed;
@@ -255,9 +300,12 @@ BODY_DECLARATIONS = """    int i_count = 1;
     real r_wiener_y = 1.5 + 0.01 * seed;
     real r_wiener_alpha = 1.2 + 0.01 * seed;
     real r_wiener_tau = 0.2 + 0.001 * seed;
+    real r_tail_y = 0.7 + 0.01 * seed;
 
     vector[2] v_any = [r_any, r_any + 0.1]';
     vector[2] v_positive = [r_positive, r_positive + 0.1]';
+    vector[2] v_steep = [r_steep, r_steep + 0.1]';
+    vector[2] v_shallow = [r_shallow, r_shallow + 0.1]';
     vector[2] v_df = [r_df, r_df + 0.1]';
     vector[2] v_prob = [r_prob, inv_logit(0.02 * seed)]';
     vector[2] v_simplex = softmax([0.01 * seed, 0]');
@@ -272,10 +320,13 @@ BODY_DECLARATIONS = """    int i_count = 1;
     vector[2] v_wiener_y = [r_wiener_y, r_wiener_y + 0.05]';
     vector[2] v_wiener_alpha = [r_wiener_alpha, r_wiener_alpha + 0.05]';
     vector[2] v_wiener_tau = [r_wiener_tau, r_wiener_tau + 0.01]';
+    vector[2] v_tail_y = [r_tail_y, r_tail_y + 0.1]';
     vector[1] v_any_one = [r_any]';
     vector[1] v_positive_one = [r_positive]';
     row_vector[2] rv_any = [r_any, r_any + 0.1];
     row_vector[2] rv_positive = [r_positive, r_positive + 0.1];
+    row_vector[2] rv_steep = [r_steep, r_steep + 0.1];
+    row_vector[2] rv_shallow = [r_shallow, r_shallow + 0.1];
     row_vector[2] rv_df = [r_df, r_df + 0.1];
     row_vector[2] rv_prob = [r_prob, inv_logit(0.02 * seed)];
     row_vector[2] rv_simplex = [r_prob, 1 - r_prob];
@@ -290,9 +341,12 @@ BODY_DECLARATIONS = """    int i_count = 1;
     row_vector[2] rv_wiener_y = [r_wiener_y, r_wiener_y + 0.05];
     row_vector[2] rv_wiener_alpha = [r_wiener_alpha, r_wiener_alpha + 0.05];
     row_vector[2] rv_wiener_tau = [r_wiener_tau, r_wiener_tau + 0.01];
+    row_vector[2] rv_tail_y = [r_tail_y, r_tail_y + 0.1];
 
     array[2] real a_r_any = {r_any, r_any + 0.1};
     array[2] real a_r_positive = {r_positive, r_positive + 0.1};
+    array[2] real a_r_steep = {r_steep, r_steep + 0.1};
+    array[2] real a_r_shallow = {r_shallow, r_shallow + 0.1};
     array[2] real a_r_df = {r_df, r_df + 0.1};
     array[2] real a_r_prob = {r_prob, inv_logit(0.02 * seed)};
     array[2] real a_r_uniform_y = {r_uniform_y, r_uniform_y};
@@ -305,13 +359,16 @@ BODY_DECLARATIONS = """    int i_count = 1;
     array[2] real a_r_wiener_y = {r_wiener_y, r_wiener_y + 0.05};
     array[2] real a_r_wiener_alpha = {r_wiener_alpha, r_wiener_alpha + 0.05};
     array[2] real a_r_wiener_tau = {r_wiener_tau, r_wiener_tau + 0.01};
+    array[2] real a_r_tail_y = {r_tail_y, r_tail_y + 0.1};
 
     array[2] vector[2] a_v_any = {v_any, v_any};
     array[2] vector[2] a_v_positive = {v_positive, v_positive};
+    array[2] vector[2] a_v_steep = {v_steep, v_steep};
     array[2] vector[2] a_v_simplex = {v_simplex, v_simplex};
     array[2] vector[2] a_v_cutpoints = {v_cutpoints, v_cutpoints};
     array[2] row_vector[2] a_rv_any = {rv_any, rv_any};
     array[2] row_vector[2] a_rv_positive = {rv_positive, rv_positive};
+    array[2] row_vector[2] a_rv_steep = {rv_steep, rv_steep};
     array[2] row_vector[2] a_rv_simplex = {rv_simplex, rv_simplex};
 
     matrix[2, 2] m_design = [[1, r_any], [r_any, 1]];
@@ -321,11 +378,83 @@ BODY_DECLARATIONS = """    int i_count = 1;
     real corr = tanh(0.01 * seed);
     matrix[2, 2] m_corr_chol = [[1, 0], [corr, sqrt(1 - square(corr))]];
     matrix[2, 2] m_corr = multiply_lower_tri_self_transpose(m_corr_chol);
-    real lp = 0;
 """
 
 
-def render_case(signature: Signature) -> str:
+# Role variables, longest prefix first so `a_r_any` never half-matches `r_`.
+ROLE_VARIABLE = re.compile(
+    r"\b(a_rv_|a_i_|a_r_|a_v_|rv_|i_|r_|v_|m_|corr\b)")
+IDENTIFIER = re.compile(r"\b[A-Za-z_]\w*\b")
+
+
+@functools.lru_cache(maxsize=None)
+def declarations() -> dict[str, str]:
+    """Role variable name -> its declaration, in BODY_DECLARATIONS order."""
+    result = {}
+    for line in BODY_DECLARATIONS.splitlines():
+        line = line.strip()
+        if not line or line.startswith("//"):
+            continue
+        head, _ = line.split(" = ", 1)
+        result[head.split()[-1]] = line
+    return result
+
+
+def data_twin_declarations() -> str:
+    """BODY_DECLARATIONS with every role variable renamed d_* and seed
+    replaced by a literal zero. A literal-only local constant-folds to a
+    data argument in both runtimes, which is what lets one call activate a
+    single argument while every other one takes the data instantiation."""
+    body = "".join(f"    {line}\n" for line in declarations().values())
+    body = re.sub(r"\bseed\b", "0.0", body)
+    return ROLE_VARIABLE.sub(lambda m: "d_" + m.group(1), body)
+
+
+@functools.lru_cache(maxsize=None)
+def seed_dependent() -> dict[str, set[str]]:
+    """Seed-dependent role variables -> the role variables they reference."""
+    uses = {name: set(IDENTIFIER.findall(line.split(" = ", 1)[1]))
+            for name, line in declarations().items()}
+    dependent = {}
+    for name, used in uses.items():
+        if "seed" in used or used & set(dependent):
+            dependent[name] = used & set(dependent)
+    return dependent
+
+
+def prelude() -> str:
+    dependent = seed_dependent()
+    hoisted = "".join(f"    {line}\n"
+                      for name, line in declarations().items()
+                      if name not in dependent)
+    return data_twin_declarations() + hoisted
+
+
+def case_declarations(arguments: list[str]) -> list[str]:
+    dependent = seed_dependent()
+    needed = set()
+    pending = [name for argument in arguments
+               for name in IDENTIFIER.findall(argument)]
+    while pending:
+        name = pending.pop()
+        if name in dependent and name not in needed:
+            needed.add(name)
+            pending.extend(dependent[name])
+    return [line for name, line in declarations().items() if name in needed]
+
+
+def as_data(argument: str) -> str:
+    return ROLE_VARIABLE.sub(lambda m: "d_" + m.group(1), argument)
+
+
+def real_argument_positions(signature: Signature) -> list[int]:
+    """Indices whose surface type carries real values (gradient-capable)."""
+    return [index for index, value in enumerate(signature.arguments)
+            if "int" not in surface_type(value)]
+
+
+def render_case(signature: Signature, active_index: int | None,
+                position: int) -> str:
         name = signature.name
         argument_types = [surface_type(value) for value in signature.arguments]
         arguments = [
@@ -364,22 +493,36 @@ def render_case(signature: Signature) -> str:
                 argument_types[2] == "array[] vector"):
             arguments[0] = "{i_category}"
             arguments[2] = "{v_cutpoints}"
+        # Per-argument activity: every other argument takes its constant
+        # data twin, so the call reaches the same single-active
+        # instantiation CmdStan's generated code selects.
+        identity = signature.canonical_id
+        if active_index is not None:
+            arguments = [argument if index == active_index
+                         else as_data(argument)
+                         for index, argument in enumerate(arguments)]
+            identity += f"@{active_index}"
         # Stan requires probability-function syntax for densities, mass
         # functions, and every CDF spelling alike.
         call = f"{name}({arguments[0]} | {', '.join(arguments[1:])})"
-        return f"    lp += {call};  // {signature.canonical_id}\n"
+        lines = ([f"real seed = probe[{position}];"]
+                 + case_declarations(arguments)
+                 + [f"out[{position}] = {call};"])
+        return (f"    {{  // {identity}\n"
+                + "".join(f"      {line}\n" for line in lines)
+                + "    }\n")
 
 
 def render_model(index: int, count: int,
-                 cases: list[tuple[Signature, str]]) -> str:
+                 cases: list[tuple[str, Callable[[int], str]]]) -> str:
     function = f"density_signatures_{index:02d}"
-    calls = "".join(source for _, source in cases)
-    body = BODY_DECLARATIONS + calls + "    return lp;"
+    body = prelude() + "".join(
+        render(position) for position, (_, render) in enumerate(cases, 1))
     return all_context_model(
-        function, body,
+        function, len(cases), body.rstrip("\n"),
         "Generated by tools/generate_density_signature_model.py from the "
         "unified FunctionSpec registry",
-        f"Partition {index} of {count}; {len(cases)} overloads.")
+        f"Partition {index} of {count}; {len(cases)} overload instantiations.")
 
 
 def main() -> int:
@@ -412,20 +555,27 @@ def main() -> int:
                       if args.filter in signature.name]
     signatures = signatures[args.start:None if args.count is None
                              else args.start + args.count]
-    rendered = [(signature, render_case(signature))
-                for signature in signatures]
-    groups = balanced_partitions(rendered, TARGET_SIGNATURES_PER_MODEL)
-    for group in groups:
-        group.sort(key=lambda value: value[0].canonical_id)
+    # Every overload once with all its real arguments parameter-dependent,
+    # then, when it has at least two such arguments, once per argument
+    # with only that one parameter-dependent: the mixed data/parameter
+    # instantiations the all-active call never reaches. An overload with
+    # fewer than two would only repeat its all-active instantiation.
+    rendered = [
+        (signature.canonical_id + ("" if position is None else f"@{position}"),
+         functools.partial(render_case, signature, position))
+        for signature in signatures
+        for positions in [real_argument_positions(signature)]
+        for position in [None] + (positions if len(positions) >= 2 else [])
+    ]
+    groups = partitions(rendered, CASES_PER_MODEL)
     expected = {
         args.output_dir / f"density_signatures_{index:02d}.stan":
             render_model(index, len(groups), group)
         for index, group in enumerate(groups, 1)
     }
-    models = []
-    for index, (path, source) in enumerate(expected.items()):
-        ids = [signature.canonical_id for signature, _ in groups[index]]
-        models.append(generated_model_record(path, source, ids, ROOT))
+    models = [generated_model_record(path, source,
+                                     [identity for identity, _ in group], ROOT)
+              for (path, source), group in zip(expected.items(), groups)]
     registered_names = registry_by_name(args.registry, "density")
     dumped_names = {signature.name for signature in inventory.signatures}
     tested_names = {signature.name for signature in signatures}
@@ -455,16 +605,17 @@ def main() -> int:
             partially_excluded_names),
         "unaccounted_registry_names": sorted(unaccounted_names),
         "tested_signature_count": len(signatures),
+        "tested_case_count": len(rendered),
         "excluded_signature_count": len(excluded),
         "missing_from_stanc": sorted(set(registered_names) - dumped_names),
-        "excluded": excluded,
+        "excluded": by_reason(excluded),
         "models": models,
     }
     okay = write_generated_outputs(expected, args.output_dir, FILE_GLOB,
-                                    args.manifest, manifest, args.check, ROOT)
+                                   args.manifest, manifest, args.check, ROOT)
     if not args.check:
-        print(f"generated {len(groups)} models covering {len(signatures)} "
-              "density signatures")
+        print(f"generated {len(groups)} models covering {len(rendered)} "
+              "density cases")
     return 0 if okay else 1
 
 

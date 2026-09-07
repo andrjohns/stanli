@@ -262,6 +262,17 @@ DensityCallPlan density_call_plan(
                             << (k - static_cast<size_t>(spec.integer_args));
   }
 
+  // A nonnegative spec mask is the kernel's promise of which real arguments
+  // it can differentiate. Parameter-dependent input outside that promise
+  // must refuse here -- the one plan choke point every backend shares --
+  // because binding it anyway drops the argument's partial silently: the
+  // lkj eta mask did exactly that and surfaced only as a 0.5% CmdStan
+  // gradient divergence in the signature-reference gate.
+  if (spec.activity_mask >= 0 &&
+      (plan.activity_mask & ~static_cast<uint8_t>(spec.activity_mask)) != 0)
+    throw std::invalid_argument(
+        "density argument outside the kernel's differentiable set");
+
   const auto matrix_dimensions = [&](size_t real_index,
                                      bool allow_row_vector = false) {
     if (real_index >= real_shapes.size())
