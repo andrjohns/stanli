@@ -117,7 +117,7 @@ def role(name: str, index: int) -> str:
         "bernoulli_logit_glm": ("count", "design", "any", "any"),
         "beta_binomial": ("count", "trials", "positive", "positive"),
         "beta": ("prob", "positive", "positive"),
-        "beta_neg_binomial": ("count", "positive", "positive", "positive"),
+        "beta_neg_binomial": ("count", "positive", "steep", "positive"),
         "beta_proportion": ("prob", "prob", "positive"),
         "binomial": ("count", "trials", "prob"),
         "binomial_logit": ("count", "trials", "any"),
@@ -194,7 +194,7 @@ def expression(type_name: str, semantic_role: str) -> str:
     integer = {
         "count": "i_count", "count_zero": "i_count_zero",
         "category": "i_category", "trials": "i_trials",
-        "positive": "i_positive",
+        "positive": "i_positive", "steep": "i_steep",
         "range_value": "i_range_value", "range_lower": "i_range_lower",
         "range_upper": "i_range_upper", "hyper_n": "i_hyper_n",
         "hyper_N": "i_hyper_N", "hyper_a": "i_hyper_a", "hyper_b": "i_hyper_b",
@@ -206,6 +206,7 @@ def expression(type_name: str, semantic_role: str) -> str:
 
     scalar_role = {
         "any": "r_any", "design": "r_any", "positive": "r_positive",
+        "steep": "r_steep",
         "df": "r_df", "prob": "r_prob", "simplex": "r_prob",
         "uniform_y": "r_uniform_y", "uniform_lower": "r_uniform_lower",
         "uniform_upper": "r_uniform_upper", "pareto_y": "r_pareto_y",
@@ -229,7 +230,8 @@ def expression(type_name: str, semantic_role: str) -> str:
         "array[] vector": "a_v_", "array[] row_vector": "a_rv_",
     }[type_name]
     container_role = {
-        "any": "any", "design": "any", "positive": "positive", "df": "df",
+        "any": "any", "design": "any", "positive": "positive",
+        "steep": "steep", "df": "df",
         "prob": "prob", "simplex": "simplex", "cutpoints": "cutpoints",
         "uniform_y": "uniform_y", "uniform_lower": "uniform_lower",
         "uniform_upper": "uniform_upper", "pareto_y": "pareto_y",
@@ -246,6 +248,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     int i_category = 1;
     int i_trials = 2;
     int i_positive = 2;
+    int i_steep = 6;
     int i_range_value = 1;
     int i_range_lower = 0;
     int i_range_upper = 2;
@@ -258,6 +261,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     array[2] int a_i_category = {1, 2};
     array[2] int a_i_trials = {2, 2};
     array[2] int a_i_positive = {2, 2};
+    array[2] int a_i_steep = {6, 6};
     array[2] int a_i_range_value = {1, 1};
     array[2] int a_i_range_lower = {0, 0};
     array[2] int a_i_range_upper = {2, 2};
@@ -270,6 +274,10 @@ BODY_DECLARATIONS = """    int i_count = 1;
     // Stay away from positive integers where beta_neg_binomial_cdf's
     // hypergeometric representation can contain singular denominator terms.
     real r_positive = 1.2 + exp(0.01 * seed);
+    // beta_neg_binomial's alpha sets how fast its CDF series converge: the
+    // 3F2 tail decays like k^-alpha and Boost's pFq at z = 1 sums to machine
+    // precision, so a call costs 19 ms at alpha 2.2 and 0.07 ms at 6.2.
+    real r_steep = 5.2 + exp(0.01 * seed);
     real r_df = 3 + exp(0.01 * seed);
     real r_prob = inv_logit(0.01 * seed);
     real r_uniform_y = 0.01 * seed;
@@ -286,6 +294,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
 
     vector[2] v_any = [r_any, r_any + 0.1]';
     vector[2] v_positive = [r_positive, r_positive + 0.1]';
+    vector[2] v_steep = [r_steep, r_steep + 0.1]';
     vector[2] v_df = [r_df, r_df + 0.1]';
     vector[2] v_prob = [r_prob, inv_logit(0.02 * seed)]';
     vector[2] v_simplex = softmax([0.01 * seed, 0]');
@@ -305,6 +314,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
     vector[1] v_positive_one = [r_positive]';
     row_vector[2] rv_any = [r_any, r_any + 0.1];
     row_vector[2] rv_positive = [r_positive, r_positive + 0.1];
+    row_vector[2] rv_steep = [r_steep, r_steep + 0.1];
     row_vector[2] rv_df = [r_df, r_df + 0.1];
     row_vector[2] rv_prob = [r_prob, inv_logit(0.02 * seed)];
     row_vector[2] rv_simplex = [r_prob, 1 - r_prob];
@@ -323,6 +333,7 @@ BODY_DECLARATIONS = """    int i_count = 1;
 
     array[2] real a_r_any = {r_any, r_any + 0.1};
     array[2] real a_r_positive = {r_positive, r_positive + 0.1};
+    array[2] real a_r_steep = {r_steep, r_steep + 0.1};
     array[2] real a_r_df = {r_df, r_df + 0.1};
     array[2] real a_r_prob = {r_prob, inv_logit(0.02 * seed)};
     array[2] real a_r_uniform_y = {r_uniform_y, r_uniform_y};
@@ -339,10 +350,12 @@ BODY_DECLARATIONS = """    int i_count = 1;
 
     array[2] vector[2] a_v_any = {v_any, v_any};
     array[2] vector[2] a_v_positive = {v_positive, v_positive};
+    array[2] vector[2] a_v_steep = {v_steep, v_steep};
     array[2] vector[2] a_v_simplex = {v_simplex, v_simplex};
     array[2] vector[2] a_v_cutpoints = {v_cutpoints, v_cutpoints};
     array[2] row_vector[2] a_rv_any = {rv_any, rv_any};
     array[2] row_vector[2] a_rv_positive = {rv_positive, rv_positive};
+    array[2] row_vector[2] a_rv_steep = {rv_steep, rv_steep};
     array[2] row_vector[2] a_rv_simplex = {rv_simplex, rv_simplex};
 
     matrix[2, 2] m_design = [[1, r_any], [r_any, 1]];

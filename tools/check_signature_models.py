@@ -214,13 +214,19 @@ def compare(name, source, manifest_sha, functions, reference, ledger,
     used = set()
     worst = 0.0
 
+    # stanc's --O1 pass dominates a replay (over 30 s on a wiener partition
+    # against 0.2 s of evaluation), so compile once and hand the three
+    # points the MIR. The flags mirror tools/stanc_process.cpp.
+    mir = args.build / "signature-mir" / (name + ".mir")
+    mir.parent.mkdir(parents=True, exist_ok=True)
+    mir.write_text(run([args.stanc, "--O1", "--debug-optimized-mir", source]))
+
     def evaluate(point):
         # The models exist to exercise the compiled paths; a section the
         # MIR interpreter took over would replay correctly and prove
         # nothing, so make that a compile error instead of a warning.
         return parse(run([args.build / "stanli_check", source, args.data,
-                          "--stanc", args.stanc, "--point", point,
-                          "--wa-values"],
+                          "--mir", mir, "--point", point, "--wa-values"],
                          env={**os.environ, "STANLI_NO_INTERPRETER": "1"}))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=POINTS) as pool:
@@ -275,7 +281,13 @@ def main():
         p.resolve() for p in (args.build, args.stanc, args.cmdstan,
                               args.reference))
     args.data = args.build / "context_seed.json"
-    args.data.write_text(json.dumps(CONTEXT_DATA) + "\n")
+    text = json.dumps(CONTEXT_DATA) + "\n"
+    if not args.data.exists() or args.data.read_text() != text:
+        # Concurrent ctest replays share this file: land it with one rename
+        # so a reader never sees it half written.
+        staged = args.data.with_name(f"context_seed.{os.getpid()}.json")
+        staged.write_text(text)
+        os.replace(staged, args.data)
     models = manifest_models(args.manifest or MANIFESTS)
     ledger = load_ledger(models)
     if args.model:
