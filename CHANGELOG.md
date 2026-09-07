@@ -29,6 +29,13 @@ is re-recorded. The sweep found the three fixes below.
 
 ### Fixes
 
+`beta_neg_binomial_cdf`, `_lcdf` and `_lccdf` took about a second per call
+on aarch64 Linux. Boost's default policy evaluates double special
+functions in long double, which there is software binary128, and its
+epsilon set the length of the hypergeometric series. The build now turns
+that promotion off, so every platform evaluates in double, as macOS on
+Apple silicon already did.
+
 `bernoulli_logit_glm`, `poisson_log_glm` and `neg_binomial_2_log_glm`
 dropped the gradient of a parameter design matrix: the log density was
 right and `x`'s adjoint came back zero.

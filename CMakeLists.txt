@@ -106,6 +106,10 @@ target_include_directories(stanmath INTERFACE
   ${_sundials}/include
   ${_tbb}/include)
 target_compile_definitions(stanmath INTERFACE _REENTRANT BOOST_DISABLE_ASSERTS)
+# Boost's default policy evaluates double in long double, which on aarch64
+# Linux is software binary128: its epsilon then sets the series length in
+# hypergeometric_pFq, so beta_neg_binomial's CDFs take a second per call.
+target_compile_definitions(stanmath INTERFACE BOOST_MATH_PROMOTE_DOUBLE_POLICY=false)
 # Pin FP contraction off: clang otherwise forms FMAs differently across
 # template instantiations of the same math, which breaks bitwise parity
 # between the kernels and the var-path references (measured: 2 ULP on
