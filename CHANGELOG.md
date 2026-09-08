@@ -29,6 +29,10 @@ is re-recorded. The sweep found the three fixes below.
 
 ### Fixes
 
+A threaded run now polls its interrupt callback once before starting the
+chains, so a stop that is already pending ends the run before the first
+transition instead of racing the worker threads.
+
 `beta_neg_binomial_cdf`, `_lcdf` and `_lccdf` took about a second per call
 on aarch64 Linux. Boost's default policy evaluates double special
 functions in long double, which there is software binary128, and its

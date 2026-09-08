@@ -260,6 +260,22 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
   std::vector<std::thread> pool;
   pool.reserve((size_t)threads);
 
+  // The caller's poll runs on this thread, between progress events, so a
+  // busy progress stream and a silent one both see it about every period.
+  // It runs once before the pool starts as well: a stop that is already
+  // pending is then seen by every chain ahead of its first transition.
+  using Clock = std::chrono::steady_clock;
+  constexpr auto poll_period = std::chrono::milliseconds(100);
+  auto last_poll = Clock::now() - poll_period;
+  const auto maybe_poll = [&] {
+    if (!poll || stop->load()) return;
+    const auto now = Clock::now();
+    if (now - last_poll < poll_period) return;
+    last_poll = now;
+    if (poll()) stop->store(true);
+  };
+  maybe_poll();
+
   // R's console API is main-thread-only, and a Python callback from a new
   // native thread has avoidable interpreter overhead. Workers therefore
   // enqueue only the three small fields; this calling thread drains them and
@@ -310,18 +326,6 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
     });
 
   std::exception_ptr progress_error;
-  // The caller's poll runs here, between events, so a busy progress stream
-  // and a silent one both see it about every period.
-  using Clock = std::chrono::steady_clock;
-  constexpr auto poll_period = std::chrono::milliseconds(100);
-  auto last_poll = Clock::now() - poll_period;
-  const auto maybe_poll = [&] {
-    if (!poll || stop->load()) return;
-    const auto now = Clock::now();
-    if (now - last_poll < poll_period) return;
-    last_poll = now;
-    if (poll()) stop->store(true);
-  };
   if (progress || poll) {
     for (;;) {
       maybe_poll();
