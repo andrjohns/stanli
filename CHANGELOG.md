@@ -37,8 +37,9 @@ transition instead of racing the worker threads.
 on aarch64 Linux. Boost's default policy evaluates double special
 functions in long double, which there is software binary128, and its
 epsilon set the length of the hypergeometric series. The build now turns
-that promotion off, so every platform evaluates in double, as macOS on
-Apple silicon already did.
+that promotion off on non-x86 targets, so those platforms evaluate in
+double instead. x86 keeps the promotion, since there long double is the
+hardware 80-bit type and matches CmdStan's reference results.
 
 `bernoulli_logit_glm`, `poisson_log_glm` and `neg_binomial_2_log_glm`
 dropped the gradient of a parameter design matrix: the log density was

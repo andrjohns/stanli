@@ -106,10 +106,13 @@ target_include_directories(stanmath INTERFACE
   ${_sundials}/include
   ${_tbb}/include)
 target_compile_definitions(stanmath INTERFACE _REENTRANT BOOST_DISABLE_ASSERTS)
-# Boost's default policy evaluates double in long double, which on aarch64
-# Linux is software binary128: its epsilon then sets the series length in
-# hypergeometric_pFq, so beta_neg_binomial's CDFs take a second per call.
-target_compile_definitions(stanmath INTERFACE BOOST_MATH_PROMOTE_DOUBLE_POLICY=false)
+# Boost's default policy evaluates double in long double. On x86 that's the
+# hardware 80-bit type, which is what CmdStan's reference results are
+# computed with. Elsewhere long double is software binary128, whose epsilon
+# sets the series length in hypergeometric_pFq and makes it slow.
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
+  target_compile_definitions(stanmath INTERFACE BOOST_MATH_PROMOTE_DOUBLE_POLICY=false)
+endif()
 # Pin FP contraction off: clang otherwise forms FMAs differently across
 # template instantiations of the same math, which breaks bitwise parity
 # between the kernels and the var-path references (measured: 2 ULP on
