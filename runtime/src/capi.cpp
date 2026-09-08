@@ -516,6 +516,17 @@ int stanli_sample_multi_interruptible(
     double* stats, stanli_sample_progress_cb progress, void* progress_user,
     stanli_sample_poll_cb poll, void* poll_user, int* interrupted,
     stanli_sample_report* reports, char* err, size_t err_len) {
+  return stanli_sample_multi_write_array(
+      m, opts, refresh, draws, stats, nullptr, progress, progress_user, poll,
+      poll_user, interrupted, reports, err, err_len);
+}
+
+int stanli_sample_multi_write_array(
+    stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
+    double* stats, double* values, stanli_sample_progress_cb progress,
+    void* progress_user, stanli_sample_poll_cb poll, void* poll_user,
+    int* interrupted, stanli_sample_report* reports, char* err,
+    size_t err_len) {
   try {
     if (interrupted != nullptr) *interrupted = 0;
     if (opts == nullptr) {
@@ -565,10 +576,75 @@ int stanli_sample_multi_interruptible(
     if (poll != nullptr)
       poll_fn = [poll, poll_user] { return poll(poll_user) != 0; };
 
+    const int64_t width = m->wa_n > 0 ? m->wa_n : m->n_con;
+    std::vector<stanli::WaRng> wa_rngs;
+    std::vector<std::unique_ptr<stanli::Executor>> wa_clones;
+    std::vector<stanli::Executor*> wa_execs;
+    if (values != nullptr) {
+      wa_rngs.reserve((size_t)n_chains);
+      for (int c = 0; c < n_chains; ++c)
+        wa_rngs.emplace_back((unsigned)opts->seed,
+                             (unsigned)(cfg.chain_id + c));
+      if (m->wa_ex) {
+        wa_execs.push_back(m->wa_ex.get());
+        for (int c = 1; c < n_chains; ++c) {
+          wa_clones.push_back(std::make_unique<stanli::Executor>(*m->wa_ex));
+          wa_execs.push_back(wa_clones.back().get());
+        }
+      }
+    }
+
+    stanli::StoredDrawWriter writer;
+    if (values != nullptr)
+      writer = [&](int c, int64_t row, const double* q) {
+        if (row >= n_stored) return;
+        double* out = values + ((int64_t)c * n_stored + row) * width;
+        stanli::Executor& main_ex = *execs[(size_t)c];
+        stanli::WaRng& rng = wa_rngs[(size_t)c];
+        try {
+          if (m->wa_interp) {
+            std::memcpy(main_ex.params_data(), q,
+                        sizeof(double) * (size_t)main_ex.n_params());
+            main_ex.run_forward_only();
+            const auto r =
+                m->wa_interp->eval(m->cm.constrained_env(main_ex), rng);
+            if ((int64_t)r.size() != width)
+              throw std::runtime_error(
+                  "write_array produced " + std::to_string(r.size()) +
+                  " columns, expected " + std::to_string(width));
+            std::memcpy(out, r.data(), sizeof(double) * (size_t)width);
+          } else if (m->wa_ex) {
+            stanli::Executor& wa_ex = *wa_execs[(size_t)c];
+            std::memcpy(wa_ex.params_data(), q,
+                        sizeof(double) * (size_t)wa_ex.n_params());
+            wa_ex.run_forward_only(stanli::EvalState{&rng});
+            int64_t at = 0;
+            for (const auto& col : m->wa_cols) {
+              const double* p = wa_ex.value_ptr(col.slot);
+              for (int64_t i = 0; i < col.len; ++i) out[at++] = p[i];
+            }
+          } else {
+            std::memcpy(main_ex.params_data(), q,
+                        sizeof(double) * (size_t)main_ex.n_params());
+            main_ex.run_forward_only();
+            int64_t at = 0;
+            for (const auto& v : m->cm.views) {
+              const double* p = main_ex.value_ptr(v.slot);
+              for (int64_t i = 0; i < v.len; ++i)
+                out[at++] = p[v.storage_index(i)];
+            }
+          }
+        } catch (const std::exception& e) {
+          throw std::runtime_error("write_array failed on draw " +
+                                   std::to_string(row) + ": " + e.what());
+        }
+      };
+
     std::vector<stanli::ChainResult> res;
     if (opts->inits == nullptr) {
-      res = stanli::run_nuts_chains(execs, cfg, opts->num_threads, {},
-                                    progress_observer, refresh, poll_fn);
+      res =
+          stanli::run_nuts_chains(execs, cfg, opts->num_threads, {},
+                                  progress_observer, refresh, poll_fn, writer);
     } else {
       std::atomic<bool> stop{false};
       // Per-chain inits mean per-chain configs, which run_nuts_chains
@@ -582,6 +658,10 @@ int stanli_sample_multi_interruptible(
         cc.init = opts->inits + (int64_t)c * n;
         cc.stop = &stop;
         cc.poll = poll_fn;
+        if (writer)
+          cc.on_stored = [&writer, c](int64_t row, const double* q) {
+            writer(c, row, q);
+          };
         try {
           stanli::ProgressObserver one_progress;
           if (progress_observer)

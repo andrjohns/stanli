@@ -141,6 +141,11 @@ static int (*p_sample_multi_interruptible)(void*, const stanli_sample_opts*,
                                            stanli_sample_poll_cb, void*, int*,
                                            stanli_sample_report*, char*,
                                            size_t);
+static int (*p_sample_multi_write_array)(void*, const stanli_sample_opts*, int,
+                                         double*, double*, double*,
+                                         stanli_sample_progress_cb, void*,
+                                         stanli_sample_poll_cb, void*, int*,
+                                         stanli_sample_report*, char*, size_t);
 static int (*p_pathfinder_inits)(void*, uint32_t, int, int, int, int, int,
                                  double, double*, stanli_path_cb, void*, char*,
                                  size_t);
@@ -225,6 +230,8 @@ SEXP stanli_bridge_load(SEXP path) {
       dl_sym(g_lib, "stanli_sample_multi_progress");
   *(void**)(&p_sample_multi_interruptible) =
       dl_sym(g_lib, "stanli_sample_multi_interruptible");
+  *(void**)(&p_sample_multi_write_array) =
+      dl_sym(g_lib, "stanli_sample_multi_write_array");
   /* Pathfinder initialization is also additive. Only callers that request it
    * require a runtime new enough to provide the symbol. */
   *(void**)(&p_pathfinder_inits) = dl_sym(g_lib, "stanli_pathfinder_inits");
@@ -501,9 +508,14 @@ SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits, SEXP refresh) {
 
   SEXP raw = PROTECT(allocVector(REALSXP, (R_xlen_t)(nchain * rows * n)));
   SEXP stats = PROTECT(allocVector(REALSXP, (R_xlen_t)(nchain * rows * 7)));
+  int64_t ncol = p_wa_n_columns(mm);
+  const int wa = ncol > 0;
+  if (!wa) ncol = p_n_constrained(mm);
+  SEXP vals = PROTECT(allocVector(REALSXP, (R_xlen_t)(nchain * rows * ncol)));
   char err[4096];
   err[0] = '\0';
   const int have_reports = p_sample_multi_progress != NULL;
+  const int in_worker = p_sample_multi_write_array != NULL;
   if (!have_reports && refresh_rate > 0) {
     Rprintf(
         "Sampling progress is unavailable with this older stanli runtime; "
@@ -513,7 +525,11 @@ SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits, SEXP refresh) {
   }
   int interrupted = 0;
   const int failed =
-      p_sample_multi_interruptible != NULL
+      in_worker ? p_sample_multi_write_array(
+                      mm, &o, refresh_rate, REAL(raw), REAL(stats), REAL(vals),
+                      refresh_rate > 0 ? sample_progress : NULL, NULL,
+                      sample_poll, NULL, &interrupted, reports, err, sizeof err)
+      : p_sample_multi_interruptible != NULL
           ? p_sample_multi_interruptible(
                 mm, &o, refresh_rate, REAL(raw), REAL(stats),
                 refresh_rate > 0 ? sample_progress : NULL, NULL, sample_poll,
@@ -525,7 +541,7 @@ SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits, SEXP refresh) {
                                     NULL, reports, err, sizeof err)
           : p_sample_multi(mm, &o, REAL(raw), REAL(stats), err, sizeof err);
   if (failed) {
-    UNPROTECT(2);
+    UNPROTECT(3);
     error("%d of %d chains failed; first: %s", failed, (int)nchain,
           err[0] ? err : "(no message)");
   }
@@ -533,34 +549,37 @@ SEXP stanli_r_sample(SEXP m, SEXP optlist, SEXP inits, SEXP refresh) {
     const char* names[] = {"interrupted", ""};
     SEXP out = PROTECT(mkNamed(VECSXP, names));
     SET_VECTOR_ELT(out, 0, ScalarLogical(1));
-    UNPROTECT(3);
+    UNPROTECT(4);
     return out;
   }
   if (have_reports && refresh_rate > 0)
     print_sample_reports(&o, nchain, reports);
 
-  /* Constrain every stored draw into the CSV columns, per chain, so the
-   * RNG stream in generated quantities differs by chain the way CmdStan's
-   * does. */
-  int64_t ncol = p_wa_n_columns(mm);
-  const int wa = ncol > 0;
-  if (!wa) ncol = p_n_constrained(mm);
-  SEXP vals = PROTECT(allocVector(REALSXP, (R_xlen_t)(nchain * rows * ncol)));
-  double* vp = REAL(vals);
-  double* rp = REAL(raw);
-  double* row = (double*)R_alloc((size_t)ncol, sizeof(double));
-  const uint32_t first_chain = (uint32_t)(o.chain_id > 0 ? o.chain_id : 1);
-  for (int64_t c = 0; c < nchain; ++c) {
-    if (wa) p_wa_seed_chain(mm, o.seed, first_chain + (uint32_t)c);
-    for (int64_t i = 0; i < rows; ++i) {
-      const double* q = rp + (c * rows + i) * n;
-      const int rc = wa ? p_wa_row(mm, q, row) : p_constrain(mm, q, row);
-      if (rc != 0) {
-        UNPROTECT(3);
-        error("failed to write draw %lld of chain %lld", (long long)i,
-              (long long)c);
+  /* Older runtimes write nothing during sampling: constrain every stored
+   * draw here, per chain, so the RNG stream in generated quantities differs
+   * by chain the way CmdStan's does. */
+  if (!in_worker) {
+    double* vp = REAL(vals);
+    double* rp = REAL(raw);
+    double* row = (double*)R_alloc((size_t)ncol, sizeof(double));
+    const uint32_t first_chain = (uint32_t)(o.chain_id > 0 ? o.chain_id : 1);
+    for (int64_t c = 0; c < nchain; ++c) {
+      if (wa) p_wa_seed_chain(mm, o.seed, first_chain + (uint32_t)c);
+      if (refresh_rate > 0) {
+        Rprintf("Chain [%d] Writing %lld draws\n", first_chain + (int)c,
+                (long long)rows);
+        R_FlushConsole();
       }
-      memcpy(vp + (c * rows + i) * ncol, row, sizeof(double) * (size_t)ncol);
+      for (int64_t i = 0; i < rows; ++i) {
+        const double* q = rp + (c * rows + i) * n;
+        const int rc = wa ? p_wa_row(mm, q, row) : p_constrain(mm, q, row);
+        if (rc != 0) {
+          UNPROTECT(3);
+          error("failed to write draw %lld of chain %lld", (long long)i,
+                (long long)c);
+        }
+        memcpy(vp + (c * rows + i) * ncol, row, sizeof(double) * (size_t)ncol);
+      }
     }
   }
 

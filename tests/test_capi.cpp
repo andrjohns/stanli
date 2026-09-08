@@ -737,6 +737,137 @@ void expect_interruptible_sampling() {
   stanli_model_free(model);
 }
 
+// Writing the CSV columns on each chain's own thread as the draws land must
+// produce exactly what the post-hoc loop over the same draws produces, and
+// must leave the sampler's own output alone.
+void expect_in_worker_write_array_on(const char* label, stanli_model* model) {
+  stanli_sample_opts opts;
+  stanli_sample_opts_init(&opts);
+  opts.seed = 7;
+  opts.chains = 2;
+  opts.warmup = 20;
+  opts.samples = 20;
+  const int64_t n = stanli_n_unconstrained(model);
+  const int64_t rows = stanli_n_stored_draws(&opts);
+  const int64_t wa = stanli_wa_n_columns(model);
+  const int64_t width = wa > 0 ? wa : stanli_n_constrained(model);
+  const size_t n_draws = (size_t)(opts.chains * rows * n);
+  const size_t n_stats = (size_t)(opts.chains * rows * STANLI_N_SAMPLER_COLS);
+  const size_t n_values = (size_t)(opts.chains * rows * width);
+  char err[8192]{};
+  for (int threads : {1, 2}) {
+    opts.num_threads = threads;
+    const std::string mode = std::string(" [") + label +
+                             (threads == 1 ? " sequential]" : " threaded]");
+
+    std::vector<double> want_draws(n_draws), want_stats(n_stats);
+    stanli_sample_report want_reports[2];
+    err[0] = '\0';
+    int rc = stanli_sample_multi_interruptible(
+        model, &opts, 0, want_draws.data(), want_stats.data(), nullptr, nullptr,
+        nullptr, nullptr, nullptr, want_reports, err, sizeof err);
+    expect_true("post-hoc reference run succeeds" + mode, rc == 0);
+
+    std::vector<double> want_values(n_values);
+    std::vector<double> row((size_t)width);
+    bool reference_ok = true;
+    for (int64_t c = 0; c < opts.chains; ++c) {
+      if (wa > 0) stanli_wa_seed_chain(model, opts.seed, (uint32_t)(1 + c));
+      for (int64_t i = 0; i < rows; ++i) {
+        const double* q = want_draws.data() + (c * rows + i) * n;
+        const int wrc = wa > 0 ? stanli_wa_row(model, q, row.data())
+                               : stanli_constrain(model, q, row.data());
+        if (wrc != 0) reference_ok = false;
+        std::copy(row.begin(), row.end(),
+                  want_values.begin() + (size_t)((c * rows + i) * width));
+      }
+    }
+    expect_true("post-hoc write_array succeeds" + mode, reference_ok);
+
+    std::vector<double> draws(n_draws, -1.0), stats(n_stats, -1.0);
+    std::vector<double> values(n_values, -1.0);
+    stanli_sample_report reports[2];
+    int interrupted = -1;
+    err[0] = '\0';
+    rc = stanli_sample_multi_write_array(
+        model, &opts, 0, draws.data(), stats.data(), values.data(), nullptr,
+        nullptr, nullptr, nullptr, &interrupted, reports, err, sizeof err);
+    expect_true("in-worker write_array sampling succeeds" + mode,
+                rc == 0 && interrupted == 0);
+    expect_true("in-worker write_array leaves the sampler alone" + mode,
+                draws == want_draws && stats == want_stats);
+    expect_true("in-worker write_array matches the post-hoc loop" + mode,
+                values == want_values);
+
+    std::vector<double> null_draws(n_draws, -1.0), null_stats(n_stats, -1.0);
+    err[0] = '\0';
+    rc = stanli_sample_multi_write_array(
+        model, &opts, 0, null_draws.data(), null_stats.data(), nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, reports, err, sizeof err);
+    expect_true(
+        "a null values buffer is the interruptible entry" + mode,
+        rc == 0 && null_draws == want_draws && null_stats == want_stats);
+  }
+}
+
+void expect_in_worker_write_array() {
+  char err[8192]{};
+  stanli_model* graph = stanli_model_new(
+      slurp("tests/fixtures/gqconst.tmir.sexp").c_str(),
+      R"({"rectangular":[[1,4],[2,5],[3,6]]})", err, sizeof err);
+  expect_true("in-worker write_array graph model builds", graph != nullptr);
+  if (graph != nullptr) {
+    expect_in_worker_write_array_on("graph", graph);
+    stanli_model_free(graph);
+  }
+
+  const std::string interp_mir = categorical_write_array_mir(
+      slurp("tests/fixtures/cat.tmir.sexp"), "categorical_lpmf", false, false,
+      false, true);
+  err[0] = '\0';
+  stanli_model* interp = stanli_model_new(
+      interp_mir.c_str(), R"({"K":3,"y":2,"ys":[3,1,3]})", err, sizeof err);
+  expect_true("in-worker write_array interpreted model builds",
+              interp != nullptr);
+  if (interp != nullptr) {
+    expect_in_worker_write_array_on("interpreted", interp);
+    stanli_model_free(interp);
+  }
+
+  err[0] = '\0';
+  stanli_model* reject =
+      stanli_model_new(slurp("tests/fixtures/gq_row_reject.tmir.sexp").c_str(),
+                       "{}", err, sizeof err);
+  expect_true("in-worker write_array reject model builds", reject != nullptr);
+  if (reject == nullptr) return;
+  expect_true("in-worker write_array reject model has columns",
+              stanli_wa_n_columns(reject) > 0);
+  stanli_sample_opts opts;
+  stanli_sample_opts_init(&opts);
+  opts.seed = 7;
+  opts.chains = 1;
+  opts.warmup = 20;
+  opts.samples = 20;
+  const int64_t n = stanli_n_unconstrained(reject);
+  const int64_t rows = stanli_n_stored_draws(&opts);
+  const int64_t width = stanli_wa_n_columns(reject);
+  std::vector<double> draws((size_t)(rows * n));
+  std::vector<double> stats((size_t)(rows * STANLI_N_SAMPLER_COLS));
+  std::vector<double> values((size_t)(rows * width));
+  stanli_sample_report reports[1];
+  int interrupted = -1;
+  err[0] = '\0';
+  const int rc = stanli_sample_multi_write_array(
+      reject, &opts, 0, draws.data(), stats.data(), values.data(), nullptr,
+      nullptr, nullptr, nullptr, &interrupted, reports, err, sizeof err);
+  const std::string message(err);
+  expect_true("a rejected row fails its chain",
+              rc == 1 && interrupted == 0 &&
+                  message.find("chain 1") != std::string::npos &&
+                  message.find("draw") != std::string::npos);
+  stanli_model_free(reject);
+}
+
 // The additive progress entry point must be the old sampler plus observation:
 // same bytes, caller-thread callbacks, exact refresh schedule and reports.
 void expect_sampling_progress() {
@@ -992,6 +1123,7 @@ int main() {
   expect_pathfinder();
   expect_sampling_progress();
   expect_interruptible_sampling();
+  expect_in_worker_write_array();
   expect_streaming_stats();
 
   if (failures == 0) std::printf("test_capi OK\n");

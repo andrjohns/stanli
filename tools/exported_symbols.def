@@ -48,6 +48,7 @@ EXPORTS
   stanli_sample_multi
   stanli_sample_multi_progress
   stanli_sample_multi_interruptible
+  stanli_sample_multi_write_array
   stanli_sampler_column_name
   stanli_summary_stats
   stanli_diagnose_text

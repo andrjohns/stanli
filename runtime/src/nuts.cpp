@@ -106,6 +106,7 @@ std::vector<std::vector<double>> run_nuts(Executor& ex, const NutsConfig& cfg,
              sp.size() > 1 ? sp[1] : 0.0, sp.size() > 2 ? sp[2] : 0.0,
              sp.size() > 3 ? sp[3] : 0.0, sp.size() > 4 ? sp[4] : 0.0});
       }
+      if (cfg.on_stored) cfg.on_stored((int64_t)draws.size() - 1, qd.data());
     }
     if (!warmup && report) {
       if (sp.size() > 3 && sp[3] != 0.0) ++report->n_divergent;
@@ -199,7 +200,8 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
                                          const DrawObserver& observe,
                                          const ChainProgressObserver& progress,
                                          int progress_refresh,
-                                         const std::function<bool()>& poll) {
+                                         const std::function<bool()>& poll,
+                                         const StoredDrawWriter& write) {
   const size_t n_chains = execs.size();
   std::vector<ChainResult> out(n_chains);
   std::atomic<bool> local_stop{false};
@@ -215,6 +217,10 @@ std::vector<ChainResult> run_nuts_chains(const std::vector<Executor*>& execs,
     cc.chain_id = cfg.chain_id + (int)c;
     cc.stop = stop;
     cc.poll = chain_poll;
+    if (write)
+      cc.on_stored = [&write, c](int64_t row, const double* q) {
+        write((int)c, row, q);
+      };
     try {
       out[c].draws = run_nuts(*execs[c], cc, &out[c].stats,
                               n_chains == 1 ? observe : DrawObserver{},
