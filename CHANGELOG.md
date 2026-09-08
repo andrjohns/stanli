@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Generated quantities and transformed parameters are now written by each
+chain as it samples. The work happens on the chain's own thread as each
+draw is stored, so it runs in parallel across chains and inside the
+sampling progress the user already sees. R and Python no longer constrain
+the stored draws after the run finishes, a phase that showed no progress
+and could take a long time on a model with tens of thousands of output
+columns.
+
 The runtime can now be built with `STANLI_NO_STDIO` defined, for R
 packaging: the object library then contains no stdout, stderr, abort, or
 assert-failure symbols. Debug traces that used to write directly to stderr

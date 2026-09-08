@@ -188,8 +188,8 @@ std::vector<double> WaInterp::eval(
     // ordered backwards.
     if (!saw_gq_) n_gq_start_ = cols_.size();
     if (!saw_tp_) n_tp_start_ = n_gq_start_;
+    have_cols_ = true;
   }
-  have_cols_ = true;
   return row;
 }
 

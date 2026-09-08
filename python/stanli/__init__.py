@@ -179,6 +179,14 @@ def _load_lib():
         _SampleProgressCallback, ctypes.c_void_p, _SamplePollCallback,
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(_SampleReport), ctypes.c_char_p, ctypes.c_size_t]
+    lib.stanli_sample_multi_write_array.restype = ctypes.c_int
+    lib.stanli_sample_multi_write_array.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(_SampleOpts), ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+        _SampleProgressCallback, ctypes.c_void_p, _SamplePollCallback,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(_SampleReport), ctypes.c_char_p, ctypes.c_size_t]
     lib.stanli_pathfinder_inits.restype = ctypes.c_int
     lib.stanli_pathfinder_inits.argtypes = [
         ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_int,
@@ -1139,6 +1147,8 @@ class Model:
         n_stored = _lib.stanli_n_stored_draws(ctypes.byref(opts))
         raw = np.empty((opts.chains, n_stored, self.n_unconstrained))
         stats = np.empty((opts.chains, n_stored, _N_SAMPLER_COLS))
+        names, _ = self._column_names()
+        out = np.empty((opts.chains, n_stored, len(names)))
         reports = (_SampleReport * opts.chains)()
         err = ctypes.create_string_buffer(4096)
         callback_errors = []
@@ -1163,9 +1173,9 @@ class Model:
         interrupted = ctypes.c_int(0)
         watch = _InterruptWatch()
         with watch:
-            failed = _lib.stanli_sample_multi_interruptible(
+            failed = _lib.stanli_sample_multi_write_array(
                 self._m, ctypes.byref(opts), refresh, _dptr(raw),
-                _dptr(stats), progress_cb, None, watch.poll, None,
+                _dptr(stats), _dptr(out), progress_cb, None, watch.poll, None,
                 ctypes.byref(interrupted), reports, err, len(err))
         del init_arr
         if interrupted.value:
@@ -1177,26 +1187,7 @@ class Model:
         if callback_errors:
             raise callback_errors[0]
 
-        names, have_wa = self._column_names()
-        out = np.empty((opts.chains, n_stored, len(names)))
-        row = np.empty(len(names))
         first_chain = opts.chain_id if opts.chain_id > 0 else 1
-        for c in range(opts.chains):
-            if have_wa:
-                # Generated quantities draw from an RNG stream; give each
-                # chain its own, or every chain would produce identical
-                # posterior-predictive draws from its own parameters.
-                _lib.stanli_wa_seed_chain(
-                    self._m, seed & 0xFFFFFFFF, first_chain + c)
-            for s in range(n_stored):
-                q = np.ascontiguousarray(raw[c, s])
-                if have_wa:
-                    if _lib.stanli_wa_row(self._m, _dptr(q), _dptr(row)) != 0:
-                        raise RuntimeError(
-                            f"write_array failed on chain {c}, draw {s}")
-                else:
-                    _lib.stanli_constrain(self._m, _dptr(q), _dptr(row))
-                out[c, s] = row
         fit = Fit(names, out, stats, opts.max_depth, seed, reports)
         if refresh:
             _print_sample_reports(reports, first_chain, opts.samples,

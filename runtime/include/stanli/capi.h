@@ -215,6 +215,28 @@ int stanli_sample_multi_interruptible(
     stanli_sample_poll_cb poll, void* poll_user, int* interrupted,
     stanli_sample_report* reports, char* err, size_t err_len);
 
+/* stanli_sample_multi_interruptible, with each chain also writing its stored
+ * draws through write_array on its own thread as they are stored, so the work
+ * runs in parallel across chains, inside the sampling progress.
+ *
+ * `values` receives chains * stanli_n_stored_draws(opts) rows of W doubles,
+ * chain-major exactly like `draws`, where W is stanli_wa_n_columns(m) when
+ * that is positive and stanli_n_constrained(m) otherwise. Chain c draws its
+ * generated quantities from the stream (opts->seed, chain_id + c), the one
+ * stanli_wa_seed_chain names, so the rows equal a post-hoc
+ * stanli_wa_seed_chain plus stanli_wa_row loop over `draws` byte for byte.
+ * The model's own stanli_wa_seed stream is untouched. A null `values` makes
+ * this identical to stanli_sample_multi_interruptible.
+ *
+ * A draw whose row cannot be produced fails its chain: it counts in the
+ * return value and err names the chain and the draw. Additive, like the
+ * progress and interruptible entry points. */
+int stanli_sample_multi_write_array(
+    stanli_model* m, const stanli_sample_opts* opts, int refresh, double* draws,
+    double* stats, double* values, stanli_sample_progress_cb progress,
+    void* progress_user, stanli_sample_poll_cb poll, void* poll_user,
+    int* interrupted, stanli_sample_report* reports, char* err, size_t err_len);
+
 /* The seven sampler columns, in order: lp__, accept_stat__, stepsize__,
  * treedepth__, n_leapfrog__, divergent__, energy__. */
 #define STANLI_N_SAMPLER_COLS 7

@@ -52,6 +52,10 @@ struct NutsConfig {
   // `stop` and ends the run.
   std::atomic<bool>* stop = nullptr;
   std::function<bool()> poll;
+  // Called on the chain's own thread right after a draw is stored, with the
+  // zero-based stored row index and the unconstrained point. A throw fails
+  // the chain.
+  std::function<void(int64_t row, const double* q)> on_stored;
 };
 
 // One row per stored draw, in CmdStan's column order:
@@ -115,6 +119,10 @@ struct ChainResult {
 using ChainProgressObserver =
     std::function<void(int chain, int64_t i, bool warmup)>;
 
+// Called on the chain's OWN thread as each draw is stored, for every chain.
+using StoredDrawWriter =
+    std::function<void(int chain, int64_t row, const double* q)>;
+
 // CmdStan-style refresh selection. `i` is zero-based within the phase. The
 // first transition, every `refresh`-th transition within the phase, and the
 // phase's final transition are reported.
@@ -144,7 +152,7 @@ std::vector<ChainResult> run_nuts_chains(
     const std::vector<Executor*>& execs, const NutsConfig& cfg,
     int n_threads = 1, const DrawObserver& observe = {},
     const ChainProgressObserver& progress = {}, int progress_refresh = 1,
-    const std::function<bool()>& poll = {});
+    const std::function<bool()>& poll = {}, const StoredDrawWriter& write = {});
 
 // Build `n` executors over the same compiled graph, copying it out of an
 // already-bound one. The caller keeps ownership; `src` is not modified.

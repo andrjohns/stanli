@@ -319,3 +319,14 @@ test_that("a part with no compiled path warns, or errors when refused", {
   on.exit(Sys.unsetenv("STANLI_NO_INTERPRETER"), add = TRUE)
   expect_error(stanli_model(code = code), "STANLI_NO_INTERPRETER")
 })
+
+test_that("a draw whose generated quantities fail names the draw", {
+  skip_without_runtime()
+  m <- stanli_model(code = "
+    parameters { real mu; }
+    model { mu ~ normal(0, 1); }
+    generated quantities { int k = categorical_rng([mu, 1 - mu]'); }")
+  expect_error(
+    sample_model(m, chains = 1, warmup = 20, samples = 20, refresh = 0),
+    "write_array failed on draw")
+})

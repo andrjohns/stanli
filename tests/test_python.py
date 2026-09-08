@@ -1063,6 +1063,20 @@ def test_embedded_stanc_from_concurrent_python_threads():
         assert bool(error) == (worker == 0)
 
 
+def test_failing_generated_quantities_name_the_draw():
+    m = stanli.Model(stan_code="""
+        parameters { real mu; }
+        model { mu ~ normal(0, 1); }
+        generated quantities { int k = categorical_rng([mu, 1 - mu]'); }
+    """)
+    try:
+        m.sample(chains=1, warmup=20, samples=20, refresh=0)
+    except RuntimeError as e:
+        assert "write_array failed on draw" in str(e), e
+    else:
+        raise AssertionError("a rejected generated quantity did not fail")
+
+
 def test_build_id_is_stable_and_specific():
     # Identifies the runtime binary. Anything caching artifacts keyed to a
     # build (a compiled MIR next to the library that produced it) needs a
