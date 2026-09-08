@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -662,8 +663,11 @@ void capture_progress(int32_t chain_id, int64_t iteration, int64_t total,
   capture->events.push_back({chain_id, iteration, total, warmup});
 }
 
-int poll_stop_at_once(void* user) {
+// Answers stop only after the chains have had time to finish: a sampler
+// that starts them before asking has nothing left to interrupt.
+int poll_stop_after_pause(void* user) {
   ++*static_cast<int*>(user);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
   return 1;
 }
 
@@ -703,12 +707,14 @@ void expect_interruptible_sampling() {
     err[0] = '\0';
     int rc = stanli_sample_multi_interruptible(
         model, &opts, 0, draws.data(), stats.data(), nullptr, nullptr,
-        poll_stop_at_once, &polls, &interrupted, reports, err, sizeof err);
+        poll_stop_after_pause, &polls, &interrupted, reports, err, sizeof err);
     expect_true("a stop answer ends sampling cleanly" + mode,
                 rc == 0 && interrupted == 1 && polls >= 1);
-    if (threads == 1)
-      expect_true("a stop before the first transition stores nothing" + mode,
-                  draws[0] == -1.0 && stats[0] == -1.0);
+    expect_true("a stop before the first transition stores nothing" + mode,
+                std::all_of(draws.begin(), draws.end(),
+                            [](double x) { return x == -1.0; }) &&
+                    std::all_of(stats.begin(), stats.end(),
+                                [](double x) { return x == -1.0; }));
 
     std::vector<double> plain_draws(n_draws), plain_stats(n_stats);
     stanli_sample_report plain_reports[2];
