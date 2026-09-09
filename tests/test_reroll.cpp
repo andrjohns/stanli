@@ -1472,6 +1472,314 @@ static void test_pow_widens() {
     expect_close(("pow v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
+// ---- vector lanes: a lane is one row of a container ----------------------
+
+namespace rowlanes {
+
+// Row l of a column-major R x C matrix reads as SLICE_STRIDED {l, R}; row l
+// of an array of C-vectors as SLICE {l * C}.
+enum class Rows { kMatrix, kArray };
+
+struct Built {
+  Graph g;
+  Fills fills;
+  std::vector<int> terms;
+  int base = -1;
+  std::vector<std::vector<int>> outcomes;   // density lanes: y per lane
+  std::vector<std::vector<double>> rowval;  // store lanes: x per lane
+};
+
+int flat(Rows rows, int L, int C, int l, int k) {
+  return rows == Rows::kMatrix ? l + L * k : l * C + k;
+}
+
+// L lanes {SLICE row l of a parameter base; BERNOULLI_LOGIT(row) with C
+// outcomes} -> target terms: the dogs likelihood. extra_rows > 0 leaves
+// rows the lanes never read.
+Built build_density(int L, int C, Rows rows, int extra_rows = 0) {
+  Built b;
+  Graph& g = b.g;
+  const int R = L + extra_rows;
+  b.base = g.add_slot((int64_t)R * C, true);
+  for (int l = 0; l < L; ++l) {
+    const int row = g.add_slot(C, false);
+    if (rows == Rows::kMatrix)
+      g.add_op(OP_SLICE_STRIDED, {b.base}, row, {l, R});
+    else
+      g.add_op(OP_SLICE, {b.base}, row, {l * C});
+    std::vector<int> y((size_t)C);
+    for (int k = 0; k < C; ++k) y[(size_t)k] = (l * 7 + k * 3) % 2;
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_BERNOULLI_LOGIT_LPMF, {row}, lp, y);
+    g.ops[(size_t)id].variant = 0x81;
+    b.outcomes.push_back(y);
+    b.terms.push_back(lp);
+  }
+  return b;
+}
+
+// L lanes {INDEX beta[0]; INDEX beta[1]; FMA(b1, x row, b0); store to row l}
+// filling a declared R x C matrix, then one density over the whole matrix.
+// Lane 0 writes the fill-backed declaration functionally, the rest in place.
+Built build_store(int L, int C, Rows rows, int extra_rows = 0,
+                  bool later_write = false) {
+  Built b;
+  Graph& g = b.g;
+  const int R = L + extra_rows;
+  const int beta = g.add_slot(2, true);
+  const int sigma = g.add_slot(1, true);
+  const int decl = g.add_slot((int64_t)R * C, false);
+  b.fills.emplace_back(decl, std::vector<double>((size_t)(R * C), 0.0));
+  b.base = g.add_slot((int64_t)R * C, false);
+  const int ydata = g.add_slot((int64_t)R * C, false);
+  std::vector<double> yv((size_t)(R * C));
+  for (size_t i = 0; i < yv.size(); ++i) yv[i] = 0.3 * (double)i - 1.0;
+  b.fills.emplace_back(ydata, yv);
+  for (int l = 0; l < L; ++l) {
+    const int b0 = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {beta}, b0, {0});
+    const int b1 = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {beta}, b1, {1});
+    const int x = g.add_slot(C, false);
+    std::vector<double> xv((size_t)C);
+    for (int k = 0; k < C; ++k) xv[(size_t)k] = 0.5 * l + 0.25 * k - 1.0;
+    b.fills.emplace_back(x, xv);
+    b.rowval.push_back(xv);
+    const int v = g.add_slot(C, false);
+    g.add_op(OP_FMA, {b1, x, b0}, v);
+    const int src = l == 0 ? decl : b.base;
+    if (rows == Rows::kMatrix)
+      g.add_op(l == 0 ? OP_SET_SLICE_STRIDED : OP_SET_SLICE_STRIDED_INPLACE,
+               {src, v}, b.base, {l, R});
+    else
+      g.add_op(l == 0 ? OP_SET_SLICE : OP_SET_SLICE_INPLACE, {src, v}, b.base,
+               {l * C});
+  }
+  if (later_write) {
+    const int extra = g.add_slot(C, false);
+    b.fills.emplace_back(extra, std::vector<double>((size_t)C, 2.5));
+    if (rows == Rows::kMatrix)
+      g.add_op(OP_SET_SLICE_STRIDED_INPLACE, {b.base, extra}, b.base, {2, R});
+    else
+      g.add_op(OP_SET_SLICE_INPLACE, {b.base, extra}, b.base, {2 * C});
+  }
+  const int lp = g.add_slot(1, false);
+  const int id = g.add_op(OP_NORMAL_LPDF, {ydata, b.base, sigma}, lp);
+  g.ops[(size_t)id].variant = 0x06;
+  b.terms.push_back(lp);
+  return b;
+}
+
+int row_stores(const Graph& g) {
+  return writefuse::count(g, OP_SET_SLICE) +
+         writefuse::count(g, OP_SET_SLICE_INPLACE) +
+         writefuse::count(g, OP_SET_SLICE_STRIDED) +
+         writefuse::count(g, OP_SET_SLICE_STRIDED_INPLACE);
+}
+
+}  // namespace rowlanes
+
+// (a, b) L row-density lanes over a matrix base and over an array of
+// vectors: one density over L*C elements reading the base in place, with
+// the lanes' outcomes laid out in the base's storage order.
+static void test_row_density_lanes() {
+  using namespace rowlanes;
+  for (Rows rows : {Rows::kMatrix, Rows::kArray}) {
+    const int L = 6, C = 4;
+    const std::string tag =
+        rows == Rows::kMatrix ? "rowdens-mat" : "rowdens-arr";
+    Built b = build_density(L, C, rows);
+    Graph ref = b.g;
+    reduce_into_result(ref, b.terms);
+    const std::vector<double> want = run_grad(std::move(ref), b.fills);
+
+    std::vector<int> tt = b.terms;
+    Fills f2 = b.fills;
+    const detail::ProfiledRerollStats profiled =
+        detail::reroll_profiled(b.g, f2, tt, {});
+    expect((tag + " regions==1").c_str(), profiled.work.regions == 1);
+    expect((tag + " term-density disposition").c_str(),
+           profiled.dispositions.term_density == 1);
+    expect((tag + " ops==1").c_str(), b.g.ops.size() == 1);
+    expect((tag + " one term").c_str(), tt.size() == 1);
+    expect((tag + " no constant materialized").c_str(),
+           f2.size() == b.fills.size());
+    if (b.g.ops.size() == 1) {
+      const Op& d = b.g.ops[0];
+      expect((tag + " density reads the base").c_str(),
+             d.opcode == OP_BERNOULLI_LOGIT_LPMF && d.in[0] == b.base);
+      expect((tag + " outcomes L*C").c_str(), d.n_idata == L * C);
+      bool laid_out = d.n_idata == L * C;
+      for (int l = 0; laid_out && l < L; ++l)
+        for (int k = 0; k < C; ++k)
+          if (d.idata[flat(rows, L, C, l, k)] !=
+              b.outcomes[(size_t)l][(size_t)k])
+            laid_out = false;
+      expect((tag + " outcomes in storage order").c_str(), laid_out);
+    }
+    if (!tt.empty()) {
+      reduce_into_result(b.g, tt);
+      const std::vector<double> got = run_grad(std::move(b.g), f2);
+      expect((tag + " sizes").c_str(), got.size() == want.size());
+      for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+        expect_close((tag + " v" + std::to_string(i)).c_str(), got[i], want[i]);
+    }
+  }
+}
+
+// (c) L row-store lanes: the FMA chain widens to L*C, its data rows pack
+// into one constant in the base's storage order, and the fused value IS
+// the matrix: no per-row stores remain.
+static void test_row_store_lanes() {
+  using namespace rowlanes;
+  for (Rows rows : {Rows::kMatrix, Rows::kArray}) {
+    const int L = 6, C = 4;
+    const std::string tag =
+        rows == Rows::kMatrix ? "rowstore-mat" : "rowstore-arr";
+    Built b = build_store(L, C, rows);
+    Graph ref = b.g;
+    reduce_into_result(ref, b.terms);
+    const std::vector<double> want = run_grad(std::move(ref), b.fills);
+
+    std::vector<int> tt = b.terms;
+    Fills f2 = b.fills;
+    const detail::ProfiledRerollStats profiled =
+        detail::reroll_profiled(b.g, f2, tt, {});
+    expect((tag + " regions==1").c_str(), profiled.work.regions == 1);
+    expect((tag + " element-store disposition").c_str(),
+           profiled.dispositions.element_store == 1);
+    expect((tag + " no row stores left").c_str(), row_stores(b.g) == 0);
+    expect((tag + " one FMA").c_str(), writefuse::count(b.g, OP_FMA) == 1);
+    // 2 hoisted INDEX + 1 FMA + NORMAL.
+    expect((tag + " ops==4").c_str(), b.g.ops.size() == 4);
+    expect((tag + " one constant materialized").c_str(),
+           f2.size() == b.fills.size() + 1);
+    int fma_out = -1, fma_x = -1;
+    for (const Op& op : b.g.ops)
+      if (op.opcode == OP_FMA) {
+        fma_out = op.out;
+        fma_x = op.in[1];
+      }
+    expect((tag + " FMA widened to L*C").c_str(),
+           fma_out >= 0 && b.g.slots[(size_t)fma_out].len == L * C);
+    for (const Op& op : b.g.ops)
+      if (op.opcode == OP_NORMAL_LPDF)
+        expect((tag + " density reads the fused value").c_str(),
+               op.in[1] == fma_out);
+    if (f2.size() == b.fills.size() + 1) {
+      const auto& packed = f2.back();
+      bool laid_out =
+          packed.first == fma_x && packed.second.size() == (size_t)(L * C);
+      for (int l = 0; laid_out && l < L; ++l)
+        for (int k = 0; k < C; ++k)
+          if (packed.second[(size_t)flat(rows, L, C, l, k)] !=
+              b.rowval[(size_t)l][(size_t)k])
+            laid_out = false;
+      expect((tag + " rows packed in storage order").c_str(), laid_out);
+    }
+    reduce_into_result(b.g, tt);
+    const std::vector<double> got = run_grad(std::move(b.g), f2);
+    expect((tag + " sizes").c_str(), got.size() == want.size());
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close((tag + " v" + std::to_string(i)).c_str(), got[i], want[i]);
+  }
+}
+
+// (d) What vector lanes must leave alone: lanes that do not cover every
+// row, a reduction inside the lane, and an invariant operand as wide as
+// the lane.
+static void test_row_lanes_bail() {
+  using namespace rowlanes;
+  {  // rows 0..L-1 of an (L+1)-row base: the fused op cannot read it whole
+    Built b = build_density(6, 4, Rows::kMatrix, 1);
+    const size_t before = b.g.ops.size();
+    Fills f2 = b.fills;
+    std::vector<int> tt = b.terms;
+    const RerollStats st = reroll(b.g, f2, tt, {});
+    expect("uncovered rows not fused",
+           st.regions == 0 && b.g.ops.size() == before && tt.size() == 6);
+  }
+  {  // the same for row stores
+    Built b = build_store(6, 4, Rows::kMatrix, 1);
+    const size_t before = b.g.ops.size();
+    Fills f2 = b.fills;
+    std::vector<int> tt = b.terms;
+    const RerollStats st = reroll(b.g, f2, tt, {});
+    expect("uncovered row stores not fused",
+           st.regions == 0 && b.g.ops.size() == before && row_stores(b.g) == 6);
+  }
+  {  // a later writer of the matrix: the run fuses into a whole-vector
+     // store and the later write chains onto it
+    Built b = build_store(6, 4, Rows::kMatrix, 0, true);
+    Graph ref = b.g;
+    reduce_into_result(ref, b.terms);
+    const std::vector<double> want = run_grad(std::move(ref), b.fills);
+    Fills f2 = b.fills;
+    std::vector<int> tt = b.terms;
+    const RerollStats st = reroll(b.g, f2, tt, {});
+    expect("later writer forces the whole-vector store form",
+           st.regions == 1 && writefuse::count(b.g, OP_SET_SLICE) == 1 &&
+               writefuse::count(b.g, OP_SET_SLICE_STRIDED) == 0);
+    expect("later row write chains, not blocks",
+           writefuse::count(b.g, OP_SET_SLICE_STRIDED_INPLACE) == 1);
+    reduce_into_result(b.g, tt);
+    const std::vector<double> got = run_grad(std::move(b.g), f2);
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close(("rowstore-chain v" + std::to_string(i)).c_str(), got[i],
+                   want[i]);
+  }
+  {  // DOT inside the lane
+    const int L = 6, C = 4;
+    Graph g;
+    Fills fills;
+    const int base = g.add_slot(L * C, true);
+    const int w = g.add_slot(C, true);
+    const int sigma = g.add_slot(1, true);
+    std::vector<int> terms;
+    for (int l = 0; l < L; ++l) {
+      const int row = g.add_slot(C, false);
+      g.add_op(OP_SLICE_STRIDED, {base}, row, {l, L});
+      const int d = g.add_slot(1, false);
+      g.add_op(OP_DOT, {row, w}, d);
+      const int y = g.add_slot(1, false);
+      fills.emplace_back(y, std::vector<double>{0.1 * l});
+      const int lp = g.add_slot(1, false);
+      const int id = g.add_op(OP_NORMAL_LPDF, {y, d, sigma}, lp);
+      g.ops[(size_t)id].variant = 0x06;
+      terms.push_back(lp);
+    }
+    const size_t before = g.ops.size();
+    std::vector<int> tt = terms;
+    const RerollStats st = reroll(g, fills, tt, {});
+    expect("lane reduction not fused",
+           st.regions == 0 && g.ops.size() == before);
+  }
+  {  // an invariant vector operand as wide as the lane
+    const int L = 6, C = 4;
+    Graph g;
+    Fills fills;
+    const int base = g.add_slot(L * C, true);
+    const int mu = g.add_slot(C, true);
+    std::vector<int> terms;
+    for (int l = 0; l < L; ++l) {
+      const int row = g.add_slot(C, false);
+      g.add_op(OP_SLICE_STRIDED, {base}, row, {l, L});
+      const int s = g.add_slot(C, false);
+      g.add_op(OP_ADD, {row, mu}, s);
+      const int lp = g.add_slot(1, false);
+      const int id = g.add_op(OP_BERNOULLI_LOGIT_LPMF, {s}, lp,
+                              std::vector<int>((size_t)C, l % 2));
+      g.ops[(size_t)id].variant = 0x81;
+      terms.push_back(lp);
+    }
+    const size_t before = g.ops.size();
+    std::vector<int> tt = terms;
+    const RerollStats st = reroll(g, fills, tt, {});
+    expect("lane-wide invariant operand not fused",
+           st.regions == 0 && g.ops.size() == before);
+  }
+}
+
 // ---- end to end through compile_model ------------------------------------
 
 static std::string slurp(const char* p) {
@@ -1673,6 +1981,9 @@ int main() {
   test_post_reroll_slice_inplace();
   test_write_fusion_scalar_chain();
   test_pow_widens();
+  test_row_density_lanes();
+  test_row_store_lanes();
+  test_row_lanes_bail();
   test_e2e_fixtures();
   if (failures) {
     std::printf("%d failures\n", failures);
