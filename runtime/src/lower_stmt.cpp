@@ -905,6 +905,32 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
         return;
       }
       if (!s.lhs_idx.empty()) {
+        const auto statically_empty = [&](const mir::Expr& ix) {
+          if (ix.name != "IndexBetween") return false;
+          try {
+            return eval_int(ix.args[1]) < eval_int(ix.args[0]);
+          } catch (const CompileError&) {
+            return false;
+          }
+        };
+        if (std::any_of(s.lhs_idx.begin(), s.lhs_idx.end(), statically_empty))
+          return;
+        if (s.lhs_idx.size() == 2 && s.lhs_idx[0].name == "IndexSingle" &&
+            s.lhs_idx[1].name == "IndexAll") {
+          const auto bound = scope.find(s.lhs);
+          const auto declared = decls.find(s.lhs);
+          const SlotInfo* lhs_si = nullptr;
+          if (bound != scope.end())
+            lhs_si = &bound->second.si;
+          else if (declared != decls.end())
+            lhs_si = &declared->second.si;
+          if (lhs_si && is_matrix(*lhs_si)) {
+            mir::Stmt row = s;
+            row.lhs_idx.pop_back();
+            lower_stmt_impl(row);
+            return;
+          }
+        }
         // Element write under unrolled control flow: functional update.
         Val prev_v{-1, false, {}};
         auto it = scope.find(s.lhs);
