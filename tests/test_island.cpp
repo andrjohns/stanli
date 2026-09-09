@@ -915,6 +915,92 @@ static void test_join_guard_skips_a_joined_compile_split_would_lose() {
            ops_match(guarded.g.ops[k], unguarded.g.ops[k]));
 }
 
+static VectorBinaryGraph build_two_piece_split_loses() {
+  VectorBinaryGraph h;
+  Graph& g = h.g;
+  const int p = g.add_slot(1, true);
+  int qs[4];
+  for (int& q : qs) q = g.add_slot(1, true);
+  const int v = g.add_slot(2, true);
+  const int c = g.add_slot(2, false);
+  h.fills.emplace_back(c, std::vector<double>{0.5, 0.6});
+  const auto chain = [&](int t0, int steps) {
+    int t = t0;
+    for (int i = 0; i < steps; ++i) {
+      const int m = g.add_slot(1, false);
+      g.add_op(OP_MUL, {t, qs[i % 4]}, m);
+      t = g.add_slot(1, false);
+      g.add_op(OP_INV_LOGIT, {m}, t);
+    }
+    return t;
+  };
+  const int t1 = chain(p, 18);
+  const int w = g.add_slot(2, false);
+  g.add_op(OP_ADD, {v, c}, w);
+  const int e = g.add_slot(1, false);
+  g.add_op(OP_INDEX, {w}, e, {0});
+  const int t2 = chain(e, 18);
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_MUL, {t1, t2}, lp);
+  g.result_slot = lp;
+  h.terms.push_back(lp);
+  return h;
+}
+
+static void test_split_skip_avoids_compiling_split_pieces() {
+  bool skipped = false;
+  int piece_estimate_lines = 0;
+  for (const std::string& l : capture_island_debug([] {
+         VectorBinaryGraph h = build_two_piece_split_loses();
+         carve_islands(h.g, h.fills, h.terms, {});
+       })) {
+    if (l.rfind("island? ops=", 0) == 0 &&
+        l.find("split_skip=1") != std::string::npos)
+      skipped = true;
+    if (l.rfind("island? ops=", 0) == 0 &&
+        l.find("graph=") != std::string::npos)
+      ++piece_estimate_lines;
+  }
+  expect("split skip fired", skipped);
+  expect_eq("one estimate line", piece_estimate_lines, 1);
+
+  VectorBinaryGraph ref = build_two_piece_split_loses();
+  const std::vector<double> want = run_grad(std::move(ref.g), ref.fills);
+  VectorBinaryGraph isl = build_two_piece_split_loses();
+  expect_eq("two-piece carved", carve_islands(isl.g, isl.fills, isl.terms, {}),
+            1);
+  expect("two-piece island first",
+         !isl.g.ops.empty() && isl.g.ops[0].opcode == OP_ISLAND);
+  const std::vector<double> got = run_grad_twice(std::move(isl.g), isl.fills);
+  expect("two-piece sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("two-piece v" + std::to_string(i), got[i], want[i]);
+}
+
+static void test_split_skip_off_by_guard() {
+  VectorBinaryGraph guarded = build_two_piece_split_loses();
+  const int guarded_carved =
+      carve_islands(guarded.g, guarded.fills, guarded.terms, {});
+
+  test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
+  VectorBinaryGraph unguarded = build_two_piece_split_loses();
+  const int unguarded_carved =
+      carve_islands(unguarded.g, unguarded.fills, unguarded.terms, {});
+  test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
+
+  expect_eq("split-skip carved count matches unguarded", guarded_carved,
+            unguarded_carved);
+  expect_eq("split-skip op count matches unguarded", (int)guarded.g.ops.size(),
+            (int)unguarded.g.ops.size());
+  const size_t n = guarded.g.ops.size() < unguarded.g.ops.size()
+                       ? guarded.g.ops.size()
+                       : unguarded.g.ops.size();
+  for (size_t k = 0; k < n; ++k)
+    expect(
+        ("op " + std::to_string(k) + " matches unguarded (split-skip)").c_str(),
+        ops_match(guarded.g.ops[k], unguarded.g.ops[k]));
+}
+
 // Many length-`width` DOT ops feeding a scalar chain.
 static VectorBinaryGraph build_dot_heavy(int width) {
   VectorBinaryGraph h;
@@ -2045,6 +2131,8 @@ int main() {
   test_join_wins_by_estimate();
   test_split_wins_by_estimate();
   test_join_guard_skips_a_joined_compile_split_would_lose();
+  test_split_skip_avoids_compiling_split_pieces();
+  test_split_skip_off_by_guard();
   test_dot_width_estimate_moves_together();
   test_const_count_does_not_grow_island_cost();
   test_softmax3_island_executor();

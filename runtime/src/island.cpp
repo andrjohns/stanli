@@ -817,20 +817,50 @@ struct Carver {
     return boundary;
   }
 
+  void vector_op_costs(size_t i, size_t j, int64_t* vector_graph,
+                       int64_t* vector_range) const {
+    *vector_graph = 0;
+    *vector_range = 0;
+    for (size_t u = i; u < j; ++u) {
+      const Op& op = g.ops[u];
+      if (in_vocab(g, op, true)) continue;
+      *vector_graph += graph_cost(u, u + 1);
+      *vector_range += (kValueRegWeight + 1 + 2) * g.slots[op.out].len;
+    }
+  }
+
   int64_t join_cost_floor(size_t i, size_t j) const {
     int64_t scalar = 0;
     for (const Candidate& sc : strict_queue)
       if (sc.accepted) scalar += sc.island_cost;
-    int64_t vector_graph = 0;
-    int64_t vector_range = 0;
-    for (size_t u = i; u < j; ++u) {
-      const Op& op = g.ops[u];
-      if (in_vocab(g, op, true)) continue;
-      vector_graph += graph_cost(u, u + 1);
-      const int64_t width = g.slots[op.out].len;
-      vector_range += (kValueRegWeight + 1 + 2) * width;
-    }
+    int64_t vector_graph, vector_range;
+    vector_op_costs(i, j, &vector_graph, &vector_range);
     return scalar - vector_graph + vector_range + joined_boundary(i, j);
+  }
+
+  int64_t split_cost_floor(const Candidate& joined, size_t i, size_t j) const {
+    int64_t vector_graph, vector_range;
+    vector_op_costs(i, j, &vector_graph, &vector_range);
+    int64_t boundary_sum = 0;
+    size_t a = i;
+    while (a < j) {
+      const size_t b = grow(a, j, true);
+      if ((int64_t)(b - a) >= kMinIslandOps)
+        boundary_sum += joined_boundary(a, b);
+      a = b > a ? b : a + 1;
+    }
+    return joined.island_cost - vector_range + vector_graph + boundary_sum;
+  }
+
+  bool split_has_multiple_pieces(size_t i, size_t j) const {
+    int pieces = 0;
+    size_t a = i;
+    while (a < j && pieces < 2) {
+      const size_t b = grow(a, j, true);
+      if ((int64_t)(b - a) >= kMinIslandOps) ++pieces;
+      a = b > a ? b : a + 1;
+    }
+    return pieces >= 2;
   }
 
   // [i, j) carved at the strict vocabulary: each sub-run of at least
@@ -1024,10 +1054,45 @@ struct Carver {
         continue;
       }
       if (!strict && grow(i, j, true) != j) {
+        const bool always = std::getenv("STANLI_ISLAND_ALWAYS") != nullptr;
+        const bool guard_off =
+            std::getenv("STANLI_NO_ISLAND_JOIN_GUARD") != nullptr;
+        auto finish = [&](Candidate&& c, int64_t split, bool any) {
+          if (always ? !c.compiled : split_wins(c, split, any)) {
+            strict_until = j;
+            return;
+          }
+          if (!c.accepted) {
+            while (i < j) result.push_back(g.ops[i++]);
+            return;
+          }
+          emit(c);
+          i = j;
+        };
+        if (!always && !guard_off && split_has_multiple_pieces(i, j)) {
+          Candidate c = evaluate(i, j);
+          if (c.accepted) {
+            const int64_t floor = split_cost_floor(c, i, j);
+            const int64_t joined = c.island_cost + c.boundary;
+            if (floor >= joined) {
+              if (std::getenv("STANLI_DEBUG_ISLAND"))
+                emit_diagnostic("island? ops=" + std::to_string(j - i) +
+                                " split_floor=" + std::to_string(floor) +
+                                " joined=" + std::to_string(joined) +
+                                " split_skip=1");
+              emit(c);
+              i = j;
+              continue;
+            }
+          }
+          bool any = false;
+          const int64_t split = split_cost(i, j, &any);
+          finish(std::move(c), split, any);
+          continue;
+        }
         bool any = false;
         const int64_t split = split_cost(i, j, &any);
-        const bool always = std::getenv("STANLI_ISLAND_ALWAYS") != nullptr;
-        if (!always && !std::getenv("STANLI_NO_ISLAND_JOIN_GUARD")) {
+        if (!always && !guard_off) {
           const int64_t floor = join_cost_floor(i, j);
           if (floor > split) {
             if (std::getenv("STANLI_DEBUG_ISLAND"))
@@ -1038,17 +1103,7 @@ struct Carver {
             continue;
           }
         }
-        Candidate c = evaluate(i, j);
-        if (always ? !c.compiled : split_wins(c, split, any)) {
-          strict_until = j;
-          continue;
-        }
-        if (!c.accepted) {
-          while (i < j) result.push_back(g.ops[i++]);
-          continue;
-        }
-        emit(c);
-        i = j;
+        finish(evaluate(i, j), split, any);
         continue;
       }
       Candidate c = strict ? strict_candidate(i, j) : evaluate(i, j);
