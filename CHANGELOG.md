@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### The upstream loop vectorizer's new shapes lower without regressions
+
+The compiler runs stanc3's `vectorize_loops` pass, and the 0.12.0 compiler
+pin widened what that pass rewrites: gathers, elementwise arithmetic,
+independent statements in one loop body, and assignment loops. Three of the
+new shapes cost more than they saved. A whole-row write into a matrix,
+`p[j, :] = v`, lowered one element at a time; it now takes the same strided
+store as `p[j] = v`. A statically empty range assignment, which the pass
+makes from a loop such as `for (i in 1:0)`, lowered its whole right-hand
+side; it now lowers nothing. A vector-valued `+`, `-`, `*` or `/` between
+two scalar runs split an island in two, and the half left over was priced
+out and interpreted: iohmm_reg's log density went from 27 ops to 10522 and
+each gradient took 29% longer. Islands now compile elementwise vector
+arithmetic up to 64 elements wide, so the run stays whole and iohmm_reg is
+back at parity. Across the 26 corpus models the pass rewrites, gradient
+time is now at or below the pass-off figure everywhere except dogs and
+dogs_log, where the pass turns one flat run of 750 Bernoulli terms into 30
+per-dog densities that the re-roll pass cannot merge; they run about 11%
+slower than with the pass off.
+
+The vectorization harness gates on op counts for every model whose MIR the
+pass changes: the lowered log density may not grow, and the final graph may
+grow by at most 10%. Its gradient benchmark set is now the models the pass
+changes. `harnesses/corpus_bench.py` measures the stanli columns through the
+shipped compile pipeline, and can build the CmdStan side with a chosen stanc
+binary and flags; a manifest next to the TSV records which.
+
 Generated quantities and transformed parameters are now written by each
 chain as it samples. The work happens on the chain's own thread as each
 draw is stored, so it runs in parallel across chains and inside the
