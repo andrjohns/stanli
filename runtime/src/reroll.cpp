@@ -135,20 +135,24 @@ bool two_int_groups(uint16_t opcode) {
 // place.
 bool ops_match(const Graph& g, const Op& a, const Op& b,
                int64_t lane_distance) {
-  if (a.opcode != b.opcode &&
-      !(is_row_store(a) && inplace_form(a.opcode) == b.opcode))
-    return false;
+  if (a.opcode != b.opcode) {
+    const bool maybe_row_store =
+        (a.opcode == OP_SET_SLICE && b.opcode == OP_SET_SLICE_INPLACE) ||
+        (a.opcode == OP_SET_SLICE_STRIDED &&
+         b.opcode == OP_SET_SLICE_STRIDED_INPLACE);
+    if (!maybe_row_store || !is_row_store(a)) return false;
+  }
   if (a.variant != b.variant || a.n_in != b.n_in || a.out2 >= 0 ||
       b.out2 >= 0 || is_effectful_op(a.opcode) ||
       has_op_trait(a.opcode, op_trait::kVariantGrouped))
     return false;
+  for (int j = 0; j < a.n_in; ++j)
+    if (g.slots[a.in[j]].len != g.slots[b.in[j]].len) return false;
+  if (g.slots[a.out].len != g.slots[b.out].len) return false;
   const bool a_row_store = is_row_store(a);
   if (a_row_store && a.out != b.out) return false;
   const bool a_row_read = a_row_store ? false : is_row_read(a);
   if (a_row_read && a.in[0] != b.in[0]) return false;
-  for (int j = 0; j < a.n_in; ++j)
-    if (g.slots[a.in[j]].len != g.slots[b.in[j]].len) return false;
-  if (g.slots[a.out].len != g.slots[b.out].len) return false;
   // Element writes carry their destination index the same way reads do, so
   // the immediate is allowed to advance across lanes for both; lpmf lanes
   // carry their integer outcome there and fuse by concatenating them.
@@ -712,12 +716,30 @@ static RerollStats reroll_impl(
         return g.ops[i + (size_t)l * P + p];
       };
 
+      const auto rigid_diverges = [&](int64_t base) {
+        for (int p = 0; p < P; ++p) {
+          const Op& t0 = op_at(p, base);
+          if (t0.opcode == OP_INDEX || is_element_store(t0) ||
+              is_row_store(t0) || is_row_read(t0) ||
+              has_op_trait(t0.opcode, op_trait::kRerollAnyDensity) ||
+              has_op_trait(t0.opcode, op_trait::kRerollWidenable))
+            continue;
+          const Op& t1 = op_at(p, base + 1);
+          for (int j = 0; j < t0.n_in; ++j)
+            if (t0.in[j] != t1.in[j]) return true;
+        }
+        return false;
+      };
+      const bool doomed = rigid_diverges(0);
+      const bool doomed_next = doomed && L > kMinLanes && rigid_diverges(1);
+
       // ---- classify, shrinking to the reported prefix on failure ----
       std::vector<Pos> pos;
       Layout layout = Layout::kAny;
-      int64_t Luse = L;
+      int64_t Luse = doomed ? 0 : L;
       bool classified = false;
-      for (int attempt = 0; attempt < kMaxClassifyAttempts && Luse >= kMinLanes;
+      for (int attempt = 0;
+           !doomed && attempt < kMaxClassifyAttempts && Luse >= kMinLanes;
            ++attempt) {
         int64_t prefix = Luse;
         pos.assign((size_t)P, Pos{});
@@ -1216,6 +1238,10 @@ static RerollStats reroll_impl(
           hard_failed[(size_t)P] = false;
         } else if (hard_failed[(size_t)P] && i < fail_end[(size_t)P]) {
           retry_at[(size_t)P] = fail_end[(size_t)P];
+        } else if (doomed_next) {
+          fail_end[(size_t)P] = run_end;
+          hard_failed[(size_t)P] = true;
+          retry_at[(size_t)P] = run_end;
         } else {
           fail_end[(size_t)P] = run_end;
           hard_failed[(size_t)P] = true;
