@@ -17,10 +17,7 @@ out and interpreted: iohmm_reg's log density went from 27 ops to 10522 and
 each gradient took 29% longer. Islands now compile elementwise vector
 arithmetic up to 64 elements wide, so the run stays whole and iohmm_reg is
 back at parity. Across the 26 corpus models the pass rewrites, gradient
-time is now at or below the pass-off figure everywhere except dogs and
-dogs_log, where the pass turns one flat run of 750 Bernoulli terms into 30
-per-dog densities that the re-roll pass cannot merge; they run about 11%
-slower than with the pass off.
+time is now at or below the pass-off figure everywhere.
 
 The vectorization harness gates on op counts for every model whose MIR the
 pass changes: the lowered log density may not grow, and the final graph may
@@ -28,6 +25,43 @@ grow by at most 10%. Its gradient benchmark set is now the models the pass
 changes. `harnesses/corpus_bench.py` measures the stanli columns through the
 shipped compile pipeline, and can build the CmdStan side with a chosen stanc
 binary and flags; a manifest next to the TSV records which.
+
+### Passes generalized past the shapes the corpus showed
+
+Each of the fixes above was one spelling of a narrower assumption in a
+pass. The assumptions are gone.
+
+The re-roll pass packs lanes that walk the rows of a container. A lane was
+one element wide, so every per-row loop, `y[i] ~ multi_normal(mu[i], Sigma)`
+over an array of vectors or a likelihood per subject, ran one vector op per
+row after unrolling. A lane may now be a whole row: row slices of an
+invariant base collapse to the base itself, per-row constants and outcomes
+pack in the base's storage order, and a run of row stores covering every
+row makes the fused value the container. dogs now runs one density over
+its 750 trials and is 19% faster with the pass on than off; dogs_log 25%;
+mother's array-of-vectors prior drops from 114 to 71 ops.
+
+Every static indexed assignment lowers through the same selector map the
+reads use: one contiguous, strided or scattered store in any dimension,
+bounds checked at compile time. The list of hand-written spellings is gone.
+Two silent out-of-range writes (`z[4] = v` on an `array[3] vector`,
+`m[5, 1]` on a `matrix[3, 4]`) are compile errors now, and a store through a
+repeated index list such as `m[{2, 2}, 1]` no longer credits every
+right-hand element in the gradient. A selector that picks nothing lowers
+nothing.
+
+Islands compile every elementwise op at any width as one range instruction
+with broadcast, so no vector op ends a run, and the carver prices the joined
+run, the run split at vector ops, and leaving the ops alone, and emits the
+cheapest. The estimate now charges reductions by the width they touch and
+does not charge absorbed constants. This matters because joining is not
+always a win: the per-element island version of a wide vector op can be
+slower than the graph kernel, and op counts do not show it.
+
+`stanli_check` compiles through the embedded pipeline, the one `stanli_run`
+and the packages use, so every lit case and corpus check now verifies the
+MIR that ships. A build without the embedded compiler runs `stanli-compile`
+as a subprocess; `--stanc PATH` remains as an explicit opt-in for A/B work.
 
 Generated quantities and transformed parameters are now written by each
 chain as it samples. The work happens on the chain's own thread as each
