@@ -517,6 +517,177 @@ static void test_unsupported_op_splits() {
   expect("split ops unchanged", g.ops.size() == before);
 }
 
+// A length-3 binary between two scalar runs, as the vectorize pass leaves
+// in iohmm_reg.
+struct VectorBinaryGraph {
+  Graph g;
+  Fills fills;
+  std::vector<int> terms;
+};
+
+// shape 0 pairs two length-3 slices, 1 a slice with a scalar, 2 a scalar
+// with a slice.
+static VectorBinaryGraph build_vector_binary(uint16_t opcode, int shape) {
+  VectorBinaryGraph h;
+  Graph& g = h.g;
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    h.fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  auto chain = [&](int t, int steps, std::vector<int>* taps) {
+    for (int i = 0; i < steps; ++i) {
+      const int m = g.add_slot(1, false);
+      g.add_op(OP_MUL, {t, cslot(0.7 + 0.05 * i)}, m);
+      const int s = g.add_slot(1, false);
+      g.add_op(OP_ADD, {m, cslot(0.1 * i - 0.4)}, s);
+      t = g.add_slot(1, false);
+      g.add_op(OP_INV_LOGIT, {s}, t);
+      if (taps && i % 2 == 1) taps->push_back(t);
+    }
+    return t;
+  };
+  const int p = g.add_slot(1, true);
+  std::vector<int> taps;
+  chain(p, 12, &taps);
+  const int z6 = g.add_slot(6, false);
+  h.fills.emplace_back(z6, std::vector<double>(6, 0.0));
+  int vec = z6;
+  for (int k = 0; k < 6; ++k) {
+    const int e = g.add_slot(1, false);
+    g.add_op(OP_ADD, {taps[(size_t)k], cslot(1.5 + 0.5 * k)}, e);
+    const int dst = g.add_slot(6, false);
+    g.add_op(OP_SET_INDEX, {vec, e}, dst, {k});
+    vec = dst;
+  }
+  const int lo = g.add_slot(3, false);
+  g.add_op(OP_SLICE, {vec}, lo, {0});
+  const int hi = g.add_slot(3, false);
+  g.add_op(OP_SLICE, {vec}, hi, {3});
+  const int a = shape == 2 ? taps[0] : lo;
+  const int b = shape == 1 ? taps[5] : hi;
+  const int v = g.add_slot(3, false);
+  g.add_op(opcode, {a, b}, v);
+  int t = -1;
+  for (int k = 0; k < 3; ++k) {
+    const int e = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {v}, e, {k});
+    if (t < 0) {
+      t = e;
+      continue;
+    }
+    const int m = g.add_slot(1, false);
+    g.add_op(OP_MUL, {t, e}, m);
+    t = m;
+  }
+  const int scaled = g.add_slot(1, false);
+  g.add_op(OP_MUL, {t, cslot(1e-3)}, scaled);
+  t = chain(scaled, 12, nullptr);
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_ADD, {t, cslot(0.25)}, lp);
+  g.result_slot = lp;
+  h.terms.push_back(lp);
+  return h;
+}
+
+static void test_vector_binary_joins_runs() {
+  const uint16_t opcodes[] = {OP_ADD, OP_SUB, OP_MUL, OP_DIV};
+  const char* names[] = {"add", "sub", "mul", "div"};
+  const char* shapes[] = {"(3,3)", "(3,1)", "(1,3)"};
+  for (int oi = 0; oi < 4; ++oi) {
+    for (int shape = 0; shape < 3; ++shape) {
+      const std::string tag =
+          std::string("vecbin ") + names[oi] + shapes[shape];
+      VectorBinaryGraph ref = build_vector_binary(opcodes[oi], shape);
+      const std::vector<double> want = run_grad(std::move(ref.g), ref.fills);
+      expect((tag + " grad nonzero").c_str(),
+             want.size() == 2 && want[1] != 0.0);
+
+      VectorBinaryGraph isl = build_vector_binary(opcodes[oi], shape);
+      const int carved = carve_islands(isl.g, isl.fills, isl.terms, {});
+      expect_eq(tag + " carved", carved, 1);
+      int islands = 0, vector_binaries = 0;
+      for (const Op& op : isl.g.ops) {
+        if (op.opcode == OP_ISLAND) ++islands;
+        if (op.opcode == opcodes[oi] && isl.g.slots[op.out].len == 3)
+          ++vector_binaries;
+      }
+      expect_eq(tag + " islands", islands, 1);
+      expect_eq(tag + " vector binaries left", vector_binaries, 0);
+      // One island, one extraction of the live-out, the term-producing op.
+      expect_eq(tag + " ops", (int)isl.g.ops.size(), 3);
+      const std::vector<double> got =
+          run_grad_twice(std::move(isl.g), isl.fills);
+      expect((tag + " sizes").c_str(), got.size() == want.size());
+      for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+        expect_close(tag + " v" + std::to_string(i), got[i], want[i]);
+    }
+  }
+}
+
+// sw_mono's shape: a length-40 binary joining two scalar runs, where the
+// joined island prices above the graph and the split does not.
+static VectorBinaryGraph build_split_wins() {
+  VectorBinaryGraph h;
+  Graph& g = h.g;
+  const int p = g.add_slot(1, true);
+  const int q = g.add_slot(1, true);
+  const int v = g.add_slot(40, true);
+  const int c = g.add_slot(40, false);
+  std::vector<double> cv(40);
+  for (int k = 0; k < 40; ++k) cv[(size_t)k] = 0.5 + 0.01 * k;
+  h.fills.emplace_back(c, cv);
+  auto chain = [&](int t, int steps) {
+    for (int i = 0; i < steps; ++i) {
+      const int m = g.add_slot(1, false);
+      g.add_op(OP_MUL, {t, q}, m);
+      t = g.add_slot(1, false);
+      g.add_op(OP_INV_LOGIT, {m}, t);
+    }
+    return t;
+  };
+  int t = chain(p, 18);
+  const int w = g.add_slot(40, false);
+  g.add_op(OP_ADD, {v, c}, w);
+  for (int k = 0; k < 3; ++k) {
+    const int e = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {w}, e, {k});
+    const int m = g.add_slot(1, false);
+    g.add_op(OP_MUL, {t, e}, m);
+    t = m;
+  }
+  t = chain(t, 100);
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_SUB, {t, q}, lp);
+  g.result_slot = lp;
+  h.terms.push_back(lp);
+  return h;
+}
+
+static void test_vector_binary_split_wins() {
+  VectorBinaryGraph ref = build_split_wins();
+  const std::vector<double> want = run_grad(std::move(ref.g), ref.fills);
+  expect("split grad nonzero",
+         want.size() == 43 && want[1] != 0.0 && want[3] != 0.0);
+
+  VectorBinaryGraph isl = build_split_wins();
+  const int carved = carve_islands(isl.g, isl.fills, isl.terms, {});
+  expect_eq("split carved", carved, 2);
+  // Each run's island and its live-out around the ADD, then the term op.
+  const uint16_t want_ops[] = {OP_ISLAND, OP_INDEX, OP_ADD,
+                               OP_ISLAND, OP_INDEX, OP_SUB};
+  expect_eq("split ops", (int)isl.g.ops.size(), 6);
+  for (size_t k = 0; k < 6 && k < isl.g.ops.size(); ++k)
+    expect_eq("split op " + std::to_string(k), (int)isl.g.ops[k].opcode,
+              (int)want_ops[k]);
+  expect("split add is the vector one",
+         isl.g.ops.size() > 2 && isl.g.slots[isl.g.ops[2].out].len == 40);
+  const std::vector<double> got = run_grad_twice(std::move(isl.g), isl.fills);
+  expect("split sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("split v" + std::to_string(i), got[i], want[i]);
+}
+
 // A region that carries far more state than it computes: each step drops
 // one scalar into its own wide template, so the register file grows by a
 // whole vector per three instructions, and the file is written by the
@@ -1504,6 +1675,7 @@ int main() {
   test_short_run_untouched();
   test_propto_density_refused();
   test_unsupported_op_splits();
+  test_vector_binary_joins_runs();
   test_too_many_live_ins();
   test_six_live_ins_ok();
   test_packed_live_ins();
@@ -1516,6 +1688,7 @@ int main() {
   test_unsetenv("STANLI_ISLAND_ALWAYS");
   test_wide_state_refused();
   test_vector_copies_carved();
+  test_vector_binary_split_wins();
   test_softmax3_island_executor();
   test_softmax3_private_slot_stays_invalid_graph_ir();
   test_softmax3_payload_copy_lifetime();

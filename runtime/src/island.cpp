@@ -9,16 +9,16 @@
 // a renamed slot, and adjoints flow through the extraction ops' existing
 // backwards.
 //
-// A run ends at: an opcode outside the vocabulary, a vector binary (already
-// vectorized -- islands are for scalar residue), a propto density (its
-// term-dropping depends on argument types; islands bind everything as T),
-// an op producing a target term (terms stay graph-visible), or idata in a
-// form the compiler does not model. Runs shorter than kMinIslandOps stay
-// as they are: below that, per-op dispatch with scratch partials is cheaper
-// than a var replay. A compiled run is then kept only if it is cheaper
-// than the ops it replaces -- see the cost estimate at the end of
-// carve_islands, which is what decides the pass is a win rather than a
-// wash.
+// A run ends at: an opcode outside the vocabulary, a vector binary wider
+// than kMaxVectorBinaryLen, a propto density (its term-dropping depends on
+// argument types; islands bind everything as T), an op producing a target
+// term (terms stay graph-visible), or idata in a form the compiler does not
+// model. Runs shorter than kMinIslandOps stay as they are: below that,
+// per-op dispatch with scratch partials is cheaper than a var replay. A
+// compiled run is then kept only if it is cheaper than the ops it replaces
+// -- see the cost estimate at the end of carve_islands, which is what
+// decides the pass is a win rather than a wash. A refused run that holds a
+// vector binary is carved again with the binary left as a graph op.
 #include <stanli/island.hpp>
 
 #include <stanli/graph.hpp>
@@ -39,6 +39,7 @@ namespace {
 
 constexpr int64_t kMinIslandOps = 32;
 constexpr int kMaxLiveIns = 6;
+constexpr int64_t kMaxVectorBinaryLen = 64;
 // What one value register costs against one element of graph traffic. The
 // value file is written by the forward and read by the backward. The compact
 // adjoint file is charged separately below: copied registers share a cell,
@@ -63,6 +64,16 @@ bool scalar_ins(const Graph& g, const Op& op) {
   for (int j = 0; j < op.n_in; ++j)
     if (g.slots[op.in[j]].len != 1) return false;
   return g.slots[op.out].len == 1;
+}
+
+bool elementwise_ins(const Graph& g, const Op& op) {
+  const int64_t out_len = g.slots[op.out].len;
+  if (out_len < 1 || out_len > kMaxVectorBinaryLen) return false;
+  for (int j = 0; j < op.n_in; ++j) {
+    const int64_t len = g.slots[op.in[j]].len;
+    if (len != 1 && len != out_len) return false;
+  }
+  return true;
 }
 
 // The scalar unaries the island machine speaks, paired with the
@@ -126,13 +137,14 @@ bool callable(const Graph& g, const Op& op) {
 // Structural vocabulary test. Shape/idata details are re-checked during
 // compilation; anything unexpected there aborts the island (compile
 // returns false) and the run is left alone.
-bool in_vocab(const Graph& g, const Op& op) {
+bool in_vocab(const Graph& g, const Op& op, bool strict = false) {
   if (op.out2 >= 0 || op.dyn_lengths) return false;
   switch (op.opcode) {
     case OP_ADD:
     case OP_SUB:
     case OP_MUL:
     case OP_DIV:
+      return strict ? scalar_ins(g, op) : elementwise_ins(g, op);
     case OP_FMA:
     case OP_ADD_N:
     case OP_LSE2:
@@ -326,8 +338,12 @@ struct Compiler {
                           OP_DIV == OP_ADD + 3,
                       "binary code order");
         const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
+        const int sa = g.slots[op.in[0]].len == 1 ? 0 : 1;
+        const int sb = g.slots[op.in[1]].len == 1 ? 0 : 1;
         const auto c = (Program::Code)(Program::ADD + (op.opcode - OP_ADD));
-        emit(c, write_reg(op.out), a, b);
+        const int d = write_reg(op.out);
+        for (int k = 0; k < out_len; ++k)
+          emit(c, d + k, a + sa * k, b + sb * k);
         return ok;
       }
       case OP_ADD_N: {
@@ -555,10 +571,12 @@ int carve_islands(Graph& g,
   result.reserve(g.ops.size());
   int carved = 0;
   size_t i = 0;
+  size_t strict_until = 0;
   while (i < g.ops.size()) {
     // Grow the run of compilable ops.
+    const bool strict = i < strict_until;
     size_t j = i;
-    while (j < g.ops.size() && in_vocab(g, g.ops[j]) &&
+    while (j < g.ops.size() && in_vocab(g, g.ops[j], strict) &&
            term_set.count(g.ops[j].out) == 0)
       ++j;
     if ((int64_t)(j - i) < kMinIslandOps) {
@@ -798,7 +816,17 @@ int carve_islands(Graph& g,
       i = j;
       continue;
     }
-    // Compile failed or nothing escapes: leave the run as ops.
+    // Compile failed or nothing escapes: leave the run as ops, or carve it
+    // again at scalar granularity when a vector binary was what it held.
+    if (!strict) {
+      bool vector_binary = false;
+      for (size_t u = i; u < j && !vector_binary; ++u)
+        vector_binary = !in_vocab(g, g.ops[u], true);
+      if (vector_binary) {
+        strict_until = j;
+        continue;
+      }
+    }
     while (i < j) result.push_back(g.ops[i++]);
   }
   g.ops = std::move(result);
