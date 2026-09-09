@@ -905,64 +905,66 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
         return;
       }
       if (!s.lhs_idx.empty()) {
-        const auto statically_empty = [&](const mir::Expr& ix) {
-          if (ix.name != "IndexBetween") return false;
-          try {
-            return eval_int(ix.args[1]) < eval_int(ix.args[0]);
-          } catch (const CompileError&) {
-            return false;
+        const auto bound = scope.find(s.lhs);
+        const auto declared = decls.find(s.lhs);
+        if (bound == scope.end() && declared == decls.end())
+          fail("indexed assignment to undeclared " + s.lhs);
+        const bool runtime = std::any_of(
+            s.lhs_idx.begin(), s.lhs_idx.end(),
+            [&](const mir::Expr& ix) { return runtime_selector(ix); });
+        BuiltinIndexMap map;
+        if (!runtime) {
+          const SlotInfo& lhs_si =
+              bound != scope.end() ? bound->second.si : declared->second.si;
+          const int64_t lhs_len = bound != scope.end()
+                                      ? g.slots[bound->second.slot].len
+                                      : declared->second.len;
+          const BuiltinArgumentShape shape =
+              view_argument_shape(lhs_si, lhs_len, BuiltinArgumentKind::Real);
+          if (s.lhs_idx.size() > shape.dimensions.size())
+            fail(
+                "unsupported indexed assignment: too many indexes for " + s.lhs,
+                s.raw);
+          std::vector<std::vector<int64_t>> selected;
+          std::vector<bool> drops;
+          for (size_t d = 0; d < s.lhs_idx.size(); ++d) {
+            selected.push_back(index_positions(
+                s.lhs_idx[d], shape.dimensions[d], "assignment index", s.raw));
+            drops.push_back(s.lhs_idx[d].name == "IndexSingle");
           }
-        };
-        if (std::any_of(s.lhs_idx.begin(), s.lhs_idx.end(), statically_empty))
-          return;
-        if (s.lhs_idx.size() == 2 && s.lhs_idx[0].name == "IndexSingle" &&
-            s.lhs_idx[1].name == "IndexAll") {
-          const auto bound = scope.find(s.lhs);
-          const auto declared = decls.find(s.lhs);
-          const SlotInfo* lhs_si = nullptr;
-          if (bound != scope.end())
-            lhs_si = &bound->second.si;
-          else if (declared != decls.end())
-            lhs_si = &declared->second.si;
-          if (lhs_si && is_matrix(*lhs_si)) {
-            mir::Stmt row = s;
-            row.lhs_idx.pop_back();
-            lower_stmt_impl(row);
+          if (std::any_of(selected.begin(), selected.end(),
+                          [](const std::vector<int64_t>& positions) {
+                            return positions.empty();
+                          }))
             return;
+          try {
+            map = builtin_index_map(shape, selected, drops,
+                                    SliceStorageOrder::OuterMajor);
+          } catch (const std::invalid_argument& error) {
+            fail(std::string("unsupported indexed assignment: ") + error.what(),
+                 s.raw);
           }
         }
-        // Element write under unrolled control flow: functional update.
         Val prev_v{-1, false, {}};
-        auto it = scope.find(s.lhs);
-        if (it != scope.end()) {
-          prev_v = it->second;
+        if (bound != scope.end()) {
+          prev_v = bound->second;
         } else {
-          auto dl = decls.find(s.lhs);
-          if (dl == decls.end())
-            fail("indexed assignment to undeclared " + s.lhs);
-          SlotInfo si = dl->second.si;
+          SlotInfo si = declared->second.si;
           si.param_free = true;
-          prev_v = Val{add_slot(dl->second.len, false), dl->second.autodiff, si,
-                       owning_layout(si)};
+          prev_v = Val{add_slot(declared->second.len, false),
+                       declared->second.autodiff, si, owning_layout(si)};
           const double initial =
-              dl->second.int_array
+              declared->second.int_array
                   ? static_cast<double>(std::numeric_limits<int>::min())
                   : std::numeric_limits<double>::quiet_NaN();
-          out.fills.emplace_back(prev_v.slot,
-                                 std::vector<double>(dl->second.len, initial));
-          if (dl->second.int_array) set_uninitialized_int_array(prev_v);
-          observe_fill(prev_v, dl->second.int_array, initial, dl->second.len);
+          out.fills.emplace_back(
+              prev_v.slot, std::vector<double>(declared->second.len, initial));
+          if (declared->second.int_array) set_uninitialized_int_array(prev_v);
+          observe_fill(prev_v, declared->second.int_array, initial,
+                       declared->second.len);
         }
-        const int prev = prev_v.slot;
-        bool all_single = true;
-        for (const auto& ix : s.lhs_idx)
-          if (ix.name != "IndexSingle") all_single = false;
-        const std::vector<int64_t>* dd =
-            is_array(prev_v.si) ? &array_shape(prev_v.si).dims : nullptr;
         const Val rhs_v = lower_expr(s.rhs);
-        if (std::any_of(
-                s.lhs_idx.begin(), s.lhs_idx.end(),
-                [&](const mir::Expr& ix) { return runtime_selector(ix); })) {
+        if (runtime) {
           Val nv = region_index(prev_v, s.lhs_idx, s.rhs.type_, s.rhs.unsized,
                                 &rhs_v);
           nv.autodiff = prev_v.autodiff;
@@ -971,336 +973,46 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
           return;
         }
         observe_indexed_rhs(s.rhs, rhs_v);
-        const int rhs = rhs_v.slot;
-        SlotInfo out_si = prev_v.si;
-        // A one-index All spans the complete logical value. Keep this as
-        // an indexed functional update rather than silently rewriting the
-        // MIR statement: the ordinary binding checks still enforce width
-        // and logical view, while the store path preserves integer-array
-        // initialization and observation metadata. Matrix `[:, j]` is a
-        // separate two-index form below and never enters this branch.
-        if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexAll") {
-          if (is_scalar(prev_v))
-            fail("full-span assignment needs a container for " + s.lhs, s.raw);
+        const int prev = prev_v.slot;
+        const SlotInfo out_si = prev_v.si;
+        const bool whole = std::all_of(
+            s.lhs_idx.begin(), s.lhs_idx.end(),
+            [](const mir::Expr& ix) { return ix.name == "IndexAll"; });
+        if (whole)
           require_binding(rhs_v, g.slots[prev].len, prev_v.si, s.lhs, s.raw);
-          Val nv = with_layout(emit_value(OP_SET_SLICE, {prev_v, rhs_v},
-                                          g.slots[prev].len, out_si, {0}),
-                               owning_layout(out_si));
-          propagate_int_update(nv, prev_v, rhs_v, 0, 1);
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        // Whole matrix row write M[i] = row_vector: one value per column,
-        // strided by the physical row count.
-        if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexSingle" &&
-            is_matrix(prev_v.si) && is_row_vector(rhs_v.si)) {
-          const int64_t i = eval_int(s.lhs_idx[0].args[0]) - 1;
-          if (i < 0 || i >= prev_v.si.rows)
-            fail("row assignment index out of bounds for " + s.lhs);
-          if (g.slots[rhs].len != prev_v.si.cols)
-            fail("row assignment size mismatch for " + s.lhs);
-          Val nv = with_layout(emit_value(OP_SET_SLICE_STRIDED, {prev_v, rhs_v},
-                                          g.slots[prev].len, out_si,
-                                          {(int)i, (int)prev_v.si.rows}),
-                               owning_layout(out_si));
-          propagate_int_update(nv, prev_v, rhs_v, i, prev_v.si.rows);
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        // Whole vector leaf write A[i, :] = rhs for array[N] vector[S].
-        // Graph array storage keeps each outer element contiguous, so this
-        // is the assignment mirror of the read path above.
-        if (s.lhs_idx.size() == 2 && s.lhs_idx[0].name == "IndexSingle" &&
-            s.lhs_idx[1].name == "IndexAll" && dd && dd->size() == 2 &&
-            (array_shape(prev_v.si).leaf == ViewKind::Vector ||
-             array_shape(prev_v.si).leaf == ViewKind::RowVector)) {
-          const int64_t i = eval_int(s.lhs_idx[0].args[0]);
-          const int64_t width = (*dd)[1];
-          check_index(i, (*dd)[0], "array assignment index", s.raw);
-          SlotInfo expected = indexed_view(prev_v.si, 1, width, s.rhs.type_);
-          require_binding(rhs_v, width, expected, s.lhs, s.raw);
-          const int64_t start = (i - 1) * width;
-          Val nv =
-              with_layout(emit_value(OP_SET_SLICE, {prev_v, rhs_v},
-                                     g.slots[prev].len, out_si, {(int)start}),
-                          owning_layout(out_si));
-          propagate_int_update(nv, prev_v, rhs_v, start, 1);
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        // Between write w[a:b] = rhs (contiguous on 1-D values). Deeper
-        // bases fall through to the shared index geometry below.
-        const bool flat_1d_array =
-            is_array(prev_v.si) && array_shape(prev_v.si).dims.size() == 1 &&
-            array_shape(prev_v.si).leaf == ViewKind::Flat;
-        const bool one_dimensional =
-            is_vector(prev_v.si) || is_row_vector(prev_v.si) || flat_1d_array;
-        if (s.lhs_idx.size() == 1 && is_range(s.lhs_idx[0]) &&
-            one_dimensional) {
-          const StaticRange range =
-              *static_range(s.lhs_idx[0], g.slots[prev].len);
-          const int64_t lo = range.lo;
-          const int64_t hi = range.hi;
-          const int64_t len = hi >= lo ? hi - lo + 1 : 0;
-          check_range(lo, hi, g.slots[prev].len, "range assignment", s.raw);
-          if (g.slots[rhs].len != len)
-            fail("range assignment size mismatch for " + s.lhs);
-          const int64_t start = len == 0 ? 0 : lo - 1;
-          Val nv =
-              with_layout(emit_value(OP_SET_SLICE, {prev_v, rhs_v},
-                                     g.slots[prev].len, out_si, {(int)start}),
-                          owning_layout(out_si));
-          propagate_int_update(nv, prev_v, rhs_v, start, 1);
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        // Scatter write x[idx] = rhs on a 1-D value: the indices are data,
-        // so spell it as one element write each; repeats then resolve
-        // last-wins as CmdStan. A gather over a deeper base selects whole
-        // outer elements and resolves through the index geometry below.
-        if (s.lhs_idx.size() == 1 && s.lhs_idx[0].name == "IndexMulti" &&
-            one_dimensional) {
-          DataMap::Entry iv =
-              eval_pure(s.lhs_idx[0].args[0], "a scatter index");
-          if (!iv.is_int) fail("scatter index must be int data", s.raw);
-          if ((int64_t)iv.i.size() != g.slots[rhs].len)
-            fail("scatter assignment size mismatch for " + s.lhs);
-          Val nv = prev_v;
-          for (size_t k = 0; k < iv.i.size(); ++k) {
-            check_index(iv.i[k], g.slots[prev].len, "scatter index", s.raw);
+        else if (g.slots[rhs_v.slot].len != map.count)
+          fail("indexed assignment size mismatch for " + s.lhs, s.raw);
+        std::vector<int64_t> cells = map.gather;
+        if (map.kind == BuiltinSliceMap::Kind::Strided && map.stride <= 0)
+          for (int64_t k = 0; k < map.count; ++k)
+            cells.push_back(map.offset + k * map.stride);
+        Val nv = prev_v;
+        if (!cells.empty()) {
+          for (int64_t k = 0; k < map.count; ++k) {
+            const int cell =
+                checked_immediate(cells[(size_t)k], "assignment cell");
             const Val el =
                 emit_value(OP_INDEX, {rhs_v}, 1, view_of("UReal"), {(int)k});
-            const Val next =
-                emit_value(OP_SET_INDEX, {nv, el}, g.slots[prev].len, out_si,
-                           {(int)(iv.i[k] - 1)});
-            propagate_int_update(next, nv, el, iv.i[k] - 1, 1);
+            const Val next = emit_value(OP_SET_INDEX, {nv, el},
+                                        g.slots[prev].len, out_si, {cell});
+            propagate_int_update(next, nv, el, cells[(size_t)k], 1);
             nv = next;
           }
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        // Column write M[:, j] = rhs (contiguous in col-major storage).
-        if (s.lhs_idx.size() == 2 && s.lhs_idx[0].name == "IndexAll" &&
-            s.lhs_idx[1].name == "IndexSingle" && is_matrix(prev_v.si)) {
-          const int64_t j = eval_int(s.lhs_idx[1].args[0]) - 1;
-          if (j < 0 || j >= prev_v.si.cols)
-            fail("column assignment index out of bounds for " + s.lhs);
-          if (g.slots[rhs].len != prev_v.si.rows)
-            fail("column assignment size mismatch for " + s.lhs);
-          Val nv = emit_value(OP_SET_SLICE, {prev_v, rhs_v}, g.slots[prev].len,
-                              out_si, {(int)(j * prev_v.si.rows)});
-          propagate_int_update(nv, prev_v, rhs_v, j * prev_v.si.rows, 1);
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        // Row-range column write M[a:b, j] = rhs (contiguous within the
-        // column).
-        if (s.lhs_idx.size() == 2 && is_range(s.lhs_idx[0]) &&
-            s.lhs_idx[1].name == "IndexSingle" && is_matrix(prev_v.si)) {
-          const StaticRange range = *static_range(s.lhs_idx[0], prev_v.si.rows);
-          const int64_t lo = range.lo;
-          const int64_t hi = range.hi;
-          const int64_t j = eval_int(s.lhs_idx[1].args[0]) - 1;
-          if (j < 0 || j >= prev_v.si.cols)
-            fail("column assignment index out of bounds for " + s.lhs);
-          const int64_t len = hi >= lo ? hi - lo + 1 : 0;
-          check_range(lo, hi, prev_v.si.rows, "row-range assignment", s.raw);
-          if (g.slots[rhs].len != len)
-            fail("range assignment size mismatch for " + s.lhs);
-          const int64_t start = len == 0 ? 0 : j * prev_v.si.rows + lo - 1;
-          Val nv =
-              with_layout(emit_value(OP_SET_SLICE, {prev_v, rhs_v},
-                                     g.slots[prev].len, out_si, {(int)start}),
-                          owning_layout(out_si));
-          propagate_int_update(nv, prev_v, rhs_v, start, 1);
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        // Columns outermost, as CmdStan's assign walks them: a repeated
-        // index has to resolve last-wins in the same order.
-        if (!all_single && s.lhs_idx.size() == 2 && is_matrix(prev_v.si)) {
-          const std::vector<int64_t> ri = index_positions(
-              s.lhs_idx[0], prev_v.si.rows, "block assignment row", s.raw);
-          const std::vector<int64_t> ci = index_positions(
-              s.lhs_idx[1], prev_v.si.cols, "block assignment column", s.raw);
-          if ((int64_t)(ri.size() * ci.size()) != g.slots[rhs].len)
-            fail("block assignment size mismatch for " + s.lhs, s.raw);
-          Val nv = prev_v;
-          for (size_t j = 0; j < ci.size(); ++j)
-            for (size_t i = 0; i < ri.size(); ++i) {
-              const Val el = emit_value(OP_INDEX, {rhs_v}, 1, view_of("UReal"),
-                                        {(int)(j * ri.size() + i)});
-              const Val next =
-                  emit_value(OP_SET_INDEX, {nv, el}, g.slots[prev].len, out_si,
-                             {(int)(ci[j] * prev_v.si.rows + ri[i])});
-              propagate_int_update(next, nv, el, ci[j] * prev_v.si.rows + ri[i],
-                                   1);
-              nv = next;
-            }
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        if (all_single && dd && s.lhs_idx.size() <= dd->size() &&
-            !is_matrix(prev_v.si)) {
-          // The mirror of the read path, through the same flat_addr.
-          const auto& D = *dd;
-          const bool mat = array_shape(prev_v.si).leaf == ViewKind::Matrix;
-          std::vector<int64_t> ix;
-          for (const auto& k : s.lhs_idx) ix.push_back(eval_int(k.args[0]) - 1);
-          const Addr a = flat_addr(D, mat, ix);
-          if (a.len != g.slots[rhs].len && a.len != 1)
-            fail("indexed assignment size mismatch for " + s.lhs);
-          Val nv =
-              a.stride != 1
-                  ? emit_value(OP_SET_SLICE_STRIDED, {prev_v, rhs_v},
-                               g.slots[prev].len, out_si,
-                               {(int)a.off, (int)a.stride})
-                  : (a.len == 1
-                         ? emit_value(OP_SET_INDEX, {prev_v, rhs_v},
-                                      g.slots[prev].len, out_si, {(int)a.off})
-                         : emit_value(OP_SET_SLICE, {prev_v, rhs_v},
-                                      g.slots[prev].len, out_si, {(int)a.off}));
-          propagate_int_update(nv, prev_v, rhs_v, a.off, a.stride);
-          scope[s.lhs] = nv;
-          sync_indexed_data_local(s.lhs, nv);
-          return;
-        }
-        // A full array-index prefix followed by an explicit `:` for every
-        // remaining dimension: H[i, :, :] on array[N] matrix[R, C] (a
-        // container leaf), or y_approx[i, :] on a plain array[N, S] real
-        // (the remaining dimension is just another array axis, no
-        // container leaf at all) -- either way this spells the same
-        // whole-remainder replacement flat_addr's "whole elements" case
-        // already gives an implicit-rest prefix. Not `all_single` (the
-        // trailing indices are All, not omitted or Single), so it falls
-        // outside the block above.
-        if (dd) {
-          size_t prefix_len = 0;
-          while (prefix_len < s.lhs_idx.size() &&
-                 s.lhs_idx[prefix_len].name == "IndexSingle")
-            ++prefix_len;
-          bool trailing_all = true;
-          for (size_t d = prefix_len; d < s.lhs_idx.size(); ++d)
-            if (s.lhs_idx[d].name != "IndexAll") trailing_all = false;
-          if (prefix_len > 0 && trailing_all && prefix_len < dd->size() &&
-              s.lhs_idx.size() == dd->size()) {
-            std::vector<int64_t> ix;
-            ix.reserve(prefix_len);
-            for (size_t d = 0; d < prefix_len; ++d) {
-              const int64_t one = eval_int(s.lhs_idx[d].args[0]);
-              check_index(one, (*dd)[d], "array assignment index", s.raw);
-              ix.push_back(one - 1);
-            }
-            const bool mat = array_shape(prev_v.si).leaf == ViewKind::Matrix;
-            const Addr a = flat_addr(*dd, mat, ix);
-            require_binding(
-                rhs_v, a.len,
-                indexed_view(prev_v.si, prefix_len, a.len, s.rhs.type_), s.lhs,
-                s.raw);
-            Val nv = emit_value(OP_SET_SLICE, {prev_v, rhs_v},
-                                g.slots[prev].len, out_si, {(int)a.off});
-            propagate_int_update(nv, prev_v, rhs_v, a.off, 1);
-            scope[s.lhs] = nv;
-            sync_indexed_data_local(s.lhs, nv);
-            return;
-          }
-        }
-        // Any remaining static selection over a container base resolves
-        // through the shared index geometry: mixed ranges, gathers, and
-        // upfrom forms over deep and container-leaf arrays, and the
-        // one-index matrix row forms. The map enumerates destination cells
-        // in the graph's outer-major storage, the order the RHS stores its
-        // cells, so repeated gather indices keep CmdStan's last-write-wins.
-        if (!is_scalar(prev_v) && !all_single) {
-          const BuiltinArgumentShape shape = view_argument_shape(
-              prev_v.si, g.slots[prev].len, BuiltinArgumentKind::Real);
-          if (s.lhs_idx.size() <= shape.dimensions.size()) {
-            std::vector<std::vector<int64_t>> selected;
-            std::vector<bool> drops;
-            selected.reserve(s.lhs_idx.size());
-            drops.reserve(s.lhs_idx.size());
-            for (size_t d = 0; d < s.lhs_idx.size(); ++d) {
-              selected.push_back(index_positions(s.lhs_idx[d],
-                                                 shape.dimensions[d],
-                                                 "assignment index", s.raw));
-              drops.push_back(s.lhs_idx[d].name == "IndexSingle");
-            }
-            BuiltinIndexMap map;
-            try {
-              map = builtin_index_map(shape, selected, drops,
-                                      SliceStorageOrder::OuterMajor);
-            } catch (const std::invalid_argument& error) {
-              fail(std::string("unsupported indexed assignment: ") +
-                       error.what(),
-                   s.raw);
-            }
-            if (g.slots[rhs].len != map.count)
-              fail("indexed assignment size mismatch for " + s.lhs, s.raw);
-            Val nv = prev_v;
-            switch (map.kind) {
-              case BuiltinSliceMap::Kind::Contiguous:
-                nv = with_layout(emit_value(OP_SET_SLICE, {prev_v, rhs_v},
-                                            g.slots[prev].len, out_si,
-                                            {checked_immediate(
-                                                map.count == 0 ? 0 : map.offset,
-                                                "assignment offset")}),
-                                 owning_layout(out_si));
-                propagate_int_update(nv, prev_v, rhs_v, map.offset, 1);
-                break;
-              case BuiltinSliceMap::Kind::Strided:
-                nv = with_layout(
-                    emit_value(
-                        OP_SET_SLICE_STRIDED, {prev_v, rhs_v},
-                        g.slots[prev].len, out_si,
-                        {checked_immediate(map.offset, "assignment offset"),
-                         checked_immediate(map.stride, "assignment stride")}),
-                    owning_layout(out_si));
-                propagate_int_update(nv, prev_v, rhs_v, map.offset, map.stride);
-                break;
-              default:
-                for (int64_t k = 0; k < map.count; ++k) {
-                  const int cell = checked_immediate(map.gather[(size_t)k],
-                                                     "assignment cell");
-                  const Val el = emit_value(OP_INDEX, {rhs_v}, 1,
-                                            view_of("UReal"), {(int)k});
-                  const Val next =
-                      emit_value(OP_SET_INDEX, {nv, el}, g.slots[prev].len,
-                                 out_si, {cell});
-                  propagate_int_update(next, nv, el, map.gather[(size_t)k], 1);
-                  nv = next;
-                }
-                break;
-            }
-            scope[s.lhs] = nv;
-            sync_indexed_data_local(s.lhs, nv);
-            return;
-          }
-        }
-        int64_t flat = 0;
-        if (all_single && s.lhs_idx.size() == 1) {
-          flat = eval_int(s.lhs_idx[0].args[0]) - 1;
-        } else if (all_single && s.lhs_idx.size() == 2 &&
-                   is_matrix(prev_v.si)) {
-          flat = (eval_int(s.lhs_idx[1].args[0]) - 1) * prev_v.si.rows +
-                 (eval_int(s.lhs_idx[0].args[0]) - 1);
+        } else if (map.kind == BuiltinSliceMap::Kind::Contiguous) {
+          nv = emit_value(map.count == 1 ? OP_SET_INDEX : OP_SET_SLICE,
+                          {prev_v, rhs_v}, g.slots[prev].len, out_si,
+                          {checked_immediate(map.offset, "assignment offset")});
+          propagate_int_update(nv, prev_v, rhs_v, map.offset, 1);
+        } else if (map.kind == BuiltinSliceMap::Kind::Strided) {
+          nv = emit_value(OP_SET_SLICE_STRIDED, {prev_v, rhs_v},
+                          g.slots[prev].len, out_si,
+                          {checked_immediate(map.offset, "assignment offset"),
+                           checked_immediate(map.stride, "assignment stride")});
+          propagate_int_update(nv, prev_v, rhs_v, map.offset, map.stride);
         } else {
-          std::string desc = "unsupported indexed assignment: lhs=" + s.lhs;
-          for (const auto& ix : s.lhs_idx)
-            desc += " [" + (ix.name.empty() ? "?" : ix.name) + "]";
-          fail(desc, s.raw);
+          fail("unsupported indexed assignment for " + s.lhs, s.raw);
         }
-        Val nv = with_layout(emit_value(OP_SET_INDEX, {prev_v, rhs_v},
-                                        g.slots[prev].len, out_si, {(int)flat}),
-                             owning_layout(out_si));
-        propagate_int_update(nv, prev_v, rhs_v, flat, 1);
+        nv = with_layout(nv, owning_layout(out_si));
         scope[s.lhs] = nv;
         sync_indexed_data_local(s.lhs, nv);
         return;
