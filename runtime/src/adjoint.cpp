@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace stanli {
@@ -46,7 +47,7 @@ bool gen_adjoint(IslandProg& p) {
   // Reversing flat jumps needs the structured if/else form the instruction
   // stream has already lost. Such programs keep the var replay.
   for (const auto& I : orig) {
-    if (program_code_spec(I.code).has(kProgramNoAdjoint)) return false;
+    if (program_spec_of(I).has(kProgramNoAdjoint)) return false;
     if (I.code != Program::CALL) continue;
     if (I.a < 0 || (size_t)I.a >= fwd.calls.size()) return false;
     const Program::Call& call = fwd.calls[(size_t)I.a];
@@ -121,7 +122,7 @@ bool gen_adjoint(IslandProg& p) {
   // bounded the operands, and they index the same vectors.
   auto in_range = [&](int r, int len) { return r >= 0 && r + len <= n0; };
   for (const auto& I : orig) {
-    const ProgramOpSpec& spec = program_code_spec(I.code);
+    const ProgramOpSpec& spec = program_spec_of(I);
     const int reads = spec.has(kProgramNoInputs) ? 0 : 3;
     if (I.code == Program::DENSITY && program_density_arity(I.len) > 3 &&
         !in_range(I.a, program_density_arity(I.len)))
@@ -143,15 +144,21 @@ bool gen_adjoint(IslandProg& p) {
       if (reads > 2 && !in_range(I.c, 1)) return false;
     }
     const int wl = program_output_len(I);
-    const bool coincident_range = spec.has(kProgramRangeOutput);
-    if (spec.has(kProgramRangeA) &&
-        (!in_range(I.a, I.len) || (overlaps(I.dst, wl, I.a, I.len) &&
-                                   !(coincident_range && I.dst == I.a))))
-      return false;
-    if (spec.has(kProgramRangeB) &&
-        (!in_range(I.b, I.len) || (overlaps(I.dst, wl, I.b, I.len) &&
-                                   !(coincident_range && I.dst == I.b))))
-      return false;
+    const bool coincident_range =
+        spec.has(kProgramRangeOutput) || I.code == Program::RANGE;
+    const int32_t operand[3] = {I.a, I.b, I.c};
+    for (int k = 0; k < 3 && !ranged_density; ++k) {
+      if (!program_reads(I, k)) continue;
+      const int len = program_input_len(I, k);
+      if (!in_range(operand[k], len)) return false;
+      // A broadcast operand must not overlap a wider output.
+      if (len == 1 && wl > 1 && I.code == Program::RANGE &&
+          overlaps(I.dst, wl, operand[k], 1))
+        return false;
+      if (len > 1 && overlaps(I.dst, wl, operand[k], len) &&
+          !(coincident_range && I.dst == operand[k]))
+        return false;
+    }
   }
 
   // Which registers carry a parameter: seeded from the live-ins the carver
@@ -184,7 +191,7 @@ bool gen_adjoint(IslandProg& p) {
         write(call.scratch, call.scratch_len);
         continue;
       }
-      const ProgramOpSpec& spec = program_code_spec(I.code);
+      const ProgramOpSpec& spec = program_spec_of(I);
       if (spec.has(kProgramNoInputs)) continue;
       if (I.code == Program::DENSITY) {
         const int ar = program_density_arity(I.len);
@@ -197,10 +204,9 @@ bool gen_adjoint(IslandProg& p) {
         dmask[i] = (uint8_t)m;
         any = m != 0;
       } else {
-        read(I.a, spec.has(kProgramRangeA) ? I.len : 1);
-        if (spec.has(kProgramReadB))
-          read(I.b, spec.has(kProgramRangeB) ? I.len : 1);
-        if (spec.has(kProgramReadC)) read(I.c, 1);
+        read(I.a, program_input_len(I, 0));
+        if (spec.has(kProgramReadB)) read(I.b, program_input_len(I, 1));
+        if (spec.has(kProgramReadC)) read(I.c, program_input_len(I, 2));
       }
       if (any) write(I.dst, program_output_len(I));
     }
@@ -344,6 +350,9 @@ bool gen_adjoint(IslandProg& p) {
     A.vb = I.b;
     A.vc = I.c;
     A.vd = I.dst;
+    A.sub = I.sub;
+    A.bcast = I.bcast;
+    if (I.code == Program::RANGE) A.mask = I.law;
     const int wl = program_output_len(I);
 
     // An operand value is needed as it stood on ENTRY to this instruction,
@@ -356,7 +365,7 @@ bool gen_adjoint(IslandProg& p) {
         need = last_write[(size_t)(r + k)] > i;
       return checkpoint(r, len, need);
     };
-    const ProgramOpSpec& spec = program_code_spec(I.code);
+    const ProgramOpSpec& spec = program_spec_of(I);
     if (I.code == Program::DENSITY) {
       const int ar = program_density_arity(I.len);
       if (ar > 3) {
@@ -368,10 +377,11 @@ bool gen_adjoint(IslandProg& p) {
       }
     } else {
       if (spec.has(kProgramSaveA))
-        A.va = save_before(I.a, spec.has(kProgramRangeA) ? I.len : 1);
+        A.va = save_before(I.a, program_input_len(I, 0));
       if (spec.has(kProgramSaveB))
-        A.vb = save_before(I.b, spec.has(kProgramRangeB) ? I.len : 1);
-      if (spec.has(kProgramSaveC)) A.vc = save_before(I.c, 1);
+        A.vb = save_before(I.b, program_input_len(I, 1));
+      if (spec.has(kProgramSaveC))
+        A.vc = save_before(I.c, program_input_len(I, 2));
     }
 
     ncode.push_back(I);
@@ -399,9 +409,9 @@ bool gen_adjoint(IslandProg& p) {
         A.c = map1(I.c);
       }
     } else if (!spec.has(kProgramNoInputs)) {
-      A.a = spec.has(kProgramRangeA) ? mapn(I.a, I.len) : map1(I.a);
-      A.b = spec.has(kProgramRangeB) ? mapn(I.b, I.len) : map1(I.b);
-      A.c = map1(I.c);
+      A.a = mapn(I.a, program_input_len(I, 0));
+      A.b = mapn(I.b, program_reads(I, 1) ? program_input_len(I, 1) : 1);
+      A.c = mapn(I.c, program_reads(I, 2) ? program_input_len(I, 2) : 1);
     }
     if (!mapped_ranges_ok) return false;
     ap.code.push_back(A);
@@ -421,6 +431,315 @@ bool gen_adjoint(IslandProg& p) {
 // in-place `x = exp(x)` needs.
 using AdjA = Eigen::Map<Eigen::ArrayXd>;
 using CAdjA = Eigen::Map<const Eigen::ArrayXd>;
+
+// The rules with more to them than one expression, shared by the scalar
+// sweep and the ranged one. `t` is the output adjoint, already consumed
+// from its cell.
+static void pow_rule(uint8_t law, double t, double va, double vb, double vd,
+                     double& adj_a, double& adj_b) {
+  if (va == 0.0) {
+    adj_a += pow_zero_base_partial(law, t, va, vb);
+    return;
+  }
+  const double m = t * vd;
+  adj_a += m * vb / va;
+  adj_b += m * std::log(va);
+}
+
+// fmax/fmin build no node at all: they return whichever operand won,
+// so the whole adjoint routes to it. Which operand wins a tie is an
+// instantiation property: the var,var overloads compare `a > b`
+// (ties to b) where var,double compares `a >= b` (ties to the var),
+// and a mixed call whose constant side wins returns a fresh constant
+// that carries no adjoint at all. `law` holds the operands' activity
+// from lowering (bit 0: a, bit 1: b; 0 is the legacy all-var form),
+// matching program_extremum's replay. NaN needs saying separately --
+// `a > b` is false when either is NaN, so the plain comparison would
+// hand fmax(x, NaN) to the NaN, where stan-math returns x. A local
+// declared and never assigned is NaN (mir_prog.hpp), so this is
+// reachable and not hypothetical.
+static void extremum_rule(bool maximum, uint8_t law, double t, double x,
+                          double y, double& adj_a, double& adj_b) {
+  const bool a_active = law == 0 || (law & 0x1u) != 0;
+  const bool b_active = law == 0 || (law & 0x2u) != 0;
+  if (std::isnan(x) && std::isnan(y)) {
+    if (a_active) adj_a = std::numeric_limits<double>::quiet_NaN();
+    if (b_active) adj_b = std::numeric_limits<double>::quiet_NaN();
+  } else if (std::isnan(y)) {
+    if (a_active) adj_a += t;
+  } else if (std::isnan(x)) {
+    if (b_active) adj_b += t;
+  } else {
+    const bool a_wins = a_active && !b_active ? (maximum ? x >= y : x <= y)
+                                              : (maximum ? x > y : x < y);
+    if (a_wins) {
+      if (a_active) adj_a += t;
+    } else if (b_active) {
+      adj_b += t;
+    }
+  }
+}
+
+// At exactly zero stan-math returns a fresh node with no operand, so the
+// derivative is dropped rather than being either sign; at NaN it poisons
+// the operand's adjoint outright, which is what makes a sampler reject the
+// draw rather than accept a finite gradient computed from nothing.
+static void fabs_rule(double t, double x, double& adj_a) {
+  if (std::isnan(x))
+    adj_a = std::numeric_limits<double>::quiet_NaN();
+  else if (x > 0.0)
+    adj_a += t;
+  else if (x < 0.0)
+    adj_a -= t;
+}
+
+static void lse2_rule(double t, double va, double vb, double& adj_a,
+                      double& adj_b) {
+  adj_a += t * stan::math::inv_logit(va - vb);
+  adj_b += t * stan::math::inv_logit(vb - va);
+}
+
+// Match rev/fun/log_diff_exp.hpp exactly. Besides being stable when the
+// arguments are close, expm1 has observably different rounding from
+// spelling either denominator with exp.
+static void log_diff_exp_rule(double t, double va, double vb, double& adj_a,
+                              double& adj_b) {
+  adj_a -= t / stan::math::expm1(vb - va);
+  adj_b -= t / stan::math::expm1(va - vb);
+}
+
+// rev/fun/log_mix.hpp: partials through the helper, with the arms swapped
+// when lambda1 <= lambda2 so the exponential cannot overflow. Transcribed
+// rather than reused because log_mix's partials live in the rev overload,
+// which rvar cannot select.
+static void log_mix_rule(double t, double va, double vb, double vc,
+                         double& adj_a, double& adj_b, double& adj_c) {
+  double theta_d = va;
+  const double lam1 = vb, lam2 = vc;
+  double one_m_exp, one_m_t_prod, one_d;
+  auto helper = [&](double th, double la, double lb) {
+    const double e = std::exp(lb - la);
+    one_m_exp = 1.0 - e;
+    const double one_m_t = 1.0 - th;
+    one_m_t_prod = one_m_t * e;
+    one_d = 1.0 / (th + one_m_t_prod);
+  };
+  if (lam1 > lam2) {
+    helper(theta_d, lam1, lam2);
+  } else {
+    helper(1.0 - theta_d, lam2, lam1);
+    one_m_exp = -one_m_exp;
+    const double swapped = one_m_t_prod;
+    one_m_t_prod = 1.0 - theta_d;
+    theta_d = swapped;
+  }
+  // Descending operand order, as the propagator's per-edge tape entries
+  // unwind.
+  adj_c += t * (one_m_t_prod * one_d);
+  adj_b += t * (theta_d * one_d);
+  adj_a += t * (one_m_exp * one_d);
+}
+
+template <int32_t SA, int32_t SB, int32_t SC, typename Body>
+static void strided(int32_t n, Body body) {
+  for (int32_t k = 0; k < n; ++k) body(k, SA * k, SB * k, SC * k);
+}
+
+// Unit and zero strides as compile-time constants, so the loops vectorize.
+template <int Arity, typename Body>
+static void each(int32_t n, int32_t sa, int32_t sb, int32_t sc, Body body) {
+  if constexpr (Arity == 1) {
+    if (sa)
+      strided<1, 0, 0>(n, body);
+    else
+      strided<0, 0, 0>(n, body);
+  } else if constexpr (Arity == 2) {
+    switch (sa * 2 + sb) {
+      case 0:
+        return strided<0, 0, 0>(n, body);
+      case 1:
+        return strided<0, 1, 0>(n, body);
+      case 2:
+        return strided<1, 0, 0>(n, body);
+      default:
+        return strided<1, 1, 0>(n, body);
+    }
+  } else {
+    switch (sa * 4 + sb * 2 + sc) {
+      case 0:
+        return strided<0, 0, 0>(n, body);
+      case 1:
+        return strided<0, 0, 1>(n, body);
+      case 2:
+        return strided<0, 1, 0>(n, body);
+      case 3:
+        return strided<0, 1, 1>(n, body);
+      case 4:
+        return strided<1, 0, 0>(n, body);
+      case 5:
+        return strided<1, 0, 1>(n, body);
+      case 6:
+        return strided<1, 1, 0>(n, body);
+      default:
+        return strided<1, 1, 1>(n, body);
+    }
+  }
+}
+
+// A RANGE instruction: the scalar rule over every element, ascending, the
+// order the graph kernels accumulate a broadcast operand's adjoint in. Each
+// element consumes its own output cell first, so an in-place range comes
+// out as it does for a scalar. Out of line so the scalar sweep's loop stays
+// as it was.
+__attribute__((noinline)) static void ranged_step(const AdjInstr& I,
+                                                  const double* val,
+                                                  double* adj) {
+  const auto rule = static_cast<Program::Code>(I.sub);
+  const ProgramOpSpec& spec = program_code_spec(rule);
+  const int32_t sa = (I.bcast & 1u) ? 0 : 1;
+  const int32_t sb = spec.has(kProgramReadB) && !(I.bcast & 2u) ? 1 : 0;
+  const int32_t sc = spec.has(kProgramReadC) && !(I.bcast & 4u) ? 1 : 0;
+  const int32_t n = I.len;
+  auto take = [&](int32_t k) {
+    const double u = adj[I.dst + k];
+    adj[I.dst + k] = 0.0;
+    return u;
+  };
+  const uint8_t law = I.mask;
+  auto unary = [&](auto body) { each<1>(n, sa, sb, sc, body); };
+  auto binary = [&](auto body) { each<2>(n, sa, sb, sc, body); };
+  auto ternary = [&](auto body) { each<3>(n, sa, sb, sc, body); };
+  switch (rule) {
+    case Program::ADD:
+      binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
+        const double u = take(k);
+        adj[I.a + ka] += u;
+        adj[I.b + kb] += u;
+      });
+      break;
+    case Program::SUB:
+      binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
+        const double u = take(k);
+        adj[I.a + ka] += u;
+        adj[I.b + kb] -= u;
+      });
+      break;
+    case Program::MUL:
+      binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
+        const double u = take(k);
+        adj[I.a + ka] += val[I.vb + kb] * u;
+        adj[I.b + kb] += val[I.va + ka] * u;
+      });
+      break;
+    case Program::DIV:
+      binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
+        const double u = take(k);
+        const double b = val[I.vb + kb];
+        adj[I.a + ka] += u / b;
+        adj[I.b + kb] -= u * val[I.va + ka] / (b * b);
+      });
+      break;
+    case Program::FMA:
+      ternary([&](int32_t k, int32_t ka, int32_t kb, int32_t kc) {
+        const double u = take(k);
+        adj[I.a + ka] += val[I.vb + kb] * u;
+        adj[I.b + kb] += val[I.va + ka] * u;
+        adj[I.c + kc] += u;
+      });
+      break;
+    case Program::POW:
+      binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
+        pow_rule(law, take(k), val[I.va + ka], val[I.vb + kb], val[I.vd + k],
+                 adj[I.a + ka], adj[I.b + kb]);
+      });
+      break;
+    case Program::FMAX:
+    case Program::FMIN:
+      binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
+        extremum_rule(rule == Program::FMAX, law, take(k), val[I.va + ka],
+                      val[I.vb + kb], adj[I.a + ka], adj[I.b + kb]);
+      });
+      break;
+    case Program::NEG:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        adj[I.a + ka] -= take(k);
+      });
+      break;
+    case Program::EXP:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        adj[I.a + ka] += take(k) * val[I.vd + k];
+      });
+      break;
+    case Program::LOG:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        adj[I.a + ka] += take(k) / val[I.va + ka];
+      });
+      break;
+    case Program::SQRT:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        const double u = take(k);
+        if (val[I.vd + k] != 0.0) adj[I.a + ka] += u / (2.0 * val[I.vd + k]);
+      });
+      break;
+    case Program::SQUARE:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        adj[I.a + ka] += take(k) * 2.0 * val[I.va + ka];
+      });
+      break;
+    case Program::INV:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        adj[I.a + ka] -= take(k) / (val[I.va + ka] * val[I.va + ka]);
+      });
+      break;
+    case Program::FABS:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        fabs_rule(take(k), val[I.va + ka], adj[I.a + ka]);
+      });
+      break;
+    case Program::INV_LOGIT:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        adj[I.a + ka] += take(k) * val[I.vd + k] * (1.0 - val[I.vd + k]);
+      });
+      break;
+    case Program::LOG1M:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        adj[I.a + ka] += take(k) / (val[I.va + ka] - 1.0);
+      });
+      break;
+    case Program::LOG1P_EXP:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        adj[I.a + ka] += take(k) * stan::math::inv_logit(val[I.va + ka]);
+      });
+      break;
+    case Program::TANH:
+      unary([&](int32_t k, int32_t ka, int32_t, int32_t) {
+        const double u = take(k);
+        const double ch = std::cosh(val[I.va + ka]);
+        adj[I.a + ka] += u / (ch * ch);
+      });
+      break;
+    case Program::LSE2:
+      binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
+        lse2_rule(take(k), val[I.va + ka], val[I.vb + kb], adj[I.a + ka],
+                  adj[I.b + kb]);
+      });
+      break;
+    case Program::LOG_DIFF_EXP:
+      binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
+        log_diff_exp_rule(take(k), val[I.va + ka], val[I.vb + kb],
+                          adj[I.a + ka], adj[I.b + kb]);
+      });
+      break;
+    case Program::LOG_MIX:
+      ternary([&](int32_t k, int32_t ka, int32_t kb, int32_t kc) {
+        log_mix_rule(take(k), val[I.va + ka], val[I.vb + kb], val[I.vc + kc],
+                     adj[I.a + ka], adj[I.b + kb], adj[I.c + kc]);
+      });
+      break;
+    default:
+      throw std::logic_error("ranged_step: unknown sub-opcode");
+  }
+}
 
 void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
                  double* adj) {
@@ -519,56 +838,17 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
         adj[I.a] += t / val[I.vb];
         adj[I.b] -= t * val[I.va] / (val[I.vb] * val[I.vb]);
         break;
-      case Program::POW: {
+      case Program::POW:
         adj[I.dst] = 0.0;
-        if (val[I.va] == 0.0) {
-          adj[I.a] +=
-              pow_zero_base_partial((uint8_t)I.len, t, val[I.va], val[I.vb]);
-          break;
-        }
-        const double m = t * val[I.vd];
-        adj[I.a] += m * val[I.vb] / val[I.va];
-        adj[I.b] += m * std::log(val[I.va]);
+        pow_rule(static_cast<uint8_t>(I.len), t, val[I.va], val[I.vb],
+                 val[I.vd], adj[I.a], adj[I.b]);
         break;
-      }
-      // fmax/fmin build no node at all: they return whichever operand won,
-      // so the whole adjoint routes to it. Which operand wins a tie is an
-      // instantiation property: the var,var overloads compare `a > b`
-      // (ties to b) where var,double compares `a >= b` (ties to the var),
-      // and a mixed call whose constant side wins returns a fresh constant
-      // that carries no adjoint at all. I.len holds the operands' activity
-      // from lowering (bit 0: a, bit 1: b; 0 is the legacy all-var form),
-      // matching program_extremum's replay. NaN needs saying separately --
-      // `a > b` is false when either is NaN, so the plain comparison would
-      // hand fmax(x, NaN) to the NaN, where stan-math returns x. A local
-      // declared and never assigned is NaN (mir_prog.hpp), so this is
-      // reachable and not hypothetical.
       case Program::FMAX:
-      case Program::FMIN: {
+      case Program::FMIN:
         adj[I.dst] = 0.0;
-        const double x = val[I.va], y = val[I.vb];
-        const uint8_t law = static_cast<uint8_t>(I.len);
-        const bool a_active = law == 0 || (law & 0x1u) != 0;
-        const bool b_active = law == 0 || (law & 0x2u) != 0;
-        if (std::isnan(x) && std::isnan(y)) {
-          if (a_active) adj[I.a] = std::numeric_limits<double>::quiet_NaN();
-          if (b_active) adj[I.b] = std::numeric_limits<double>::quiet_NaN();
-        } else if (std::isnan(y)) {
-          if (a_active) adj[I.a] += t;
-        } else if (std::isnan(x)) {
-          if (b_active) adj[I.b] += t;
-        } else {
-          const bool a_wins = a_active && !b_active
-                                  ? (I.code == Program::FMAX ? x >= y : x <= y)
-                                  : (I.code == Program::FMAX ? x > y : x < y);
-          if (a_wins) {
-            if (a_active) adj[I.a] += t;
-          } else if (b_active) {
-            adj[I.b] += t;
-          }
-        }
+        extremum_rule(I.code == Program::FMAX, static_cast<uint8_t>(I.len), t,
+                      val[I.va], val[I.vb], adj[I.a], adj[I.b]);
         break;
-      }
       case Program::NEG:
         adj[I.dst] = 0.0;
         adj[I.a] -= t;
@@ -595,17 +875,7 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
         break;
       case Program::FABS:
         adj[I.dst] = 0.0;
-        // At exactly zero stan-math returns a fresh node with no operand,
-        // so the derivative is dropped rather than being either sign; at
-        // NaN it poisons the operand's adjoint outright, which is what
-        // makes a sampler reject the draw rather than accept a finite
-        // gradient computed from nothing.
-        if (std::isnan(val[I.va]))
-          adj[I.a] = std::numeric_limits<double>::quiet_NaN();
-        else if (val[I.va] > 0.0)
-          adj[I.a] += t;
-        else if (val[I.va] < 0.0)
-          adj[I.a] -= t;
+        fabs_rule(t, val[I.va], adj[I.a]);
         break;
       case Program::INV_LOGIT:
         adj[I.dst] = 0.0;
@@ -703,49 +973,17 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
       }
       case Program::LSE2:
         adj[I.dst] = 0.0;
-        adj[I.a] += t * stan::math::inv_logit(val[I.va] - val[I.vb]);
-        adj[I.b] += t * stan::math::inv_logit(val[I.vb] - val[I.va]);
+        lse2_rule(t, val[I.va], val[I.vb], adj[I.a], adj[I.b]);
         break;
       case Program::LOG_DIFF_EXP:
         adj[I.dst] = 0.0;
-        // Match rev/fun/log_diff_exp.hpp exactly. Besides being stable when
-        // the arguments are close, expm1 has observably different rounding
-        // from spelling either denominator with exp.
-        adj[I.a] -= t / stan::math::expm1(val[I.vb] - val[I.va]);
-        adj[I.b] -= t / stan::math::expm1(val[I.va] - val[I.vb]);
+        log_diff_exp_rule(t, val[I.va], val[I.vb], adj[I.a], adj[I.b]);
         break;
-      case Program::LOG_MIX: {
+      case Program::LOG_MIX:
         adj[I.dst] = 0.0;
-        // rev/fun/log_mix.hpp: partials through the helper, with the arms
-        // swapped when lambda1 <= lambda2 so the exponential cannot
-        // overflow. Transcribed rather than reused because log_mix's
-        // partials live in the rev overload, which rvar cannot select.
-        double theta_d = val[I.va];
-        const double lam1 = val[I.vb], lam2 = val[I.vc];
-        double one_m_exp, one_m_t_prod, one_d;
-        auto helper = [&](double th, double la, double lb) {
-          const double e = std::exp(lb - la);
-          one_m_exp = 1.0 - e;
-          const double one_m_t = 1.0 - th;
-          one_m_t_prod = one_m_t * e;
-          one_d = 1.0 / (th + one_m_t_prod);
-        };
-        if (lam1 > lam2) {
-          helper(theta_d, lam1, lam2);
-        } else {
-          helper(1.0 - theta_d, lam2, lam1);
-          one_m_exp = -one_m_exp;
-          const double swapped = one_m_t_prod;
-          one_m_t_prod = 1.0 - theta_d;
-          theta_d = swapped;
-        }
-        // Descending operand order, as the propagator's per-edge tape
-        // entries unwind.
-        adj[I.c] += t * (one_m_t_prod * one_d);
-        adj[I.b] += t * (theta_d * one_d);
-        adj[I.a] += t * (one_m_exp * one_d);
+        log_mix_rule(t, val[I.va], val[I.vb], val[I.vc], adj[I.a], adj[I.b],
+                     adj[I.c]);
         break;
-      }
       case Program::DENSITY: {
         // stan-math computes the partials in doubles through the recorder
         // (program_density.cpp); this only scales and accumulates them.
@@ -771,6 +1009,9 @@ void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
         if (I.mask & 1u) adj[I.a] += t * part[0];
         break;
       }
+      case Program::RANGE:
+        ranged_step(I, val, adj);
+        break;
       case Program::DYN_INDEX:
       case Program::IDIV:
       case Program::EXTREMA_RANGE:

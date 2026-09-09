@@ -9,16 +9,17 @@
 // a renamed slot, and adjoints flow through the extraction ops' existing
 // backwards.
 //
-// A run ends at: an opcode outside the vocabulary, a vector binary wider
-// than kMaxVectorBinaryLen, a propto density (its term-dropping depends on
-// argument types; islands bind everything as T), an op producing a target
-// term (terms stay graph-visible), or idata in a form the compiler does not
-// model. Runs shorter than kMinIslandOps stay as they are: below that,
-// per-op dispatch with scratch partials is cheaper than a var replay. A
-// compiled run is then kept only if it is cheaper than the ops it replaces
-// -- see the cost estimate at the end of carve_islands, which is what
-// decides the pass is a win rather than a wash. A refused run that holds a
-// vector binary is carved again with the binary left as a graph op.
+// A run ends at: an opcode outside the vocabulary, a propto density (its
+// term-dropping depends on argument types; islands bind everything as T),
+// an op producing a target term (terms stay graph-visible), or idata in a
+// form the compiler does not model. Elementwise ops compile at any width,
+// with length-1 operands broadcast. Runs shorter than kMinIslandOps stay
+// as they are: below that, per-op dispatch with scratch partials is cheaper
+// than a var replay. A compiled run is then kept only if it is cheaper
+// than the ops it replaces -- see the cost estimate at the end of
+// carve_islands, which is what decides the pass is a win rather than a
+// wash. A run holding vector elementwise ops is also priced split at them,
+// and carved whichever way is cheaper.
 #include <stanli/island.hpp>
 
 #include <stanli/graph.hpp>
@@ -39,7 +40,6 @@ namespace {
 
 constexpr int64_t kMinIslandOps = 32;
 constexpr int kMaxLiveIns = 6;
-constexpr int64_t kMaxVectorBinaryLen = 64;
 // What one value register costs against one element of graph traffic. The
 // value file is written by the forward and read by the backward. The compact
 // adjoint file is charged separately below: copied registers share a cell,
@@ -60,6 +60,43 @@ constexpr int kValueRegWeight = 2;
 // 1.28x once they were compiled.
 constexpr int kOpCost = 5;
 
+// What a graph op costs on top of the elements it moves. The executor's
+// per-op profile puts a scalar op at the dispatch alone, a scalar density
+// at twice that, log_sum_exp at eight times, and softmax at seventeen. A
+// dot product's own dispatch measures the same as a scalar op; the elements
+// it reads are charged in graph_cost below.
+int64_t graph_op_cost(uint16_t opcode) {
+  switch (opcode) {
+    case OP_SOFTMAX:
+      return 17 * kOpCost;
+    case OP_LOG_SUM_EXP:
+      return 8 * kOpCost;
+    case OP_DOT:
+      return kOpCost;
+    default:
+      return program_density_id_by_opcode(opcode) >= 0 ? 2 * kOpCost : kOpCost;
+  }
+}
+
+// Whether an island instruction's rule runs once per element rather than
+// once total. Shared by Program::Instr and AdjInstr, which both carry a
+// `code` and a `len`.
+bool touches_width(Program::Code code) {
+  switch (code) {
+    case Program::RANGE:
+    case Program::DOT:
+    case Program::SOFTMAX:
+    case Program::LOG_RANGE:
+    case Program::EXP_RANGE:
+    case Program::LSE_RANGE:
+    case Program::MDIVIDE_LEFT:
+    case Program::MDIVIDE_RIGHT_SPD:
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool scalar_ins(const Graph& g, const Op& op) {
   for (int j = 0; j < op.n_in; ++j)
     if (g.slots[op.in[j]].len != 1) return false;
@@ -68,7 +105,7 @@ bool scalar_ins(const Graph& g, const Op& op) {
 
 bool elementwise_ins(const Graph& g, const Op& op) {
   const int64_t out_len = g.slots[op.out].len;
-  if (out_len < 1 || out_len > kMaxVectorBinaryLen) return false;
+  if (out_len < 1) return false;
   for (int j = 0; j < op.n_in; ++j) {
     const int64_t len = g.slots[op.in[j]].len;
     if (len != 1 && len != out_len) return false;
@@ -136,7 +173,9 @@ bool callable(const Graph& g, const Op& op) {
 
 // Structural vocabulary test. Shape/idata details are re-checked during
 // compilation; anything unexpected there aborts the island (compile
-// returns false) and the run is left alone.
+// returns false) and the run is left alone. Strict is the vocabulary
+// before elementwise ops had range forms: scalar arithmetic, and vector
+// unaries only for log and exp.
 bool in_vocab(const Graph& g, const Op& op, bool strict = false) {
   if (op.out2 >= 0 || op.dyn_lengths) return false;
   switch (op.opcode) {
@@ -144,15 +183,15 @@ bool in_vocab(const Graph& g, const Op& op, bool strict = false) {
     case OP_SUB:
     case OP_MUL:
     case OP_DIV:
-      return strict ? scalar_ins(g, op) : elementwise_ins(g, op);
     case OP_FMA:
-    case OP_ADD_N:
     case OP_LSE2:
     case OP_LOG_MIX:
     case OP_POW:
     case OP_FMAX:
     case OP_FMIN:
     case OP_LOG_DIFF_EXP:
+      return strict ? scalar_ins(g, op) : elementwise_ins(g, op);
+    case OP_ADD_N:
       return scalar_ins(g, op);
     case OP_INDEX:
     case OP_SET_INDEX:
@@ -167,8 +206,12 @@ bool in_vocab(const Graph& g, const Op& op, bool strict = false) {
     case OP_SOFTMAX:
       return op.n_in == 1;
     default:
-      if (unary_code(op.opcode) >= 0)
-        return g.slots[op.out].len == g.slots[op.in[0]].len;
+      if (unary_code(op.opcode) >= 0) {
+        const int64_t len = g.slots[op.out].len;
+        if (len < 1 || len != g.slots[op.in[0]].len) return false;
+        return !strict || len == 1 || op.opcode == OP_LOGV ||
+               op.opcode == OP_EXPV;
+      }
       // Propto term-dropping depends on argument TYPES; the island binds
       // every argument as T, which only matches the <false> instantiation.
       if (program_density_id_by_opcode(op.opcode) >= 0)
@@ -196,6 +239,11 @@ struct Compiler {
   // value-file passes and retain only their identity cell in the compact
   // adjoint count below: effective weight 1.
   int64_t n_call_scratch = 0;
+  // Scalar CONST registers holding a pool-absorbed constant, excluded from
+  // the register-file charge the same way call scratch is. A CONSTR
+  // register is not counted here: it can end up aliased into a SET_INDEX
+  // or SET_SLICE output and stop being just a constant.
+  int64_t n_const_regs = 0;
   bool ok = true;
   int max_live_ins = kMaxLiveIns;
   bool noop_backward = false;  // a kernel without a backward gets an empty one
@@ -239,6 +287,10 @@ struct Compiler {
       prog.pool.insert(prog.pool.end(), cit->second->begin(),
                        cit->second->end());
       reg_of.emplace(slot, r);
+      // Only a scalar constant's register is excluded: a CONSTR register can
+      // be aliased into a SET_INDEX/SET_SLICE output (base_dead_here below),
+      // where it stops holding just the constant.
+      if (len == 1) n_const_regs += 1;
       return r;
     }
     if ((int)live_in_slots.size() >= max_live_ins) {
@@ -324,6 +376,34 @@ struct Compiler {
     return ok;
   }
 
+  // The scalar instruction, or one ranged instruction with its length-1
+  // operands broadcast.
+  bool compile_elementwise(const Op& op, Program::Code c, int law) {
+    const int64_t out_len = g.slots[op.out].len;
+    int r[3] = {0, 0, 0};
+    uint8_t bcast = 0;
+    for (int j = 0; j < op.n_in; ++j) {
+      r[j] = read_reg(op.in[j]);
+      if (g.slots[op.in[j]].len == 1) bcast |= (uint8_t)(1u << j);
+    }
+    const int d = write_reg(op.out);
+    if (out_len == 1) {
+      prog.code.push_back(Program::Instr(c, d, r[0], r[1], r[2], law));
+      return ok;
+    }
+    if (c == Program::LOG || c == Program::EXP) {
+      emit(c == Program::LOG ? Program::LOG_RANGE : Program::EXP_RANGE, d, r[0],
+           0, 0, (int)out_len);
+      return ok;
+    }
+    Program::Instr I(Program::RANGE, d, r[0], r[1], r[2], (int32_t)out_len);
+    I.sub = static_cast<uint8_t>(c);
+    I.bcast = bcast;
+    I.law = static_cast<uint8_t>(law);
+    prog.code.push_back(I);
+    return ok;
+  }
+
   bool compile(const Op& op) {
     const int64_t out_len = g.slots[op.out].len;
     switch (op.opcode) {
@@ -337,14 +417,8 @@ struct Compiler {
                           OP_SUB == OP_ADD + 1 && OP_MUL == OP_ADD + 2 &&
                           OP_DIV == OP_ADD + 3,
                       "binary code order");
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        const int sa = g.slots[op.in[0]].len == 1 ? 0 : 1;
-        const int sb = g.slots[op.in[1]].len == 1 ? 0 : 1;
         const auto c = (Program::Code)(Program::ADD + (op.opcode - OP_ADD));
-        const int d = write_reg(op.out);
-        for (int k = 0; k < out_len; ++k)
-          emit(c, d + k, a + sa * k, b + sb * k);
-        return ok;
+        return compile_elementwise(op, c, 0);
       }
       case OP_ADD_N: {
         const int a0 = read_reg(op.in[0]);
@@ -361,21 +435,7 @@ struct Compiler {
 #define X(opc, code) case opc:
         STANLI_ISLAND_UNARY_LIST(X)
 #undef X
-        {
-          const Program::Code c = (Program::Code)unary_code(op.opcode);
-          const int a = read_reg(op.in[0]);
-          const int d = write_reg(op.out);
-          if (out_len == 1) {
-            emit(c, d, a);
-          } else if (c == Program::LOG) {
-            emit(Program::LOG_RANGE, d, a, 0, 0, (int)out_len);
-          } else if (c == Program::EXP) {
-            emit(Program::EXP_RANGE, d, a, 0, 0, (int)out_len);
-          } else {
-            return false;  // vector unary outside the range vocabulary
-          }
-          return ok;
-        }
+        return compile_elementwise(op, (Program::Code)unary_code(op.opcode), 0);
       case OP_INDEX: {
         const int idx = op.idata[0];
         if (idx < 0 || idx >= g.slots[op.in[0]].len) return false;
@@ -437,45 +497,22 @@ struct Compiler {
         emit(Program::SOFTMAX, write_reg(op.out), a, 0, 0, (int)out_len);
         return ok;
       }
-      case OP_LSE2: {
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(Program::LSE2, write_reg(op.out), a, b);
-        return ok;
-      }
-      case OP_LOG_DIFF_EXP: {
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(Program::LOG_DIFF_EXP, write_reg(op.out), a, b);
-        return ok;
-      }
-      case OP_POW: {
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(Program::POW, write_reg(op.out), a, b, 0, op.variant);
-        return ok;
-      }
-      case OP_FMAX: {
-        // The variant is the operands' activity, set at lowering; ties and
-        // NaN adjoints depend on the instantiation (adjoint.cpp).
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(Program::FMAX, write_reg(op.out), a, b, 0, op.variant);
-        return ok;
-      }
-      case OP_FMIN: {
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        emit(Program::FMIN, write_reg(op.out), a, b, 0, op.variant);
-        return ok;
-      }
-      case OP_LOG_MIX: {
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        const int c = read_reg(op.in[2]);
-        emit(Program::LOG_MIX, write_reg(op.out), a, b, c);
-        return ok;
-      }
-      case OP_FMA: {
-        const int a = read_reg(op.in[0]), b = read_reg(op.in[1]);
-        const int c = read_reg(op.in[2]);
-        emit(Program::FMA, write_reg(op.out), a, b, c);
-        return ok;
-      }
+      case OP_LSE2:
+        return compile_elementwise(op, Program::LSE2, 0);
+      case OP_LOG_DIFF_EXP:
+        return compile_elementwise(op, Program::LOG_DIFF_EXP, 0);
+      case OP_POW:
+        return compile_elementwise(op, Program::POW, op.variant);
+      // The variant is the operands' activity, set at lowering; ties and
+      // NaN adjoints depend on the instantiation (adjoint.cpp).
+      case OP_FMAX:
+        return compile_elementwise(op, Program::FMAX, op.variant);
+      case OP_FMIN:
+        return compile_elementwise(op, Program::FMIN, op.variant);
+      case OP_LOG_MIX:
+        return compile_elementwise(op, Program::LOG_MIX, 0);
+      case OP_FMA:
+        return compile_elementwise(op, Program::FMA, 0);
       default: {
         const int dc = program_density_id_by_opcode(op.opcode);
         if (dc < 0) return compile_call(op);
@@ -513,6 +550,452 @@ bool may_forward_adjacent_copy_destination(const Program& p) {
   return false;
 }
 
+// One run compiled, with the estimate's verdict on it.
+struct Candidate {
+  size_t begin;
+  size_t end;
+  Compiler cc;
+  std::vector<int> live_outs;
+  std::unordered_set<int> in_set;
+  std::unique_ptr<IslandProg> destination_source;
+  bool priced_gen = false;
+  bool compiled = false;
+  bool accepted = false;
+  int64_t graph_cost = 0;
+  int64_t island_cost = 0;
+  // What the island pays at its edges: live-ins copied in and their
+  // adjoints harvested, live-outs copied out, seeded, and extracted by one
+  // graph op each. Charged only where carvings differ, when a run is priced
+  // whole against split.
+  int64_t boundary = 0;
+};
+
+struct Carver {
+  Graph& g;
+  std::unordered_set<int> term_set;
+  std::unordered_set<int> root_set;
+  std::unordered_set<int> pinned;
+  std::unordered_map<int, size_t> last_use;
+  std::unordered_map<int, const std::vector<double>*> const_slots;
+  std::vector<char> slot_active;
+  std::vector<Op> result;
+  int carved = 0;
+  // Strict sub-runs split_cost compiled to price a split, in the order it
+  // walked them. run() re-walks the same spans to emit them and pops this
+  // instead of compiling again, as long as nothing upstream renamed a slot
+  // an unconsumed entry depends on.
+  std::vector<Candidate> strict_queue;
+  size_t strict_queue_pos = 0;
+
+  Carver(Graph& graph,
+         const std::vector<std::pair<int, std::vector<double>>>& fills,
+         const std::vector<int>& target_terms,
+         const std::vector<int>& extra_roots)
+      : g(graph),
+        term_set(target_terms.begin(), target_terms.end()),
+        root_set(extra_roots.begin(), extra_roots.end()),
+        pinned(term_set) {
+    pinned.insert(root_set.begin(), root_set.end());
+
+    // Last op index reading each slot, and whether any op writes it. A fill
+    // slot no op writes is a load-time constant the program can absorb.
+    std::unordered_set<int> written;
+    for (size_t u = 0; u < g.ops.size(); ++u) {
+      for (int j = 0; j < g.ops[u].n_in; ++j) last_use[g.ops[u].in[j]] = u;
+      if (g.ops[u].out >= 0) written.insert(g.ops[u].out);
+      if (g.ops[u].out2 >= 0) written.insert(g.ops[u].out2);
+    }
+    for (const auto& f : fills)
+      if (!written.count(f.first)) const_slots[f.first] = &f.second;
+
+    // Which slots carry a parameter. The adjoint generator turns this into
+    // per-argument masks on the densities it differentiates; slots added
+    // below are active until something says otherwise.
+    slot_active.assign(g.slots.size(), 0);
+    for (size_t s = 0; s < g.slots.size(); ++s)
+      slot_active[s] = g.slots[s].is_param ? 1 : 0;
+    for (const Op& op : g.ops) {
+      bool any = false;
+      for (int j = 0; j < op.n_in && !any; ++j)
+        if (op.in[j] >= 0 && slot_active[(size_t)op.in[j]]) any = true;
+      if (!any) continue;
+      if (op.out >= 0) slot_active[(size_t)op.out] = 1;
+      if (op.out2 >= 0) slot_active[(size_t)op.out2] = 1;
+    }
+  }
+
+  // The run of compilable ops from i, stopping before `end`.
+  size_t grow(size_t i, size_t end, bool strict) const {
+    size_t j = i;
+    while (j < end && in_vocab(g, g.ops[j], strict) &&
+           term_set.count(g.ops[j].out) == 0)
+      ++j;
+    return j;
+  }
+
+  // The graph's side of the estimate: what its ops move (an in-place
+  // element update moves one element, not a vector) plus what each op
+  // costs to run.
+  int64_t graph_cost(size_t i, size_t j) const {
+    int64_t cost = 0;
+    for (size_t u = i; u < j; ++u) {
+      const Op& op = g.ops[u];
+      if (op.opcode == OP_SET_INDEX_INPLACE)
+        cost += 1;
+      else if (op.opcode == OP_SET_SLICE_INPLACE)
+        cost += g.slots[op.in[1]].len;
+      else if (op.opcode == OP_DOT)
+        cost += g.slots[op.in[0]].len;
+      else
+        cost += g.slots[op.out].len;
+      cost += graph_op_cost(op.opcode);
+    }
+    return cost;
+  }
+
+  // Compile and price [i, j) without touching the graph.
+  Candidate evaluate(size_t i, size_t j) {
+    Candidate c{
+        i, j,
+        Compiler{g, const_slots, last_use, pinned, {}, {}, {}, 0, 0, 0, true}};
+    Compiler& cc = c.cc;
+    bool compiled = true;
+    for (size_t u = i; u < j && compiled; ++u) {
+      cc.op_index = u;
+      compiled = cc.compile(g.ops[u]) && cc.ok;
+    }
+    // Live-outs: written in the region and visible after it, in first-write
+    // order for a deterministic packing. Settled before compaction, because
+    // the program's live-outs are registers and compaction renumbers them.
+    c.in_set.insert(cc.live_in_slots.begin(), cc.live_in_slots.end());
+    if (compiled) {
+      std::unordered_set<int> seen;
+      for (size_t u = i; u < j; ++u) {
+        const int o = g.ops[u].out;
+        if (seen.count(o)) continue;
+        seen.insert(o);
+        auto lit = last_use.find(o);
+        const bool read_after = lit != last_use.end() && lit->second >= j;
+        if (read_after || root_set.count(o) || term_set.count(o))
+          c.live_outs.push_back(o);
+      }
+      // A slot that is BOTH a live-in and a live-out (an in-place chain
+      // whose template the region reads first and overwrites last) cannot
+      // keep its id on the output side: the island reads the arena buffer
+      // in the forward, and an extraction writing the same buffer would
+      // feed the NEXT gradient's forward its own previous output. The
+      // extraction gets a fresh slot and later references are renamed --
+      // unless the slot is read from outside the graph, where the id is
+      // the contract, and then the run stays as ops.
+      bool aliased_pinned = false;
+      for (int o : c.live_outs)
+        if (c.in_set.count(o) && pinned.count(o)) aliased_pinned = true;
+      if (c.live_outs.empty() || aliased_pinned) compiled = false;
+    }
+    if (compiled)
+      for (int o : c.live_outs)
+        for (int e = 0; e < (int)g.slots[o].len; ++e)
+          cc.prog.out_regs.push_back(cc.reg_of.at(o) + e);
+
+    // Price the pre-destination-forwarding program. This deliberately keeps
+    // activation identical to the established cost model: copy coalescing may
+    // make an island that was already selected faster, but it cannot use its
+    // own savings to pull a new island across the line. A raw copy is retained
+    // only when the optimization is enabled, and is compacted after the cost
+    // decision below.
+    if (compiled) {
+      for (size_t k = 0; k < cc.prog.ins.size(); ++k)
+        cc.prog.ins[k].active = slot_active[(size_t)cc.live_in_slots[k]] != 0;
+      if (!std::getenv("STANLI_NO_PROGRAM_DEST_FORWARD") &&
+          !std::getenv("STANLI_NO_ISLAND_COMPACT") &&
+          may_forward_adjacent_copy_destination(cc.prog))
+        c.destination_source = std::make_unique<IslandProg>(cc.prog);
+      compact_island_gated(cc.prog, false);
+      c.priced_gen = gen_adjoint(cc.prog);
+      cc.prog.native_adj = c.priced_gen && !std::getenv("STANLI_NO_NATIVE_ADJ");
+      // A failed generated adjoint would make this optimization replay each
+      // kernel through callback vars. Leave the run as graph ops instead;
+      // that is the same work without the gather/scatter adapter.
+      if (!cc.prog.calls.empty() && !cc.prog.native_adj) compiled = false;
+      // A refusal is not an error -- the replay still gives the right
+      // gradient -- but it is worth being able to see, because it is the
+      // difference between a region that is fast and one that merely
+      // works, and nothing else about the model would show it.
+      if (!c.priced_gen && std::getenv("STANLI_DEBUG_ISLAND"))
+        emit_diagnostic("island: no adjoint generated for a " +
+                        std::to_string(j - i) +
+                        "-op region; it will replay under var");
+    }
+    c.compiled = compiled;
+    c.graph_cost = graph_cost(i, j);
+    if (!compiled) return c;
+    // Is the island cheaper than the ops it replaces? The graph's side is
+    // graph_cost above; the island's is its register file plus its two
+    // instruction streams, forward and adjoint.
+    //
+    // `bones_model` is what the estimate is still for: 36 ops behind a
+    // 4,024-register file, which is 3,979 live-outs packed into one op and
+    // measured 0.25x. Everything else the carver reaches now wins, because
+    // the register file stopped being built as vars. (`STANLI_ISLAND_ALWAYS=1`
+    // bypasses this, for tests that exercise the compiler on small graphs
+    // and for asking why a region was left alone.)
+    //
+    // A CALL should read as cost-NEUTRAL: it runs the graph's own
+    // kernel with the graph's own per-call overhead (context assembly,
+    // indirect call, twice per gradient), so absorbing one buys
+    // continuity, never speed. Two corrections make that true in the
+    // arithmetic: its scratch is subtracted from the two value-file passes
+    // (working memory the graph op also had) but retains its identity cell
+    // in the compact adjoint count, for effective weight 1; and each CALL
+    // pays the same kOpCost the graph side is charged -- without which a
+    // region of nothing but CALLs reads as a win and measures a loss
+    // (dugongs_model, 0.63x, the first sweep after the vocabulary widened).
+    const int64_t n_calls = (int64_t)cc.prog.calls.size();
+    // A rare program the generator refuses keeps the replay. Preserve its
+    // old one-cell-per-value charge rather than treating an absent compact
+    // adjoint program as a zero-sized file.
+    const int64_t adj_regs = cc.prog.adj.empty() ? (int64_t)cc.prog.n_regs
+                                                 : (int64_t)cc.prog.adj.n_regs;
+    // An instruction whose rule runs once per element (RANGE and the other
+    // ranged opcodes) counts its width; everything else counts 1.
+    int64_t instrs = 0;
+    for (const auto& I : cc.prog.code)
+      instrs += touches_width(I.code) ? I.len : 1;
+    for (const auto& I : cc.prog.adj.code)
+      instrs += touches_width(I.code) ? I.len : 1;
+    c.island_cost = kValueRegWeight * ((int64_t)cc.prog.n_regs -
+                                       cc.n_call_scratch - cc.n_const_regs) +
+                    adj_regs + instrs + (kOpCost - 1) * 2 * n_calls;
+    for (const auto& li : cc.prog.ins) c.boundary += 2 * li.len;
+    for (int o : c.live_outs) c.boundary += kOpCost + 3 * g.slots[o].len;
+    if (std::getenv("STANLI_ISLAND_ALWAYS")) {
+      c.accepted = true;
+      return c;
+    }
+    if (std::getenv("STANLI_DEBUG_ISLAND"))
+      emit_diagnostic("island? ops=" + std::to_string(j - i) +
+                      " graph=" + std::to_string(c.graph_cost) +
+                      " island=" + std::to_string(c.island_cost) +
+                      " boundary=" + std::to_string(c.boundary));
+    c.accepted = c.graph_cost >= c.island_cost;
+    return c;
+  }
+
+  // [i, j) carved at the strict vocabulary: each sub-run of at least
+  // kMinIslandOps priced on its own, everything else as graph ops. `any`
+  // says whether one of them is accepted. Each priced sub-run is kept in
+  // strict_queue so run() can emit it without compiling it again.
+  int64_t split_cost(size_t i, size_t j, bool* any) {
+    strict_queue.clear();
+    strict_queue_pos = 0;
+    int64_t cost = 0;
+    *any = false;
+    size_t a = i;
+    while (a < j) {
+      const size_t b = grow(a, j, true);
+      if ((int64_t)(b - a) < kMinIslandOps) {
+        const size_t stop = b > a ? b : a + 1;
+        cost += graph_cost(a, stop);
+        a = stop;
+        continue;
+      }
+      Candidate c = evaluate(a, b);
+      if (c.accepted) {
+        cost += c.island_cost + c.boundary;
+        *any = true;
+      } else {
+        cost += c.graph_cost;
+      }
+      a = b;
+      strict_queue.push_back(std::move(c));
+    }
+    return cost;
+  }
+
+  // A live-out that is also a live-in of the same candidate gets a fresh
+  // slot on emission, and every later op referencing the old slot is
+  // rewritten. That invalidates any queued candidate compiled against the
+  // old ids.
+  static bool renames_a_slot(const Candidate& c) {
+    for (int o : c.live_outs)
+      if (c.in_set.count(o)) return true;
+    return false;
+  }
+
+  // The span split_cost already compiled and priced for [i, j), or a fresh
+  // compile when the queue does not have it (a mismatch, or emptied by an
+  // earlier rename in this same split).
+  Candidate strict_candidate(size_t i, size_t j) {
+    if (strict_queue_pos < strict_queue.size()) {
+      Candidate& next = strict_queue[strict_queue_pos];
+      if (next.begin == i && next.end == j) {
+        Candidate c = std::move(next);
+        ++strict_queue_pos;
+        return c;
+      }
+    }
+    return evaluate(i, j);
+  }
+
+  // A run holding ops the strict vocabulary refuses is priced whole and
+  // split at them, boundaries included, and the split is carved when it is
+  // cheaper or when only its pieces are accepted.
+  bool split_wins(const Candidate& c) {
+    if (std::getenv("STANLI_ISLAND_ALWAYS")) return !c.compiled;
+    bool any = false;
+    const int64_t split = split_cost(c.begin, c.end, &any);
+    if (!c.accepted) return any;
+    const int64_t joined = c.island_cost + c.boundary;
+    if (std::getenv("STANLI_DEBUG_ISLAND"))
+      emit_diagnostic("island? ops=" + std::to_string(c.end - c.begin) +
+                      " joined=" + std::to_string(joined) +
+                      " split=" + std::to_string(split));
+    return any && split < joined;
+  }
+
+  void emit(Candidate& c) {
+    Compiler& cc = c.cc;
+    const size_t j = c.end;
+    if (c.destination_source && c.priced_gen) {
+      IslandProg optimized = std::move(*c.destination_source);
+      if (compact_island_gated(optimized, true)) {
+        const bool optimized_gen = gen_adjoint(optimized);
+        optimized.native_adj =
+            optimized_gen && !std::getenv("STANLI_NO_NATIVE_ADJ");
+        // Do not trade the existing generated backward for replay if
+        // forwarding exposes an unforeseen generator limitation. CALL cannot
+        // replay at all.
+        const bool usable =
+            optimized_gen && (optimized.calls.empty() || optimized.native_adj);
+        if (usable) {
+          cc.prog = std::move(optimized);
+        } else if (std::getenv("STANLI_DEBUG_ISLAND")) {
+          emit_diagnostic(
+              "island: destination forwarding kept the priced program "
+              "because its optimized adjoint was refused");
+        }
+      }
+    }
+    int64_t packed = 0;
+    for (int o : c.live_outs) packed += g.slots[o].len;
+    std::shared_ptr<const Program> optimized;
+    if (!std::getenv("STANLI_NO_ISLAND_SOFTMAX3"))
+      optimized = specialize_softmax3(cc.prog);
+    const bool specialized = static_cast<bool>(optimized);
+    Op is;
+    is.opcode = OP_ISLAND;
+    is.variant = specialized             ? kIslandSoftmax3Variant
+                 : cc.prog.calls.empty() ? 0
+                                         : kIslandCallVariant;
+    is.n_in = (int)cc.live_in_slots.size();
+    for (int k = 0; k < is.n_in; ++k) is.in[k] = cc.live_in_slots[k];
+    is.out = g.add_slot(packed, false);
+    slot_active.resize(g.slots.size(), 1);
+    if (specialized) {
+      auto specialized_prog = std::make_shared<Softmax3IslandProg>();
+      static_cast<IslandProg&>(*specialized_prog) = std::move(cc.prog);
+      specialized_prog->optimized_double = std::move(optimized);
+      // Erase the converted base pointer, not the derived pointer: readers
+      // shared with OP_ISLAND recover IslandProg directly from udata.
+      std::shared_ptr<IslandProg> prog = std::move(specialized_prog);
+      is.udata = prog.get();
+      g.udata_pool.push_back(std::move(prog));
+    } else {
+      auto prog = std::make_shared<IslandProg>(std::move(cc.prog));
+      is.udata = prog.get();
+      g.udata_pool.push_back(std::move(prog));
+    }
+    result.push_back(is);
+    // Extractions write the ORIGINAL slot ids, so downstream readers,
+    // roots, and target terms are untouched -- except for the
+    // live-in/live-out slots above, which get a fresh slot and a
+    // rename of every later reference (read or write, as reroll's
+    // write fusion does, so the two stay consistent).
+    int64_t off = 0;
+    for (int o : c.live_outs) {
+      const int64_t len = g.slots[o].len;
+      int dst = o;
+      if (c.in_set.count(o)) {
+        dst = g.add_slot(len, false);
+        slot_active.resize(g.slots.size(), 1);
+        slot_active[(size_t)dst] = slot_active[(size_t)o];
+        for (size_t u = j; u < g.ops.size(); ++u) {
+          for (int q = 0; q < g.ops[u].n_in; ++q)
+            if (g.ops[u].in[q] == o) g.ops[u].in[q] = dst;
+          if (g.ops[u].out == o) g.ops[u].out = dst;
+          if (g.ops[u].out2 == o) g.ops[u].out2 = dst;
+        }
+      }
+      Op ex;
+      ex.opcode = len == 1 ? OP_INDEX : OP_SLICE;
+      ex.n_in = 1;
+      ex.in[0] = is.out;
+      ex.out = dst;
+      g.idata_pool.push_back({(int)off});
+      ex.idata = g.idata_pool.back().data();
+      ex.n_idata = 1;
+      result.push_back(ex);
+      off += len;
+    }
+    if (std::getenv("STANLI_DEBUG_ISLAND")) {
+      const IslandProg& p = *static_cast<const IslandProg*>(is.udata);
+      emit_diagnostic("island: ops=" + std::to_string(j - c.begin) +
+                      " instr=" + std::to_string(p.code.size()) +
+                      " regs=" + std::to_string(p.n_regs) +
+                      " ins=" + std::to_string(p.ins.size()) +
+                      " outs=" + std::to_string(p.out_regs.size()) +
+                      " adj=" + std::to_string(p.adj.code.size()) +
+                      " adj_regs=" + std::to_string(p.adj.n_regs));
+      // Which instructions the region is made of, so a disagreement
+      // with the replay can be attributed to an opcode rather than
+      // guessed at.
+      std::vector<int> hist(64, 0);
+      for (const auto& I : p.code)
+        if ((int)I.code < 64) ++hist[(size_t)I.code];
+      std::string opcodes = "island opcodes:";
+      for (int cd = 0; cd < 64; ++cd)
+        if (hist[(size_t)cd])
+          opcodes +=
+              " " + std::to_string(cd) + ":" + std::to_string(hist[(size_t)cd]);
+      emit_diagnostic(opcodes);
+    }
+    ++carved;
+  }
+
+  int run() {
+    result.reserve(g.ops.size());
+    size_t i = 0;
+    size_t strict_until = 0;
+    while (i < g.ops.size()) {
+      const bool strict = i < strict_until;
+      const size_t j = grow(i, g.ops.size(), strict);
+      if ((int64_t)(j - i) < kMinIslandOps) {
+        const size_t stop = j > i ? j : i + 1;
+        while (i < stop) result.push_back(g.ops[i++]);
+        continue;
+      }
+      Candidate c = strict ? strict_candidate(i, j) : evaluate(i, j);
+      if (!strict && grow(i, j, true) != j && split_wins(c)) {
+        strict_until = j;
+        continue;
+      }
+      if (!c.accepted) {
+        while (i < j) result.push_back(g.ops[i++]);
+        continue;
+      }
+      const bool renamed = strict && renames_a_slot(c);
+      emit(c);
+      if (renamed) {
+        strict_queue.clear();
+        strict_queue_pos = 0;
+      }
+      i = j;
+    }
+    g.ops = std::move(result);
+    return carved;
+  }
+};
+
 }  // namespace
 
 void compact_island(IslandProg& p) { (void)compact_island_gated(p, true); }
@@ -533,314 +1016,12 @@ int carve_islands(Graph& g,
                   const std::vector<int>& target_terms,
                   const std::vector<int>& extra_roots) {
   if (std::getenv("STANLI_NO_ISLAND")) return 0;
-
-  std::unordered_set<int> term_set(target_terms.begin(), target_terms.end());
-  std::unordered_set<int> root_set(extra_roots.begin(), extra_roots.end());
-  std::unordered_set<int> pinned(term_set);
-  pinned.insert(root_set.begin(), root_set.end());
-
-  // Last op index reading each slot, and whether any op writes it. A fill
-  // slot no op writes is a load-time constant the program can absorb.
-  std::unordered_map<int, size_t> last_use;
-  std::unordered_set<int> written;
-  for (size_t u = 0; u < g.ops.size(); ++u) {
-    for (int j = 0; j < g.ops[u].n_in; ++j) last_use[g.ops[u].in[j]] = u;
-    if (g.ops[u].out >= 0) written.insert(g.ops[u].out);
-    if (g.ops[u].out2 >= 0) written.insert(g.ops[u].out2);
-  }
-  std::unordered_map<int, const std::vector<double>*> const_slots;
-  for (const auto& f : fills)
-    if (!written.count(f.first)) const_slots[f.first] = &f.second;
-
-  // Which slots carry a parameter. The adjoint generator turns this into
-  // per-argument masks on the densities it differentiates; slots added
-  // below are active until something says otherwise.
-  std::vector<char> slot_active(g.slots.size(), 0);
-  for (size_t s = 0; s < g.slots.size(); ++s)
-    slot_active[s] = g.slots[s].is_param ? 1 : 0;
-  for (const Op& op : g.ops) {
-    bool any = false;
-    for (int j = 0; j < op.n_in && !any; ++j)
-      if (op.in[j] >= 0 && slot_active[(size_t)op.in[j]]) any = true;
-    if (!any) continue;
-    if (op.out >= 0) slot_active[(size_t)op.out] = 1;
-    if (op.out2 >= 0) slot_active[(size_t)op.out2] = 1;
-  }
-
-  std::vector<Op> result;
-  result.reserve(g.ops.size());
-  int carved = 0;
-  size_t i = 0;
-  size_t strict_until = 0;
-  while (i < g.ops.size()) {
-    // Grow the run of compilable ops.
-    const bool strict = i < strict_until;
-    size_t j = i;
-    while (j < g.ops.size() && in_vocab(g, g.ops[j], strict) &&
-           term_set.count(g.ops[j].out) == 0)
-      ++j;
-    if ((int64_t)(j - i) < kMinIslandOps) {
-      const size_t stop = j > i ? j : i + 1;
-      while (i < stop) result.push_back(g.ops[i++]);
-      continue;
-    }
-
-    // Compile. A failure mid-run keeps the graph untouched for the run.
-    Compiler cc{g, const_slots, last_use, pinned, {}, {}, {}, 0, 0, true};
-    bool compiled = true;
-    for (size_t u = i; u < j && compiled; ++u) {
-      cc.op_index = u;
-      compiled = cc.compile(g.ops[u]) && cc.ok;
-    }
-    // Live-outs: written in the region and visible after it, in first-write
-    // order for a deterministic packing. Settled before compaction, because
-    // the program's live-outs are registers and compaction renumbers them.
-    std::vector<int> live_outs;
-    std::unordered_set<int> in_set(cc.live_in_slots.begin(),
-                                   cc.live_in_slots.end());
-    if (compiled) {
-      std::unordered_set<int> seen;
-      for (size_t u = i; u < j; ++u) {
-        const int o = g.ops[u].out;
-        if (seen.count(o)) continue;
-        seen.insert(o);
-        auto lit = last_use.find(o);
-        const bool read_after = lit != last_use.end() && lit->second >= j;
-        if (read_after || root_set.count(o) || term_set.count(o))
-          live_outs.push_back(o);
-      }
-      // A slot that is BOTH a live-in and a live-out (an in-place chain
-      // whose template the region reads first and overwrites last) cannot
-      // keep its id on the output side: the island reads the arena buffer
-      // in the forward, and an extraction writing the same buffer would
-      // feed the NEXT gradient's forward its own previous output. The
-      // extraction gets a fresh slot and later references are renamed --
-      // unless the slot is read from outside the graph, where the id is
-      // the contract, and then the run stays as ops.
-      bool aliased_pinned = false;
-      for (int o : live_outs)
-        if (in_set.count(o) && pinned.count(o)) aliased_pinned = true;
-      if (live_outs.empty() || aliased_pinned) compiled = false;
-    }
-    if (compiled)
-      for (int o : live_outs)
-        for (int e = 0; e < (int)g.slots[o].len; ++e)
-          cc.prog.out_regs.push_back(cc.reg_of.at(o) + e);
-
-    // Price the pre-destination-forwarding program. This deliberately keeps
-    // activation identical to the established cost model: copy coalescing may
-    // make an island that was already selected faster, but it cannot use its
-    // own savings to pull a new island across the line. A raw copy is retained
-    // only when the optimization is enabled, and is compacted after the cost
-    // decision below.
-    std::unique_ptr<IslandProg> destination_source;
-    bool priced_gen = false;
-    if (compiled) {
-      for (size_t k = 0; k < cc.prog.ins.size(); ++k)
-        cc.prog.ins[k].active = slot_active[(size_t)cc.live_in_slots[k]] != 0;
-      if (!std::getenv("STANLI_NO_PROGRAM_DEST_FORWARD") &&
-          !std::getenv("STANLI_NO_ISLAND_COMPACT") &&
-          may_forward_adjacent_copy_destination(cc.prog))
-        destination_source = std::make_unique<IslandProg>(cc.prog);
-      compact_island_gated(cc.prog, false);
-      priced_gen = gen_adjoint(cc.prog);
-      cc.prog.native_adj = priced_gen && !std::getenv("STANLI_NO_NATIVE_ADJ");
-      // A failed generated adjoint would make this optimization replay each
-      // kernel through callback vars. Leave the run as graph ops instead;
-      // that is the same work without the gather/scatter adapter.
-      if (!cc.prog.calls.empty() && !cc.prog.native_adj) compiled = false;
-      // A refusal is not an error -- the replay still gives the right
-      // gradient -- but it is worth being able to see, because it is the
-      // difference between a region that is fast and one that merely
-      // works, and nothing else about the model would show it.
-      if (!priced_gen && std::getenv("STANLI_DEBUG_ISLAND"))
-        emit_diagnostic("island: no adjoint generated for a " +
-                        std::to_string(j - i) +
-                        "-op region; it will replay under var");
-    }
-    // Is the island cheaper than the ops it replaces? The graph's side is
-    // what its ops move (an in-place element update moves one element, not
-    // a vector) plus what they pay per dispatch; the island's is its
-    // register file plus its two instruction streams, forward and adjoint.
-    //
-    // `bones_model` is what the estimate is still for: 36 ops behind a
-    // 4,024-register file, which is 3,979 live-outs packed into one op and
-    // measured 0.25x. Everything else the carver reaches now wins, because
-    // the register file stopped being built as vars. (`STANLI_ISLAND_ALWAYS=1`
-    // bypasses this, for tests that exercise the compiler on small graphs
-    // and for asking why a region was left alone.)
-    if (compiled && !std::getenv("STANLI_ISLAND_ALWAYS")) {
-      int64_t graph_elems = 0;
-      for (size_t u = i; u < j; ++u) {
-        const Op& op = g.ops[u];
-        if (op.opcode == OP_SET_INDEX_INPLACE)
-          graph_elems += 1;
-        else if (op.opcode == OP_SET_SLICE_INPLACE)
-          graph_elems += g.slots[op.in[1]].len;
-        else
-          graph_elems += g.slots[op.out].len;
-      }
-      const int64_t graph_cost = graph_elems + kOpCost * (int64_t)(j - i);
-      // A CALL should read as cost-NEUTRAL: it runs the graph's own
-      // kernel with the graph's own per-call overhead (context assembly,
-      // indirect call, twice per gradient), so absorbing one buys
-      // continuity, never speed. Two corrections make that true in the
-      // arithmetic: its scratch is subtracted from the two value-file passes
-      // (working memory the graph op also had) but retains its identity cell
-      // in the compact adjoint count, for effective weight 1; and each CALL
-      // pays the same kOpCost the graph side is charged -- without which a
-      // region of nothing but CALLs reads as a win and measures a loss
-      // (dugongs_model, 0.63x, the first sweep after the vocabulary widened).
-      const int64_t n_calls = (int64_t)cc.prog.calls.size();
-      // A rare program the generator refuses keeps the replay. Preserve its
-      // old one-cell-per-value charge rather than treating an absent compact
-      // adjoint program as a zero-sized file.
-      const int64_t adj_regs = cc.prog.adj.empty()
-                                   ? (int64_t)cc.prog.n_regs
-                                   : (int64_t)cc.prog.adj.n_regs;
-      const int64_t island_cost =
-          kValueRegWeight * ((int64_t)cc.prog.n_regs - cc.n_call_scratch) +
-          adj_regs + (int64_t)cc.prog.code.size() +
-          (int64_t)cc.prog.adj.code.size() + (kOpCost - 1) * 2 * n_calls;
-      if (std::getenv("STANLI_DEBUG_ISLAND"))
-        emit_diagnostic("island? ops=" + std::to_string(j - i) +
-                        " graph=" + std::to_string(graph_cost) +
-                        " island=" + std::to_string(island_cost));
-      if (graph_cost < island_cost) compiled = false;
-    }
-    if (compiled && destination_source && priced_gen) {
-      IslandProg optimized = std::move(*destination_source);
-      if (compact_island_gated(optimized, true)) {
-        const bool optimized_gen = gen_adjoint(optimized);
-        optimized.native_adj =
-            optimized_gen && !std::getenv("STANLI_NO_NATIVE_ADJ");
-        // Do not trade the existing generated backward for replay if
-        // forwarding exposes an unforeseen generator limitation. CALL cannot
-        // replay at all.
-        const bool usable =
-            optimized_gen && (optimized.calls.empty() || optimized.native_adj);
-        if (usable) {
-          cc.prog = std::move(optimized);
-        } else if (std::getenv("STANLI_DEBUG_ISLAND")) {
-          emit_diagnostic(
-              "island: destination forwarding kept the priced program "
-              "because its optimized adjoint was refused");
-        }
-      }
-    }
-    if (compiled) {
-      int64_t packed = 0;
-      for (int o : live_outs) packed += g.slots[o].len;
-      std::shared_ptr<const Program> optimized;
-      if (!std::getenv("STANLI_NO_ISLAND_SOFTMAX3"))
-        optimized = specialize_softmax3(cc.prog);
-      const bool specialized = static_cast<bool>(optimized);
-      Op is;
-      is.opcode = OP_ISLAND;
-      is.variant = specialized             ? kIslandSoftmax3Variant
-                   : cc.prog.calls.empty() ? 0
-                                           : kIslandCallVariant;
-      is.n_in = (int)cc.live_in_slots.size();
-      for (int k = 0; k < is.n_in; ++k) is.in[k] = cc.live_in_slots[k];
-      is.out = g.add_slot(packed, false);
-      slot_active.resize(g.slots.size(), 1);
-      if (specialized) {
-        auto specialized_prog = std::make_shared<Softmax3IslandProg>();
-        static_cast<IslandProg&>(*specialized_prog) = std::move(cc.prog);
-        specialized_prog->optimized_double = std::move(optimized);
-        // Erase the converted base pointer, not the derived pointer: readers
-        // shared with OP_ISLAND recover IslandProg directly from udata.
-        std::shared_ptr<IslandProg> prog = std::move(specialized_prog);
-        is.udata = prog.get();
-        g.udata_pool.push_back(std::move(prog));
-      } else {
-        auto prog = std::make_shared<IslandProg>(std::move(cc.prog));
-        is.udata = prog.get();
-        g.udata_pool.push_back(std::move(prog));
-      }
-      result.push_back(is);
-      // Extractions write the ORIGINAL slot ids, so downstream readers,
-      // roots, and target terms are untouched -- except for the
-      // live-in/live-out slots above, which get a fresh slot and a
-      // rename of every later reference (read or write, as reroll's
-      // write fusion does, so the two stay consistent).
-      int64_t off = 0;
-      for (int o : live_outs) {
-        const int64_t len = g.slots[o].len;
-        int dst = o;
-        if (in_set.count(o)) {
-          dst = g.add_slot(len, false);
-          slot_active.resize(g.slots.size(), 1);
-          slot_active[(size_t)dst] = slot_active[(size_t)o];
-          for (size_t u = j; u < g.ops.size(); ++u) {
-            for (int q = 0; q < g.ops[u].n_in; ++q)
-              if (g.ops[u].in[q] == o) g.ops[u].in[q] = dst;
-            if (g.ops[u].out == o) g.ops[u].out = dst;
-            if (g.ops[u].out2 == o) g.ops[u].out2 = dst;
-          }
-        }
-        Op ex;
-        ex.opcode = len == 1 ? OP_INDEX : OP_SLICE;
-        ex.n_in = 1;
-        ex.in[0] = is.out;
-        ex.out = dst;
-        g.idata_pool.push_back({(int)off});
-        ex.idata = g.idata_pool.back().data();
-        ex.n_idata = 1;
-        result.push_back(ex);
-        off += len;
-      }
-      if (std::getenv("STANLI_DEBUG_ISLAND")) {
-        const IslandProg& p = *static_cast<const IslandProg*>(is.udata);
-        emit_diagnostic("island: ops=" + std::to_string(j - i) +
-                        " instr=" + std::to_string(p.code.size()) +
-                        " regs=" + std::to_string(p.n_regs) +
-                        " ins=" + std::to_string(p.ins.size()) +
-                        " outs=" + std::to_string(p.out_regs.size()) +
-                        " adj=" + std::to_string(p.adj.code.size()) +
-                        " adj_regs=" + std::to_string(p.adj.n_regs));
-        // Which instructions the region is made of, so a disagreement
-        // with the replay can be attributed to an opcode rather than
-        // guessed at.
-        std::vector<int> hist(64, 0);
-        for (const auto& I : p.code)
-          if ((int)I.code < 64) ++hist[(size_t)I.code];
-        std::string opcodes = "island opcodes:";
-        for (int c = 0; c < 64; ++c)
-          if (hist[(size_t)c])
-            opcodes +=
-                " " + std::to_string(c) + ":" + std::to_string(hist[(size_t)c]);
-        emit_diagnostic(opcodes);
-      }
-      ++carved;
-      i = j;
-      continue;
-    }
-    // Compile failed or nothing escapes: leave the run as ops, or carve it
-    // again at scalar granularity when a vector binary was what it held.
-    if (!strict) {
-      bool vector_binary = false;
-      for (size_t u = i; u < j && !vector_binary; ++u)
-        vector_binary = !in_vocab(g, g.ops[u], true);
-      if (vector_binary) {
-        strict_until = j;
-        continue;
-      }
-    }
-    while (i < j) result.push_back(g.ops[i++]);
-  }
-  g.ops = std::move(result);
-  return carved;
+  Carver carver(g, fills, target_terms, extra_roots);
+  return carver.run();
 }
 
 bool segment_supports(const Graph& g, const Op& op) {
-  if (is_effectful_op(op.opcode) || op.dyn_lengths || !in_vocab(g, op))
-    return false;
-  // A vector unary without a range instruction splits the run instead of
-  // refusing it.
-  const int unary = unary_code(op.opcode);
-  return unary < 0 || g.slots[op.out].len == 1 || unary == Program::LOG ||
-         unary == Program::EXP;
+  return !is_effectful_op(op.opcode) && !op.dyn_lengths && in_vocab(g, op);
 }
 
 bool compile_segment(
@@ -850,17 +1031,9 @@ bool compile_segment(
     Segment* out) {
   static const std::unordered_map<int, size_t> no_last_use;
   static const std::unordered_set<int> no_pinned;
-  Compiler cc{g,
-              constants,
-              no_last_use,
-              no_pinned,
-              {},
-              {},
-              {},
-              0,
-              0,
-              true,
-              std::numeric_limits<int>::max(),
+  Compiler cc{g,   constants, no_last_use, no_pinned,
+              {},  {},        {},          0,
+              0,   0,         true,        std::numeric_limits<int>::max(),
               true};
   std::vector<int> written;
   std::unordered_set<int> written_set;

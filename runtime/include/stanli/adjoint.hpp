@@ -48,6 +48,10 @@ struct AdjInstr {
   // Rides in the padding after `code`, as the graph's density ops carry
   // their activity in Op::variant.
   uint8_t mask = 0xf;
+  // RANGE only: the rule and its broadcast bits, as the forward instruction
+  // carries them; `len` is then the width and `mask` the rule's law.
+  uint8_t sub = 0;
+  uint8_t bcast = 0;
   int32_t dst = 0, a = 0, b = 0, c = 0;
   int32_t len = 0;
   int32_t vd = 0, va = 0, vb = 0, vc = 0;
