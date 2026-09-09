@@ -12,19 +12,38 @@ useful and a rerun can skip what is already there.
 Usage: python3 harnesses/corpus_bench.py deps/cmdstan deps/posteriordb OUT.tsv
                                       [--filter SUBSTR] [--timeout SEC]
                                       [--stanli-only]
+                                      [--cmdstan-stanc PATH]
+                                      [--stancflags FLAGS]
 Needs build-rel/ built. Expect hours: CmdStan builds a binary per model.
+
+The stanli gradient and prep columns compile with
+deps/stanc3/stanli-vectorize-probe and loop vectorization on, which is the
+MIR the embedded compiler produces. The sample column runs stanli_run from
+source.
 
 --stanli-only re-measures the stanli columns of every EXISTING row in place
 and keeps the CmdStan columns as they are. That is the refresh mode for a
 stanli-side change (a new graph pass, a sampler fix): the CmdStan numbers
 are unaffected and rebuilding 120 model binaries to reproduce them is the
 expensive part of a full run.
+
+--cmdstan-stanc PATH installs PATH as deps/cmdstan/bin/stanc for the run
+(the original goes back afterwards) and also emits the gradient driver's
+header with it. --stancflags FLAGS reaches make as STANCFLAGS and is
+appended to the header command. Without them the make build uses
+CmdStan's own bin/stanc, the header deps/stanc3/stanc, both with no flags.
+OUT.manifest.json next to the TSV records the stanc binaries and flags
+behind the CmdStan columns.
 """
+import contextlib
 import csv
+import hashlib
 import json
 import os
 import pathlib
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -38,6 +57,7 @@ from cmdstan_ref import compile_cmd  # noqa: E402
 BENCH = REPO / "build-rel/bench_grad"
 RUN = REPO / "build-rel/stanli_run"
 STANC = REPO / "deps/stanc3/stanc"
+VECTORIZE_PROBE = REPO / "deps/stanc3/stanli-vectorize-probe"
 COLS = ["model", "params", "stanli_prep_s", "stanli_ns_grad",
         "stanli_sample_s", "stanli_grads", "cmdstan_build_s",
         "cmdstan_ns_grad", "cmdstan_sample_s", "note"]
@@ -91,15 +111,64 @@ def evals_for(n):
     return 300 if n > 2000 else 3000 if n > 200 else 20000
 
 
+def option(name, default):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
+def stanc_info(path):
+    if not path.exists():
+        return {"path": str(path), "sha256": None, "version": ""}
+    v = run([str(path), "--version"], 60)
+    return {"path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "version": v.stdout.strip() if v else ""}
+
+
+def cmdstan_manifest(cs, cmdstan_stanc, stancflags):
+    return {"cmdstan": {
+        "make_stanc": stanc_info(cmdstan_stanc or cs / "bin" / "stanc"),
+        "header_stanc": stanc_info(cmdstan_stanc or STANC),
+        "stancflags": stancflags,
+    }}
+
+
+@contextlib.contextmanager
+def installed_stanc(cs, stanc):
+    """Put `stanc` at cs/bin/stanc for the duration, then restore."""
+    if stanc is None:
+        yield
+        return
+    target = cs / "bin" / "stanc"
+    aside = cs / "bin" / "stanc.corpus_bench_orig"
+    if aside.exists():
+        raise SystemExit(f"{aside} exists: an earlier run did not restore "
+                         f"{target}; move it back by hand first")
+    had_original = target.exists()
+    if had_original:
+        target.rename(aside)
+    try:
+        shutil.copy2(stanc, target)
+        yield
+    finally:
+        target.unlink(missing_ok=True)
+        if had_original:
+            aside.rename(target)
+
+
 def main():
     cs = pathlib.Path(sys.argv[1]).resolve()
     pdb = pathlib.Path(sys.argv[2]) / "posterior_database"
     out_path = pathlib.Path(sys.argv[3])
-    filt = (sys.argv[sys.argv.index("--filter") + 1]
-            if "--filter" in sys.argv else "")
-    timeout = int(sys.argv[sys.argv.index("--timeout") + 1]
-                  if "--timeout" in sys.argv else 900)
+    filt = option("--filter", "")
+    timeout = int(option("--timeout", 900))
     stanli_only = "--stanli-only" in sys.argv
+    cmdstan_stanc = option("--cmdstan-stanc", None)
+    if cmdstan_stanc is not None:
+        cmdstan_stanc = pathlib.Path(cmdstan_stanc).resolve()
+        if not cmdstan_stanc.is_file():
+            raise SystemExit(f"--cmdstan-stanc: {cmdstan_stanc} is not a file")
+    stancflags = option("--stancflags", "")
+    header_stanc = cmdstan_stanc or STANC
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="stanli_cb_"))
 
     done = set()
@@ -118,136 +187,159 @@ def main():
         out_path.write_text("\t".join(COLS) + "\n")
     if stanli_only:
         done = set()  # revisit every row; CmdStan columns carry over
+    else:
+        manifest_path = out_path.with_suffix(".manifest.json")
+        manifest = cmdstan_manifest(cs, cmdstan_stanc, stancflags)
+        if old_rows:
+            # A TSV without a manifest predates the option: defaults.
+            recorded = (json.loads(manifest_path.read_text())
+                        if manifest_path.exists()
+                        else cmdstan_manifest(cs, None, ""))
+            if recorded != manifest:
+                raise SystemExit(f"{out_path} holds CmdStan columns from "
+                                 "another stanc or flags; use a new output "
+                                 "TSV")
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     pairs = {}
     for pj in sorted((pdb / "posteriors").glob("*.json")):
         meta = json.loads(pj.read_text())
         pairs.setdefault(meta["model_name"], meta["data_name"])
 
-    for model, dname in sorted(pairs.items()):
-        if (filt and filt not in model) or model in done:
-            continue
-        stan = pdb / "models" / "stan" / f"{model}.stan"
-        dz = pdb / "data" / "data" / f"{dname}.json.zip"
-        if not stan.exists() or not dz.exists():
-            continue
-        dj = tmp / f"{model}.json"
-        with zipfile.ZipFile(dz) as z:
-            dj.write_bytes(z.read(z.namelist()[0]))
-        row = {c: "" for c in COLS}
-        row["model"] = model
-        notes = []
+    with installed_stanc(cs, None if stanli_only else cmdstan_stanc):
+        for model, dname in sorted(pairs.items()):
+            if (filt and filt not in model) or model in done:
+                continue
+            stan = pdb / "models" / "stan" / f"{model}.stan"
+            dz = pdb / "data" / "data" / f"{dname}.json.zip"
+            if not stan.exists() or not dz.exists():
+                continue
+            dj = tmp / f"{model}.json"
+            with zipfile.ZipFile(dz) as z:
+                dj.write_bytes(z.read(z.namelist()[0]))
+            row = {c: "" for c in COLS}
+            row["model"] = model
+            notes = []
 
-        # ---- stanli ----
-        sexp = tmp / f"{model}.sexp"
-        r = run([str(STANC), "--O1", "--debug-optimized-mir", str(stan)], timeout)
-        if r is None:
-            notes.append("stanc_fail")
-        else:
-            sexp.write_text(r.stdout)
-            probe = run([str(BENCH), str(sexp), str(dj), "1"], timeout)
-            # A rejected model (sir: domain error at the probe point) can
-            # exit 0 with nothing on stdout; treat that as eval_fail too.
-            if probe is None or not probe.stdout.split():
-                notes.append("stanli_eval_fail")
+            # ---- stanli ----
+            mir = tmp / f"{model}.mir"
+            r = run([str(VECTORIZE_PROBE), "--vectorize-loops", "on",
+                     "--output", str(mir), str(stan)], timeout)
+            if r is None or not mir.exists():
+                notes.append("stanc_fail")
             else:
-                n_params = int(probe.stdout.split()[-1])
-                row["params"] = n_params
-                # Compile and bind only. The old `1` invocation also ran a
-                # time-capped warmup plus one measured gradient, which made
-                # this column depend on model runtime and mislabeled ~200 ms
-                # as preparation even on small models.
-                prep = run([str(BENCH), str(sexp), str(dj), "--prep"], timeout)
-                prep_lines = ([line for line in prep.stdout.splitlines()
-                               if line.strip()]
-                              if prep and prep.returncode == 0 else [])
-                if prep_lines:
-                    row["stanli_prep_s"] = (
-                        f"{float(prep_lines[-1].split()[0]):.3f}")
+                probe = run([str(BENCH), str(mir), str(dj), "1"], timeout)
+                # A rejected model (sir: domain error at the probe point) can
+                # exit 0 with nothing on stdout; treat that as eval_fail too.
+                if probe is None or not probe.stdout.split():
+                    notes.append("stanli_eval_fail")
                 else:
-                    notes.append("stanli_prep_fail")
-                g = run([str(BENCH), str(sexp), str(dj),
-                         str(evals_for(n_params))], timeout)
-                if g:
-                    row["stanli_ns_grad"] = f"{float(g.stdout.split()[0]):.0f}"
-                t0 = time.perf_counter()
-                s, st = run2([str(RUN), str(stan), str(dj), "--warmup",
-                              "1000", "--samples", "1000", "--seed", "1"],
-                             timeout)
-                if st == "ok":
-                    row["stanli_sample_s"] = f"{time.perf_counter() - t0:.2f}"
-                    row["stanli_grads"] = parse_grad_count(s.stderr)
-                elif st == "timeout":
-                    notes.append("stanli_sample_timeout")
-                else:
-                    row["stanli_grads"] = parse_grad_count(s.stderr)
-                    err = (s.stderr.strip().splitlines() or [""])[-1][:60]
-                    notes.append(f"stanli_sample_fail({err})")
-
-        if stanli_only:
-            old = old_rows.get(model, {})
-            for c in ("cmdstan_build_s", "cmdstan_ns_grad",
-                      "cmdstan_sample_s"):
-                row[c] = old.get(c, "")
-            notes += [n for n in old.get("note", "").split(",")
-                      if n.startswith("cmdstan")]
-            row["note"] = ",".join(n for n in notes if n)
-            old_rows[model] = row
-            # Rewrite in place so a partial refresh is still a coherent file.
-            with out_path.open("w") as f:
-                f.write("\t".join(COLS) + "\n")
-                for m in sorted(old_rows):
-                    f.write(row_line(old_rows[m]))
-            print(f"{model}: stanli {row['stanli_ns_grad']}ns/"
-                  f"{row['stanli_sample_s']}s  {row['note']}", flush=True)
-            continue
-
-        # ---- CmdStan: real model binary, built the way users build it ----
-        work = tmp / model
-        work.mkdir(exist_ok=True)
-        (work / f"{model}.stan").write_text(stan.read_text())
-        exe = work / model
-        t0 = time.perf_counter()
-        b = run(["make", str(exe)], timeout, cwd=str(cs))
-        row["cmdstan_build_s"] = f"{time.perf_counter() - t0:.1f}"
-        if b is None:
-            notes.append("cmdstan_build_fail")
-        else:
-            # CmdStan's make compiles the generated header without leaving
-            # it behind, so emit our own copy for the gradient driver.
-            hpp = work / f"{model}.hpp"
-            if run([str(STANC), str(work / f"{model}.stan"), f"--o={hpp}"],
-                   timeout) and hpp.exists():
-                gexe = work / "gradbench"
-                cmd = compile_cmd(cs, hpp,
-                                  REPO / "tools/bench_cmdstan_grad.cpp",
-                                  gexe, opt="-O3")
-                if not run(cmd, timeout):
-                    notes.append("cmdstan_grad_build_fail")
-                else:
-                    n_params = int(row["params"] or 0)
-                    g = run([str(gexe), str(dj), str(evals_for(n_params))],
-                            timeout)
-                    if g:
-                        row["cmdstan_ns_grad"] = f"{float(g.stdout.split()[0]):.0f}"
+                    n_params = int(probe.stdout.split()[-1])
+                    row["params"] = n_params
+                    # Compile and bind only. The old `1` invocation also ran a
+                    # time-capped warmup plus one measured gradient, which made
+                    # this column depend on model runtime and mislabeled ~200 ms
+                    # as preparation even on small models.
+                    prep = run([str(BENCH), str(mir), str(dj), "--prep"],
+                               timeout)
+                    prep_lines = ([line for line in prep.stdout.splitlines()
+                                   if line.strip()]
+                                  if prep and prep.returncode == 0 else [])
+                    if prep_lines:
+                        row["stanli_prep_s"] = (
+                            f"{float(prep_lines[-1].split()[0]):.3f}")
                     else:
-                        notes.append("cmdstan_grad_fail")
-            t0 = time.perf_counter()
-            s, st = run2([str(exe), "sample", "num_warmup=1000",
-                          "num_samples=1000", "random", "seed=1",
-                          "data", f"file={dj}",
-                          "output", f"file={work}/out.csv"], timeout)
-            if st == "ok":
-                row["cmdstan_sample_s"] = f"{time.perf_counter() - t0:.2f}"
-            else:
-                notes.append(f"cmdstan_sample_{st}")
+                        notes.append("stanli_prep_fail")
+                    g = run([str(BENCH), str(mir), str(dj),
+                             str(evals_for(n_params))], timeout)
+                    if g:
+                        row["stanli_ns_grad"] = (
+                            f"{float(g.stdout.split()[0]):.0f}")
+                    t0 = time.perf_counter()
+                    s, st = run2([str(RUN), str(stan), str(dj), "--warmup",
+                                  "1000", "--samples", "1000", "--seed", "1"],
+                                 timeout)
+                    if st == "ok":
+                        row["stanli_sample_s"] = (
+                            f"{time.perf_counter() - t0:.2f}")
+                        row["stanli_grads"] = parse_grad_count(s.stderr)
+                    elif st == "timeout":
+                        notes.append("stanli_sample_timeout")
+                    else:
+                        row["stanli_grads"] = parse_grad_count(s.stderr)
+                        err = (s.stderr.strip().splitlines() or [""])[-1][:60]
+                        notes.append(f"stanli_sample_fail({err})")
 
-        row["note"] = ",".join(notes)
-        with out_path.open("a") as f:
-            f.write(row_line(row))
-        print(f"{model}: stanli {row['stanli_ns_grad']}ns/"
-              f"{row['stanli_sample_s']}s  cmdstan {row['cmdstan_ns_grad']}ns/"
-              f"{row['cmdstan_sample_s']}s  {row['note']}", flush=True)
+            if stanli_only:
+                old = old_rows.get(model, {})
+                for c in ("cmdstan_build_s", "cmdstan_ns_grad",
+                          "cmdstan_sample_s"):
+                    row[c] = old.get(c, "")
+                notes += [n for n in old.get("note", "").split(",")
+                          if n.startswith("cmdstan")]
+                row["note"] = ",".join(n for n in notes if n)
+                old_rows[model] = row
+                # Rewrite in place so a partial refresh is still a coherent file.
+                with out_path.open("w") as f:
+                    f.write("\t".join(COLS) + "\n")
+                    for m in sorted(old_rows):
+                        f.write(row_line(old_rows[m]))
+                print(f"{model}: stanli {row['stanli_ns_grad']}ns/"
+                      f"{row['stanli_sample_s']}s  {row['note']}", flush=True)
+                continue
+
+            # ---- CmdStan: real model binary, built the way users build it ----
+            work = tmp / model
+            work.mkdir(exist_ok=True)
+            (work / f"{model}.stan").write_text(stan.read_text())
+            exe = work / model
+            make = ["make", str(exe)]
+            if stancflags:
+                make.append(f"STANCFLAGS={stancflags}")
+            t0 = time.perf_counter()
+            b = run(make, timeout, cwd=str(cs))
+            row["cmdstan_build_s"] = f"{time.perf_counter() - t0:.1f}"
+            if b is None:
+                notes.append("cmdstan_build_fail")
+            else:
+                # CmdStan's make compiles the generated header without leaving
+                # it behind, so emit our own copy for the gradient driver.
+                hpp = work / f"{model}.hpp"
+                if run([str(header_stanc), str(work / f"{model}.stan"),
+                        f"--o={hpp}", *shlex.split(stancflags)],
+                       timeout) and hpp.exists():
+                    gexe = work / "gradbench"
+                    cmd = compile_cmd(cs, hpp,
+                                      REPO / "tools/bench_cmdstan_grad.cpp",
+                                      gexe, opt="-O3")
+                    if not run(cmd, timeout):
+                        notes.append("cmdstan_grad_build_fail")
+                    else:
+                        n_params = int(row["params"] or 0)
+                        g = run([str(gexe), str(dj), str(evals_for(n_params))],
+                                timeout)
+                        if g:
+                            row["cmdstan_ns_grad"] = (
+                                f"{float(g.stdout.split()[0]):.0f}")
+                        else:
+                            notes.append("cmdstan_grad_fail")
+                t0 = time.perf_counter()
+                s, st = run2([str(exe), "sample", "num_warmup=1000",
+                              "num_samples=1000", "random", "seed=1",
+                              "data", f"file={dj}",
+                              "output", f"file={work}/out.csv"], timeout)
+                if st == "ok":
+                    row["cmdstan_sample_s"] = f"{time.perf_counter() - t0:.2f}"
+                else:
+                    notes.append(f"cmdstan_sample_{st}")
+
+            row["note"] = ",".join(notes)
+            with out_path.open("a") as f:
+                f.write(row_line(row))
+            print(f"{model}: stanli {row['stanli_ns_grad']}ns/"
+                  f"{row['stanli_sample_s']}s  "
+                  f"cmdstan {row['cmdstan_ns_grad']}ns/"
+                  f"{row['cmdstan_sample_s']}s  {row['note']}", flush=True)
 
 
 if __name__ == "__main__":
