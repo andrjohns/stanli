@@ -843,6 +843,78 @@ static int64_t parse_field(const std::string& line, const std::string& key) {
   return std::atoll(line.c_str() + pos + key.size() + 1);
 }
 
+static bool ops_match(const Op& x, const Op& y) {
+  if (x.opcode != y.opcode || x.out != y.out || x.out2 != y.out2 ||
+      x.n_in != y.n_in || x.variant != y.variant || x.n_idata != y.n_idata)
+    return false;
+  for (int k = 0; k < x.n_in; ++k)
+    if (x.in[k] != y.in[k]) return false;
+  for (int64_t k = 0; k < x.n_idata; ++k)
+    if (x.idata[k] != y.idata[k]) return false;
+  return true;
+}
+
+static VectorBinaryGraph build_join_guard_fires() {
+  VectorBinaryGraph h;
+  Graph& g = h.g;
+  const int p = g.add_slot(1, true);
+  const int q = g.add_slot(1, true);
+  const int v = g.add_slot(40, true);
+  const int c = g.add_slot(40, false);
+  std::vector<double> cv(40);
+  for (int k = 0; k < 40; ++k) cv[(size_t)k] = 0.5 + 0.01 * k;
+  h.fills.emplace_back(c, cv);
+  int t = p;
+  for (int i = 0; i < 18; ++i) {
+    const int m = g.add_slot(1, false);
+    g.add_op(OP_MUL, {t, q}, m);
+    t = g.add_slot(1, false);
+    g.add_op(OP_INV_LOGIT, {m}, t);
+  }
+  const int w = g.add_slot(40, false);
+  g.add_op(OP_ADD, {v, c}, w);
+  const int e = g.add_slot(1, false);
+  g.add_op(OP_INDEX, {w}, e, {0});
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_MUL, {t, e}, lp);
+  g.result_slot = lp;
+  h.terms.push_back(lp);
+  return h;
+}
+
+static void test_join_guard_skips_a_joined_compile_split_would_lose() {
+  bool skipped = false;
+  for (const std::string& l : capture_island_debug([] {
+         VectorBinaryGraph h = build_join_guard_fires();
+         carve_islands(h.g, h.fills, h.terms, {});
+       }))
+    if (l.rfind("island? ops=", 0) == 0 &&
+        l.find("skip=1") != std::string::npos)
+      skipped = true;
+  expect("join guard fired", skipped);
+
+  VectorBinaryGraph guarded = build_join_guard_fires();
+  const int guarded_carved =
+      carve_islands(guarded.g, guarded.fills, guarded.terms, {});
+
+  test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
+  VectorBinaryGraph unguarded = build_join_guard_fires();
+  const int unguarded_carved =
+      carve_islands(unguarded.g, unguarded.fills, unguarded.terms, {});
+  test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
+
+  expect_eq("guarded carved count matches unguarded", guarded_carved,
+            unguarded_carved);
+  expect_eq("guarded op count matches unguarded", (int)guarded.g.ops.size(),
+            (int)unguarded.g.ops.size());
+  const size_t n = guarded.g.ops.size() < unguarded.g.ops.size()
+                       ? guarded.g.ops.size()
+                       : unguarded.g.ops.size();
+  for (size_t k = 0; k < n; ++k)
+    expect(("op " + std::to_string(k) + " matches unguarded").c_str(),
+           ops_match(guarded.g.ops[k], unguarded.g.ops[k]));
+}
+
 // Many length-`width` DOT ops feeding a scalar chain.
 static VectorBinaryGraph build_dot_heavy(int width) {
   VectorBinaryGraph h;
@@ -892,6 +964,7 @@ static std::string capture_estimate_line(const std::function<void()>& fn) {
 // element correction) and the island side (touches_width), so doubling it
 // should move both, not just one.
 static void test_dot_width_estimate_moves_together() {
+  test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
   const std::string at40 = capture_estimate_line([] {
     VectorBinaryGraph h = build_dot_heavy(40);
     carve_islands(h.g, h.fills, h.terms, {});
@@ -900,6 +973,7 @@ static void test_dot_width_estimate_moves_together() {
     VectorBinaryGraph h = build_dot_heavy(80);
     carve_islands(h.g, h.fills, h.terms, {});
   });
+  test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
   expect("dot estimate at width 40 captured", !at40.empty());
   expect("dot estimate at width 80 captured", !at80.empty());
   if (at40.empty() || at80.empty()) return;
@@ -1970,6 +2044,7 @@ int main() {
   test_vector_copies_carved();
   test_join_wins_by_estimate();
   test_split_wins_by_estimate();
+  test_join_guard_skips_a_joined_compile_split_would_lose();
   test_dot_width_estimate_moves_together();
   test_const_count_does_not_grow_island_cost();
   test_softmax3_island_executor();
