@@ -27,42 +27,15 @@
 #include <stanli/nuts.hpp>
 #include <stanli/wa_interp.hpp>
 
+#include "stanc_embedded.hpp"
 #include "stanc_process.hpp"
 
-#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
-
-#ifdef STANLI_EMBED_STANC
-extern "C" char* stanli_stanc_tmir(const char* stan_code);
-extern "C" void stanli_stanc_free(char* p);
-
-// The compiler linked into this binary. Returns the MIR, or throws with
-// stanc's own error text -- there is no stanc binary to find, no
-// subprocess, and no temp file.
-static std::string embedded_stanc(const std::string& model) {
-  std::string src;
-  {
-    std::unique_ptr<FILE, int (*)(FILE*)> f(std::fopen(model.c_str(), "rb"),
-                                            std::fclose);
-    if (!f) throw std::runtime_error("cannot read " + model);
-    std::array<char, 1 << 16> buf;
-    size_t n;
-    while ((n = fread(buf.data(), 1, buf.size(), f.get())) > 0)
-      src.append(buf.data(), n);
-  }
-  char* res = stanli_stanc_tmir(src.c_str());
-  const std::string out(res ? res : "ERRstanc returned nothing");
-  if (res) stanli_stanc_free(res);
-  if (out.compare(0, 3, "ERR") == 0)
-    throw std::runtime_error("stanc: " + out.substr(3));
-  return out.substr(2);  // strip "OK"
-}
-#endif
 
 static std::string run_stanc(const std::string& stanc,
                              const std::string& model) {
@@ -164,8 +137,9 @@ int main(int argc, char** argv) {
     // explicitly (--stanc or $STANC), which is how a build with both can
     // still be pointed at a different stanc3 for a bisect.
 #ifdef STANLI_EMBED_STANC
-    const std::string mir =
-        stanc_explicit ? run_stanc(stanc, model) : embedded_stanc(model);
+    const std::string mir = stanc_explicit
+                                ? run_stanc(stanc, model)
+                                : stanli::tooling::embedded_stanc(model);
 #else
     const std::string mir = run_stanc(stanc, model);
 #endif

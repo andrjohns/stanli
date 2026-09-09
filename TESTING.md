@@ -305,9 +305,18 @@ that consumes them. To regenerate them explicitly, run:
 `.hpp` files that stanc also writes beside the models are removed. Neither the
 MIR nor the C++ output is checked in.
 
-Core `tools/dev_setup.sh` builds the compiler executable from the configured
-stanc3 source revision because both fixture generation and source-level lit
-tests use it. `--embed` additionally builds the in-process compiler object.
+Core `tools/dev_setup.sh` builds both compiler artifacts from the configured
+stanc3 source revision: the executable, which fixture generation and the
+signature model generators run, and the in-process compiler object, which
+`stanli_check` links. The source-level lit cases, the function model replay,
+and the signature model replay all compile through that in-process pipeline,
+the one `stanli_run` and the language packages ship, so they see the same
+source passes a user does. A build without the object (the Windows and
+AddressSanitizer CI jobs) runs the same pipeline through its executable,
+`stanli-compile`, which CMake copies from `deps/stanc3/` to sit beside
+`stanli_check`, the way the Windows wheel ships it beside the runtime.
+`stanli_check --stanc PATH` runs an external stanc instead, for A/B work and
+compiler bisects.
 
 Unit tests check the kernels and cases they explicitly construct. They do not
 by themselves establish that model lowering selects the intended kernel or

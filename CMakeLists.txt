@@ -601,7 +601,7 @@ enable_testing()
 
 # Runtime and lowering tests consume stanc's legacy MIR, but the generated
 # text is not source. Build it once from the checked-in Stan models with the
-# same pinned compiler the source-level lit tests use. Keeping the output in
+# pinned compiler executable. Keeping the output in
 # tests/fixtures preserves the established test and developer-tool paths while
 # .gitignore keeps a build from dirtying the checkout.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -758,6 +758,36 @@ add_executable(stanli_check tools/stanli_check.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(stanli_check PRIVATE stanli stanli_stanc_process)
 add_dependencies(stanli_check stanli_mir_fixtures)
+stanli_embed_stanc(stanli_check)
+# Without the embedded object, stanli_check runs the same pipeline through
+# its executable, stanli-compile, which it looks for beside itself.
+set(STANLI_PORTABLE_COMPILER "" CACHE FILEPATH
+    "stanli-compile executable copied beside stanli_check when no embedded stanc3 object is linked")
+if(NOT STANLI_STANC_EMBED_OBJ)
+  if(NOT STANLI_PORTABLE_COMPILER)
+    foreach(_stanli_cli_candidate
+            "stanli-compile${CMAKE_EXECUTABLE_SUFFIX}" "stanli-compile")
+      if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/${_stanli_cli_candidate}")
+        set(STANLI_PORTABLE_COMPILER
+            "${CMAKE_CURRENT_SOURCE_DIR}/deps/stanc3/${_stanli_cli_candidate}")
+        break()
+      endif()
+    endforeach()
+  endif()
+  if(STANLI_PORTABLE_COMPILER)
+    add_custom_command(TARGET stanli_check POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${STANLI_PORTABLE_COMPILER}"
+              "$<TARGET_FILE_DIR:stanli_check>/stanli-compile${CMAKE_EXECUTABLE_SUFFIX}"
+      VERBATIM)
+    message(STATUS "stanli_check compiles through ${STANLI_PORTABLE_COMPILER}")
+  else()
+    message(WARNING
+      "no embedded stanc3 object and no stanli-compile under deps/stanc3; "
+      "stanli_check's default compile path will fail (lit, signature_refs, "
+      "test_function_models)")
+  endif()
+endif()
 add_executable(test_stanc_process tests/test_stanc_process.cpp)
 target_link_libraries(test_stanc_process PRIVATE stanli_stanc_process)
 add_test(NAME test_stanc_process COMMAND test_stanc_process)
@@ -772,6 +802,13 @@ add_test(NAME test_check_precompiled_mir_conflict
                  -DSTANLI_CHECK=$<TARGET_FILE:stanli_check>
                  -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_mir_conflict.cmake)
+add_test(NAME test_check_external_stanc
+         COMMAND ${CMAKE_COMMAND}
+                 -DSTANLI_CHECK=$<TARGET_FILE:stanli_check>
+                 -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/check_external_stanc
+                 -DSTANC=${STANLI_STANC_EXECUTABLE}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_external_stanc.cmake)
 add_executable(bench_grad tools/bench_grad.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(bench_grad PRIVATE stanli)
@@ -1037,7 +1074,6 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME test_function_models
            COMMAND ${Python3_EXECUTABLE} tools/check_function_models.py
                    --build ${CMAKE_CURRENT_BINARY_DIR}
-                   --stanc ${STANLI_STANC_EXECUTABLE}
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_vectorize_ab
            COMMAND ${Python3_EXECUTABLE} tests/test_vectorize_ab.py
@@ -1045,9 +1081,9 @@ if(Python3_Interpreter_FOUND)
   # Source-level lit cases are one marked .stan file each. CMake discovers
   # both the dedicated tests/lit tree and existing fixtures that opt in, then
   # gives every case its own CTest entry. Adding coverage needs no build-system
-  # edit and no new C++ target. The runner invokes stanli_check, whose compiler
-  # is provisioned by the ordinary developer setup; a missing compiler is a
-  # test failure rather than a skip.
+  # edit and no new C++ target. The runner invokes stanli_check, which compiles
+  # through the embedded stanc3 pipeline or its stanli-compile executable; a
+  # build with neither fails these tests rather than skipping them.
   file(GLOB_RECURSE STANLI_LIT_CANDIDATES CONFIGURE_DEPENDS
        "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.stan")
   # The generated signature models are replay tests registered from their
@@ -1102,7 +1138,6 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME ${STANLI_SIGNATURE_TEST}
              COMMAND ${Python3_EXECUTABLE} tools/check_signature_models.py
                      --build ${CMAKE_CURRENT_BINARY_DIR}
-                     --stanc ${STANLI_STANC_EXECUTABLE}
                      --model ${STANLI_SIGNATURE_STEM}
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     set_tests_properties(${STANLI_SIGNATURE_TEST} PROPERTIES

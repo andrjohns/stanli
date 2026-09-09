@@ -1369,7 +1369,7 @@ jobs:
   # not paying for instrumentation, and the CTest suite is the target.
   asan:
     name: ctest under AddressSanitizer
-    needs: build
+    needs: [build, browser-compiler]
     if: >-
       github.event_name != 'pull_request' &&
       startsWith(github.ref, 'refs/tags/') == false
@@ -1419,6 +1419,23 @@ jobs:
           test "$(cat deps/stanc3/stanc.src)" = "$STANC3_SRC_SHA"
           chmod +x deps/stanc3/stanc
           ./deps/stanc3/stanc --version
+      # This build does not embed stanc3, so stanli_check compiles through
+      # stanli-compile, the same pipeline as a native executable, which the
+      # browser-compiler job built and validated.
+      - name: Install the portable compiler from the browser-compiler job
+        uses: actions/download-artifact@v4
+        with:
+          name: browser-compilers
+          path: browser-compilers
+      - name: Stage stanli-compile
+        run: |
+          source tools/stanc_embed/provenance.sh
+          stanli_stancjs_artifact_matches browser-compilers/stanli_compiler_cli \
+            "$STANC3_SRC_REPO" "$STANC3_SRC_SHA" stancjs
+          install -m 755 browser-compilers/stanli_compiler_cli \
+            deps/stanc3/stanli-compile
+          deps/stanc3/stanli-compile tests/fixtures/es.stan > /tmp/es.portable-mir
+          head -c 8 /tmp/es.portable-mir | grep -q '^STANLI2:'
       # Both fatal runs of this job died at the same place -- the density
       # shards -- with "the runner has received a shutdown signal" while
       # the sibling manylinux job on its own runner sailed on. That is the
@@ -1469,7 +1486,8 @@ jobs:
             -DSTANLI_SANITIZE=address \
             -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSTANLI_PORTABLE_COMPILER="$PWD/deps/stanc3/stanli-compile"
           # Peak of the largest single compile, the wheel build's own
           # instrumentation: GNU time reports the largest child, which is
           # exactly the number -j has to fit. This job has been OOM-killed
@@ -1895,7 +1913,9 @@ jobs:
           cp deps/stanc3/stanli-compiler.js \
             deps/stanc3/stanli-compiler.js.stamp \
             deps/stanc3/stancjs.bc.js \
-            deps/stanc3/stancjs.bc.js.stamp browser-dist/
+            deps/stanc3/stancjs.bc.js.stamp \
+            deps/stanc3/stanli_compiler_cli \
+            deps/stanc3/stanli_compiler_cli.stamp browser-dist/
 
       - uses: actions/upload-artifact@v4
         with:

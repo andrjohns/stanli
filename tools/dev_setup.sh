@@ -2,8 +2,8 @@
 # One-shot dev environment setup. Safe to re-run; every step is
 # idempotent and skipped once its output exists.
 #
-#   tools/dev_setup.sh               core: pinned stanc + cmake builds/tests
-#   tools/dev_setup.sh --embed       + in-process compiler
+#   tools/dev_setup.sh               core: pinned stanc, in-process compiler,
+#                                    cmake builds/tests
 #   tools/dev_setup.sh --corpus      + posteriordb and CmdStan rig
 #   tools/dev_setup.sh --conformance + the Stan conformance reference stack
 #   tools/dev_setup.sh --all         everything
@@ -18,8 +18,10 @@
 # --conformance adds: the pinned CmdStan/BridgeStan pair and a venv
 #   holding the version-pinned reference client. It reuses the same
 #   deps/cmdstan checkout as --corpus and the same stanc3 source tree and
-#   opam switch as --embed, so with either of those already done most of
+#   opam switch as core, so with either of those already done most of
 #   it is a no-op.
+# --embed is accepted and does nothing: the in-process compiler is part of
+#   core because stanli_check and the lit tests compile through it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -34,16 +36,15 @@ source tools/stanc_embed/provenance.sh
 source tools/build_jobs.sh
 BUILD_JOBS=$(stanli_detect_build_jobs)
 
-WANT_EMBED=0
 WANT_CORPUS=0
 WANT_CONFORMANCE=0
 WANT_BUILD=1
 for arg in "$@"; do
   case "$arg" in
-    --embed) WANT_EMBED=1 ;;
+    --embed) ;;
     --corpus) WANT_CORPUS=1 ;;
     --conformance) WANT_CONFORMANCE=1 ;;
-    --all) WANT_EMBED=1; WANT_CORPUS=1; WANT_CONFORMANCE=1 ;;
+    --all) WANT_CORPUS=1; WANT_CONFORMANCE=1 ;;
     --no-build) WANT_BUILD=0 ;;
     -h|--help) sed -n '2,/^set -/{ /^set -/d; p; }' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)"; exit 2 ;;
@@ -119,16 +120,16 @@ step "fetching pinned deps (Stan Math and Stan)"
 ./deps/fetch.sh
 
 # --- source-pinned stanc3 --------------------------------------------------
-# Source-level lit tests are part of the ordinary CTest suite, so their
-# compiler is part of the core setup rather than an optional corpus tool.
-# build_stanc caches by source revision; after the first build this is a no-op.
+# Fixture generation and the signature model generators run this executable;
+# the ctest suite compiles everything else through the in-process compiler
+# built below. build_stanc caches by source revision; after the first build
+# this is a no-op.
 step "stanc3 executable from source at $STANC3_SRC_SHA"
 # The embed build needs the source checkout too. Force the centralized builder
 # to recreate a cached output when that checkout or its opam switch is absent.
-if [ "$WANT_EMBED" = 1 ] &&
-   { [ "$(git -C deps/stanc3-src rev-parse HEAD 2>/dev/null || true)" != \
-       "$STANC3_SRC_SHA" ] ||
-     ! opam switch list --color=never --short 2>/dev/null | tr -d '\r' | grep -qx "$OPAM_SWITCH"; }; then
+if [ "$(git -C deps/stanc3-src rev-parse HEAD 2>/dev/null || true)" != \
+     "$STANC3_SRC_SHA" ] ||
+   ! opam switch list --color=never --short 2>/dev/null | tr -d '\r' | grep -qx "$OPAM_SWITCH"; then
   rm -f deps/stanc3/stanc-pinned deps/stanc3/stanc-pinned.src
 fi
 ./harnesses/conformance/build_stanc.sh "$OPAM_SWITCH"
@@ -140,19 +141,17 @@ cp deps/stanc3/stanc-pinned.src deps/stanc3/stanc.src
 }
 "./deps/stanc3/stanc$EXE_SUFFIX" --version
 
-# --- embedded stanc3 (optional) --------------------------------------------
-if [ "$WANT_EMBED" = 1 ]; then
-  step "building the embeddable stanc object"
-  if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
-       "$STANC3_SRC_SHA" &&
-     [ -x deps/stanc3/stanli-vectorize-probe ] &&
-     stanc_embed_artifact_matches deps/stanc3/stanli-vectorize-probe \
-       "$STANC3_SRC_SHA"; then
-    echo "embedded compiler artifacts match the source and producer inputs"
-  else
-    echo "embedded compiler artifacts are absent or mismatched; rebuilding"
-    tools/stanc_embed/build.sh deps/stanc3-src "$OPAM_SWITCH"
-  fi
+# --- embedded stanc3 -------------------------------------------------------
+step "building the embeddable stanc object"
+if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
+     "$STANC3_SRC_SHA" &&
+   [ -x deps/stanc3/stanli-vectorize-probe ] &&
+   stanc_embed_artifact_matches deps/stanc3/stanli-vectorize-probe \
+     "$STANC3_SRC_SHA"; then
+  echo "embedded compiler artifacts match the source and producer inputs"
+else
+  echo "embedded compiler artifacts are absent or mismatched; rebuilding"
+  tools/stanc_embed/build.sh deps/stanc3-src "$OPAM_SWITCH"
 fi
 
 # --- cmake builds ----------------------------------------------------------
@@ -220,7 +219,7 @@ fi
 # and already refuses to proceed on a pin mismatch, so this adds only the
 # client and the staged runtime -- and every part of it is a no-op on the
 # second run. The cost people remember is the one-time stanc build; it is
-# once per machine per pin, not once per session, and --embed pays it too.
+# once per machine per pin, not once per session, and core pays it too.
 if [ "$WANT_CONFORMANCE" = 1 ]; then
   step "conformance reference toolchain (stanc from source, CmdStan, BridgeStan)"
   ./harnesses/conformance/fetch_cmdstan.sh
@@ -271,7 +270,7 @@ if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
      "$STANC3_SRC_SHA"; then
   echo "wheel:       tools/build_wheel.sh"
 else
-  echo "wheel:       rerun with --embed, then tools/build_wheel.sh"
+  echo "wheel:       rerun tools/dev_setup.sh, then tools/build_wheel.sh"
 fi
 if [ "$WANT_CONFORMANCE" = 1 ]; then
   # Run the driver under the venv interpreter, not the host's: the harness

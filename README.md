@@ -365,8 +365,7 @@ workflows.
 One-shot setup (fetches pinned deps, builds, runs tests):
 
 ```
-./tools/dev_setup.sh               # core build + tests + source-pinned stanc3
-./tools/dev_setup.sh --embed       # + in-process compiler
+./tools/dev_setup.sh               # core build + tests + source-pinned stanc3 (executable and embedded)
 ./tools/dev_setup.sh --corpus      # + posteriordb and CmdStan
 ./tools/dev_setup.sh --conformance # + the Stan conformance reference stack
 ./tools/dev_setup.sh --all
