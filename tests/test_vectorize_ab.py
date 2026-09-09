@@ -276,6 +276,39 @@ class VectorizeAbTest(unittest.TestCase):
         self.assertEqual(measured["iterations"], 5000)
         self.assertEqual(measured["on_over_off"], 2.0)
 
+    def test_op_count_gate_compares_reroll_on_cells(self):
+        def cell(source_pass, runtime_reroll, final_ops, lowered_ops):
+            return {
+                "source_pass": source_pass,
+                "runtime_reroll": runtime_reroll,
+                "graph": {"ops": final_ops},
+                "samples": [{"sample": 1, "rows": [{
+                    "graph": "log_prob", "stage": "lower", "ns": 1,
+                    "ops": lowered_ops,
+                }]}],
+            }
+
+        grown = vectorize_ab.op_count_gate("probe", [
+            cell("off", "on", 104, 14041), cell("on", "on", 163, 8311)])
+        self.assertEqual(len(grown), 1)
+        self.assertIn("104 -> 163", grown[0])
+        self.assertEqual(vectorize_ab.op_count_gate("probe", [
+            cell("off", "on", 16, 91), cell("on", "on", 17, 14)]), [])
+        self.assertEqual(vectorize_ab.op_count_gate("probe", [
+            cell("off", "on", 10, 10), cell("on", "on", 11, 10)]), [])
+        lowered = vectorize_ab.op_count_gate("probe", [
+            cell("off", "on", 7, 6), cell("on", "on", 7, 8)])
+        self.assertEqual(len(lowered), 1)
+        self.assertIn("6 -> 8", lowered[0])
+        self.assertEqual(vectorize_ab.op_count_gate("probe", [
+            cell("off", "off", 27, 1), cell("on", "off", 10522, 2),
+            cell("off", "on", 27, 1)]), [])
+        missing = cell("on", "on", None, None)
+        missing["graph"] = {}
+        missing["samples"] = []
+        self.assertEqual(vectorize_ab.op_count_gate("probe", [
+            cell("off", "on", 27, 58449), missing]), [])
+
     def test_report_writes_all_artifacts(self):
         graph = {
             "model": "probe",
@@ -300,7 +333,7 @@ class VectorizeAbTest(unittest.TestCase):
                 [graph], [{
                     "model": "probe", "mir_changed": False,
                     "changed_values": 0, "points": 1,
-                }], [], [])
+                }], [], [], [])
             self.assertTrue(summary["ok"])
             expected = {
                 "manifest.json", "corpus.jsonl", "graphs.jsonl",
@@ -312,6 +345,15 @@ class VectorizeAbTest(unittest.TestCase):
             self.assertIn("write_array_ops", header)
             self.assertIn("log_prob_reroll_packed_rows", header)
             self.assertIn("write_array_reroll_element_store", header)
+            summary = vectorize_ab.write_reports(
+                out, {"schema": 1}, [], [graph], [{
+                    "model": "probe", "mir_changed": True,
+                    "changed_values": 0, "points": 1,
+                }], [], [], ["probe: final log_prob ops grew 27 -> 10522"])
+            self.assertFalse(summary["ok"])
+            self.assertEqual(len(summary["op_count_failures"]), 1)
+            self.assertIn("## Op count failures",
+                          (out / "summary.md").read_text())
 
 
 if __name__ == "__main__":

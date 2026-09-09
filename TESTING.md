@@ -89,19 +89,22 @@ python3 harnesses/vectorize_ab.py deps/posteriordb \
 ```
 
 The "MIR vectorization A/B" workflow step runs the complete run on every
-push to main and on the schedule; a pull request runs a 35-model slice
-listed in the workflow, about 90 s, so the full run is a post-submit gate.
+push to main and on the schedule; a pull request runs a 44-model slice
+listed in the workflow, so the full run is a post-submit gate.
 The hard gates cover command/status consistency, result and write-array
 categories, error parity, per-element finite/NaN/infinity classes, shapes and
 names, and both pass modes against the existing CmdStan references. Finite
 bit differences that remain within those gates are listed separately with
-bit patterns and ULP distances.
+bit patterns and ULP distances. A model whose portable MIR differs between
+the two cells is also gated on op counts: with the runtime reroll pass on,
+the lowered log_prob graph must not grow and the final log_prob graph may
+grow by at most 10%.
 
 The output directory contains `manifest.json`, `corpus.jsonl`,
 `graphs.jsonl`, `bench.tsv`, `summary.json`, and `summary.md`. The manifest
 records source pins, producer provenance, tool hashes, platform, toolchain,
-environment policy, and corpus scope. Compiler wall time, graph and
-preparation counts, separate log-density/write-array reroll dispositions, and
+environment policy, and corpus scope. Compiler wall time, preparation
+timings, separate log-density/write-array reroll dispositions, and
 auto-calibrated ABBA gradient timings are descriptive measurements; their
 ratios do not decide pass/fail. Missing or malformed measurement output does
 fail the run because it would make the report incomplete. The report labels

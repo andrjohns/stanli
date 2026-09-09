@@ -10,8 +10,11 @@ off/on crossed with the C++ re-roll pass off/on).
 Hard failures are semantic: result categories, vector shapes, write_array
 names and shapes, nonfinite behavior, and the existing CmdStan reference
 gates. Different finite bits within those gates are reported as arithmetic
-order changes, with one bit-pattern/ULP row per changed off/on value. Op
-counts and preparation timings are evidence only.
+order changes, with one bit-pattern/ULP row per changed off/on value. For a
+model whose portable MIR the pass changes, op counts are gated too: the
+lowered log_prob graph must not grow and the final log_prob graph may grow
+by at most 10%, both in the runtime-reroll-on cells. Preparation and
+gradient timings are evidence only.
 
 Complete semantic report (130 recorded models plus PDB A/B-only models):
   python3 harnesses/vectorize_ab.py deps/posteriordb \
@@ -19,9 +22,9 @@ Complete semantic report (130 recorded models plus PDB A/B-only models):
 
 Bounded report:
   python3 harnesses/vectorize_ab.py deps/posteriordb \
-    normal_mixture radon_pooled soil_incubation arK low_dim_gauss_mix \
-    hmm_example \
-    eight_schools_noncentered --output-dir build/vectorize-ab
+    election88_full iohmm_reg dogs radon_county s2_nlf \
+    one_comp_mm_elim_abs soil_incubation covid19imperial_v2 \
+    --output-dir build/vectorize-ab
 
 The no-model form covers the complete committed reference set, including
 the language fixtures under tests/stanc3, plus every model in posteriordb's
@@ -66,15 +69,35 @@ EXPECTED_MIR_CHANGES = {
 }
 GRADIENT_MODELS = {
     VECTORIZE_LOOPS: frozenset((
+        "2pl_latent_reg_irt",
+        "covid19imperial_v2",
+        "covid19imperial_v3",
+        "dogs",
+        "dogs_log",
+        "election88_full",
+        "gpcm_latent_reg_irt",
+        "grsm_latent_reg_irt",
+        "iohmm_reg",
+        "log10earn_height",
+        "losscurve_sislob",
+        "lotka_volterra",
+        "lsat_model",
+        "mother",
+        "multi_occupancy",
         "normal_mixture",
+        "one_comp_mm_elim_abs",
+        "pilots",
+        "radon_county",
         "radon_pooled",
+        "s2_car",
+        "s2_logistic_normal",
+        "s2_nlf",
         "soil_incubation",
-        "arK",
-        "low_dim_gauss_mix",
-        "hmm_example",
-        "eight_schools_noncentered",
+        "surgical_model",
+        "sw_nonlinear",
     )),
 }
+FINAL_OPS_GROWTH_PERCENT = 10
 
 RUNTIME_ENV_KEYS = (
     "STANLI_DEBUG_ALGEBRA",
@@ -111,6 +134,7 @@ REROLL_FIELDS = (
 REQUIRED_PREP_ROWS = {
     ("driver", "total"): ("ns",),
     ("compile", "total"): ("ns",),
+    ("log_prob", "lower"): ("ns", "ops"),
     ("log_prob", "total"): ("ns", "ops", "slots"),
     ("write_array", "total"): ("ns", "ops", "slots"),
     ("log_prob", "reroll"): ("ns",) + REROLL_FIELDS,
@@ -749,6 +773,40 @@ def graph_cell(dump, bench, mir, data, source_mode, reroll_enabled,
     }
 
 
+def lower_ops(cell):
+    for sample in cell["samples"]:
+        ops = prep_row(sample["rows"], "log_prob", "lower").get("ops")
+        if isinstance(ops, int):
+            return ops
+    return None
+
+
+def op_count_gate(model, records):
+    cells = {
+        (record["source_pass"], record["runtime_reroll"]): record
+        for record in records
+    }
+    off, on = cells.get(("off", "on")), cells.get(("on", "on"))
+    if off is None or on is None:
+        return []
+    failures = []
+    off_lower, on_lower = lower_ops(off), lower_ops(on)
+    if (off_lower is not None and on_lower is not None
+            and on_lower > off_lower):
+        failures.append(
+            f"{model}: lowered log_prob ops grew {off_lower} -> {on_lower} "
+            "(off/reroll-on vs on/reroll-on)")
+    off_final = off.get("graph", {}).get("ops")
+    on_final = on.get("graph", {}).get("ops")
+    if (isinstance(off_final, int) and isinstance(on_final, int)
+            and on_final * 100 > off_final * (100 + FINAL_OPS_GROWTH_PERCENT)):
+        failures.append(
+            f"{model}: final log_prob ops grew {off_final} -> {on_final}, "
+            f"over {FINAL_OPS_GROWTH_PERCENT}% "
+            "(off/reroll-on vs on/reroll-on)")
+    return failures
+
+
 def parse_bench_output(stdout):
     """Parse only bench_grad's final four-field numeric row."""
     lines = stdout.rstrip().splitlines()
@@ -857,7 +915,8 @@ def tsv_value(row, key):
 
 
 def write_reports(output_dir, manifest, corpus_records, graph_records,
-                  model_summaries, failures, infrastructure_failures):
+                  model_summaries, failures, infrastructure_failures,
+                  op_count_failures):
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -959,7 +1018,8 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
                          for summary in model_summaries)
     summary = {
         "schema": 2,
-        "ok": not failures and not infrastructure_failures,
+        "ok": (not failures and not infrastructure_failures
+               and not op_count_failures),
         "candidate_pass": manifest.get("corpus_scope", {}).get(
             "candidate_pass", VECTORIZE_LOOPS),
         "models": len(model_summaries),
@@ -974,6 +1034,7 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         "mir_changed_models": changed_models,
         "arithmetic_order_changed_values": changed_values,
         "semantic_failures": failures,
+        "op_count_failures": op_count_failures,
         "infrastructure_failures": infrastructure_failures,
         "per_model": model_summaries,
     }
@@ -995,10 +1056,14 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         f"- Models with different portable MIR: {changed_models}",
         f"- Finite values changed by arithmetic order: {changed_values}",
         f"- Semantic failures: {len(failures)}",
+        f"- Op count failures: {len(op_count_failures)}",
         f"- Measurement infrastructure failures: "
         f"{len(infrastructure_failures)}", "",
-        "Op counts, preparation timings, and gradient timings in "
-        "`graphs.jsonl` and `bench.tsv` are measurements, not gates.", "",
+        "Preparation timings and gradient timings in `graphs.jsonl` and "
+        "`bench.tsv` are measurements, not gates. Op counts are gated only "
+        "for models with different portable MIR: lowered log_prob ops must "
+        "not grow and final log_prob ops may grow by at most "
+        f"{FINAL_OPS_GROWTH_PERCENT}%, in the runtime-reroll-on cells.", "",
         "| model | comparison | MIR changed | changed values | semantic points | "
         "gradient on/off |",
         "| --- | --- | ---: | ---: | ---: | ---: |",
@@ -1013,6 +1078,9 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
     if failures:
         lines += ["", "## Semantic failures", ""]
         lines += [f"- {failure}" for failure in failures]
+    if op_count_failures:
+        lines += ["", "## Op count failures", ""]
+        lines += [f"- {failure}" for failure in op_count_failures]
     if infrastructure_failures:
         lines += ["", "## Measurement infrastructure failures", ""]
         lines += [f"- {failure}" for failure in infrastructure_failures]
@@ -1211,6 +1279,7 @@ def main():
     model_summaries = []
     failures = []
     infrastructure_failures = []
+    op_count_failures = []
     with tempfile.TemporaryDirectory(prefix="stanli_vectorize_ab_") as temp:
         temp = pathlib.Path(temp)
         for model in selected:
@@ -1329,6 +1398,9 @@ def main():
                                 f"{'on' if reroll_enabled else 'off'} "
                                 f"sample {sample['sample']}: bench_grad"
                                 f"{': ' + detail if detail else ''}")
+            if mir_changed:
+                op_count_failures.extend(
+                    op_count_gate(model, model_graph_records))
 
             gradient = None
             if model in gradient_models:
@@ -1364,10 +1436,11 @@ def main():
     manifest["harness_elapsed_ns"] = time.monotonic_ns() - harness_started_ns
     summary = write_reports(
         output_dir, manifest, corpus_records, graph_records, model_summaries,
-        failures, infrastructure_failures)
+        failures, infrastructure_failures, op_count_failures)
     print(
         f"\n{summary['models']} models, {summary['points']} points, "
         f"{len(failures)} semantic failures, "
+        f"{len(op_count_failures)} op count failures, "
         f"{len(infrastructure_failures)} measurement failures")
     print(f"report: {output_dir}")
     return 0 if summary["ok"] else 1

@@ -545,7 +545,10 @@ jobs:
               gp_regr one_comp_mm_elim_abs bym2_offset_only kronecker_gp
               multi_occupancy state_space_stochastic_level_stochastic_seasonal
               mother multidim_var_param_ar45_mat23 reductions_allowed
-              s2_ar_cov s2_invgaussian s2_logistic_normal sw_mv_rescor)
+              s2_ar_cov s2_invgaussian s2_logistic_normal sw_mv_rescor
+              2pl_latent_reg_irt covid19imperial_v2 covid19imperial_v3
+              dogs_log grsm_latent_reg_irt s2_car s2_nlf surgical_model
+              sw_nonlinear)
           fi
           python3 harnesses/vectorize_ab.py deps/posteriordb \
             --compiler deps/stanc3/stanli-vectorize-probe \
