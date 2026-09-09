@@ -912,6 +912,9 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
         const bool runtime = std::any_of(
             s.lhs_idx.begin(), s.lhs_idx.end(),
             [&](const mir::Expr& ix) { return runtime_selector(ix); });
+        const bool whole = std::all_of(
+            s.lhs_idx.begin(), s.lhs_idx.end(),
+            [](const mir::Expr& ix) { return ix.name == "IndexAll"; });
         BuiltinIndexMap map;
         if (!runtime) {
           const SlotInfo& lhs_si =
@@ -919,31 +922,87 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
           const int64_t lhs_len = bound != scope.end()
                                       ? g.slots[bound->second.slot].len
                                       : declared->second.len;
-          const BuiltinArgumentShape shape =
-              view_argument_shape(lhs_si, lhs_len, BuiltinArgumentKind::Real);
-          if (s.lhs_idx.size() > shape.dimensions.size())
-            fail(
-                "unsupported indexed assignment: too many indexes for " + s.lhs,
-                s.raw);
-          std::vector<std::vector<int64_t>> selected;
-          std::vector<bool> drops;
-          for (size_t d = 0; d < s.lhs_idx.size(); ++d) {
-            selected.push_back(index_positions(
-                s.lhs_idx[d], shape.dimensions[d], "assignment index", s.raw));
-            drops.push_back(s.lhs_idx[d].name == "IndexSingle");
+          const size_t rank =
+              is_array(lhs_si)    ? array_shape(lhs_si).dims.size()
+              : is_matrix(lhs_si) ? 2
+              : lhs_si.kind == ViewKind::Flat && lhs_si.shape == 0 ? 0
+                                                                   : 1;
+          const bool all_single =
+              s.lhs_idx.size() <= rank &&
+              std::all_of(
+                  s.lhs_idx.begin(), s.lhs_idx.end(),
+                  [](const mir::Expr& ix) { return ix.name == "IndexSingle"; });
+          if (whole) {
+            map.count = lhs_len;
+          } else if (all_single) {
+            if (is_array(lhs_si)) {
+              const ArrayShape& shape = array_shape(lhs_si);
+              std::vector<int64_t> ix;
+              ix.reserve(s.lhs_idx.size());
+              for (size_t d = 0; d < s.lhs_idx.size(); ++d) {
+                const int64_t i = eval_int(s.lhs_idx[d].args[0]);
+                check_index(i, shape.dims[d], "assignment index", s.raw);
+                ix.push_back(i - 1);
+              }
+              const Addr a =
+                  flat_addr(shape.dims, shape.leaf == ViewKind::Matrix, ix);
+              map.offset = a.off;
+              map.stride = a.stride;
+              map.count = a.len;
+            } else if (is_matrix(lhs_si)) {
+              const int64_t i = eval_int(s.lhs_idx[0].args[0]);
+              check_index(i, lhs_si.rows, "assignment index", s.raw);
+              if (s.lhs_idx.size() == 2) {
+                const int64_t j = eval_int(s.lhs_idx[1].args[0]);
+                check_index(j, lhs_si.cols, "assignment index", s.raw);
+                map.offset = (j - 1) * lhs_si.rows + (i - 1);
+                map.count = 1;
+              } else {
+                map.offset = i - 1;
+                map.stride = lhs_si.rows;
+                map.count = lhs_si.cols;
+              }
+            } else {
+              const int64_t i = eval_int(s.lhs_idx[0].args[0]);
+              check_index(i, lhs_len, "assignment index", s.raw);
+              map.offset = i - 1;
+              map.count = 1;
+            }
+            map.kind = map.stride != 1 && map.count != 1
+                           ? BuiltinSliceMap::Kind::Strided
+                           : BuiltinSliceMap::Kind::Contiguous;
+          } else {
+            const BuiltinArgumentShape shape =
+                view_argument_shape(lhs_si, lhs_len, BuiltinArgumentKind::Real);
+            if (s.lhs_idx.size() > shape.dimensions.size())
+              fail("unsupported indexed assignment: too many indexes for " +
+                       s.lhs,
+                   s.raw);
+            std::vector<std::vector<int64_t>> selected;
+            std::vector<bool> drops;
+            selected.reserve(s.lhs_idx.size());
+            drops.reserve(s.lhs_idx.size());
+            for (size_t d = 0; d < s.lhs_idx.size(); ++d) {
+              selected.push_back(index_positions(s.lhs_idx[d],
+                                                 shape.dimensions[d],
+                                                 "assignment index", s.raw));
+              drops.push_back(s.lhs_idx[d].name == "IndexSingle");
+            }
+            if (std::any_of(selected.begin(), selected.end(),
+                            [](const std::vector<int64_t>& positions) {
+                              return positions.empty();
+                            }))
+              return;
+            try {
+              map = builtin_index_map(shape, selected, drops,
+                                      SliceStorageOrder::OuterMajor);
+            } catch (const std::invalid_argument& error) {
+              fail(std::string("unsupported indexed assignment: ") +
+                       error.what(),
+                   s.raw);
+            }
           }
-          if (std::any_of(selected.begin(), selected.end(),
-                          [](const std::vector<int64_t>& positions) {
-                            return positions.empty();
-                          }))
-            return;
-          try {
-            map = builtin_index_map(shape, selected, drops,
-                                    SliceStorageOrder::OuterMajor);
-          } catch (const std::invalid_argument& error) {
-            fail(std::string("unsupported indexed assignment: ") + error.what(),
-                 s.raw);
-          }
+          if (map.count == 0) return;
         }
         Val prev_v{-1, false, {}};
         if (bound != scope.end()) {
@@ -975,27 +1034,27 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
         observe_indexed_rhs(s.rhs, rhs_v);
         const int prev = prev_v.slot;
         const SlotInfo out_si = prev_v.si;
-        const bool whole = std::all_of(
-            s.lhs_idx.begin(), s.lhs_idx.end(),
-            [](const mir::Expr& ix) { return ix.name == "IndexAll"; });
         if (whole)
           require_binding(rhs_v, g.slots[prev].len, prev_v.si, s.lhs, s.raw);
         else if (g.slots[rhs_v.slot].len != map.count)
           fail("indexed assignment size mismatch for " + s.lhs, s.raw);
-        std::vector<int64_t> cells = map.gather;
-        if (map.kind == BuiltinSliceMap::Kind::Strided && map.stride <= 0)
+        std::vector<int64_t> descending;
+        const std::vector<int64_t>* cells = &map.gather;
+        if (map.kind == BuiltinSliceMap::Kind::Strided && map.stride <= 0) {
           for (int64_t k = 0; k < map.count; ++k)
-            cells.push_back(map.offset + k * map.stride);
+            descending.push_back(map.offset + k * map.stride);
+          cells = &descending;
+        }
         Val nv = prev_v;
-        if (!cells.empty()) {
+        if (!cells->empty()) {
           for (int64_t k = 0; k < map.count; ++k) {
             const int cell =
-                checked_immediate(cells[(size_t)k], "assignment cell");
+                checked_immediate((*cells)[(size_t)k], "assignment cell");
             const Val el =
                 emit_value(OP_INDEX, {rhs_v}, 1, view_of("UReal"), {(int)k});
             const Val next = emit_value(OP_SET_INDEX, {nv, el},
                                         g.slots[prev].len, out_si, {cell});
-            propagate_int_update(next, nv, el, cells[(size_t)k], 1);
+            propagate_int_update(next, nv, el, (*cells)[(size_t)k], 1);
             nv = next;
           }
         } else if (map.kind == BuiltinSliceMap::Kind::Contiguous) {
