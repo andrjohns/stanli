@@ -133,14 +133,19 @@ bool two_int_groups(uint16_t opcode) {
 // OP_INDEX (checked as a progression during classification). A row store
 // run starts with the functional write of the declaration and continues in
 // place.
-bool ops_match(const Graph& g, const Op& a, const Op& b) {
-  const bool same_opcode =
-      a.opcode == b.opcode ||
-      (is_row_store(a) && inplace_form(a.opcode) == b.opcode);
-  if (!same_opcode || a.variant != b.variant || a.n_in != b.n_in ||
-      a.out2 >= 0 || b.out2 >= 0 || is_effectful_op(a.opcode) ||
+bool ops_match(const Graph& g, const Op& a, const Op& b,
+               int64_t lane_distance) {
+  if (a.opcode != b.opcode &&
+      !(is_row_store(a) && inplace_form(a.opcode) == b.opcode))
+    return false;
+  if (a.variant != b.variant || a.n_in != b.n_in || a.out2 >= 0 ||
+      b.out2 >= 0 || is_effectful_op(a.opcode) ||
       has_op_trait(a.opcode, op_trait::kVariantGrouped))
     return false;
+  const bool a_row_store = is_row_store(a);
+  if (a_row_store && a.out != b.out) return false;
+  const bool a_row_read = a_row_store ? false : is_row_read(a);
+  if (a_row_read && a.in[0] != b.in[0]) return false;
   for (int j = 0; j < a.n_in; ++j)
     if (g.slots[a.in[j]].len != g.slots[b.in[j]].len) return false;
   if (g.slots[a.out].len != g.slots[b.out].len) return false;
@@ -150,8 +155,25 @@ bool ops_match(const Graph& g, const Op& a, const Op& b) {
   if (a.opcode == OP_INDEX || a.opcode == OP_SET_INDEX ||
       a.opcode == OP_SET_INDEX_INPLACE)
     return a.n_idata == 1 && b.n_idata == 1;
-  if (is_row_read(a) || is_row_store(a) ||
-      has_op_trait(a.opcode, op_trait::kRerollIdataDensity))
+  if (a_row_read) {
+    if (a.n_idata != b.n_idata) return false;
+    bool same = true;
+    for (int64_t k = 0; k < a.n_idata; ++k)
+      same = same && a.idata[k] == b.idata[k];
+    if (same) return true;
+    if (is_strided(a.opcode))
+      return b.idata[0] == a.idata[0] + lane_distance &&
+             b.idata[1] == a.idata[1];
+    return b.idata[0] == a.idata[0] + lane_distance * g.slots[a.out].len;
+  }
+  if (a_row_store) {
+    if (a.n_idata != b.n_idata) return false;
+    if (is_strided(a.opcode))
+      return b.idata[0] == a.idata[0] + lane_distance &&
+             b.idata[1] == a.idata[1];
+    return b.idata[0] == a.idata[0] + lane_distance * g.slots[a.in[1]].len;
+  }
+  if (has_op_trait(a.opcode, op_trait::kRerollIdataDensity))
     return a.n_idata == b.n_idata;
   if (a.n_idata != b.n_idata) return false;
   for (int64_t k = 0; k < a.n_idata; ++k)
@@ -680,7 +702,7 @@ static RerollStats reroll_impl(
       while (i + ((size_t)L + 1) * P <= g.ops.size()) {
         bool match = true;
         for (int p = 0; p < P && match; ++p)
-          match = ops_match(g, g.ops[i + p], g.ops[i + (size_t)L * P + p]);
+          match = ops_match(g, g.ops[i + p], g.ops[i + (size_t)L * P + p], L);
         if (!match) break;
         ++L;
       }

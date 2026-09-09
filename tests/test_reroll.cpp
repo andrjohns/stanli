@@ -1518,6 +1518,35 @@ Built build_density(int L, int C, Rows rows, int extra_rows = 0) {
   return b;
 }
 
+Built build_density_shared_row(int L, int C, Rows rows) {
+  Built b;
+  Graph& g = b.g;
+  b.base = g.add_slot((int64_t)L * C, true);
+  const int shared = g.add_slot(1, true);
+  for (int l = 0; l < L; ++l) {
+    const int row = g.add_slot(C, false);
+    if (rows == Rows::kMatrix)
+      g.add_op(OP_SLICE_STRIDED, {b.base}, row, {l, L});
+    else
+      g.add_op(OP_SLICE, {b.base}, row, {l * C});
+    const int fixed = g.add_slot(1, false);
+    if (rows == Rows::kMatrix)
+      g.add_op(OP_SLICE_STRIDED, {shared}, fixed, {0, 1});
+    else
+      g.add_op(OP_SLICE, {shared}, fixed, {0});
+    const int combined = g.add_slot(C, false);
+    g.add_op(OP_ADD, {row, fixed}, combined);
+    std::vector<int> y((size_t)C);
+    for (int k = 0; k < C; ++k) y[(size_t)k] = (l * 7 + k * 3) % 2;
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_BERNOULLI_LOGIT_LPMF, {combined}, lp, y);
+    g.ops[(size_t)id].variant = 0x81;
+    b.outcomes.push_back(y);
+    b.terms.push_back(lp);
+  }
+  return b;
+}
+
 // L lanes {INDEX beta[0]; INDEX beta[1]; FMA(b1, x row, b0); store to row l}
 // filling a declared R x C matrix, then one density over the whole matrix.
 // Lane 0 writes the fill-backed declaration functionally, the rest in place.
@@ -1780,6 +1809,36 @@ static void test_row_lanes_bail() {
   }
 }
 
+static void test_row_lane_shared_read() {
+  using namespace rowlanes;
+  for (Rows rows : {Rows::kMatrix, Rows::kArray}) {
+    const int L = 6, C = 4;
+    const std::string tag =
+        rows == Rows::kMatrix ? "rowshared-mat" : "rowshared-arr";
+    Built b = build_density_shared_row(L, C, rows);
+    Graph ref = b.g;
+    reduce_into_result(ref, b.terms);
+    const std::vector<double> want = run_grad(std::move(ref), b.fills);
+
+    std::vector<int> tt = b.terms;
+    Fills f2 = b.fills;
+    const detail::ProfiledRerollStats profiled =
+        detail::reroll_profiled(b.g, f2, tt, {});
+    expect((tag + " regions==1").c_str(), profiled.work.regions == 1);
+    expect((tag + " shared row hoisted").c_str(),
+           writefuse::count(b.g, OP_SLICE) +
+                   writefuse::count(b.g, OP_SLICE_STRIDED) <=
+               1);
+    if (!tt.empty()) {
+      reduce_into_result(b.g, tt);
+      const std::vector<double> got = run_grad(std::move(b.g), f2);
+      expect((tag + " sizes").c_str(), got.size() == want.size());
+      for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+        expect_close((tag + " v" + std::to_string(i)).c_str(), got[i], want[i]);
+    }
+  }
+}
+
 // ---- end to end through compile_model ------------------------------------
 
 static std::string slurp(const char* p) {
@@ -1984,6 +2043,7 @@ int main() {
   test_row_density_lanes();
   test_row_store_lanes();
   test_row_lanes_bail();
+  test_row_lane_shared_read();
   test_e2e_fixtures();
   if (failures) {
     std::printf("%d failures\n", failures);
