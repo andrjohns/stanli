@@ -75,6 +75,14 @@ call of a function that asks the extent of its own local paid the
 interpreter's cost. The write_array scan now answers such a query from the
 local's declared type, as the lowering after it does.
 
+The browser compiler bundles load on Safari 17 and iOS 17 again.
+js_of_ocaml 6.4.1 puts a line break between `static` and the class field
+it modifies, and JavaScriptCore 17 reads that as a field named `static`,
+so the compiler's 64-bit integer constants were undefined and the first
+compile threw. The build now joins those lines and fails if any remain.
+The reporter also fixed the printer upstream in ocsigen/js_of_ocaml#2421
+(#342).
+
 ## 0.12.0
 
 ### Sampling can be interrupted

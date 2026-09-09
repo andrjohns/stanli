@@ -1853,6 +1853,11 @@ jobs:
         env:
           OPAMYES: '1'
 
+      - name: Keep static on one line for Safari 17
+        run: |
+          tools/stanc_embed/fix_static_newline.sh \
+            deps/stanc3/stancjs.bc.js deps/stanc3/stanli-compiler.js
+
       - name: Validate browser compiler provenance
         run: |
           source tools/stanc_embed/provenance.sh
