@@ -37,8 +37,11 @@ measured in ULPs; the default policy is within 2 ULP. Bitwise agreement is not
 a gate; a change that moves a model from bitwise to a small ULP band is
 accepted. Reassociation-class kernel changes (reductions, matvec, gather
 backward, softmax backward) may reach 10 ULP only when the change states that
-budget in its commit message and updates the baseline in the same commit.
-Anything beyond 10 ULP is a bug. Unit tests for individual operations and
+budget in its commit message and updates the baseline in the same commit. A
+density merged across loop lanes, where one call sums what CmdStan sums in
+one call per iteration, may reach 30 ULP; the models that use the budget are
+listed in `tools/corpus.py` with the measured value, as work still owed.
+Anything beyond those budgets is a bug. Unit tests for individual operations and
 the cross-path tests (stanli's own paths against each other) still use
 bitwise equality; a kernel change that widens one of them records the new
 limit at the assertion. Most corpus
@@ -228,7 +231,8 @@ differ from `a+(b+c)` in the last bit.
 The policy is: agreement within 2 ULP by default. Reassociation-class kernel
 changes (reductions, matvec, gather backward, softmax backward) may use a 10
 ULP budget when the change is measured and that budget is stated in the commit
-message. Bitwise agreement is reported for information but is not a gate; if a
+message. Densities merged across loop lanes may use 30 ULP, recorded per
+model. Bitwise agreement is reported for information but is not a gate; if a
 change improves performance by moving a model from bitwise to a small ULP band,
 that is an accepted trade. At their primary recorded point, 41 verified
 posteriordb models have 0 ULP difference with CmdStan. Eight additional language

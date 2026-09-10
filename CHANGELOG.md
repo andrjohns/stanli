@@ -79,6 +79,17 @@ go through `emit_diagnostic`, a sink-backed channel parallel to `print()`'s
 existing `emit_message`. The preparation profiler no longer aborts if a
 model exceeds its previous fixed row count; it grows instead.
 
+The island interpreter's two entry points are aligned to a cache line.
+Growing the runtime moved them to 60 bytes into a line, and the same island
+program ran 5.5% slower on hmm_gaussian and hmm_drive_0 with islands on and
+identically with them off; aligned, both are back at parity with the
+previous release and the small brms islands lost most of their drift.
+
+A density merged across loop lanes may sit up to 30 ULP from CmdStan, since
+one call sums what CmdStan sums per iteration; dogs measures 31 and 32 at
+two recorded points and is listed in `tools/corpus.py` as owed, with the
+fix being to accumulate the merged call in CmdStan's row order.
+
 ### Every stanc signature replays against CmdStan
 
 The generated builtin and density signature models used to prove only that

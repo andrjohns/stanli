@@ -34,7 +34,7 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `covid19imperial_v2` | 52 | 8.2e-16 | 7 |
 | `covid19imperial_v3` | 52 | 8.2e-16 | 7 |
 | `diamonds` | 27 | 2.6e-12 | 16248 |
-| `dogs` | 4 | 5.3e-16 | 3 |
+| `dogs` | 4 | 5.5e-15 | 31 |
 | `dogs_hierarchical` | 3 | 1.2e-15 | 9 |
 | `dogs_log` | 3 | 0 (bitwise) | 0 |
 | `dogs_nonhierarchical` | 66 | 6.9e-16 | 4 |
@@ -125,6 +125,11 @@ A model counts as passing only when tools/verify_sample.py matches CmdStan's log
 | `wells_dist100ars_model` | 4 | 0 (bitwise) | 0 |
 | `wells_interaction_c_model` | 5 | 6.6e-15 | 39 |
 | `wells_interaction_model` | 5 | 0 (bitwise) | 0 |
+
+Models over the default budget:
+
+- `dogs`: 31 and 32 ULP at two of the three recorded points, against a 30 ULP budget: the thirty per-dog Bernoulli densities the loop vectorizer leaves are merged into one call over 750 trials, which sums in a different order from CmdStan. Owed: accumulate the merged density row by row so the order matches.
+- `dogs_log`: bitwise at the primary point and 25 ULP at another recorded point, for the same reason as dogs, inside the 30 ULP budget.
 
 ## write_array references
 

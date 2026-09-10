@@ -31,6 +31,15 @@ VERIFY_JSON = REPO / "docs" / "verification.json"
 # Context for models that evaluate but do not match, so the reason is not
 # lost between runs.
 NOTES = {
+    "dogs":
+        "31 and 32 ULP at two of the three recorded points, against a 30 ULP "
+        "budget: the thirty per-dog Bernoulli densities the loop vectorizer "
+        "leaves are merged into one call over 750 trials, which sums in a "
+        "different order from CmdStan. Owed: accumulate the merged density "
+        "row by row so the order matches.",
+    "dogs_log":
+        "bitwise at the primary point and 25 ULP at another recorded "
+        "point, for the same reason as dogs, inside the 30 ULP budget.",
     "kronecker_gp":
         "lp matches CmdStan to 1e-13 and 436/438 gradients match; the two "
         "that flow through eigenvectors_sym differ by 0.7%. The covariance "
@@ -147,6 +156,10 @@ def main():
         v = ver[m]
         rel = "0 (bitwise)" if v["max_rel"] == 0 else f"{v['max_rel']:.1e}"
         md.append(f"| `{m}` | {v['n_values']} | {rel} | {v['max_ulp']} |")
+    noted = [m for m in verified if m in NOTES]
+    if noted:
+        md += ["", "Models over the default budget:", ""]
+        md += [f"- `{m}`: {NOTES[m]}" for m in noted]
     wa_refs = {}
     if REFS_PATH.exists():
         # Every point carries its own write_array reference; the table
