@@ -916,6 +916,7 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
             s.lhs_idx.begin(), s.lhs_idx.end(),
             [](const mir::Expr& ix) { return ix.name == "IndexAll"; });
         BuiltinIndexMap map;
+        bool empty_selection = false;
         if (!runtime) {
           const SlotInfo& lhs_si =
               bound != scope.end() ? bound->second.si : declared->second.si;
@@ -991,18 +992,20 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
             if (std::any_of(selected.begin(), selected.end(),
                             [](const std::vector<int64_t>& positions) {
                               return positions.empty();
-                            }))
-              return;
-            try {
-              map = builtin_index_map(shape, selected, drops,
-                                      SliceStorageOrder::OuterMajor);
-            } catch (const std::invalid_argument& error) {
-              fail(std::string("unsupported indexed assignment: ") +
-                       error.what(),
-                   s.raw);
+                            })) {
+              empty_selection = true;
+            } else {
+              try {
+                map = builtin_index_map(shape, selected, drops,
+                                        SliceStorageOrder::OuterMajor);
+              } catch (const std::invalid_argument& error) {
+                fail(std::string("unsupported indexed assignment: ") +
+                         error.what(),
+                     s.raw);
+              }
             }
           }
-          if (map.count == 0) return;
+          if (!empty_selection && map.count == 0) empty_selection = true;
         }
         Val prev_v{-1, false, {}};
         if (bound != scope.end()) {
@@ -1029,6 +1032,12 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
           nv.autodiff = prev_v.autodiff;
           scope[s.lhs] = nv;
           sync_indexed_data_local(s.lhs, nv);
+          return;
+        }
+        if (empty_selection) {
+          extra_roots.push_back(rhs_v.slot);
+          scope[s.lhs] = prev_v;
+          sync_indexed_data_local(s.lhs, prev_v);
           return;
         }
         observe_indexed_rhs(s.rhs, rhs_v);

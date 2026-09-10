@@ -2,7 +2,7 @@
 // STANLI-LIT-EXPECT: OK
 // STANLI-LIT-DATA: {"N": 3, "y": [0.4, -1.1, 0.7]}
 // STANLI-LIT-DUMP: log_prob:lower
-// STANLI-LIT-CHECK-NOT: LOG1P_EXP
+// STANLI-LIT-CHECK-NOT: SET_
 data {
   int N;
   vector[N] y;

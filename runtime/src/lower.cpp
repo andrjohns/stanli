@@ -865,6 +865,7 @@ CompiledModel::WriteArray Lowering::run_write_array(const mir::Program& p) {
   }
   std::vector<int> roots = jac_slots;
   for (const auto& v : out.views) roots.push_back(v.slot);
+  roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());
   prep.graph(prep_graph, "lower", lower_time, g, out.fills, target_terms.size(),
              out.views.size(), PrepTrace::Extra::Truncated,
              !wa.truncated.empty());
@@ -914,6 +915,7 @@ CompiledModel Lowering::run(const mir::Program& p) {
   // of the arena, so no op consumes them and the pass cannot infer them.
   std::vector<int> roots = jac_slots;
   for (const auto& v : out.views) roots.push_back(v.slot);
+  roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());
 
   run_passes(roots, PassPlan{true, true, true, true, true});
 
