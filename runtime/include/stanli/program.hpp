@@ -477,7 +477,8 @@ inline T program_pow(uint8_t law, const T& a, const T& b) {
 }
 
 template <bool ReuseCallCtx, typename T>
-void run_program_impl(const Program& p, T* reg, EvalState* state = nullptr) {
+__attribute__((aligned(64))) void run_program_impl(const Program& p, T* reg,
+                                                   EvalState* state = nullptr) {
   using VecT = Eigen::Matrix<T, Eigen::Dynamic, 1>;
   ProgramCallCtx<ReuseCallCtx> call_ctx;
   const int64_t n = (int64_t)p.code.size();

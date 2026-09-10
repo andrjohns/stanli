@@ -741,8 +741,9 @@ __attribute__((noinline)) static void ranged_step(const AdjInstr& I,
   }
 }
 
-void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
-                 double* adj) {
+__attribute__((aligned(64))) void run_adjoint(const Program& fwd,
+                                              const AdjProgram& ap,
+                                              const double* val, double* adj) {
   // A per-invocation local, not a shared static: island_bwd_native calls
   // back into run_adjoint for an island's own adjoint program, and that
   // program can itself contain a CALL. A static (or thread_local) ctx here

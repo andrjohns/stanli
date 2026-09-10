@@ -86,8 +86,9 @@ struct AdjProgram {
 // may not have an adjoint cell of its own.
 // `fwd` supplies normalized CALL payloads: one per CALL instruction, with a
 // pre-resolved kernel backward and precomputed value/adjoint ranges.
-void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
-                 double* adj);
+__attribute__((aligned(64))) void run_adjoint(const Program& fwd,
+                                              const AdjProgram& ap,
+                                              const double* val, double* adj);
 
 }  // namespace stanli
 
