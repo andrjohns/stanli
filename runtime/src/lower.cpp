@@ -653,6 +653,7 @@ void register_tune_choices(
                   std::to_string(key.end) + (key.strict ? ",strict" : "") +
                   "] " + carve_decision_name(rec.taken) + "->" +
                   carve_decision_name(desired);
+    choice.closeness = decision_closeness(rec);
     choice.alternative = [state, key, desired](Graph& g) -> bool {
       g = state->pristine;
       CarvePlan replay;
@@ -1089,8 +1090,8 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
     const auto tune_time = prep.start();
     const TuneStats ts = tune(cm);
     prep.tune_stage("log_prob", tune_time, ts.choices, ts.tried, ts.flipped,
-                    ts.skipped_disagree, ts.skipped_no_point,
-                    ts.skipped_budget);
+                    ts.skipped_disagree, ts.skipped_no_point, ts.skipped_budget,
+                    ts.skipped_far);
   }
   prep.plain("compile", "total", compile_time);
   prep.report();

@@ -847,7 +847,10 @@ forcing it would mean compiling something the natural path judged not
 worth compiling. Choices are timed closest call first, ordered by
 `|chosen - other| / max(chosen, other)` from the costs the estimate
 compared, so a budget that runs out spends its time on the decisions
-most likely to be wrong. The budget itself is one thousand times the
+most likely to be wrong; a decision past `kTuneTrustRadius` (0.25) is
+never timed at all, since that margin is where the estimate is not
+trusted to rank two forms, a property of the estimate itself rather
+than of any model or machine. The budget itself is one thousand times the
 duration of the first gradient evaluation, amortizing the cost of
 tuning against the run it is tuning for; each choice is checked against
 it before it is tried and again once its alternative graph and executor
@@ -862,12 +865,12 @@ that decided every flip or keep.
 
 | model | tune stage | compile, tuning on | compile, tuning off |
 | --- | --- | --- | --- |
-| sw_skewnormal | 357 us | 2.45 ms | 1.77 ms |
-| s2_mm | 438 us | 2.87 ms | 2.27 ms |
-| s2_index_mi | 242 us | 1.34 ms | 1.03 ms |
-| hmm_gaussian | 9.15 ms | 336 ms | 325 ms |
-| iohmm_reg | 13.4 ms | 493 ms | 478 ms |
-| ldaK5 | 0.2 us | 448 ms | 438 ms |
+| sw_skewnormal | 360 us | 2.44 ms | 1.79 ms |
+| s2_mm | 437 us | 2.88 ms | 2.24 ms |
+| s2_index_mi | 241 us | 1.32 ms | 1.04 ms |
+| hmm_gaussian | 1.60 ms | 328 ms | 324 ms |
+| iohmm_reg | 2.74 ms | 482 ms | 478 ms |
+| ldaK5 | 0.2 us | 439 ms | 436 ms |
 
 ## Native symmetric eigendecomposition pullbacks (`matrix_fns.cpp`)
 

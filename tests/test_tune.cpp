@@ -73,7 +73,10 @@ static CompiledModel make_model() {
 static TuningChoice identity_choice(const char* what) {
   TuningChoice c;
   c.what = what;
-  c.alternative = [](Graph&) { return true; };
+  c.alternative = [](Graph& g) {
+    g = build_chain();
+    return true;
+  };
   return c;
 }
 
@@ -84,6 +87,7 @@ static TuningChoice disagreeing_choice(const char* what) {
   TuningChoice c;
   c.what = what;
   c.alternative = [](Graph& g) {
+    g = build_chain();
     for (Op& op : g.ops)
       if (op.opcode == OP_ADD) op.opcode = OP_SUB;
     return true;
@@ -265,6 +269,43 @@ static void test_skipped_no_point_on_refusal() {
   expect_eq("refuse: skipped_no_point", stats.skipped_no_point, 1);
 }
 
+// A choice past kTuneTrustRadius is skipped without ever calling its
+// alternative; one at or under it runs the normal script.
+static void test_skipped_far() {
+  ScriptBuilder b;
+  b.resolution();
+  b.budget(0.01);
+  b.calibrate(0.001);
+  b.built();
+  b.rounds({{0.002, 0.001}, {0.002, 0.001}, {0.002, 0.001}});
+  b.read();  // stats.seconds
+
+  ScriptedMeasurer m;
+  m.script = b.s;
+  CompiledModel cm = make_model();
+
+  bool far_built = false;
+  TuningChoice far;
+  far.what = "far";
+  far.closeness = 0.4;
+  far.alternative = [&](Graph& g) {
+    far_built = true;
+    g = build_chain();
+    return true;
+  };
+  cm.choices.push_back(std::move(far));
+
+  TuningChoice close = identity_choice("close");
+  close.closeness = 0.1;
+  cm.choices.push_back(std::move(close));
+
+  const TuneStats stats = tune(cm, &m);
+  expect_eq("far: choices", stats.choices, 2);
+  expect_eq("far: skipped_far", stats.skipped_far, 1);
+  expect("far: alternative never built", !far_built);
+  expect_eq("far: tried", stats.tried, 1);
+}
+
 static void test_skipped_budget() {
   ScriptBuilder b;
   b.resolution();
@@ -313,7 +354,8 @@ static void test_greedy_accumulation() {
 
   TuningChoice second;
   second.what = "second";
-  second.alternative = [&](Graph&) {
+  second.alternative = [&](Graph& g) {
+    g = build_chain();
     second_saw_first_won = first_won ? 1 : 0;
     return true;
   };
@@ -400,6 +442,7 @@ int main() {
   test_no_flip_on_tie();
   test_no_flip_on_disagreement();
   test_skipped_no_point_on_refusal();
+  test_skipped_far();
   test_skipped_budget();
   test_greedy_accumulation();
   test_end_to_end_through_compile_model();

@@ -11,13 +11,19 @@ namespace stanli {
 
 struct CompiledModel;
 
-// `g` arrives as a copy of the current graph; `alternative` rebuilds it in
-// the other form and reports whether it could. `won` runs at most once, only
-// if the alternative replaces the current graph.
+// The margin inside which the cost estimate is not trusted to rank two
+// forms. A property of the estimate, not of any model or machine.
+inline constexpr double kTuneTrustRadius = 0.25;
+
+// `g` arrives empty; `alternative` builds the other form into it and
+// reports whether it could. `won` runs at most once, only if the
+// alternative replaces the current graph. `closeness` is set at
+// registration from the estimate's own costs for the decision.
 struct TuningChoice {
   std::string what;
   std::function<bool(Graph&)> alternative;
   std::function<void()> won;
+  double closeness = 0.0;
 };
 
 struct Measurer {
@@ -32,6 +38,7 @@ struct TuneStats {
   int skipped_disagree = 0;
   int skipped_no_point = 0;
   int skipped_budget = 0;
+  int skipped_far = 0;
   double seconds = 0;
 };
 

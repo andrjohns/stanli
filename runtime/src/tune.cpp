@@ -110,6 +110,14 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
   const double budget_seconds = 1000.0 * first_eval_time;
 
   for (TuningChoice& choice : cm.choices) {
+    if (choice.closeness > kTuneTrustRadius) {
+      ++stats.skipped_far;
+      if (debug)
+        emit_diagnostic("tune: " + choice.what + " skipped_far closeness=" +
+                        std::to_string(choice.closeness));
+      continue;
+    }
+
     const double elapsed = m.now_seconds() - t_start;
 
     double p0_lp = 0.0;
@@ -135,7 +143,7 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
     }
     ++stats.tried;
 
-    Graph g_alt = cm.graph;
+    Graph g_alt;
     if (!choice.alternative(g_alt)) {
       ++stats.skipped_no_point;
       if (debug)
