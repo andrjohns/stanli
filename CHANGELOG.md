@@ -104,8 +104,10 @@ previous release and the small brms islands lost most of their drift.
 
 A density merged across loop lanes may sit up to 30 ULP from CmdStan, since
 one call sums what CmdStan sums per iteration; dogs measures 31 and 32 at
-two recorded points and is listed in `tools/corpus.py` as owed, with the
-fix being to accumulate the merged call in CmdStan's row order.
+two recorded points. Against a 60-digit reference both engines are off by
+about as much there, CmdStan by its one-term-at-a-time sum and stanli by
+Eigen's packet reduction, so the gap is a difference in rounding rather
+than an error on one side, and `tools/corpus.py` records it as such.
 
 ### Every stanc signature replays against CmdStan
 

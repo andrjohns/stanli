@@ -32,11 +32,16 @@ VERIFY_JSON = REPO / "docs" / "verification.json"
 # lost between runs.
 NOTES = {
     "dogs":
-        "31 and 32 ULP at two of the three recorded points, against a 30 ULP "
-        "budget: the thirty per-dog Bernoulli densities the loop vectorizer "
-        "leaves are merged into one call over 750 trials, which sums in a "
-        "different order from CmdStan. Owed: accumulate the merged density "
-        "row by row so the order matches.",
+        "31 and 32 ULP from CmdStan at two of the three recorded points, "
+        "against a 30 ULP budget. Against a 60-digit reference both engines "
+        "are off by about as much: CmdStan sums the 750 Bernoulli terms one "
+        "at a time and lands 10 to 59 ULP from the true log density, stanli's "
+        "one merged call uses Eigen's packet reduction and vectorized "
+        "exp/log1p and lands 15 to 63 ULP off, and on the gradient each "
+        "engine is the closer one at a different point. Matching CmdStan "
+        "would mean adopting its order; pairwise summation would put the "
+        "merged call within 1 ULP of the reference at a larger distance from "
+        "CmdStan.",
     "dogs_log":
         "bitwise at the primary point and 25 ULP at another recorded "
         "point, for the same reason as dogs, inside the 30 ULP budget.",

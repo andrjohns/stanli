@@ -40,7 +40,7 @@ backward, softmax backward) may reach 10 ULP only when the change states that
 budget in its commit message and updates the baseline in the same commit. A
 density merged across loop lanes, where one call sums what CmdStan sums in
 one call per iteration, may reach 30 ULP; the models that use the budget are
-listed in `tools/corpus.py` with the measured value, as work still owed.
+listed in `tools/corpus.py` with the measured value and its cause.
 Anything beyond those budgets is a bug. Unit tests for individual operations and
 the cross-path tests (stanli's own paths against each other) still use
 bitwise equality; a kernel change that widens one of them records the new
