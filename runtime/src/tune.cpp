@@ -42,7 +42,7 @@ bool finite_result(double lp, const std::vector<double>& grad) {
 }
 
 bool safe_eval(Executor& ex, const std::vector<double>& point, double* lp,
-              std::vector<double>& grad) {
+               std::vector<double>& grad) {
   std::copy(point.begin(), point.end(), ex.params_data());
   try {
     *lp = ex.gradient(grad.data());
@@ -117,8 +117,8 @@ TuneStats tune(CompiledModel& cm, double budget_seconds, Measurer* measurer) {
     if (elapsed + round_est > budget_seconds) {
       ++stats.skipped_budget;
       if (debug) {
-        emit_diagnostic("tune: " + choice.what + " skipped_budget elapsed=" +
-                        std::to_string(elapsed) +
+        emit_diagnostic("tune: " + choice.what +
+                        " skipped_budget elapsed=" + std::to_string(elapsed) +
                         " round_est=" + std::to_string(round_est) +
                         " budget=" + std::to_string(budget_seconds));
       }
@@ -159,7 +159,8 @@ TuneStats tune(CompiledModel& cm, double budget_seconds, Measurer* measurer) {
         break;
       }
       for (int64_t j = 0; j < n; ++j) {
-        if (cur_grad[static_cast<size_t>(j)] != alt_grad[static_cast<size_t>(j)]) {
+        if (cur_grad[static_cast<size_t>(j)] !=
+            alt_grad[static_cast<size_t>(j)]) {
           disagree = true;
           disagree_point = k;
           disagree_component = static_cast<int>(j);
@@ -176,16 +177,15 @@ TuneStats tune(CompiledModel& cm, double budget_seconds, Measurer* measurer) {
         std::string msg = "tune: " + choice.what + " disagrees at point " +
                           std::to_string(disagree_point);
         msg += disagree_component >= 0
-                  ? " component " + std::to_string(disagree_component)
-                  : " lp";
+                   ? " component " + std::to_string(disagree_component)
+                   : " lp";
         emit_diagnostic(msg);
       }
       continue;
     }
     if (usable.empty()) {
       ++stats.skipped_no_point;
-      if (debug)
-        emit_diagnostic("tune: " + choice.what + " no usable point");
+      if (debug) emit_diagnostic("tune: " + choice.what + " no usable point");
       continue;
     }
 

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -53,6 +54,13 @@ static void summarize(const stanli::Graph& g) {
 }
 
 int main(int argc, char** argv) {
+  if (!std::getenv("STANLI_NO_TUNE")) {
+#ifdef _WIN32
+    _putenv_s("STANLI_NO_TUNE", "1");
+#else
+    setenv("STANLI_NO_TUNE", "1", 1);
+#endif
+  }
   if (argc < 3) {
     std::fprintf(stderr,
                  "usage: dump_ops mir.sexp data.json [max_ops|-1 summary]\n");

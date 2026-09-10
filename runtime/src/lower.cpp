@@ -613,6 +613,25 @@ int reduce_terms_replay(Graph& g, std::vector<int> terms) {
   return terms[0];
 }
 
+bool desired_decision(const CandidateRecord& rec, CarveDecision* out) {
+  if (rec.taken == CarveDecision::kIsland) {
+    *out = CarveDecision::kLeave;
+    return true;
+  }
+  if (rec.island_viable != Viability::kNo) {
+    *out = CarveDecision::kIsland;
+    return true;
+  }
+  return false;
+}
+
+bool has_eligible_choice(const std::vector<CandidateRecord>& decisions) {
+  CarveDecision unused;
+  for (const CandidateRecord& rec : decisions)
+    if (desired_decision(rec, &unused)) return true;
+  return false;
+}
+
 struct TuneCarveState {
   Graph pristine;
   std::vector<std::pair<int, std::vector<double>>> fills;
@@ -638,13 +657,7 @@ void register_tune_choices(
 
   for (const CandidateRecord& rec : plan.decisions) {
     CarveDecision desired;
-    if (rec.taken == CarveDecision::kIsland) {
-      desired = CarveDecision::kLeave;
-    } else if (rec.island_viable != Viability::kNo) {
-      desired = CarveDecision::kIsland;
-    } else {
-      continue;
-    }
+    if (!desired_decision(rec, &desired)) continue;
     const CandidateKey key = rec.key;
     TuningChoice choice;
     choice.what = "island[" + std::to_string(key.begin) + "," +
@@ -796,14 +809,45 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     if (std::getenv("STANLI_NO_TUNE") || std::getenv("STANLI_NO_ISLAND")) {
       islands = carve_islands(g, out.fills, target_terms, roots);
     } else {
-      Graph pristine = g;
+      const size_t orig_slots = g.slots.size();
+      const size_t orig_idata = g.idata_pool.size();
+      const size_t orig_udata = g.udata_pool.size();
       CarvePlan carve_plan;
       islands = carve_islands(g, out.fills, target_terms, roots, &carve_plan);
-      std::vector<int> reduce_terms_slots = target_terms;
-      reduce_terms_slots.insert(reduce_terms_slots.end(), jac_slots.begin(),
-                                jac_slots.end());
-      register_tune_choices(out, std::move(pristine), out.fills, target_terms,
-                            roots, reduce_terms_slots, carve_plan);
+      if (has_eligible_choice(carve_plan.decisions)) {
+        std::vector<Op> carved_ops = std::move(g.ops);
+        std::vector<Slot> carved_slots(
+            std::make_move_iterator(g.slots.begin() + (ptrdiff_t)orig_slots),
+            std::make_move_iterator(g.slots.end()));
+        std::vector<std::vector<int>> carved_idata(
+            std::make_move_iterator(g.idata_pool.begin() +
+                                    (ptrdiff_t)orig_idata),
+            std::make_move_iterator(g.idata_pool.end()));
+        std::vector<std::shared_ptr<void>> carved_udata(
+            std::make_move_iterator(g.udata_pool.begin() +
+                                    (ptrdiff_t)orig_udata),
+            std::make_move_iterator(g.udata_pool.end()));
+        g.ops = std::move(carve_plan.pre_island_ops);
+        g.slots.resize(orig_slots);
+        g.idata_pool.resize(orig_idata);
+        g.udata_pool.resize(orig_udata);
+        Graph pristine = g;
+        g.ops = std::move(carved_ops);
+        g.slots.insert(g.slots.end(),
+                       std::make_move_iterator(carved_slots.begin()),
+                       std::make_move_iterator(carved_slots.end()));
+        g.idata_pool.insert(g.idata_pool.end(),
+                            std::make_move_iterator(carved_idata.begin()),
+                            std::make_move_iterator(carved_idata.end()));
+        g.udata_pool.insert(g.udata_pool.end(),
+                            std::make_move_iterator(carved_udata.begin()),
+                            std::make_move_iterator(carved_udata.end()));
+        std::vector<int> reduce_terms_slots = target_terms;
+        reduce_terms_slots.insert(reduce_terms_slots.end(), jac_slots.begin(),
+                                  jac_slots.end());
+        register_tune_choices(out, std::move(pristine), out.fills, target_terms,
+                              roots, reduce_terms_slots, carve_plan);
+      }
     }
     trace("island", island_time, roots, PrepTrace::Extra::Regions, islands);
   }

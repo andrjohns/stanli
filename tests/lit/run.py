@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
 import tempfile
 
+os.environ.setdefault("STANLI_NO_TUNE", "1")
 
 PREFIX = "// STANLI-LIT: "
 EXPECT_PREFIX = "// STANLI-LIT-EXPECT: "

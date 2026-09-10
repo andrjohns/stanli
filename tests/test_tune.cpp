@@ -179,10 +179,10 @@ static void test_flips_when_faster_every_round() {
   expect_eq("flip: tried", stats.tried, 1);
   expect_eq("flip: flipped", stats.flipped, 1);
   expect("flip: won callback fired", won);
-  expect_eq("flip: nothing skipped", stats.skipped_disagree +
-                                         stats.skipped_no_point +
-                                         stats.skipped_budget,
-            0);
+  expect_eq(
+      "flip: nothing skipped",
+      stats.skipped_disagree + stats.skipped_no_point + stats.skipped_budget,
+      0);
 }
 
 static void test_no_flip_on_tie() {
@@ -309,16 +309,33 @@ static int64_t parse_choices(const std::vector<std::string>& lines) {
   for (const std::string& line : lines) {
     if (line.find("stage=tune") == std::string::npos) continue;
     const size_t pos = line.find("choices=");
-    if (pos != std::string::npos)
-      return std::atoll(line.c_str() + pos + 8);
+    if (pos != std::string::npos) return std::atoll(line.c_str() + pos + 8);
   }
   return -1;
+}
+
+static bool idata_pointers_valid(const stanli::Graph& g) {
+  for (const stanli::Op& op : g.ops) {
+    if (!op.idata) continue;
+    bool found = false;
+    for (const std::vector<int>& block : g.idata_pool) {
+      if (block.empty()) continue;
+      if (op.idata >= block.data() &&
+          op.idata + op.n_idata <= block.data() + block.size()) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) return false;
+  }
+  return true;
 }
 
 static void test_end_to_end_through_compile_model() {
   using namespace stanli;
   const std::string mir = slurp("tests/tune_fixtures/tune_hmm.tmir.sexp");
-  const DataMap data = DataMap::from_json_file("tests/tune_fixtures/tune_hmm.json");
+  const DataMap data =
+      DataMap::from_json_file("tests/tune_fixtures/tune_hmm.json");
 
   test_setenv("STANLI_NO_TUNE", "1", 1);
   CompiledModel baseline = compile_model(mir, data);
@@ -339,7 +356,9 @@ static void test_end_to_end_through_compile_model() {
   test_unsetenv("STANLI_PROFILE_PREP");
 
   expect("e2e: tune stage ran with at least one choice",
-        parse_choices(lines) >= 1);
+         parse_choices(lines) >= 1);
+  expect("e2e: idata pointers land inside tuned.graph.idata_pool",
+         idata_pointers_valid(tuned.graph));
 
   Executor tuned_ex(std::move(tuned.graph));
   tuned.bind(tuned_ex);
@@ -349,10 +368,10 @@ static void test_end_to_end_through_compile_model() {
 
   expect_exact("e2e: lp bitwise equal at zeros", tuned_lp, base_lp);
   expect_eq("e2e: gradient size", (long long)tuned_grad.size(),
-           (long long)base_grad.size());
+            (long long)base_grad.size());
   for (size_t i = 0; i < base_grad.size() && i < tuned_grad.size(); ++i)
     expect_exact(("e2e: grad[" + std::to_string(i) + "] bitwise equal").c_str(),
-                tuned_grad[i], base_grad[i]);
+                 tuned_grad[i], base_grad[i]);
 }
 
 int main() {

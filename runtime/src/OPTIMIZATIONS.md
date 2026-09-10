@@ -818,6 +818,70 @@ directions read one instruction at a time and decide what to do with it,
 where CmdStan's compiler has inlined the equivalent straight into the
 model's machine code.
 
+## Prep-time tuning (`tune.cpp`, disable: `STANLI_NO_TUNE=1`)
+
+The island carver decides island, split, or leave from a static cost
+estimate of the register-program interpreter. That estimate is a model,
+and near the boundary between two of its outcomes it can be wrong in
+either direction for reasons the model does not see: cache behavior, the
+kernel dispatch path a particular vocabulary takes, whatever the host is
+doing at compile time. The carver already records every candidate it
+priced and the decision it took (`carve_plan.hpp`); this pass replays
+each recorded decision with its losing alternative, times both forms on
+the real executor, and keeps whichever one actually ran faster.
+
+For each recorded decision it rebuilds the pre-carve graph, carves it
+again with that one candidate forced the other way, and times batches of
+real gradient calls against the graph the carver actually chose,
+alternating which one goes first each round. Three unanimous rounds
+decide early; otherwise it runs up to seven and needs five wins with a
+lower median to flip. Before any timing happens, both forms must agree
+to the last bit on the log-density and every gradient component at three
+fixed points (the origin and two `mt19937_64`-seeded points); any
+disagreement keeps the carver's answer no matter how the timing would
+have gone, since a form that changes the answer is never a valid
+alternative regardless of speed. A winning flip becomes the graph later
+choices are timed against, so gains compound down the list. Each choice
+is only tried if the elapsed compile time plus one round's estimated
+cost still fits the budget, so a model with many close candidates cannot
+run away with prep time. `STANLI_DEBUG_TUNE=1` reports the reason for
+every skip and the timing that decided every flip or keep.
+
+Each tried decision copies the current graph, copies the pristine
+pre-carve graph into a fresh alternative and replays the carve over it,
+and builds a new `Executor`, all before any evaluation happens; that
+cost tracks the pre-carve graph's slot and idata pool size, which stays
+at the model's full scale even where earlier passes have driven the op
+count down to a handful. On `sw_skewnormal` (two decisions, one flip)
+and `s2_mm` (two decisions, no flip), both under a thousand pre-carve
+slots, the tune stage costs several hundred microseconds against a
+compile under three milliseconds. `hmm_gaussian` and `iohmm_reg` carry
+tens of thousands of pre-carve slots; there each decision costs tens of
+milliseconds regardless of outcome, including on `hmm_gaussian`, where
+the first of its two recorded decisions is timed to a kept decision and
+only the second, a stricter candidate, disagrees and is skipped.
+`STANLI_NO_TUNE=1` skips
+building a plan at all, which is what `stanli_check`, `dump_ops`, and
+the lit runner pin so their graphs stay deterministic across runs;
+`bench_grad`, `stanli_run`, and the
+bindings run what ships.
+
+The replay's own bookkeeping has a separate cost from the tuning it
+enables: rebuilding the pre-carve graph for each replay needs a graph
+the carve has not yet appended islands' extraction ops and register
+slots onto. On `ldaK5`, a fully vectorized ~1M-slot graph with no
+carve candidates at all, copying that graph once per compile regardless
+of whether there was anything to tune cost about 15 ms, 3% of total
+prep. The fix defers that copy behind a check for at least one
+eligible decision, and builds it by truncating the graph back to its
+pre-carve slot, idata, and udata counts, copying, then restoring the
+carved tail, rather than copying the whole post-carve graph. Since the
+carver only ever appends to those pools, the truncated copy is exactly
+the pre-carve graph, and its cost is proportional to the pre-carve
+size rather than the vectorized one. Measured on `ldaK5`, the island
+stage's cost with tuning on is now within run-to-run noise of tuning
+off.
+
 ## Native symmetric eigendecomposition pullbacks (`matrix_fns.cpp`)
 
 Stan Math's reverse overloads for `eigenvalues_sym` and `eigenvectors_sym`

@@ -88,6 +88,13 @@ static std::string read_mir(const std::string& path) {
 }
 
 int main(int argc, char** argv) {
+  if (!std::getenv("STANLI_NO_TUNE")) {
+#ifdef _WIN32
+    _putenv_s("STANLI_NO_TUNE", "1");
+#else
+    setenv("STANLI_NO_TUNE", "1", 1);
+#endif
+  }
   if (argc < 3) {
     std::fprintf(stderr,
                  "usage: stanli_check model.stan data.json "

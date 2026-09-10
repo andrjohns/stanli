@@ -104,6 +104,7 @@ RUNTIME_ENV_KEYS = (
     "STANLI_DEBUG_INIT",
     "STANLI_DEBUG_ISLAND",
     "STANLI_DEBUG_ODE",
+    "STANLI_DEBUG_TUNE",
     "STANLI_ISLAND_ALWAYS",
     "STANLI_NO_CONSTFOLD",
     "STANLI_NO_CSE",
@@ -112,9 +113,11 @@ RUNTIME_ENV_KEYS = (
     "STANLI_NO_INPLACE",
     "STANLI_NO_ISLAND",
     "STANLI_NO_ISLAND_COMPACT",
+    "STANLI_NO_ISLAND_JOIN_GUARD",
     "STANLI_NO_NATIVE_ADJ",
     "STANLI_NO_PARTITION",
     "STANLI_NO_REROLL",
+    "STANLI_NO_TUNE",
     "STANLI_PACKET_MATH",
     "STANLI_PROFILE",
     "STANLI_PROFILE_PREP",
@@ -739,7 +742,9 @@ def graph_cell(dump, bench, mir, data, source_mode, reroll_enabled,
     env = dict(CLEAN_RUNTIME_ENV)
     if not reroll_enabled:
         env["STANLI_NO_REROLL"] = "1"
-    dump_proc = run_command([dump, mir, data, "-1"], timeout, env)
+    dump_env = dict(env)
+    dump_env["STANLI_NO_TUNE"] = "1"
+    dump_proc = run_command([dump, mir, data, "-1"], timeout, dump_env)
     parsed_dump = (parse_dump(dump_proc["stdout"])
                    if dump_proc["returncode"] == 0 else {})
     dump_issues = dump_problems(parsed_dump)
