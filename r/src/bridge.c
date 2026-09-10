@@ -115,9 +115,15 @@ static void* g_lib = NULL;
 
 /* Every entry point the R side uses. */
 static int (*p_abi_version)(void);
-static void* (*p_model_new_from_stan)(const char*, const char*, uint32_t, char*,
-                                      size_t);
-static void* (*p_model_new)(const char*, const char*, uint32_t, char*, size_t);
+static void* (*p_model_new_from_stan)(const char*, const char*, char*, size_t);
+static void* (*p_model_new)(const char*, const char*, char*, size_t);
+/* The seeded constructors are additive: an older runtime has neither, and
+ * rejects every _rng call in transformed data, so under it the seed has
+ * nothing to affect and the unseeded constructors serve. */
+static void* (*p_model_new_from_stan_seeded)(const char*, const char*, uint32_t,
+                                             char*, size_t);
+static void* (*p_model_new_seeded)(const char*, const char*, uint32_t, char*,
+                                   size_t);
 static void (*p_model_free)(void*);
 static int (*p_has_embedded_stanc)(void);
 static int (*p_exact_lp)(void);
@@ -208,8 +214,11 @@ SEXP stanli_bridge_load(SEXP path) {
     return mkString(msg);
   }
 
-  BIND("stanli_model_new_from_stan_seeded", p_model_new_from_stan);
-  BIND("stanli_model_new_seeded", p_model_new);
+  BIND("stanli_model_new_from_stan", p_model_new_from_stan);
+  BIND("stanli_model_new", p_model_new);
+  *(void**)(&p_model_new_from_stan_seeded) =
+      dl_sym(g_lib, "stanli_model_new_from_stan_seeded");
+  *(void**)(&p_model_new_seeded) = dl_sym(g_lib, "stanli_model_new_seeded");
   BIND("stanli_model_free", p_model_free);
   BIND("stanli_has_embedded_stanc", p_has_embedded_stanc);
   BIND("stanli_exact_lp", p_exact_lp);
@@ -283,14 +292,18 @@ SEXP stanli_r_model_new(SEXP code, SEXP data_json, SEXP is_mir, SEXP seed) {
   char err[8192];
   err[0] = '\0';
   void* m;
+  const char* text = CHAR(STRING_ELT(code, 0));
+  const char* data = CHAR(STRING_ELT(data_json, 0));
   const uint32_t construction_seed = (uint32_t)asReal(seed);
   if (asLogical(is_mir))
-    m = p_model_new(CHAR(STRING_ELT(code, 0)), CHAR(STRING_ELT(data_json, 0)),
-                    construction_seed, err, sizeof err);
+    m = p_model_new_seeded != NULL
+            ? p_model_new_seeded(text, data, construction_seed, err, sizeof err)
+            : p_model_new(text, data, err, sizeof err);
   else
-    m = p_model_new_from_stan(CHAR(STRING_ELT(code, 0)),
-                              CHAR(STRING_ELT(data_json, 0)), construction_seed,
-                              err, sizeof err);
+    m = p_model_new_from_stan_seeded != NULL
+            ? p_model_new_from_stan_seeded(text, data, construction_seed, err,
+                                           sizeof err)
+            : p_model_new_from_stan(text, data, err, sizeof err);
   if (m == NULL) error("%s", err[0] ? err : "stanli: model compilation failed");
   SEXP ext = PROTECT(R_MakeExternalPtr(m, R_NilValue, R_NilValue));
   R_RegisterCFinalizerEx(ext, model_finalizer, TRUE);
