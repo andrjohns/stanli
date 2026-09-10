@@ -16,12 +16,14 @@ StructuredMode read_structured_mode() {
   return StructuredMode::Off;
 }
 Lowering::Lowering(const DataMap& d, PrepTrace& p, PassDumper& dump_to,
-                   const char* graph_name, std::shared_ptr<ShapeInterner> pool)
+                   const char* graph_name, WaRng stream,
+                   std::shared_ptr<ShapeInterner> pool)
     : data(d),
       shape_pool(std::move(pool)),
       prep(p),
       dumper(dump_to),
-      prep_graph(graph_name) {}
+      prep_graph(graph_name),
+      td_rng(std::move(stream)) {}
 void Lowering::dump_named(const std::string& label, const std::string& name,
                           const std::vector<int>& roots, bool unfiltered) {
   GraphPrintInfo info;
@@ -807,7 +809,8 @@ std::string report_request() {
 
 }  // namespace
 
-CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
+CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
+                            unsigned seed) {
   const char* prep_env = std::getenv("STANLI_PROFILE_PREP");
   PrepTrace prep(prep_env && prep_env[0] != '0');
   PassDumper dumper(std::getenv("STANLI_DUMP_PASSES"),
@@ -821,13 +824,13 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data) {
   auto prog = std::make_shared<mir::Program>(decode_program(mir_text));
   prep.plain("compile", "parse_mir", parse_time, PrepTrace::Extra::MirBytes,
              static_cast<int64_t>(mir_text.size()));
-  Lowering lo(data, prep, dumper, "log_prob");
+  Lowering lo(data, prep, dumper, "log_prob", WaRng(seed));
   CompiledModel cm = lo.run(*prog);
   if (!prog->generate_quantities.empty()) {
     // A second lowering, over the transformed data the first one already
     // interpreted: re-running prepare_data would double preparation time on
     // the models where preparation is the cost (nn_rbm1bJ100, 20.7 s).
-    Lowering wa(data, prep, dumper, "write_array", lo.shape_pool);
+    Lowering wa(data, prep, dumper, "write_array", lo.td_rng, lo.shape_pool);
     const auto env_copy_time = prep.start();
     wa.td.env() = lo.td.env();
     wa.int_env = lo.int_env_data;

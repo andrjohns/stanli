@@ -277,6 +277,28 @@ def test_sample_eight_schools():
     assert 3.0 < mu < 6.0, mu
 
 
+def test_model_seed_draws_transformed_data():
+    # The construction seed owns transformed data's RNG draws, so the log
+    # density at a fixed point repeats under the same seed and moves under
+    # another. A run forwards its seed there the way CmdStan does: sampling
+    # at seed 7 rebuilds the seed-8 model into the seed-7 one.
+    src = ("transformed data { real z = normal_rng(0, 1); }\n"
+           "parameters { real mu; }\nmodel { mu ~ normal(z, 1); }\n")
+    q = np.zeros(1)
+    lp = [stanli.Model(stan_code=src, seed=s).log_prob_grad(q)[0]
+          for s in (7, 7, 8)]
+    assert lp[0] == lp[1], lp
+    assert lp[0] != lp[2], lp
+    m = stanli.Model(stan_code=src, seed=8)
+    m.sample(chains=1, seed=7, warmup=10, samples=10, refresh=0)
+    assert m.log_prob_grad(q)[0] == lp[0]
+    # A model whose transformed data never draws is not rebuilt.
+    plain = stanli.Model(stan_code="parameters { real mu; } model { mu ~ normal(0, 1); }")
+    handle = plain._m
+    plain.sample(chains=1, seed=7, warmup=10, samples=10, refresh=0)
+    assert plain._m == handle
+
+
 def test_log_prob_grad():
     m = stanli.Model(stan_file=FIXTURES / "es.stan",
                      data=FIXTURES / "eight_schools.json")

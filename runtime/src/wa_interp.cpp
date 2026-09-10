@@ -171,10 +171,11 @@ std::vector<double> WaInterp::eval(
     }
     return false;
   };
-  h.fun = [this, &cur, &rng](const mir::Expr& e, DataMap::Entry* out) {
-    return rng_fun(*cur, e, out, rng) ||
+  h.fun = [this, &rng](MirInterp<double>& in, const mir::Expr& e,
+                       DataMap::Entry* out) {
+    return interpreted_rng_call(in, e, out, rng) ||
            evaluate_retained_higher_order(
-               funs_, e, [&](const mir::Expr& arg) { return cur->eval(arg); },
+               funs_, e, [&in](const mir::Expr& arg) { return in.eval(arg); },
                out);
   };
   MirInterp<double> in(funs_, "write_array", std::move(h));
@@ -277,8 +278,8 @@ bool WaInterp::write_param(MirInterp<double>& in, const mir::Stmt& s,
   return true;
 }
 
-bool WaInterp::rng_fun(MirInterp<double>& in, const mir::Expr& e,
-                       DataMap::Entry* out, WaRng& rng) {
+bool interpreted_rng_call(MirInterp<double>& in, const mir::Expr& e,
+                          DataMap::Entry* out, WaRng& rng) {
   stan::rng_t& g = rng.gen();
   const std::string& f = e.name;
   if (f.size() < 5 || f.compare(f.size() - 4, 4, "_rng") != 0) return false;

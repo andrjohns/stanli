@@ -56,6 +56,28 @@ test_that("log_prob_grad returns lp and a gradient of the right length", {
   expect_length(g$grad, m$n_unconstrained)
 })
 
+test_that("a run seed rebuilds transformed data the way CmdStan seeds it", {
+  skip_without_runtime()
+  code <- "
+    transformed data { real z = normal_rng(0, 1); }
+    parameters { real mu; }
+    model { mu ~ normal(z, 1); }"
+  lp_at <- function(m) log_prob_grad(m, 0)$lp
+  seven <- lp_at(stanli_model(code = code, seed = 7))
+  expect_equal(lp_at(stanli_model(code = code, seed = 7)), seven)
+  m <- stanli_model(code = code, seed = 8)
+  expect_false(lp_at(m) == seven)
+  fit <- sample_model(m, chains = 1, seed = 7, warmup = 10, samples = 10,
+                      refresh = 0)
+  expect_equal(fit$model$seed, 7)
+  expect_equal(lp_at(fit$model), seven)
+  # A model whose transformed data never draws keeps its handle.
+  plain <- progress_model()
+  fit <- sample_model(plain, chains = 1, seed = 7, warmup = 10, samples = 10,
+                      refresh = 0)
+  expect_identical(fit$model$ptr, plain$ptr)
+})
+
 test_that("unconstrain turns constrained starting values into the free vector", {
   skip_without_runtime()
   # A model whose free order differs from its serial order: the simplex has

@@ -212,9 +212,21 @@ struct CompiledModel {
   // Each part of the model that has no compiled path and would run through
   // the MIR interpreter, with the lowering's reason.
   std::vector<std::string> interpreter_fallbacks;
+  // Transformed data drew from the construction seed, so this model is a
+  // function of that seed as well as of its data. A host that runs with one
+  // seed the way CmdStan does rebuilds under the run seed when this is set,
+  // and leaves every other model alone.
+  bool transformed_data_draws = false;
 };
 
-CompiledModel compile_model(const std::string& mir_text, const DataMap& data);
+// `seed` is the model-construction seed: transformed data's RNG calls draw
+// from create_rng(seed, 0), exactly as CmdStan's generated constructor does.
+// The section runs once here and its values are baked into both graphs, so
+// a different seed means a different compiled model. Generated-quantities
+// draws are unrelated; those streams are the caller's (see wa_interp.hpp).
+// The default matches the reference drivers and BridgeStan's convention.
+CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
+                            unsigned seed = 1);
 
 // The warning a host shows once per model with interpreter_fallbacks, and
 // the compile error STANLI_NO_INTERPRETER turns it into. `probe_failure` is

@@ -1995,7 +1995,7 @@ bool try_lower_region(
   {
     bool candidate_ready = false;
     try {
-      Lowering trial(data, prep, dumper, prep_graph,
+      Lowering trial(data, prep, dumper, prep_graph, td_rng,
                      std::make_shared<ShapeInterner>(*shape_pool));
       trial.fun_defs = fun_defs;
       trial.decls = decls;

@@ -756,10 +756,21 @@ struct Lowering {
   const char* prep_graph;
   const char* last_stage = "start";
   std::vector<int> last_roots;
+  // Transformed data's RNG stream. CmdStan's generated constructor seeds it
+  // with the run seed and chain 0 and runs the section once per model, so
+  // every chain sees the same draws; stanli evaluates the section once at
+  // load and bakes it into both graphs, which makes the seed a compile
+  // input like the data. The write_array lowering never runs prepare_data
+  // (it copies this lowering's environment), so its stream is never drawn.
+  WaRng td_rng;
   // The MIR interpreter instance for everything DataOnly: prepare_data,
   // data-only conditions, size expressions. Its environment doubles as the
   // lowering's view of transformed data. Hooks route FnReadData to the
-  // DataMap and unknown variables to the unrolled-loop int environment.
+  // DataMap, unknown variables to the unrolled-loop int environment, and
+  // RNG draws to td_rng through the same handler interpreted write_array
+  // uses. Compile-time folding of model and generated-quantities
+  // expressions goes through try_eval_interpreter, which refuses anything
+  // expr_effectful (every `_rng`), so those draws cannot reach this stream.
   MirInterp<double> td{
       fun_defs, "prepare_data",
       MirHooks{[this](const std::string& n) -> const DataMap::Entry* {
@@ -771,11 +782,16 @@ struct Lowering {
                  *out = it->second;
                  return true;
                },
-               [this](const mir::Expr& e, DataMap::Entry* out) {
+               [this](MirInterp<double>& in, const mir::Expr& e,
+                      DataMap::Entry* result) {
+                 if (interpreted_rng_call(in, e, result, td_rng)) {
+                   out.transformed_data_draws = true;
+                   return true;
+                 }
                  return evaluate_retained_higher_order(
                      fun_defs, e,
-                     [this](const mir::Expr& arg) { return td.eval(arg); },
-                     out);
+                     [&in](const mir::Expr& arg) { return in.eval(arg); },
+                     result);
                }}};
   Graph g;
   CompiledModel out;
@@ -856,7 +872,7 @@ struct Lowering {
 
   explicit Lowering(
       const DataMap& d, PrepTrace& p, PassDumper& dump_to,
-      const char* graph_name,
+      const char* graph_name, WaRng stream,
       std::shared_ptr<ShapeInterner> pool = std::make_shared<ShapeInterner>());
 
   void dump_named(const std::string& label, const std::string& name,

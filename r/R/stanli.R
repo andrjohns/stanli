@@ -50,6 +50,11 @@ read_utf8_file <- function(path) {
 #' @param data A named list of data, or a path to a JSON data file.
 #' @param mir Transformed MIR text, for a build without the embedded
 #'   compiler. Rarely needed.
+#' @param seed The model-construction seed: RNG calls in transformed data
+#'   draw from it once, here, the way CmdStan's generated constructor does.
+#'   [sample_model()] and [optimize_model()] forward their own `seed` here
+#'   when transformed data drew from it, rebuilding the model for that run,
+#'   so one seed governs a whole run as it does in CmdStan.
 #' @return An object of class `stanli_model` whose `columns` name every
 #'   output the way the posterior package reads them, `theta[1,2]` for an
 #'   indexed value. Warns, naming the part and the
@@ -58,7 +63,8 @@ read_utf8_file <- function(path) {
 #'   `STANLI_NO_INTERPRETER` set that is an error instead. Either message is
 #'   what to include in a bug report.
 #' @export
-stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL) {
+stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL,
+                         seed = 1) {
   load_runtime()
   if (is.null(code) && is.null(mir)) {
     if (is.null(file)) stop("provide file, code or mir", call. = FALSE)
@@ -82,14 +88,31 @@ stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL) {
     is_mir <- TRUE
   }
   ptr <- .Call("stanli_r_model_new", if (is_mir) mir else code, data_json,
-               is_mir)
+               is_mir, as.numeric(seed))
   note <- .Call("stanli_r_warnings", ptr)
   if (nzchar(note)) warning(note, call. = FALSE)
   structure(list(ptr = ptr,
                  n_unconstrained = .Call("stanli_r_n_unconstrained", ptr),
                  columns = stan_variable_names(
-                   .Call("stanli_r_column_names", ptr))),
+                   .Call("stanli_r_column_names", ptr)),
+                 source = list(code = if (is_mir) mir else code,
+                               data_json = data_json, is_mir = is_mir),
+                 seed = seed),
             class = "stanli_model")
+}
+
+# CmdStan builds the model under the run seed, so transformed data that
+# draws from it follows that seed. Rebuild for this run only when a draw
+# happened and the seed differs; every other model is returned unchanged.
+with_run_seed <- function(model, seed) {
+  if (seed == model$seed ||
+      !.Call("stanli_r_transformed_data_rng", model$ptr))
+    return(model)
+  model$ptr <- .Call("stanli_r_model_new", model$source$code,
+                     model$source$data_json, model$source$is_mir,
+                     as.numeric(seed))
+  model$seed <- seed
+  model
 }
 
 stan_variable_names <- function(x) {
@@ -151,7 +174,9 @@ unconstrain <- function(model, values) {
 #' all. Chain `c` uses CmdStan's stream for `(seed, chain id c + 1)`.
 #'
 #' @param model A `stanli_model`.
-#' @param chains,seed,warmup,samples,thin Sampler configuration.
+#' @param chains,seed,warmup,samples,thin Sampler configuration. `seed` is
+#'   also the model-construction seed for this run when transformed data
+#'   draws from it; see [stanli_model()].
 #' @param delta Target acceptance statistic.
 #' @param max_depth Maximum treedepth.
 #' @param save_warmup Keep the warmup draws.
@@ -202,6 +227,7 @@ sample_model <- function(model, chains = 4, seed = 1, warmup = 1000,
     stop("chains must be a positive integer with Pathfinder initialization",
          call. = FALSE)
   load_runtime()
+  model <- with_run_seed(model, seed)
   if (is.null(parallel_chains)) parallel_chains <- chains
   if (!is.null(pathfinder_init)) {
     init <- .Call("stanli_r_pathfinder_inits", model$ptr, as.integer(seed),
@@ -360,6 +386,7 @@ stanli_diagnose <- function(fit) {
 optimize_model <- function(model, seed = 1, iter = 2000, init = NULL,
                            init_radius = 2) {
   load_runtime()
+  model <- with_run_seed(model, seed)
   opts <- list(as.integer(seed), as.integer(iter), TRUE,
                as.double(init_radius))
   init_vec <- if (is.null(init)) numeric(0) else as.double(init)
