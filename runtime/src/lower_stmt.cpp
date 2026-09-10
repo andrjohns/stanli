@@ -917,6 +917,8 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
             [](const mir::Expr& ix) { return ix.name == "IndexAll"; });
         BuiltinIndexMap map;
         bool empty_selection = false;
+        SlotInfo expected_view;
+        bool has_expected_view = false;
         if (!runtime) {
           const SlotInfo& lhs_si =
               bound != scope.end() ? bound->second.si : declared->second.si;
@@ -1003,6 +1005,30 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
                          error.what(),
                      s.raw);
               }
+              if (s.rhs.type_ == "UReal" || s.rhs.type_ == "UInt") {
+                expected_view = view_of(s.rhs.type_);
+              } else if (s.rhs.type_ == "UVector" ||
+                         s.rhs.type_ == "URowVector") {
+                expected_view = view_of(s.rhs.type_);
+                expected_view.param_free = lhs_si.param_free;
+              } else if (s.rhs.type_ == "UMatrix") {
+                if (map.dimensions.size() != 2)
+                  fail("unsupported indexed assignment: matrix shape", s.raw);
+                expected_view = matrix_view(
+                    map.dimensions[0], map.dimensions[1], lhs_si.param_free);
+              } else {
+                const ViewKind leaf =
+                    s.rhs.unsized.leaf == mir::UnsizedLeaf::Matrix
+                        ? ViewKind::Matrix
+                    : s.rhs.unsized.leaf == mir::UnsizedLeaf::Vector
+                        ? ViewKind::Vector
+                    : s.rhs.unsized.leaf == mir::UnsizedLeaf::RowVector
+                        ? ViewKind::RowVector
+                        : ViewKind::Flat;
+                expected_view =
+                    array_view(map.dimensions, leaf, lhs_si.param_free);
+              }
+              has_expected_view = true;
             }
           }
           if (!empty_selection && map.count == 0) empty_selection = true;
@@ -1045,6 +1071,8 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
         const SlotInfo out_si = prev_v.si;
         if (whole)
           require_binding(rhs_v, g.slots[prev].len, prev_v.si, s.lhs, s.raw);
+        else if (has_expected_view)
+          require_binding(rhs_v, map.count, expected_view, s.lhs, s.raw);
         else if (g.slots[rhs_v.slot].len != map.count)
           fail("indexed assignment size mismatch for " + s.lhs, s.raw);
         std::vector<int64_t> descending;
