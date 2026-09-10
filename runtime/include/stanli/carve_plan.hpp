@@ -50,7 +50,8 @@ struct CandidateRecord {
 // already decided that side wasn't worth pricing, so it isn't worth timing.
 inline bool desired_decision(const CandidateRecord& rec, CarveDecision* out) {
   if (rec.taken == CarveDecision::kIsland) {
-    *out = CarveDecision::kLeave;
+    *out = rec.split_viable == Viability::kYes ? CarveDecision::kSplit
+                                               : CarveDecision::kLeave;
     return true;
   }
   if (rec.island_viable == Viability::kYes) {

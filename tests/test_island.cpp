@@ -2318,6 +2318,104 @@ static void test_eligible_decisions_ordered_by_closeness() {
   }
 }
 
+// A joined region whose split was actually priced offers kSplit as the
+// alternative, not kLeave: the estimate that took kIsland here compared it
+// against the split cost, not against leaving the region ungrouped.
+static void test_desired_decision_offers_split_when_priced() {
+  CandidateRecord rec;
+  rec.key = CandidateKey{0, 10, false};
+  rec.taken = CarveDecision::kIsland;
+  rec.island_viable = Viability::kYes;
+  rec.split_viable = Viability::kYes;
+  rec.chosen_cost = 100;
+  rec.other_cost = 90;
+
+  CarveDecision alt;
+  expect("priced split decision eligible", desired_decision(rec, &alt));
+  expect("priced split alternative is split", alt == CarveDecision::kSplit);
+}
+
+// The same taken=kIsland record, but the natural path never priced a
+// split: the only alternative worth timing is leaving the region alone.
+static void test_desired_decision_offers_leave_when_split_unpriced() {
+  CandidateRecord rec;
+  rec.key = CandidateKey{0, 10, false};
+  rec.taken = CarveDecision::kIsland;
+  rec.island_viable = Viability::kYes;
+  rec.split_viable = Viability::kUnknown;
+  rec.chosen_cost = 100;
+  rec.other_cost = 90;
+
+  CarveDecision alt;
+  expect("unpriced split decision eligible", desired_decision(rec, &alt));
+  expect("unpriced split alternative is leave", alt == CarveDecision::kLeave);
+}
+
+// build_two_piece_split_loses joins under the multi-piece floor shortcut,
+// which never prices the split: resolve() records the graph (leave) cost
+// as the alternative, and the tuner's replay stays a join-vs-leave probe.
+static void test_resolve_records_graph_cost_when_split_unpriced() {
+  VectorBinaryGraph h = build_two_piece_split_loses();
+  CarvePlan plan;
+  expect_eq("unpriced-split carved",
+            carve_islands(h.g, h.fills, h.terms, {}, &plan), 1);
+  expect_eq("unpriced-split one decision", (int)plan.decisions.size(), 1);
+  if (plan.decisions.empty()) return;
+  const CandidateRecord& rec = plan.decisions[0];
+  expect("unpriced-split taken island", rec.taken == CarveDecision::kIsland);
+  expect("unpriced-split split unpriced",
+         rec.split_viable == Viability::kUnknown);
+  CarveDecision alt;
+  expect("unpriced-split eligible", desired_decision(rec, &alt));
+  expect("unpriced-split alternative leave", alt == CarveDecision::kLeave);
+}
+
+// The same region, with the join guard disabled so the natural path prices
+// the split before comparing: resolve() must record that priced split cost
+// as the alternative, not the graph (leave) cost the estimate never used
+// to reach its decision.
+static void test_resolve_records_split_cost_when_priced() {
+  const CandidateKey key = [] {
+    VectorBinaryGraph h = build_two_piece_split_loses();
+    CarvePlan plan;
+    carve_islands(h.g, h.fills, h.terms, {}, &plan);
+    return plan.decisions.empty() ? CandidateKey{} : plan.decisions[0].key;
+  }();
+
+  test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
+  VectorBinaryGraph base = build_two_piece_split_loses();
+  CarvePlan plan;
+  const int carved = carve_islands(base.g, base.fills, base.terms, {}, &plan);
+  test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
+  expect_eq("priced-split carved", carved, 1);
+  expect_eq("priced-split one decision", (int)plan.decisions.size(), 1);
+  if (plan.decisions.empty()) return;
+  const CandidateRecord natural = plan.decisions[0];
+  expect("priced-split same key", natural.key.begin == key.begin &&
+                                      natural.key.end == key.end &&
+                                      natural.key.strict == key.strict);
+  expect("priced-split taken island", natural.taken == CarveDecision::kIsland);
+  expect("priced-split split priced", natural.split_viable == Viability::kYes);
+  CarveDecision alt;
+  expect("priced-split eligible", desired_decision(natural, &alt));
+  expect("priced-split alternative split", alt == CarveDecision::kSplit);
+
+  restore_pre_island(base.g, plan);
+  plan.overrides[natural.key] = CarveDecision::kSplit;
+  plan.decisions.clear();
+  test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
+  const int forced = carve_islands(base.g, base.fills, base.terms, {}, &plan);
+  test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
+  expect_eq("priced-split forced carved two", forced, 2);
+  expect("priced-split forced records the outer key first",
+         !plan.decisions.empty());
+  if (plan.decisions.empty()) return;
+  expect_eq("priced-split forced taken split", (int)plan.decisions[0].taken,
+            (int)CarveDecision::kSplit);
+  expect_eq("priced-split other_cost is the priced split cost",
+            natural.other_cost, plan.decisions[0].chosen_cost);
+}
+
 int main() {
   // What the compiler does with a region, on graphs small enough to
   // reason about. The cost estimate would refuse most of them -- it is
@@ -2379,6 +2477,10 @@ int main() {
   test_override_join_split();
   test_join_guard_skip_registers_no_choice();
   test_eligible_decisions_ordered_by_closeness();
+  test_desired_decision_offers_split_when_priced();
+  test_desired_decision_offers_leave_when_split_unpriced();
+  test_resolve_records_graph_cost_when_split_unpriced();
+  test_resolve_records_split_cost_when_priced();
   if (failures) {
     std::printf("%d failures\n", failures);
     return 1;

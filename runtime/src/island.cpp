@@ -1109,12 +1109,15 @@ struct Carver {
                   ? (c->compiled ? CarveDecision::kIsland : natural)
                   : ov->second;
     }
+    const Viability split_viable =
+        have_split ? (any ? Viability::kYes : Viability::kNo)
+                   : Viability::kUnknown;
     int64_t chosen_cost = 0, other_cost = 0;
     if (c) {
       const int64_t island_side = c->island_cost + c->boundary;
       if (taken == CarveDecision::kIsland) {
         chosen_cost = island_side;
-        other_cost = c->graph_cost;
+        other_cost = split_viable == Viability::kYes ? split : c->graph_cost;
       } else if (taken == CarveDecision::kSplit) {
         chosen_cost = split;
         other_cost = island_side;
@@ -1129,9 +1132,7 @@ struct Carver {
         CandidateRecord{key, taken,
                         c ? (c->compiled ? Viability::kYes : Viability::kNo)
                           : Viability::kUnknown,
-                        have_split ? (any ? Viability::kYes : Viability::kNo)
-                                   : Viability::kUnknown,
-                        chosen_cost, other_cost});
+                        split_viable, chosen_cost, other_cost});
     return taken;
   }
 
