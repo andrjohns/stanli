@@ -318,7 +318,7 @@ def main():
                         n_params = int(row["params"] or 0)
                         g = run([str(gexe), str(dj), str(evals_for(n_params))],
                                 timeout)
-                        if g:
+                        if g and g.stdout.split():
                             row["cmdstan_ns_grad"] = (
                                 f"{float(g.stdout.split()[0]):.0f}")
                         else:
