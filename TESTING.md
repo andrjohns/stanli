@@ -232,7 +232,10 @@ The policy is: agreement within 2 ULP by default. Reassociation-class kernel
 changes (reductions, matvec, gather backward, softmax backward) may use a 10
 ULP budget when the change is measured and that budget is stated in the commit
 message. Densities merged across loop lanes may use 30 ULP, recorded per
-model. Bitwise agreement is reported for information but is not a gate; if a
+model. A larger distance from CmdStan is acceptable when a high-precision
+reference shows stanli at least as close to the true value as CmdStan is;
+the reference measurement is recorded with the model, as dogs' is in
+`tools/corpus.py`. Bitwise agreement is reported for information but is not a gate; if a
 change improves performance by moving a model from bitwise to a small ULP band,
 that is an accepted trade. At their primary recorded point, 41 verified
 posteriordb models have 0 ULP difference with CmdStan. Eight additional language
