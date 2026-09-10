@@ -4546,7 +4546,7 @@ void test_gq_reduction_lowering_guards() {
     };
     expect_invalid_range(0, 1, "out of bounds", "low OOB range assignment");
     expect_invalid_range(5, 6, "out of bounds", "high OOB range assignment");
-    expect_invalid_range(4, 4, "size mismatch",
+    expect_invalid_range(4, 4, "width mismatch",
                          "range assignment RHS width mismatch");
 
     // A single range index on a 2-D value selects rows; 4:5 is outside the
