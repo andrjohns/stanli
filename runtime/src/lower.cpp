@@ -804,7 +804,7 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
       const size_t orig_udata = g.udata_pool.size();
       CarvePlan carve_plan;
       islands = carve_islands(g, out.fills, target_terms, roots, &carve_plan);
-      if (has_eligible_choice(carve_plan.decisions)) {
+      if (has_eligible_choice(carve_plan.decisions, kTuneTrustRadius)) {
         std::vector<Op> carved_ops = std::move(g.ops);
         std::vector<Slot> carved_slots(
             std::make_move_iterator(g.slots.begin() + (ptrdiff_t)orig_slots),

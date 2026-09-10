@@ -827,7 +827,7 @@ either direction for reasons the model does not see. The carver already
 records every candidate it priced and the decision it took
 (`carve_plan.hpp`); this pass replays a recorded decision with its
 losing alternative, times both forms on the real executor, and keeps
-whichever one actually ran faster.
+whichever one ran faster.
 
 Before any timing happens, both forms must agree to the last bit on the
 log-density and every gradient component at three fixed points (the
@@ -835,8 +835,8 @@ origin and two `mt19937_64`-seeded points); any disagreement keeps the
 carver's answer no matter how the timing would have gone. The gate is
 bitwise, not a tolerance, because a form that changes the answer is
 never a valid alternative regardless of speed, and a small difference
-here is exactly the signature of a genuine reassociation the carver's
-own vocabulary is not free to make.
+here is the signature of a reassociation the carver's own vocabulary
+is not free to make.
 
 A decision is only a choice if it is worth pricing: `taken == kIsland`
 (the alternative is leave, always free to try) or `island_viable ==
@@ -848,15 +848,16 @@ worth compiling. Choices are timed closest call first, ordered by
 `|chosen - other| / max(chosen, other)` from the costs the estimate
 compared, so a budget that runs out spends its time on the decisions
 most likely to be wrong; a decision past `kTuneTrustRadius` (0.25) is
-never timed at all, since that margin is where the estimate is not
+never timed at all, and a graph with no decision inside the radius
+keeps no replay state, since that margin is where the estimate is not
 trusted to rank two forms, a property of the estimate itself rather
 than of any model or machine. The budget itself is one thousand times the
 duration of the first gradient evaluation, amortizing the cost of
 tuning against the run it is tuning for; each choice is checked against
 it before it is tried and again once its alternative graph and executor
 are built, so a model with an expensive rebuild cannot run past the
-budget mid-choice. A batch floor of 20 us keeps a round from being a
-sliver too short for the clock to resolve. `STANLI_NO_TUNE=1` skips
+budget mid-choice. A batch floor of 20 us keeps a round from being too
+short for the clock to resolve. `STANLI_NO_TUNE=1` skips
 building a plan at all, which is what `stanli_check`, `dump_ops`, and
 the lit runner pin so their graphs stay deterministic across runs;
 `bench_grad`, `stanli_run`, and the bindings run what ships.
@@ -868,8 +869,8 @@ that decided every flip or keep.
 | sw_skewnormal | 360 us | 2.44 ms | 1.79 ms |
 | s2_mm | 437 us | 2.88 ms | 2.24 ms |
 | s2_index_mi | 241 us | 1.32 ms | 1.04 ms |
-| hmm_gaussian | 1.60 ms | 328 ms | 324 ms |
-| iohmm_reg | 2.74 ms | 482 ms | 478 ms |
+| hmm_gaussian | 0 | 327 ms | 327 ms |
+| iohmm_reg | 0 | 479 ms | 477 ms |
 | ldaK5 | 0.2 us | 439 ms | 436 ms |
 
 ## Native symmetric eigendecomposition pullbacks (`matrix_fns.cpp`)

@@ -60,18 +60,21 @@ inline bool desired_decision(const CandidateRecord& rec, CarveDecision* out) {
   return false;
 }
 
-inline bool has_eligible_choice(const std::vector<CandidateRecord>& decisions) {
-  CarveDecision unused;
-  for (const CandidateRecord& rec : decisions)
-    if (desired_decision(rec, &unused)) return true;
-  return false;
-}
-
 inline double decision_closeness(const CandidateRecord& rec) {
   const int64_t mx = std::max(rec.chosen_cost, rec.other_cost);
   if (mx <= 0) return 0.0;
   return std::abs(static_cast<double>(rec.chosen_cost - rec.other_cost)) /
          static_cast<double>(mx);
+}
+
+inline bool has_eligible_choice(const std::vector<CandidateRecord>& decisions,
+                                double trust_radius) {
+  CarveDecision unused;
+  for (const CandidateRecord& rec : decisions)
+    if (desired_decision(rec, &unused) &&
+        decision_closeness(rec) <= trust_radius)
+      return true;
+  return false;
 }
 
 // Indices of the eligible decisions in `decisions`, closest call first.
