@@ -32,6 +32,7 @@
 #define STANLI_ISLAND_HPP
 
 #include <stanli/adjoint.hpp>
+#include <stanli/carve_plan.hpp>
 #include <stanli/program.hpp>
 
 #include <cstdint>
@@ -155,10 +156,23 @@ struct Graph;  // graph.hpp
 // Returns the number of islands carved. STANLI_NO_ISLAND=1 disables this
 // pass only: the islands lowering emits for parameter-dependent control
 // flow are not an optimization and are always on.
+//
+// With plan == nullptr, behavior is exactly as above. With a plan, every
+// candidate the scan prices is recorded in plan->decisions in scan order;
+// an entry in plan->overrides forces that candidate's decision, and
+// plan->cache (created on first use) makes a replay skip recompiling a
+// candidate it has already priced. plan->pre_island_ops receives the op
+// list the carve replaced, for restore_pre_island below.
 int carve_islands(Graph& g,
                   const std::vector<std::pair<int, std::vector<double>>>& fills,
                   const std::vector<int>& target_terms,
-                  const std::vector<int>& extra_roots);
+                  const std::vector<int>& extra_roots,
+                  CarvePlan* plan = nullptr);
+
+// Put plan.pre_island_ops back as g.ops, undoing a carve so it can be
+// replayed with different overrides. g's slots and payload pools are left
+// as they are.
+void restore_pre_island(Graph& g, const CarvePlan& plan);
 
 // A straight-line run of a retained loop body compiled to one program. The
 // loop executor seeds the live-in registers from its own slot bindings, runs
