@@ -11,7 +11,7 @@ useful and a rerun can skip what is already there.
 
 Usage: python3 harnesses/corpus_bench.py deps/cmdstan deps/posteriordb OUT.tsv
                                       [--filter SUBSTR] [--timeout SEC]
-                                      [--stanli-only]
+                                      [--stanli-only] [--no-sample]
                                       [--cmdstan-stanc PATH]
                                       [--stancflags FLAGS]
 Needs build-rel/ built. Expect hours: CmdStan builds a binary per model.
@@ -34,6 +34,10 @@ appended to the header command. Without them the make build uses
 CmdStan's own bin/stanc, the header deps/stanc3/stanc, both with no flags.
 OUT.manifest.json next to the TSV records the stanc binaries and flags
 behind the CmdStan columns.
+
+--no-sample skips both samplers and leaves stanli_sample_s, stanli_grads,
+and cmdstan_sample_s empty. Use it to measure gradient and compile time
+without paying for a full 1000 warmup + 1000 draw run per model.
 """
 import contextlib
 import csv
@@ -162,6 +166,7 @@ def main():
     filt = option("--filter", "")
     timeout = int(option("--timeout", 900))
     stanli_only = "--stanli-only" in sys.argv
+    no_sample = "--no-sample" in sys.argv
     cmdstan_stanc = option("--cmdstan-stanc", None)
     if cmdstan_stanc is not None:
         cmdstan_stanc = pathlib.Path(cmdstan_stanc).resolve()
@@ -255,20 +260,22 @@ def main():
                     if g:
                         row["stanli_ns_grad"] = (
                             f"{float(g.stdout.split()[0]):.0f}")
-                    t0 = time.perf_counter()
-                    s, st = run2([str(RUN), str(stan), str(dj), "--warmup",
-                                  "1000", "--samples", "1000", "--seed", "1"],
-                                 timeout)
-                    if st == "ok":
-                        row["stanli_sample_s"] = (
-                            f"{time.perf_counter() - t0:.2f}")
-                        row["stanli_grads"] = parse_grad_count(s.stderr)
-                    elif st == "timeout":
-                        notes.append("stanli_sample_timeout")
-                    else:
-                        row["stanli_grads"] = parse_grad_count(s.stderr)
-                        err = (s.stderr.strip().splitlines() or [""])[-1][:60]
-                        notes.append(f"stanli_sample_fail({err})")
+                    if not no_sample:
+                        t0 = time.perf_counter()
+                        s, st = run2([str(RUN), str(stan), str(dj),
+                                      "--warmup", "1000", "--samples", "1000",
+                                      "--seed", "1"], timeout)
+                        if st == "ok":
+                            row["stanli_sample_s"] = (
+                                f"{time.perf_counter() - t0:.2f}")
+                            row["stanli_grads"] = parse_grad_count(s.stderr)
+                        elif st == "timeout":
+                            notes.append("stanli_sample_timeout")
+                        else:
+                            row["stanli_grads"] = parse_grad_count(s.stderr)
+                            err = (s.stderr.strip().splitlines()
+                                   or [""])[-1][:60]
+                            notes.append(f"stanli_sample_fail({err})")
 
             if stanli_only:
                 old = old_rows.get(model, {})
@@ -323,15 +330,17 @@ def main():
                                 f"{float(g.stdout.split()[0]):.0f}")
                         else:
                             notes.append("cmdstan_grad_fail")
-                t0 = time.perf_counter()
-                s, st = run2([str(exe), "sample", "num_warmup=1000",
-                              "num_samples=1000", "random", "seed=1",
-                              "data", f"file={dj}",
-                              "output", f"file={work}/out.csv"], timeout)
-                if st == "ok":
-                    row["cmdstan_sample_s"] = f"{time.perf_counter() - t0:.2f}"
-                else:
-                    notes.append(f"cmdstan_sample_{st}")
+                if not no_sample:
+                    t0 = time.perf_counter()
+                    s, st = run2([str(exe), "sample", "num_warmup=1000",
+                                  "num_samples=1000", "random", "seed=1",
+                                  "data", f"file={dj}",
+                                  "output", f"file={work}/out.csv"], timeout)
+                    if st == "ok":
+                        row["cmdstan_sample_s"] = (
+                            f"{time.perf_counter() - t0:.2f}")
+                    else:
+                        notes.append(f"cmdstan_sample_{st}")
 
             row["note"] = ",".join(notes)
             with out_path.open("a") as f:
