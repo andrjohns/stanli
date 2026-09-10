@@ -1,7 +1,8 @@
 // The tuner's decision rule, isolated from the island carver: scripted
 // batch times drive flip/keep/skip outcomes over small hand-built graphs.
 // tune.cpp documents the exact now_seconds() call sequence ScriptBuilder
-// replays here.
+// replays here. budget_seconds is 1000x the scripted first-evaluation
+// duration, not a parameter, so every test scripts one.
 #include "env_helpers.hpp"
 #include "graph_helpers.hpp"
 #include <stanli/compile.hpp>
@@ -117,6 +118,12 @@ struct ScriptBuilder {
   }
   void advance(double delta) { t += delta; }
 
+  // The one-time pre-loop timing pair that sets budget_seconds to 1000x dt.
+  void budget(double dt) {
+    read();
+    advance(dt);
+    read();
+  }
   // The elapsed check plus the point-0 timing pair that sizes the batch:
   // three reads, cur_eval_time == dt.
   void calibrate(double dt) {
@@ -125,6 +132,9 @@ struct ScriptBuilder {
     advance(dt);
     read();
   }
+  // The elapsed-vs-budget recheck once the alternative graph and executor
+  // are built: one read, called only when the alternative did not refuse.
+  void built() { read(); }
   void round_pair(double first_dt, double second_dt) {
     read();
     advance(first_dt);
@@ -162,7 +172,9 @@ struct ScriptedMeasurer : Measurer {
 static void test_flips_when_faster_every_round() {
   ScriptBuilder b;
   b.resolution();
+  b.budget(0.01);
   b.calibrate(0.001);
+  b.built();
   b.rounds({{0.002, 0.001}, {0.002, 0.001}, {0.002, 0.001}});
   b.read();  // stats.seconds
 
@@ -174,7 +186,7 @@ static void test_flips_when_faster_every_round() {
   c.won = [&] { won = true; };
   cm.choices.push_back(std::move(c));
 
-  const TuneStats stats = tune(cm, 10.0, &m);
+  const TuneStats stats = tune(cm, &m);
   expect_eq("flip: choices", stats.choices, 1);
   expect_eq("flip: tried", stats.tried, 1);
   expect_eq("flip: flipped", stats.flipped, 1);
@@ -188,7 +200,9 @@ static void test_flips_when_faster_every_round() {
 static void test_no_flip_on_tie() {
   ScriptBuilder b;
   b.resolution();
+  b.budget(0.01);
   b.calibrate(0.001);
+  b.built();
   b.rounds({{0.001, 0.001},
             {0.001, 0.001},
             {0.001, 0.001},
@@ -206,7 +220,7 @@ static void test_no_flip_on_tie() {
   c.won = [&] { won = true; };
   cm.choices.push_back(std::move(c));
 
-  const TuneStats stats = tune(cm, 10.0, &m);
+  const TuneStats stats = tune(cm, &m);
   expect_eq("tie: tried", stats.tried, 1);
   expect_eq("tie: flipped", stats.flipped, 0);
   expect("tie: won callback did not fire", !won);
@@ -215,7 +229,9 @@ static void test_no_flip_on_tie() {
 static void test_no_flip_on_disagreement() {
   ScriptBuilder b;
   b.resolution();
+  b.budget(0.01);
   b.calibrate(0.001);
+  b.built();
   // Faster in every round, but the agreement gate never lets rounds start.
   b.rounds({});
   b.read();
@@ -225,7 +241,7 @@ static void test_no_flip_on_disagreement() {
   CompiledModel cm = make_model();
   cm.choices.push_back(disagreeing_choice("disagree test"));
 
-  const TuneStats stats = tune(cm, 10.0, &m);
+  const TuneStats stats = tune(cm, &m);
   expect_eq("disagree: tried", stats.tried, 1);
   expect_eq("disagree: flipped", stats.flipped, 0);
   expect_eq("disagree: skipped_disagree", stats.skipped_disagree, 1);
@@ -234,6 +250,7 @@ static void test_no_flip_on_disagreement() {
 static void test_skipped_no_point_on_refusal() {
   ScriptBuilder b;
   b.resolution();
+  b.budget(0.01);
   b.calibrate(0.001);
   b.read();
 
@@ -242,7 +259,7 @@ static void test_skipped_no_point_on_refusal() {
   CompiledModel cm = make_model();
   cm.choices.push_back(refusing_choice("refuse test"));
 
-  const TuneStats stats = tune(cm, 10.0, &m);
+  const TuneStats stats = tune(cm, &m);
   expect_eq("refuse: tried", stats.tried, 1);
   expect_eq("refuse: flipped", stats.flipped, 0);
   expect_eq("refuse: skipped_no_point", stats.skipped_no_point, 1);
@@ -251,8 +268,9 @@ static void test_skipped_no_point_on_refusal() {
 static void test_skipped_budget() {
   ScriptBuilder b;
   b.resolution();
-  // A 10ms point-0 eval makes one round's estimate (2 batches) far exceed a
-  // budget of one millisecond.
+  // A 10us first evaluation sets budget_seconds to 0.01; a 10ms point-0 eval
+  // makes one round's estimate (2 batches) far exceed that.
+  b.budget(0.00001);
   b.calibrate(0.010);
   b.read();  // stats.seconds
 
@@ -261,7 +279,7 @@ static void test_skipped_budget() {
   CompiledModel cm = make_model();
   cm.choices.push_back(identity_choice("budget test"));
 
-  const TuneStats stats = tune(cm, 0.001, &m);
+  const TuneStats stats = tune(cm, &m);
   expect_eq("budget: tried", stats.tried, 0);
   expect_eq("budget: flipped", stats.flipped, 0);
   expect_eq("budget: skipped_budget", stats.skipped_budget, 1);
@@ -273,9 +291,12 @@ static void test_skipped_budget() {
 static void test_greedy_accumulation() {
   ScriptBuilder b;
   b.resolution();
+  b.budget(0.01);
   b.calibrate(0.001);
+  b.built();
   b.rounds({{0.002, 0.001}, {0.002, 0.001}, {0.002, 0.001}});
   b.calibrate(0.001);
+  b.built();
   b.rounds({{0.002, 0.001}, {0.002, 0.001}, {0.002, 0.001}});
   b.read();
 
@@ -298,7 +319,7 @@ static void test_greedy_accumulation() {
   };
   cm.choices.push_back(std::move(second));
 
-  const TuneStats stats = tune(cm, 10.0, &m);
+  const TuneStats stats = tune(cm, &m);
   expect_eq("greedy: choices", stats.choices, 2);
   expect_eq("greedy: tried", stats.tried, 2);
   expect_eq("greedy: flipped", stats.flipped, 2);

@@ -69,7 +69,7 @@ double median_of(std::vector<double> v) {
 
 }  // namespace
 
-TuneStats tune(CompiledModel& cm, double budget_seconds, Measurer* measurer) {
+TuneStats tune(CompiledModel& cm, Measurer* measurer) {
   TuneStats stats;
   if (std::getenv("STANLI_NO_TUNE")) return stats;
   stats.choices = static_cast<int>(cm.choices.size());
@@ -81,7 +81,7 @@ TuneStats tune(CompiledModel& cm, double budget_seconds, Measurer* measurer) {
 
   double t_start = 0.0;
   const double resolution = clock_resolution(m, &t_start);
-  const double batch_target = 100.0 * resolution;
+  const double batch_target = std::max(100.0 * resolution, 20e-6);
 
   auto cur_ex = std::make_unique<Executor>(cm.graph);
   cm.bind(*cur_ex);
@@ -99,6 +99,15 @@ TuneStats tune(CompiledModel& cm, double budget_seconds, Measurer* measurer) {
 
   std::vector<double> cur_grad(static_cast<size_t>(n)),
       alt_grad(static_cast<size_t>(n));
+
+  // The budget is amortized against real use: a graph that evaluates fewer
+  // than a thousand gradients over its lifetime isn't worth tuning for.
+  double first_lp = 0.0;
+  const double t_first = m.now_seconds();
+  safe_eval(*cur_ex, points[0], &first_lp, cur_grad);
+  const double first_eval_time =
+      std::max(m.now_seconds() - t_first, resolution);
+  const double budget_seconds = 1000.0 * first_eval_time;
 
   for (TuningChoice& choice : cm.choices) {
     const double elapsed = m.now_seconds() - t_start;
@@ -135,6 +144,14 @@ TuneStats tune(CompiledModel& cm, double budget_seconds, Measurer* measurer) {
     }
     auto alt_ex = std::make_unique<Executor>(g_alt);
     cm.bind(*alt_ex);
+
+    if (m.now_seconds() - t_start > budget_seconds) {
+      ++stats.skipped_budget;
+      if (debug)
+        emit_diagnostic("tune: " + choice.what +
+                        " skipped_budget after building alternative");
+      break;
+    }
 
     std::vector<int> usable;
     bool disagree = false;

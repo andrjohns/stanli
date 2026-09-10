@@ -1096,8 +1096,8 @@ struct Carver {
   // Records key's decision, applying any override; prices a side only when
   // the override needs it beyond what the natural path already priced.
   CarveDecision resolve(const CandidateKey& key, CarveDecision natural,
-                        std::optional<Candidate>& c, bool any,
-                        bool have_split) {
+                        std::optional<Candidate>& c, bool any, bool have_split,
+                        int64_t split) {
     if (!plan) return natural;
     auto ov = plan->overrides.find(key);
     const bool overriding = ov != plan->overrides.end();
@@ -1109,12 +1109,29 @@ struct Carver {
                   ? (c->compiled ? CarveDecision::kIsland : natural)
                   : ov->second;
     }
+    int64_t chosen_cost = 0, other_cost = 0;
+    if (c) {
+      const int64_t island_side = c->island_cost + c->boundary;
+      if (taken == CarveDecision::kIsland) {
+        chosen_cost = island_side;
+        other_cost = c->graph_cost;
+      } else if (taken == CarveDecision::kSplit) {
+        chosen_cost = split;
+        other_cost = island_side;
+      } else {
+        chosen_cost = c->graph_cost;
+        other_cost = island_side;
+      }
+    } else if (taken == CarveDecision::kSplit && have_split) {
+      chosen_cost = split;
+    }
     plan->decisions.push_back(
         CandidateRecord{key, taken,
                         c ? (c->compiled ? Viability::kYes : Viability::kNo)
                           : Viability::kUnknown,
                         have_split ? (any ? Viability::kYes : Viability::kNo)
-                                   : Viability::kUnknown});
+                                   : Viability::kUnknown,
+                        chosen_cost, other_cost});
     return taken;
   }
 
@@ -1193,7 +1210,7 @@ struct Carver {
           }
         }
 
-        switch (resolve(key, natural, c, any, have_split)) {
+        switch (resolve(key, natural, c, any, have_split, split)) {
           case CarveDecision::kSplit:
             strict_until = j;
             break;
@@ -1219,9 +1236,14 @@ struct Carver {
           taken = ov->second == CarveDecision::kIsland
                       ? (c.compiled ? CarveDecision::kIsland : natural)
                       : CarveDecision::kLeave;
+        const int64_t island_side = c.island_cost + c.boundary;
+        const int64_t chosen_cost =
+            taken == CarveDecision::kIsland ? island_side : c.graph_cost;
+        const int64_t other_cost =
+            taken == CarveDecision::kIsland ? c.graph_cost : island_side;
         plan->decisions.push_back(CandidateRecord{
             key, taken, c.compiled ? Viability::kYes : Viability::kNo,
-            Viability::kUnknown});
+            Viability::kUnknown, chosen_cost, other_cost});
       }
       if (taken == CarveDecision::kIsland) {
         const bool renamed = strict && renames_a_slot(c);

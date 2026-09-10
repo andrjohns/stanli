@@ -551,15 +551,14 @@ void Lowering::lower_read_param(const mir::Stmt& s) {
   if (!in_write_array)
     out.views.push_back(parameter_view(s, con.slot, con_len));
 }
-// Scalar terms reduce through chained ADD_N ops (6-input limit per op).
-int Lowering::reduce_terms(std::vector<int> terms) {
-  // The target is a scalar, and every consumer of a term reads one value
-  // from it. A container term is therefore not a shape to accommodate but
-  // a lowering bug -- one whose symptom, before this check, was a model
-  // that sampled a wrong posterior without saying anything.
-  for (int t : terms)
-    if (g.slots[t].len != 1) fail("target term is not a scalar");
-  if (terms.empty()) return const_slot(0.0);
+namespace {
+
+// The shared grouping loop behind reduce_terms and reduce_terms_replay:
+// chunks of up to 6 terms fold through one ADD_N each until one remains.
+// emit_chunk does the actual op emission, which differs between a live
+// Lowering pass and a replay over a detached Graph copy.
+template <typename EmitChunk>
+int reduce_terms_grouped(std::vector<int> terms, EmitChunk emit_chunk) {
   while (terms.size() > 1) {
     std::vector<int> next;
     for (size_t i = 0; i < terms.size(); i += 6) {
@@ -569,11 +568,28 @@ int Lowering::reduce_terms(std::vector<int> terms) {
         continue;
       }
       std::vector<int> chunk(terms.begin() + i, terms.begin() + i + n);
-      next.push_back(emit_raw(OP_ADD_N, chunk, 1, {}).slot);
+      next.push_back(emit_chunk(chunk));
     }
     terms = std::move(next);
   }
-  return terms[0];
+  return terms.empty() ? -1 : terms[0];
+}
+
+}  // namespace
+
+// Scalar terms reduce through chained ADD_N ops (6-input limit per op).
+int Lowering::reduce_terms(std::vector<int> terms) {
+  // The target is a scalar, and every consumer of a term reads one value
+  // from it. A container term is therefore not a shape to accommodate but
+  // a lowering bug -- one whose symptom, before this check, was a model
+  // that sampled a wrong posterior without saying anything.
+  for (int t : terms)
+    if (g.slots[t].len != 1) fail("target term is not a scalar");
+  if (terms.empty()) return const_slot(0.0);
+  return reduce_terms_grouped(std::move(terms),
+                              [&](const std::vector<int>& chunk) {
+                                return emit_raw(OP_ADD_N, chunk, 1, {}).slot;
+                              });
 }
 
 namespace {
@@ -592,44 +608,16 @@ const char* carve_decision_name(CarveDecision d) {
 
 int reduce_terms_replay(Graph& g, std::vector<int> terms) {
   if (terms.empty()) return g.add_slot(1, false);
-  while (terms.size() > 1) {
-    std::vector<int> next;
-    for (size_t i = 0; i < terms.size(); i += 6) {
-      const size_t n = std::min<size_t>(6, terms.size() - i);
-      if (n == 1) {
-        next.push_back(terms[i]);
-        continue;
-      }
-      Op op;
-      op.opcode = OP_ADD_N;
-      op.n_in = 0;
-      for (size_t k = i; k < i + n; ++k) op.in[op.n_in++] = terms[k];
-      op.out = g.add_slot(1, false);
-      g.ops.push_back(op);
-      next.push_back(op.out);
-    }
-    terms = std::move(next);
-  }
-  return terms[0];
-}
-
-bool desired_decision(const CandidateRecord& rec, CarveDecision* out) {
-  if (rec.taken == CarveDecision::kIsland) {
-    *out = CarveDecision::kLeave;
-    return true;
-  }
-  if (rec.island_viable != Viability::kNo) {
-    *out = CarveDecision::kIsland;
-    return true;
-  }
-  return false;
-}
-
-bool has_eligible_choice(const std::vector<CandidateRecord>& decisions) {
-  CarveDecision unused;
-  for (const CandidateRecord& rec : decisions)
-    if (desired_decision(rec, &unused)) return true;
-  return false;
+  return reduce_terms_grouped(std::move(terms),
+                              [&](const std::vector<int>& chunk) {
+                                Op op;
+                                op.opcode = OP_ADD_N;
+                                op.n_in = 0;
+                                for (int t : chunk) op.in[op.n_in++] = t;
+                                op.out = g.add_slot(1, false);
+                                g.ops.push_back(op);
+                                return op.out;
+                              });
 }
 
 struct TuneCarveState {
@@ -655,9 +643,10 @@ void register_tune_choices(
   state->reduce_terms = reduce_terms;
   state->cache = plan.cache;
 
-  for (const CandidateRecord& rec : plan.decisions) {
+  for (size_t idx : eligible_decisions_by_closeness(plan.decisions)) {
+    const CandidateRecord& rec = plan.decisions[idx];
     CarveDecision desired;
-    if (!desired_decision(rec, &desired)) continue;
+    desired_decision(rec, &desired);
     const CandidateKey key = rec.key;
     TuningChoice choice;
     choice.what = "island[" + std::to_string(key.begin) + "," +
@@ -970,8 +959,6 @@ std::string report_request() {
 CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
                             unsigned seed) {
   const bool no_tune = std::getenv("STANLI_NO_TUNE") != nullptr;
-  const auto tune_epoch = no_tune ? std::chrono::steady_clock::time_point{}
-                                  : std::chrono::steady_clock::now();
   const char* prep_env = std::getenv("STANLI_PROFILE_PREP");
   PrepTrace prep(prep_env && prep_env[0] != '0');
   PassDumper dumper(std::getenv("STANLI_DUMP_PASSES"),
@@ -1099,12 +1086,8 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
   if (!cm.interpreter_fallbacks.empty() && std::getenv("STANLI_NO_INTERPRETER"))
     throw CompileError(interpreter_error(cm));
   if (!no_tune) {
-    const double budget_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      tune_epoch)
-            .count();
     const auto tune_time = prep.start();
-    const TuneStats ts = tune(cm, budget_seconds);
+    const TuneStats ts = tune(cm);
     prep.tune_stage("log_prob", tune_time, ts.choices, ts.tried, ts.flipped,
                     ts.skipped_disagree, ts.skipped_no_point,
                     ts.skipped_budget);

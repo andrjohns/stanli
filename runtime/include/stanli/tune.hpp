@@ -37,9 +37,9 @@ struct TuneStats {
 
 // Times cm.choices against cm.graph in registration order, replacing
 // cm.graph with whichever alternative wins each round, then clears
-// cm.choices. budget_seconds and `measurer` share the same clock.
-TuneStats tune(CompiledModel& cm, double budget_seconds,
-               Measurer* measurer = nullptr);
+// cm.choices. The budget is one thousand times the duration of the first
+// evaluation of cm.graph.
+TuneStats tune(CompiledModel& cm, Measurer* measurer = nullptr);
 
 }  // namespace stanli
 

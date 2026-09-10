@@ -2273,6 +2273,51 @@ static void test_override_join_split() {
   }
 }
 
+// The join guard's skip bound decides kSplit without pricing the joined
+// island, so the recorded decision's island_viable stays kUnknown.
+static void test_join_guard_skip_registers_no_choice() {
+  VectorBinaryGraph h = build_join_guard_fires();
+  CarvePlan plan;
+  carve_islands(h.g, h.fills, h.terms, {}, &plan);
+  bool found = false;
+  for (const CandidateRecord& rec : plan.decisions) {
+    if (rec.taken != CarveDecision::kSplit) continue;
+    if (rec.island_viable != Viability::kUnknown) continue;
+    found = true;
+    CarveDecision unused;
+    expect("join guard skip decision ineligible",
+           !desired_decision(rec, &unused));
+  }
+  expect("join guard skip decision recorded", found);
+}
+
+// eligible_decisions_by_closeness orders on |chosen-other|/max(chosen,
+// other): a decision whose alternative nearly won sorts before one where
+// the estimate wasn't close.
+static void test_eligible_decisions_ordered_by_closeness() {
+  CandidateRecord far;
+  far.key = CandidateKey{0, 10, false};
+  far.taken = CarveDecision::kIsland;
+  far.island_viable = Viability::kYes;
+  far.chosen_cost = 100;
+  far.other_cost = 10;
+
+  CandidateRecord close;
+  close.key = CandidateKey{20, 30, false};
+  close.taken = CarveDecision::kIsland;
+  close.island_viable = Viability::kYes;
+  close.chosen_cost = 100;
+  close.other_cost = 95;
+
+  const std::vector<size_t> order =
+      eligible_decisions_by_closeness({far, close});
+  expect_eq("closeness order count", (int)order.size(), 2);
+  if (order.size() == 2) {
+    expect_eq("closest call first", (int)order[0], 1);
+    expect_eq("farthest call second", (int)order[1], 0);
+  }
+}
+
 int main() {
   // What the compiler does with a region, on graphs small enough to
   // reason about. The cost estimate would refuse most of them -- it is
@@ -2332,6 +2377,8 @@ int main() {
   test_override_leave();
   test_override_island_on_refused();
   test_override_join_split();
+  test_join_guard_skip_registers_no_choice();
+  test_eligible_decisions_ordered_by_closeness();
   if (failures) {
     std::printf("%d failures\n", failures);
     return 1;

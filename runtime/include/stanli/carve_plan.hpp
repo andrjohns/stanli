@@ -5,7 +5,10 @@
 
 #include <stanli/kernel_types.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <vector>
@@ -36,7 +39,54 @@ struct CandidateRecord {
   CarveDecision taken = CarveDecision::kLeave;
   Viability island_viable = Viability::kUnknown;
   Viability split_viable = Viability::kUnknown;
+  // The two costs the estimate compared to reach `taken`: island-vs-leave is
+  // island_cost + boundary versus graph_cost, join-vs-split is the joined
+  // cost versus the split cost. 0 when the natural path never priced a side.
+  int64_t chosen_cost = 0;
+  int64_t other_cost = 0;
 };
+
+// kUnknown is never eligible for tuning: the carver's own guard bounds
+// already decided that side wasn't worth pricing, so it isn't worth timing.
+inline bool desired_decision(const CandidateRecord& rec, CarveDecision* out) {
+  if (rec.taken == CarveDecision::kIsland) {
+    *out = CarveDecision::kLeave;
+    return true;
+  }
+  if (rec.island_viable == Viability::kYes) {
+    *out = CarveDecision::kIsland;
+    return true;
+  }
+  return false;
+}
+
+inline bool has_eligible_choice(const std::vector<CandidateRecord>& decisions) {
+  CarveDecision unused;
+  for (const CandidateRecord& rec : decisions)
+    if (desired_decision(rec, &unused)) return true;
+  return false;
+}
+
+inline double decision_closeness(const CandidateRecord& rec) {
+  const int64_t mx = std::max(rec.chosen_cost, rec.other_cost);
+  if (mx <= 0) return 0.0;
+  return std::abs(static_cast<double>(rec.chosen_cost - rec.other_cost)) /
+         static_cast<double>(mx);
+}
+
+// Indices of the eligible decisions in `decisions`, closest call first.
+inline std::vector<size_t> eligible_decisions_by_closeness(
+    const std::vector<CandidateRecord>& decisions) {
+  std::vector<size_t> idx;
+  for (size_t i = 0; i < decisions.size(); ++i) {
+    CarveDecision unused;
+    if (desired_decision(decisions[i], &unused)) idx.push_back(i);
+  }
+  std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+    return decision_closeness(decisions[a]) < decision_closeness(decisions[b]);
+  });
+  return idx;
+}
 
 // Compiled candidates keyed by CandidateKey, shared across replays of the
 // same plan. Candidate itself is file-local to island.cpp, so entries hold

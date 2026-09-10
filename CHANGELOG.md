@@ -6,15 +6,18 @@
 
 The island carver picks island, split, or leave from a cost estimate, and
 near the boundary between two of those the estimate can be wrong in either
-direction. Compiling now replays each recorded decision with its losing
-alternative and times both forms on the real executor, keeping whichever
-ran faster; a candidate only flips if both forms agree to the last bit on
-the log density and every gradient component first. `STANLI_NO_TUNE=1`
-disables it for a deterministic graph; `stanli_check`, `dump_ops`, and the
-lit runner pin it themselves so their output stays reproducible across
-runs, while `bench_grad`, `stanli_run`, and the language bindings tune by
-default. `STANLI_DEBUG_TUNE=1` reports why each candidate flipped, kept,
-or was skipped.
+direction. Compiling now replays a recorded decision the estimate already
+priced with its losing alternative and times both forms on the real
+executor, keeping whichever ran faster; a candidate only flips if both
+forms agree to the last bit on the log density and every gradient
+component first. Candidates are tried closest call first, and the time
+spent tuning is capped at a thousand times one gradient evaluation, so the
+cost is amortized against the run the tuning is for rather than fixed.
+`STANLI_NO_TUNE=1` disables it for a deterministic graph; `stanli_check`,
+`dump_ops`, and the lit runner pin it themselves so their output stays
+reproducible across runs, while `bench_grad`, `stanli_run`, and the
+language bindings tune by default. `STANLI_DEBUG_TUNE=1` reports why each
+candidate flipped, kept, or was skipped.
 
 ### The upstream loop vectorizer's new shapes lower without regressions
 
