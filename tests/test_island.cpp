@@ -2101,7 +2101,8 @@ static void test_plan_records() {
   if (!plan.decisions.empty()) {
     expect("plan records kIsland",
            plan.decisions[0].taken == CarveDecision::kIsland);
-    expect("plan records island_viable", plan.decisions[0].island_viable);
+    expect("plan records island_viable",
+           plan.decisions[0].island_viable == Viability::kYes);
   }
   expect_eq("plan records pre_island_ops size", (int)plan.pre_island_ops.size(),
             (int)before);
@@ -2187,7 +2188,8 @@ static void test_override_island_on_refused() {
   if (plan.decisions.empty()) return;
   expect("refused decision is leave",
          plan.decisions[0].taken == CarveDecision::kLeave);
-  expect("refused island still compiles", plan.decisions[0].island_viable);
+  expect("refused island still compiles",
+         plan.decisions[0].island_viable == Viability::kYes);
   const CandidateKey key = plan.decisions[0].key;
 
   restore_pre_island(g, plan);
@@ -2220,7 +2222,8 @@ static void test_override_join_split() {
   const CandidateKey outer_key = plan.decisions[0].key;
   expect("join/split baseline decision island",
          plan.decisions[0].taken == CarveDecision::kIsland);
-  expect("join/split baseline split viable", plan.decisions[0].split_viable);
+  expect("join/split baseline split unpriced by the natural path",
+         plan.decisions[0].split_viable == Viability::kUnknown);
 
   auto same_key = [&](const CandidateKey& k) {
     return k.begin == outer_key.begin && k.end == outer_key.end &&

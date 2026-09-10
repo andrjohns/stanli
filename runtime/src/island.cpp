@@ -1093,26 +1093,28 @@ struct Carver {
     ++carved;
   }
 
-  // Records the candidate at `key` in plan->decisions (with an override
-  // applied, if one is present) and returns the decision to execute. `c`
-  // and `split`/`any` may already be known (`c` engaged, or have_split);
-  // whichever is not gets priced here so a plan always has both candidates'
-  // viability, even where the estimate's own shortcuts would have skipped
-  // one.
+  // Records key's decision, applying any override; prices a side only when
+  // the override needs it beyond what the natural path already priced.
   CarveDecision resolve(const CandidateKey& key, CarveDecision natural,
-                        std::optional<Candidate>& c, int64_t split, bool any,
+                        std::optional<Candidate>& c, bool any,
                         bool have_split) {
     if (!plan) return natural;
-    if (!c) c.emplace(evaluate_cached(key.begin, key.end, key.strict));
-    if (!have_split) split = split_cost(key.begin, key.end, &any);
-    CarveDecision taken = natural;
     auto ov = plan->overrides.find(key);
-    if (ov != plan->overrides.end()) {
+    const bool overriding = ov != plan->overrides.end();
+    if (overriding && ov->second == CarveDecision::kIsland && !c)
+      c.emplace(evaluate_cached(key.begin, key.end, key.strict));
+    CarveDecision taken = natural;
+    if (overriding) {
       taken = ov->second == CarveDecision::kIsland
                   ? (c->compiled ? CarveDecision::kIsland : natural)
                   : ov->second;
     }
-    plan->decisions.push_back(CandidateRecord{key, taken, c->compiled, any});
+    plan->decisions.push_back(
+        CandidateRecord{key, taken,
+                        c ? (c->compiled ? Viability::kYes : Viability::kNo)
+                          : Viability::kUnknown,
+                        have_split ? (any ? Viability::kYes : Viability::kNo)
+                                   : Viability::kUnknown});
     return taken;
   }
 
@@ -1191,7 +1193,7 @@ struct Carver {
           }
         }
 
-        switch (resolve(key, natural, c, split, any, have_split)) {
+        switch (resolve(key, natural, c, any, have_split)) {
           case CarveDecision::kSplit:
             strict_until = j;
             break;
@@ -1217,8 +1219,9 @@ struct Carver {
           taken = ov->second == CarveDecision::kIsland
                       ? (c.compiled ? CarveDecision::kIsland : natural)
                       : CarveDecision::kLeave;
-        plan->decisions.push_back(
-            CandidateRecord{key, taken, c.compiled, false});
+        plan->decisions.push_back(CandidateRecord{
+            key, taken, c.compiled ? Viability::kYes : Viability::kNo,
+            Viability::kUnknown});
       }
       if (taken == CarveDecision::kIsland) {
         const bool renamed = strict && renames_a_slot(c);

@@ -28,11 +28,14 @@ inline bool operator<(const CandidateKey& a, const CandidateKey& b) {
 
 enum class CarveDecision { kIsland, kSplit, kLeave };
 
+// kUnknown when the natural path never priced that side of the decision.
+enum class Viability { kUnknown, kNo, kYes };
+
 struct CandidateRecord {
   CandidateKey key;
   CarveDecision taken = CarveDecision::kLeave;
-  bool island_viable = false;
-  bool split_viable = false;
+  Viability island_viable = Viability::kUnknown;
+  Viability split_viable = Viability::kUnknown;
 };
 
 // Compiled candidates keyed by CandidateKey, shared across replays of the
