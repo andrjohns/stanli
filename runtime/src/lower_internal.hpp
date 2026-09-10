@@ -81,6 +81,7 @@ struct PrepTrace {
     Regions,
     Truncated,
     MirBytes,
+    Tune,
   };
 
   struct Row {
@@ -97,6 +98,8 @@ struct PrepTrace {
     int64_t b = 0;
     int64_t c = 0;
     int64_t d = 0;
+    int64_t e = 0;
+    int64_t f = 0;
     int64_t packed_rows = 0;
     int64_t term_density = 0;
     int64_t element_density = 0;
@@ -128,6 +131,23 @@ struct PrepTrace {
     r.ns = elapsed(from);
     r.extra = extra;
     r.a = a;
+  }
+
+  void tune_stage(const char* graph, Time from, int64_t choices, int64_t tried,
+                  int64_t flipped, int64_t skipped_disagree,
+                  int64_t skipped_no_point, int64_t skipped_budget) {
+    if (!enabled_) return;
+    Row& r = next();
+    r.graph = graph;
+    r.stage = "tune";
+    r.ns = elapsed(from);
+    r.extra = Extra::Tune;
+    r.a = choices;
+    r.b = tried;
+    r.c = flipped;
+    r.d = skipped_disagree;
+    r.e = skipped_no_point;
+    r.f = skipped_budget;
   }
 
   void graph(const char* graph_name, const char* stage, Time from,
@@ -227,6 +247,14 @@ struct PrepTrace {
           break;
         case Extra::MirBytes:
           field("mir_bytes", r.a);
+          break;
+        case Extra::Tune:
+          field("choices", r.a);
+          field("tried", r.b);
+          field("flipped", r.c);
+          field("skipped_disagree", r.d);
+          field("skipped_no_point", r.e);
+          field("skipped_budget", r.f);
           break;
         case Extra::None:
           break;

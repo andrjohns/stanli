@@ -575,6 +575,108 @@ int Lowering::reduce_terms(std::vector<int> terms) {
   }
   return terms[0];
 }
+
+namespace {
+
+const char* carve_decision_name(CarveDecision d) {
+  switch (d) {
+    case CarveDecision::kIsland:
+      return "island";
+    case CarveDecision::kSplit:
+      return "split";
+    case CarveDecision::kLeave:
+      return "leave";
+  }
+  return "?";
+}
+
+int reduce_terms_replay(Graph& g, std::vector<int> terms) {
+  if (terms.empty()) return g.add_slot(1, false);
+  while (terms.size() > 1) {
+    std::vector<int> next;
+    for (size_t i = 0; i < terms.size(); i += 6) {
+      const size_t n = std::min<size_t>(6, terms.size() - i);
+      if (n == 1) {
+        next.push_back(terms[i]);
+        continue;
+      }
+      Op op;
+      op.opcode = OP_ADD_N;
+      op.n_in = 0;
+      for (size_t k = i; k < i + n; ++k) op.in[op.n_in++] = terms[k];
+      op.out = g.add_slot(1, false);
+      g.ops.push_back(op);
+      next.push_back(op.out);
+    }
+    terms = std::move(next);
+  }
+  return terms[0];
+}
+
+struct TuneCarveState {
+  Graph pristine;
+  std::vector<std::pair<int, std::vector<double>>> fills;
+  std::vector<int> terms;
+  std::vector<int> roots;
+  std::vector<int> reduce_terms;
+  std::shared_ptr<CarveCache> cache;
+  std::map<CandidateKey, CarveDecision> overrides;
+};
+
+void register_tune_choices(
+    CompiledModel& out, Graph pristine,
+    const std::vector<std::pair<int, std::vector<double>>>& fills,
+    const std::vector<int>& terms, const std::vector<int>& roots,
+    const std::vector<int>& reduce_terms, const CarvePlan& plan) {
+  auto state = std::make_shared<TuneCarveState>();
+  state->pristine = std::move(pristine);
+  state->fills = fills;
+  state->terms = terms;
+  state->roots = roots;
+  state->reduce_terms = reduce_terms;
+  state->cache = plan.cache;
+
+  for (const CandidateRecord& rec : plan.decisions) {
+    CarveDecision desired;
+    if (rec.taken == CarveDecision::kIsland) {
+      desired = CarveDecision::kLeave;
+    } else if (rec.island_viable != Viability::kNo) {
+      desired = CarveDecision::kIsland;
+    } else {
+      continue;
+    }
+    const CandidateKey key = rec.key;
+    TuningChoice choice;
+    choice.what = "island[" + std::to_string(key.begin) + "," +
+                  std::to_string(key.end) + (key.strict ? ",strict" : "") +
+                  "] " + carve_decision_name(rec.taken) + "->" +
+                  carve_decision_name(desired);
+    choice.alternative = [state, key, desired](Graph& g) -> bool {
+      g = state->pristine;
+      CarvePlan replay;
+      replay.cache = state->cache;
+      replay.overrides = state->overrides;
+      replay.overrides[key] = desired;
+      carve_islands(g, state->fills, state->terms, state->roots, &replay);
+      bool ok = false;
+      for (const CandidateRecord& d : replay.decisions) {
+        if (d.key.begin == key.begin && d.key.end == key.end &&
+            d.key.strict == key.strict) {
+          ok = d.taken == desired;
+          break;
+        }
+      }
+      if (!ok) return false;
+      g.result_slot = reduce_terms_replay(g, state->reduce_terms);
+      return true;
+    };
+    choice.won = [state, key, desired]() { state->overrides[key] = desired; };
+    out.choices.push_back(std::move(choice));
+  }
+}
+
+}  // namespace
+
 // Shared tail of both lowerings: inplace/store-forward/reroll always run;
 // the rest is gated by plan so write_array can skip the passes that assume
 // a scalar log-density result. Ordering constraints between the stages
@@ -690,7 +792,19 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     // scalar residue survives (recurrences the re-roll can never widen)
     // into island ops. Off under STANLI_NO_ISLAND.
     const auto island_time = prep.start();
-    const int islands = carve_islands(g, out.fills, target_terms, roots);
+    int islands = 0;
+    if (std::getenv("STANLI_NO_TUNE") || std::getenv("STANLI_NO_ISLAND")) {
+      islands = carve_islands(g, out.fills, target_terms, roots);
+    } else {
+      Graph pristine = g;
+      CarvePlan carve_plan;
+      islands = carve_islands(g, out.fills, target_terms, roots, &carve_plan);
+      std::vector<int> reduce_terms_slots = target_terms;
+      reduce_terms_slots.insert(reduce_terms_slots.end(), jac_slots.begin(),
+                                jac_slots.end());
+      register_tune_choices(out, std::move(pristine), out.fills, target_terms,
+                            roots, reduce_terms_slots, carve_plan);
+    }
     trace("island", island_time, roots, PrepTrace::Extra::Regions, islands);
   }
 }
@@ -811,6 +925,9 @@ std::string report_request() {
 
 CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
                             unsigned seed) {
+  const bool no_tune = std::getenv("STANLI_NO_TUNE") != nullptr;
+  const auto tune_epoch = no_tune ? std::chrono::steady_clock::time_point{}
+                                  : std::chrono::steady_clock::now();
   const char* prep_env = std::getenv("STANLI_PROFILE_PREP");
   PrepTrace prep(prep_env && prep_env[0] != '0');
   PassDumper dumper(std::getenv("STANLI_DUMP_PASSES"),
@@ -937,6 +1054,17 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
   }
   if (!cm.interpreter_fallbacks.empty() && std::getenv("STANLI_NO_INTERPRETER"))
     throw CompileError(interpreter_error(cm));
+  if (!no_tune) {
+    const double budget_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      tune_epoch)
+            .count();
+    const auto tune_time = prep.start();
+    const TuneStats ts = tune(cm, budget_seconds);
+    prep.tune_stage("log_prob", tune_time, ts.choices, ts.tried, ts.flipped,
+                    ts.skipped_disagree, ts.skipped_no_point,
+                    ts.skipped_budget);
+  }
   prep.plain("compile", "total", compile_time);
   prep.report();
   return cm;

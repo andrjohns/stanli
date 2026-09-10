@@ -314,6 +314,7 @@ set(STANLI_RUNTIME_SOURCES
   runtime/src/mir_decode.cpp
   runtime/src/portable_mir_v2_reader.cpp
   runtime/src/lower.cpp
+  runtime/src/tune.cpp
   runtime/src/lower_expr.cpp
   runtime/src/lower_stmt.cpp
   runtime/src/lower_funapp.cpp
@@ -1003,6 +1004,7 @@ set(STANLI_TESTS
   test_partition
   test_solve test_cross_path
   test_write_array test_pool test_bridgestan test_mixture test_island
+  test_tune
   test_adjoint test_diagnose test_multichain test_newtrans test_rejectprint
   test_odevariadic test_algebra test_estimate test_brmsmono
   test_reduce_sum
