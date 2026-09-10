@@ -308,6 +308,13 @@ class VectorizeAbTest(unittest.TestCase):
         missing["samples"] = []
         self.assertEqual(vectorize_ab.op_count_gate("probe", [
             cell("off", "on", 27, 58449), missing]), [])
+        expected = next(iter(vectorize_ab.LOWERED_GROWTH_EXPECTED))
+        self.assertEqual(vectorize_ab.op_count_gate(expected, [
+            cell("off", "on", 315, 1348), cell("on", "on", 315, 1628)]), [])
+        final_grew = vectorize_ab.op_count_gate(expected, [
+            cell("off", "on", 315, 1348), cell("on", "on", 400, 1628)])
+        self.assertEqual(len(final_grew), 1)
+        self.assertIn("315 -> 400", final_grew[0])
 
     def test_report_writes_all_artifacts(self):
         graph = {
