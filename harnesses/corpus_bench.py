@@ -252,7 +252,7 @@ def main():
                                   if prep and prep.returncode == 0 else [])
                     if prep_lines:
                         row["stanli_prep_s"] = (
-                            f"{float(prep_lines[-1].split()[0]):.3f}")
+                            f"{float(prep_lines[-1].split()[0]):.6f}")
                     else:
                         notes.append("stanli_prep_fail")
                     g = run([str(BENCH), str(mir), str(dj),
