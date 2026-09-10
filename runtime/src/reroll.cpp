@@ -55,8 +55,8 @@
 namespace stanli {
 namespace {
 
-constexpr int64_t kMinLanes = 4;
-constexpr int kMaxPeriod = 32;
+constexpr int64_t kMinLanes = detail::kMinLanes;
+constexpr int kMaxPeriod = detail::kMaxPeriod;
 constexpr int kMaxClassifyAttempts = 6;
 
 enum class InKind { kInvariant, kConstLanes, kLaneLocal, kBad };
@@ -183,6 +183,47 @@ bool ops_match(const Graph& g, const Op& a, const Op& b,
   for (int64_t k = 0; k < a.n_idata; ++k)
     if (a.idata[k] != b.idata[k]) return false;
   return true;
+}
+
+uint64_t mix_u64(uint64_t h, uint64_t v) {
+  v += 0x9e3779b97f4a7c15ULL;
+  v ^= v >> 30;
+  v *= 0xbf58476d1ce4e5b9ULL;
+  v ^= v >> 27;
+  v *= 0x94d049bb133111ebULL;
+  v ^= v >> 31;
+  return (h ^ v) * 1099511628211ULL;
+}
+
+// A necessary condition for ops_match(g, a, b, L) at any lane distance L:
+// every field ops_match requires identical between a and b, folded into one
+// integer. Fields ops_match lets advance with the lane -- OP_INDEX and
+// element-write idata, the row-read/row-store idata offset -- are left out.
+uint64_t op_signature(const Graph& g, const Op& a) {
+  uint64_t h = 1469598103934665603ULL;
+  h = mix_u64(h, (uint64_t)inplace_form(a.opcode));
+  h = mix_u64(h, (uint64_t)a.variant);
+  h = mix_u64(h, (uint64_t)a.n_in);
+  for (int j = 0; j < a.n_in; ++j)
+    h = mix_u64(h, a.in[j] >= 0 ? (uint64_t)g.slots[a.in[j]].len : ~0ULL);
+  h = mix_u64(h, a.out >= 0 ? (uint64_t)g.slots[a.out].len : ~0ULL);
+  const bool row_store = is_row_store(a);
+  const bool row_read = row_store ? false : is_row_read(a);
+  const bool idx_family = a.opcode == OP_INDEX || a.opcode == OP_SET_INDEX ||
+                          a.opcode == OP_SET_INDEX_INPLACE;
+  if (row_store) {
+    h = mix_u64(h, (uint64_t)a.out);
+    h = mix_u64(h, (uint64_t)a.n_idata);
+  } else if (row_read) {
+    h = mix_u64(h, (uint64_t)a.in[0]);
+    h = mix_u64(h, (uint64_t)a.n_idata);
+  } else if (!idx_family) {
+    h = mix_u64(h, (uint64_t)a.n_idata);
+    if (!has_op_trait(a.opcode, op_trait::kRerollIdataDensity))
+      for (int64_t k = 0; k < a.n_idata; ++k)
+        h = mix_u64(h, (uint64_t)(uint32_t)a.idata[k]);
+  }
+  return h;
 }
 
 // LDA's likelihood is a small inner loop nested in a much larger document
@@ -686,6 +727,31 @@ static RerollStats reroll_impl(
   std::vector<size_t> fail_end((size_t)kMaxPeriod + 1, 0);
   std::vector<bool> hard_failed((size_t)kMaxPeriod + 1, false);
 
+  // sig[u] is op_signature(g.ops[u]); period_fwd(P)[k] is the largest L
+  // such that sig[k] == sig[k + P] == ... == sig[k + L * P], built once
+  // per P and cached.
+  const bool prefilter_off =
+      std::getenv("STANLI_NO_REROLL_PREFILTER") != nullptr;
+  std::vector<uint64_t> sig;
+  if (!prefilter_off) {
+    sig.resize(g.ops.size());
+    for (size_t u = 0; u < g.ops.size(); ++u)
+      sig[u] = op_signature(g, g.ops[u]);
+  }
+  std::vector<std::vector<int32_t>> period_fwd_cache((size_t)kMaxPeriod + 1);
+  const auto period_fwd = [&](int P) -> const std::vector<int32_t>& {
+    std::vector<int32_t>& fwd = period_fwd_cache[(size_t)P];
+    if (fwd.empty() && !g.ops.empty()) {
+      fwd.assign(g.ops.size(), 0);
+      for (size_t k = g.ops.size(); k-- > 0;) {
+        const size_t next = k + (size_t)P;
+        fwd[k] =
+            (next < g.ops.size() && sig[k] == sig[next]) ? fwd[next] + 1 : 0;
+      }
+    }
+    return fwd;
+  };
+
   std::vector<Op> result;
   result.reserve(g.ops.size());
   size_t i = 0;
@@ -702,8 +768,17 @@ static RerollStats reroll_impl(
       if (next_candidate[i] >= i + (size_t)P) continue;
 
       // Count template-matching lanes.
+      int64_t Lcap = std::numeric_limits<int64_t>::max();
+      if (!prefilter_off) {
+        const std::vector<int32_t>& fwd = period_fwd(P);
+        Lcap = fwd[i];
+        for (int p = 1; p < P && Lcap + 1 >= kMinLanes; ++p)
+          Lcap = std::min(Lcap, (int64_t)fwd[i + (size_t)p]);
+        if (Lcap + 1 < kMinLanes) continue;
+        Lcap += 1;
+      }
       int64_t L = 1;
-      while (i + ((size_t)L + 1) * P <= g.ops.size()) {
+      while (L <= Lcap && i + ((size_t)L + 1) * P <= g.ops.size()) {
         bool match = true;
         for (int p = 0; p < P && match; ++p)
           match = ops_match(g, g.ops[i + p], g.ops[i + (size_t)L * P + p], L);
@@ -1536,6 +1611,24 @@ ProfiledRerollStats reroll_profiled(
   ProfiledRerollStats result;
   result.work =
       reroll_impl(g, fills, target_terms, extra_roots, &result.dispositions);
+  return result;
+}
+
+SignatureCheckResult check_signature_soundness(const Graph& g, int64_t window) {
+  SignatureCheckResult result;
+  std::vector<uint64_t> sig(g.ops.size());
+  for (size_t u = 0; u < g.ops.size(); ++u) sig[u] = op_signature(g, g.ops[u]);
+  for (size_t a = 0; a < g.ops.size(); ++a) {
+    const size_t hi = std::min(g.ops.size(), a + (size_t)window + 1);
+    for (size_t b = a + 1; b < hi; ++b) {
+      const int64_t direct = (int64_t)(b - a);
+      for (int64_t dist : {direct, (int64_t)1, kMinLanes}) {
+        ++result.pairs_checked;
+        if (sig[a] != sig[b] && ops_match(g, g.ops[a], g.ops[b], dist))
+          ++result.violations;
+      }
+    }
+  }
   return result;
 }
 

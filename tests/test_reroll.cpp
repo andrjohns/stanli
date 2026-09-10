@@ -1900,6 +1900,171 @@ static void test_e2e_fixtures() {
   }
 }
 
+// Signature prefilter: op_signature(a) != op_signature(b) must prove
+// ops_match(g, a, b, *) false, checked directly against ops_match on a mix
+// of handbuilt graphs covering every ops_match branch and a couple of
+// compiled models.
+static void test_signature_soundness() {
+  const auto check = [&](const std::string& name, const Graph& g) {
+    const auto result = detail::check_signature_soundness(
+        g, (int64_t)detail::kMaxPeriod * detail::kMinLanes);
+    expect((name + " signature sound").c_str(), result.violations == 0);
+  };
+
+  {
+    ldashape::Built b = ldashape::build(24);
+    check("lda", b.g);
+  }
+  {
+    rowlanes::Built b = rowlanes::build_density(6, 4, rowlanes::Rows::kMatrix);
+    check("row density matrix", b.g);
+  }
+  {
+    rowlanes::Built b = rowlanes::build_density(6, 4, rowlanes::Rows::kArray);
+    check("row density array", b.g);
+  }
+  {
+    rowlanes::Built b = rowlanes::build_store(6, 4, rowlanes::Rows::kMatrix);
+    check("row store matrix", b.g);
+  }
+  {
+    rowlanes::Built b = rowlanes::build_store(6, 4, rowlanes::Rows::kArray);
+    check("row store array", b.g);
+  }
+  {
+    rowlanes::Built b =
+        rowlanes::build_density_shared_row(6, 4, rowlanes::Rows::kMatrix);
+    check("row density shared", b.g);
+  }
+
+  const char* rdata =
+      "{\"N\":16,\"x\":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,"
+      "1.3,1.4,1.5,1.6],"
+      "\"y\":[1.1,0.9,1.3,0.7,1.0,1.2,0.8,1.05,0.95,1.15,0.85,1.0,1.1,"
+      "0.92,1.08,0.98]}";
+  const char* adata =
+      "{\"K\":2,\"T\":12,\"y\":[0.3,0.5,0.2,0.6,0.4,0.55,0.35,0.45,0.5,"
+      "0.42,0.48,0.44]}";
+  struct Fixture {
+    const char* sexp;
+    const char* json;
+    const char* name;
+  };
+  const Fixture fixtures[] = {
+      {"tests/fixtures/rloop.tmir.sexp", rdata, "rloop corpus"},
+      {"tests/fixtures/arloop.tmir.sexp", adata, "arloop corpus"},
+  };
+  test_setenv("STANLI_NO_REROLL", "1", 1);
+  for (const Fixture& f : fixtures) {
+    DataMap data = DataMap::from_json(f.json);
+    CompiledModel cm = compile_model(slurp(f.sexp), data);
+    check(f.name, cm.graph);
+    if (cm.write_array)
+      check(std::string(f.name) + " write_array", cm.write_array->graph);
+  }
+  {
+    DataMap data = DataMap::from_json_file("tests/fixtures/brmsmono.json");
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/brmsmono.tmir.sexp"), data);
+    check("brmsmono corpus", cm.graph);
+    if (cm.write_array)
+      check("brmsmono corpus write_array", cm.write_array->graph);
+  }
+  test_unsetenv("STANLI_NO_REROLL");
+}
+
+static bool ops_equal(const Op& a, const Op& b) {
+  if (a.opcode != b.opcode || a.variant != b.variant || a.out != b.out ||
+      a.out2 != b.out2 || a.n_in != b.n_in || a.n_idata != b.n_idata)
+    return false;
+  for (int j = 0; j < a.n_in; ++j)
+    if (a.in[j] != b.in[j]) return false;
+  for (int64_t k = 0; k < a.n_idata; ++k)
+    if (a.idata[k] != b.idata[k]) return false;
+  return true;
+}
+
+static bool graphs_equal(const Graph& a, const Graph& b) {
+  if (a.ops.size() != b.ops.size()) return false;
+  for (size_t u = 0; u < a.ops.size(); ++u)
+    if (!ops_equal(a.ops[u], b.ops[u])) return false;
+  return true;
+}
+
+// The prefilter changes how many lanes the scan reaches before ops_match is
+// called, never which lanes it decides to keep: same graph, fills and
+// target terms out of reroll() with STANLI_NO_REROLL_PREFILTER off and on.
+static void expect_prefilter_matches(const std::string& name, const Graph& g,
+                                     const Fills& fills,
+                                     const std::vector<int>& terms) {
+  Graph g_on = g;
+  Fills fills_on = fills;
+  std::vector<int> terms_on = terms;
+  test_unsetenv("STANLI_NO_REROLL_PREFILTER");
+  reroll(g_on, fills_on, terms_on, {});
+
+  Graph g_off = g;
+  Fills fills_off = fills;
+  std::vector<int> terms_off = terms;
+  test_setenv("STANLI_NO_REROLL_PREFILTER", "1", 1);
+  reroll(g_off, fills_off, terms_off, {});
+  test_unsetenv("STANLI_NO_REROLL_PREFILTER");
+
+  expect((name + " prefilter ops match").c_str(), graphs_equal(g_on, g_off));
+  expect((name + " prefilter terms match").c_str(), terms_on == terms_off);
+  bool fills_match = fills_on.size() == fills_off.size();
+  for (size_t k = 0; fills_match && k < fills_on.size(); ++k)
+    fills_match = fills_on[k].first == fills_off[k].first &&
+                  fills_on[k].second == fills_off[k].second;
+  expect((name + " prefilter fills match").c_str(), fills_match);
+}
+
+static void test_prefilter_output_matches() {
+  {
+    ldashape::Built b = ldashape::build(24);
+    expect_prefilter_matches("lda", b.g, b.fills, b.terms);
+  }
+  {
+    rowlanes::Built b = rowlanes::build_density(6, 4, rowlanes::Rows::kMatrix);
+    expect_prefilter_matches("row density matrix", b.g, b.fills, b.terms);
+  }
+  {
+    rowlanes::Built b = rowlanes::build_store(6, 4, rowlanes::Rows::kArray);
+    expect_prefilter_matches("row store array", b.g, b.fills, b.terms);
+  }
+
+  const char* rdata =
+      "{\"N\":16,\"x\":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,"
+      "1.3,1.4,1.5,1.6],"
+      "\"y\":[1.1,0.9,1.3,0.7,1.0,1.2,0.8,1.05,0.95,1.15,0.85,1.0,1.1,"
+      "0.92,1.08,0.98]}";
+  const char* adata =
+      "{\"K\":2,\"T\":12,\"y\":[0.3,0.5,0.2,0.6,0.4,0.55,0.35,0.45,0.5,"
+      "0.42,0.48,0.44]}";
+  struct Fixture {
+    const char* sexp;
+    const char* json;
+    const char* name;
+  };
+  const Fixture fixtures[] = {
+      {"tests/fixtures/rloop.tmir.sexp", rdata, "rloop corpus"},
+      {"tests/fixtures/arloop.tmir.sexp", adata, "arloop corpus"},
+  };
+  test_setenv("STANLI_NO_REROLL", "1", 1);
+  for (const Fixture& f : fixtures) {
+    DataMap data = DataMap::from_json(f.json);
+    CompiledModel cm = compile_model(slurp(f.sexp), data);
+    expect_prefilter_matches(f.name, cm.graph, cm.fills, {});
+  }
+  {
+    DataMap data = DataMap::from_json_file("tests/fixtures/brmsmono.json");
+    CompiledModel cm =
+        compile_model(slurp("tests/fixtures/brmsmono.tmir.sexp"), data);
+    expect_prefilter_matches("brmsmono corpus", cm.graph, cm.fills, {});
+  }
+  test_unsetenv("STANLI_NO_REROLL");
+}
+
 // (e) a lane output that is a graph root the pass is not told about. The
 // executor reads jacobian slots and constrained-parameter views directly,
 // with no consuming op, so `uses` cannot see them: a region that folds one
@@ -2045,6 +2210,8 @@ int main() {
   test_row_lanes_bail();
   test_row_lane_shared_read();
   test_e2e_fixtures();
+  test_signature_soundness();
+  test_prefilter_output_matches();
   if (failures) {
     std::printf("%d failures\n", failures);
     return 1;
