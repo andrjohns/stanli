@@ -12,7 +12,6 @@
 #include <stanli/init_interp.hpp>
 #include <stanli/graph.hpp>
 #include <stanli/mir.hpp>
-#include <stanli/tune.hpp>
 
 #include <optional>
 #include <map>
@@ -218,8 +217,6 @@ struct CompiledModel {
   // seed the way CmdStan does rebuilds under the run seed when this is set,
   // and leaves every other model alone.
   bool transformed_data_draws = false;
-  // Pending prep-time tuning decisions for the log_prob graph (tune.hpp).
-  std::vector<TuningChoice> choices;
 };
 
 // `seed` is the model-construction seed: transformed data's RNG calls draw

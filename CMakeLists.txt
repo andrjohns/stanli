@@ -314,7 +314,6 @@ set(STANLI_RUNTIME_SOURCES
   runtime/src/mir_decode.cpp
   runtime/src/portable_mir_v2_reader.cpp
   runtime/src/lower.cpp
-  runtime/src/tune.cpp
   runtime/src/lower_expr.cpp
   runtime/src/lower_stmt.cpp
   runtime/src/lower_funapp.cpp
@@ -679,22 +678,8 @@ add_custom_command(
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   COMMENT "Generating ${STANLI_FIXTURE_COUNT} legacy MIR fixtures"
   VERBATIM)
-set(STANLI_TUNE_FIXTURE
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/tune_fixtures/tune_hmm.tmir.sexp")
-add_custom_command(
-  OUTPUT "${STANLI_TUNE_FIXTURE}"
-  COMMAND ${STANLI_FIXTURE_PYTHON}
-          "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fixtures.py"
-          --stanc "${STANLI_STANC_EXECUTABLE}"
-          --source-dir tests/tune_fixtures --output-dir tests/tune_fixtures
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/tune_fixtures/tune_hmm.stan"
-          "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fixtures.py"
-          "${STANLI_STANC_EXECUTABLE}"
-  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-  COMMENT "Generating the tuner fixture MIR"
-  VERBATIM)
 add_custom_target(stanli_mir_fixtures ALL
-                  DEPENDS ${STANLI_MIR_FIXTURES} "${STANLI_TUNE_FIXTURE}")
+                  DEPENDS ${STANLI_MIR_FIXTURES})
 
 # Pull-request validation uses Clang so its cheap test translation units can
 # link to the optimized runtime objects below. Shipped platform builds may use
@@ -1022,7 +1007,6 @@ set(STANLI_TESTS
   test_partition
   test_solve test_cross_path
   test_write_array test_pool test_bridgestan test_mixture test_island
-  test_tune
   test_adjoint test_diagnose test_multichain test_newtrans test_rejectprint
   test_odevariadic test_algebra test_estimate test_brmsmono
   test_reduce_sum

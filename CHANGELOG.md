@@ -2,18 +2,6 @@
 
 ## Unreleased
 
-### Prep-time tuning of the island carver's close calls is opt-in
-
-The island carver picks island, split, or leave from a cost estimate, and
-near the boundary between two of those the estimate can be wrong in either
-direction. Compiling can now replay a recorded decision with its losing
-alternative and time both forms on the real executor, keeping whichever
-ran faster, gated on agreeing to the bit at three sampled points first.
-Set `STANLI_TUNE=1` to turn it on; it stays off by default until an
-island instruction's agreement with the graph kernel it replaces is a
-contract rather than something sampled at a few points. `STANLI_DEBUG_TUNE=1`
-reports why each candidate flipped, kept, or was skipped.
-
 ### The upstream loop vectorizer's new shapes lower without regressions
 
 The compiler runs stanc3's `vectorize_loops` pass, and the 0.12.0 compiler

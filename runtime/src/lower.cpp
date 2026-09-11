@@ -553,10 +553,9 @@ void Lowering::lower_read_param(const mir::Stmt& s) {
 }
 namespace {
 
-// The shared grouping loop behind reduce_terms and reduce_terms_replay:
-// chunks of up to 6 terms fold through one ADD_N each until one remains.
-// emit_chunk does the actual op emission, which differs between a live
-// Lowering pass and a replay over a detached Graph copy.
+// The grouping loop behind reduce_terms: chunks of up to 6 terms fold
+// through one ADD_N each until one remains. emit_chunk does the actual op
+// emission.
 template <typename EmitChunk>
 int reduce_terms_grouped(std::vector<int> terms, EmitChunk emit_chunk) {
   while (terms.size() > 1) {
@@ -591,94 +590,6 @@ int Lowering::reduce_terms(std::vector<int> terms) {
                                 return emit_raw(OP_ADD_N, chunk, 1, {}).slot;
                               });
 }
-
-namespace {
-
-const char* carve_decision_name(CarveDecision d) {
-  switch (d) {
-    case CarveDecision::kIsland:
-      return "island";
-    case CarveDecision::kSplit:
-      return "split";
-    case CarveDecision::kLeave:
-      return "leave";
-  }
-  return "?";
-}
-
-int reduce_terms_replay(Graph& g, std::vector<int> terms) {
-  if (terms.empty()) return g.add_slot(1, false);
-  return reduce_terms_grouped(std::move(terms),
-                              [&](const std::vector<int>& chunk) {
-                                Op op;
-                                op.opcode = OP_ADD_N;
-                                op.n_in = 0;
-                                for (int t : chunk) op.in[op.n_in++] = t;
-                                op.out = g.add_slot(1, false);
-                                g.ops.push_back(op);
-                                return op.out;
-                              });
-}
-
-struct TuneCarveState {
-  Graph pristine;
-  std::vector<std::pair<int, std::vector<double>>> fills;
-  std::vector<int> terms;
-  std::vector<int> roots;
-  std::vector<int> reduce_terms;
-  std::shared_ptr<CarveCache> cache;
-  std::map<CandidateKey, CarveDecision> overrides;
-};
-
-void register_tune_choices(
-    CompiledModel& out, Graph pristine,
-    const std::vector<std::pair<int, std::vector<double>>>& fills,
-    const std::vector<int>& terms, const std::vector<int>& roots,
-    const std::vector<int>& reduce_terms, const CarvePlan& plan) {
-  auto state = std::make_shared<TuneCarveState>();
-  state->pristine = std::move(pristine);
-  state->fills = fills;
-  state->terms = terms;
-  state->roots = roots;
-  state->reduce_terms = reduce_terms;
-  state->cache = plan.cache;
-
-  for (size_t idx : eligible_decisions_by_closeness(plan.decisions)) {
-    const CandidateRecord& rec = plan.decisions[idx];
-    CarveDecision desired;
-    desired_decision(rec, &desired);
-    const CandidateKey key = rec.key;
-    TuningChoice choice;
-    choice.what = "island[" + std::to_string(key.begin) + "," +
-                  std::to_string(key.end) + (key.strict ? ",strict" : "") +
-                  "] " + carve_decision_name(rec.taken) + "->" +
-                  carve_decision_name(desired);
-    choice.closeness = decision_closeness(rec);
-    choice.alternative = [state, key, desired](Graph& g) -> bool {
-      g = state->pristine;
-      CarvePlan replay;
-      replay.cache = state->cache;
-      replay.overrides = state->overrides;
-      replay.overrides[key] = desired;
-      carve_islands(g, state->fills, state->terms, state->roots, &replay);
-      bool ok = false;
-      for (const CandidateRecord& d : replay.decisions) {
-        if (d.key.begin == key.begin && d.key.end == key.end &&
-            d.key.strict == key.strict) {
-          ok = d.taken == desired;
-          break;
-        }
-      }
-      if (!ok) return false;
-      g.result_slot = reduce_terms_replay(g, state->reduce_terms);
-      return true;
-    };
-    choice.won = [state, key, desired]() { state->overrides[key] = desired; };
-    out.choices.push_back(std::move(choice));
-  }
-}
-
-}  // namespace
 
 // Shared tail of both lowerings: inplace/store-forward/reroll always run;
 // the rest is gated by plan so write_array can skip the passes that assume
@@ -795,50 +706,7 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     // scalar residue survives (recurrences the re-roll can never widen)
     // into island ops. Off under STANLI_NO_ISLAND.
     const auto island_time = prep.start();
-    int islands = 0;
-    if (!tuning_enabled() || std::getenv("STANLI_NO_ISLAND")) {
-      islands = carve_islands(g, out.fills, target_terms, roots);
-    } else {
-      const size_t orig_slots = g.slots.size();
-      const size_t orig_idata = g.idata_pool.size();
-      const size_t orig_udata = g.udata_pool.size();
-      CarvePlan carve_plan;
-      islands = carve_islands(g, out.fills, target_terms, roots, &carve_plan);
-      if (has_eligible_choice(carve_plan.decisions, kTuneTrustRadius)) {
-        std::vector<Op> carved_ops = std::move(g.ops);
-        std::vector<Slot> carved_slots(
-            std::make_move_iterator(g.slots.begin() + (ptrdiff_t)orig_slots),
-            std::make_move_iterator(g.slots.end()));
-        std::vector<std::vector<int>> carved_idata(
-            std::make_move_iterator(g.idata_pool.begin() +
-                                    (ptrdiff_t)orig_idata),
-            std::make_move_iterator(g.idata_pool.end()));
-        std::vector<std::shared_ptr<void>> carved_udata(
-            std::make_move_iterator(g.udata_pool.begin() +
-                                    (ptrdiff_t)orig_udata),
-            std::make_move_iterator(g.udata_pool.end()));
-        g.ops = std::move(carve_plan.pre_island_ops);
-        g.slots.resize(orig_slots);
-        g.idata_pool.resize(orig_idata);
-        g.udata_pool.resize(orig_udata);
-        Graph pristine = g;
-        g.ops = std::move(carved_ops);
-        g.slots.insert(g.slots.end(),
-                       std::make_move_iterator(carved_slots.begin()),
-                       std::make_move_iterator(carved_slots.end()));
-        g.idata_pool.insert(g.idata_pool.end(),
-                            std::make_move_iterator(carved_idata.begin()),
-                            std::make_move_iterator(carved_idata.end()));
-        g.udata_pool.insert(g.udata_pool.end(),
-                            std::make_move_iterator(carved_udata.begin()),
-                            std::make_move_iterator(carved_udata.end()));
-        std::vector<int> reduce_terms_slots = target_terms;
-        reduce_terms_slots.insert(reduce_terms_slots.end(), jac_slots.begin(),
-                                  jac_slots.end());
-        register_tune_choices(out, std::move(pristine), out.fills, target_terms,
-                              roots, reduce_terms_slots, carve_plan);
-      }
-    }
+    const int islands = carve_islands(g, out.fills, target_terms, roots);
     trace("island", island_time, roots, PrepTrace::Extra::Regions, islands);
   }
 }
@@ -1087,13 +955,6 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
   }
   if (!cm.interpreter_fallbacks.empty() && std::getenv("STANLI_NO_INTERPRETER"))
     throw CompileError(interpreter_error(cm));
-  {
-    const auto tune_time = prep.start();
-    const TuneStats ts = tune(cm);
-    prep.tune_stage("log_prob", tune_time, ts.choices, ts.tried, ts.flipped,
-                    ts.skipped_disagree, ts.skipped_no_point, ts.skipped_budget,
-                    ts.skipped_far);
-  }
   prep.plain("compile", "total", compile_time);
   prep.report();
   return cm;

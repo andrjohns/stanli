@@ -553,13 +553,12 @@ bool may_forward_adjacent_copy_destination(const Program& p) {
   return false;
 }
 
+enum class CarveDecision { kIsland, kSplit, kLeave };
+
 // One run compiled, with the estimate's verdict on it. Holds what emit()
-// and a cache replay need by value -- never the Compiler that built it,
-// which carries references into the Carver that compiled this candidate
-// (its graph, its const_slots, its last_use). A cached Candidate can
-// outlive that Carver, and a Compiler reference member surviving the same
-// way would leave the cache pointing at a destroyed graph the moment a
-// caller carves a copy and drops the original.
+// needs by value -- never the Compiler that built it, which carries
+// references into the Carver that compiled this candidate (its graph, its
+// const_slots, its last_use).
 struct Candidate {
   size_t begin;
   size_t end;
@@ -580,24 +579,6 @@ struct Candidate {
   int64_t boundary = 0;
 };
 
-// A deep-enough copy for a cache entry to be reused without emit() (which
-// moves prog) consuming the cached original.
-Candidate clone_candidate(const Candidate& c) {
-  Candidate out{c.begin, c.end, c.prog, c.live_in_slots};
-  out.live_outs = c.live_outs;
-  out.in_set = c.in_set;
-  out.destination_source =
-      c.destination_source ? std::make_unique<IslandProg>(*c.destination_source)
-                           : nullptr;
-  out.priced_gen = c.priced_gen;
-  out.compiled = c.compiled;
-  out.accepted = c.accepted;
-  out.graph_cost = c.graph_cost;
-  out.island_cost = c.island_cost;
-  out.boundary = c.boundary;
-  return out;
-}
-
 struct Carver {
   Graph& g;
   std::unordered_set<int> term_set;
@@ -608,7 +589,6 @@ struct Carver {
   std::vector<char> slot_active;
   std::vector<Op> result;
   int carved = 0;
-  CarvePlan* plan = nullptr;
   // Strict sub-runs split_cost compiled to price a split, discarded after
   // join_cost_floor sums their accepted island costs: emission never
   // replays a strict-sourced split (liveness_split_cost subsumes it, see
@@ -628,12 +608,11 @@ struct Carver {
   Carver(Graph& graph,
          const std::vector<std::pair<int, std::vector<double>>>& fills,
          const std::vector<int>& target_terms,
-         const std::vector<int>& extra_roots, CarvePlan* plan_in = nullptr)
+         const std::vector<int>& extra_roots)
       : g(graph),
         term_set(target_terms.begin(), target_terms.end()),
         root_set(extra_roots.begin(), extra_roots.end()),
-        pinned(term_set),
-        plan(plan_in) {
+        pinned(term_set) {
     pinned.insert(root_set.begin(), root_set.end());
 
     // Last op index reading each slot, and whether any op writes it. A fill
@@ -823,38 +802,6 @@ struct Carver {
     return c;
   }
 
-  // The op fields a rename can touch, for [i, j).
-  std::vector<int> op_signature(size_t i, size_t j) const {
-    std::vector<int> sig;
-    for (size_t u = i; u < j; ++u) {
-      const Op& op = g.ops[u];
-      sig.push_back((int)op.opcode);
-      sig.push_back(op.n_in);
-      sig.push_back(op.out);
-      sig.push_back(op.out2);
-      for (int k = 0; k < op.n_in; ++k) sig.push_back(op.in[k]);
-    }
-    return sig;
-  }
-
-  // evaluate(), through plan->cache when a plan is given. strict names which
-  // vocabulary priced [i, j) and so which CandidateKey to use.
-  Candidate evaluate_cached(size_t i, size_t j, bool strict,
-                            const char* label = "island") {
-    if (!plan) return evaluate(i, j, label);
-    const CandidateKey key{i, j, strict};
-    std::vector<int> sig = op_signature(i, j);
-    auto it = plan->cache->entries.find(key);
-    if (it != plan->cache->entries.end() && it->second.op_signature == sig)
-      return clone_candidate(
-          *std::static_pointer_cast<Candidate>(it->second.candidate));
-    Candidate c = evaluate(i, j, label);
-    plan->cache->entries[key] = CarveCache::Entry{
-        std::make_shared<Candidate>(clone_candidate(c)), std::move(sig)};
-    ++plan->cache->compiles;
-    return c;
-  }
-
   int64_t joined_boundary(size_t i, size_t j) const {
     const size_t n = g.slots.size();
     if (boundary_produced.size() < n) boundary_produced.assign(n, 0);
@@ -969,7 +916,7 @@ struct Carver {
         a = b > a ? b : a + 1;
         continue;
       }
-      strict_queue.push_back(evaluate_cached(a, b, true));
+      strict_queue.push_back(evaluate(a, b));
       a = b;
     }
   }
@@ -1067,7 +1014,7 @@ struct Carver {
       whole.decide = whole.report = graph_cost(i, j);
       return whole;
     }
-    Candidate c = evaluate_cached(i, j, false, "island-liveness");
+    Candidate c = evaluate(i, j, "island-liveness");
     whole.decide = c.accepted ? c.island_cost : c.graph_cost;
     whole.report = c.accepted ? c.island_cost + c.boundary : c.graph_cost;
     whole.any = c.accepted;
@@ -1134,7 +1081,7 @@ struct Carver {
         return c;
       }
     }
-    return evaluate_cached(i, j, false, "island-liveness");
+    return evaluate(i, j, "island-liveness");
   }
 
   // A live-out that is also a live-in of the same candidate gets a fresh
@@ -1268,60 +1215,8 @@ struct Carver {
     ++carved;
   }
 
-  // Records key's decision, applying any override; prices a side only when
-  // the override needs it beyond what the natural path already priced.
-  CarveDecision resolve(const CandidateKey& key, CarveDecision natural,
-                        std::optional<Candidate>& c, bool any, bool have_split,
-                        int64_t split) {
-    if (!plan) return natural;
-    auto ov = plan->overrides.find(key);
-    const bool overriding = ov != plan->overrides.end();
-    if (overriding && ov->second == CarveDecision::kIsland && !c)
-      c.emplace(evaluate_cached(key.begin, key.end, key.strict));
-    CarveDecision taken = natural;
-    if (overriding) {
-      taken = ov->second == CarveDecision::kIsland
-                  ? (c->compiled ? CarveDecision::kIsland : natural)
-                  : ov->second;
-    }
-    const Viability split_viable =
-        have_split ? (any ? Viability::kYes : Viability::kNo)
-                   : Viability::kUnknown;
-    int64_t chosen_cost = 0, other_cost = 0;
-    if (c) {
-      // island_cost alone is what c->accepted compared against graph_cost;
-      // island_cost+boundary (what split_wins compares split against) only
-      // enters where a split was actually priced as the alternative.
-      if (taken == CarveDecision::kIsland) {
-        if (split_viable == Viability::kYes) {
-          chosen_cost = c->island_cost + c->boundary;
-          other_cost = split;
-        } else {
-          chosen_cost = c->island_cost;
-          other_cost = c->graph_cost;
-        }
-      } else if (taken == CarveDecision::kSplit) {
-        chosen_cost = split;
-        other_cost = c->island_cost + c->boundary;
-      } else {
-        chosen_cost = c->graph_cost;
-        other_cost = c->island_cost;
-      }
-    } else if (taken == CarveDecision::kSplit && have_split) {
-      chosen_cost = split;
-    }
-    plan->decisions.push_back(
-        CandidateRecord{key, taken,
-                        c ? (c->compiled ? Viability::kYes : Viability::kNo)
-                          : Viability::kUnknown,
-                        split_viable, chosen_cost, other_cost});
-    return taken;
-  }
-
   int run() {
     result.reserve(g.ops.size());
-    std::vector<Op> pre_ops;
-    if (plan) pre_ops = g.ops;
     // Liveness subsumes strict splitting (its own search always includes
     // the strict cut as one candidate, so it is never worse; a corpus
     // sweep over 254 models found it never even ties by losing, matching
@@ -1345,18 +1240,16 @@ struct Carver {
         const bool always = std::getenv("STANLI_ISLAND_ALWAYS") != nullptr;
         const bool guard_off =
             std::getenv("STANLI_NO_ISLAND_JOIN_GUARD") != nullptr;
-        const CandidateKey key{i, j, false};
         const bool multi =
             !always && !guard_off && split_has_multiple_pieces(i, j);
 
         std::optional<Candidate> c;
         int64_t split = 0;
         bool any = false;
-        bool have_split = false;
         CarveDecision natural = CarveDecision::kLeave;
 
         if (multi) {
-          c.emplace(evaluate_cached(i, j, false));
+          c.emplace(evaluate(i, j));
           if (c->accepted) {
             const int64_t floor = split_cost_floor(*c, i, j);
             const int64_t joined = c->island_cost + c->boundary;
@@ -1376,7 +1269,6 @@ struct Carver {
           // non-multi branch.
           if (!multi) populate_strict_queue(i, j);
           split = liveness_split_cost(i, j, &any);
-          have_split = true;
           if (!multi) {
             if (!always && !guard_off) {
               const int64_t floor = join_cost_floor(i, j);
@@ -1389,8 +1281,7 @@ struct Carver {
                 natural = CarveDecision::kSplit;
               }
             }
-            if (natural != CarveDecision::kSplit)
-              c.emplace(evaluate_cached(i, j, false));
+            if (natural != CarveDecision::kSplit) c.emplace(evaluate(i, j));
           }
           if (natural != CarveDecision::kIsland &&
               natural != CarveDecision::kSplit) {
@@ -1403,7 +1294,7 @@ struct Carver {
           }
         }
 
-        switch (resolve(key, natural, c, any, have_split, split)) {
+        switch (natural) {
           case CarveDecision::kSplit:
             liveness_until = j;
             break;
@@ -1417,33 +1308,8 @@ struct Carver {
         }
         continue;
       }
-      Candidate c =
-          via_liveness ? liveness_candidate(i, j) : evaluate_cached(i, j, false);
-      // via_liveness prices a piece of a split, which must not collide
-      // with the outer, undivided span's own key (strict=false) even
-      // when a liveness piece happens to span the whole outer range
-      // unfragmented.
-      const CandidateKey key{i, j, via_liveness};
-      const CarveDecision natural =
-          c.accepted ? CarveDecision::kIsland : CarveDecision::kLeave;
-      CarveDecision taken = natural;
-      if (plan) {
-        auto ov = plan->overrides.find(key);
-        if (ov != plan->overrides.end())
-          taken = ov->second == CarveDecision::kIsland
-                      ? (c.compiled ? CarveDecision::kIsland : natural)
-                      : CarveDecision::kLeave;
-        // No split candidate exists here, so this is always island versus
-        // leave -- the same comparison c.accepted made, boundary-free.
-        const int64_t chosen_cost =
-            taken == CarveDecision::kIsland ? c.island_cost : c.graph_cost;
-        const int64_t other_cost =
-            taken == CarveDecision::kIsland ? c.graph_cost : c.island_cost;
-        plan->decisions.push_back(CandidateRecord{
-            key, taken, c.compiled ? Viability::kYes : Viability::kNo,
-            Viability::kUnknown, chosen_cost, other_cost});
-      }
-      if (taken == CarveDecision::kIsland) {
+      Candidate c = via_liveness ? liveness_candidate(i, j) : evaluate(i, j);
+      if (c.accepted) {
         const bool renamed = via_liveness && renames_a_slot(c);
         emit(c);
         if (renamed) {
@@ -1456,7 +1322,6 @@ struct Carver {
       }
     }
     g.ops = std::move(result);
-    if (plan) plan->pre_island_ops = std::move(pre_ops);
     return carved;
   }
 };
@@ -1479,10 +1344,9 @@ bool compact_island_gated(IslandProg& p, bool enable_destination_forwarding) {
 int carve_islands(Graph& g,
                   const std::vector<std::pair<int, std::vector<double>>>& fills,
                   const std::vector<int>& target_terms,
-                  const std::vector<int>& extra_roots, CarvePlan* plan) {
+                  const std::vector<int>& extra_roots) {
   if (std::getenv("STANLI_NO_ISLAND")) return 0;
-  if (plan && !plan->cache) plan->cache = std::make_shared<CarveCache>();
-  Carver carver(g, fills, target_terms, extra_roots, plan);
+  Carver carver(g, fills, target_terms, extra_roots);
   return carver.run();
 }
 

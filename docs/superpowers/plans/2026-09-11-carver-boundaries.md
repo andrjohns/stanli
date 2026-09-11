@@ -62,10 +62,8 @@ the review's second complaint: `c.accepted` (813) reads `graph_cost >=
 island_cost` with no boundary, while `split_wins` (985-993) compares split
 against `island_cost + boundary`; the same candidate is judged two ways
 depending which alternative sits next to it. Under one function, `c.accepted`
-becomes `graph_cost(i, j) >= cost(join, i, j)` everywhere, and the tuner's
-closeness (carve_plan.hpp: 66-71) is `|chosen - other| / max(chosen, other)`
-over these same three numbers, never a boundary-in/boundary-out mix of one
-candidate.
+becomes `graph_cost(i, j) >= cost(join, i, j)` everywhere, judged from these
+same three numbers, never a boundary-in/boundary-out mix of one candidate.
 
 Surviving as bounds on this function: `join_cost_floor` already adds
 `joined_boundary(i, j)` (898), so it is a lower bound on `cost(join)` computed
@@ -86,8 +84,8 @@ multipliers in `graph_op_cost`, 44-80) keep their values and role: named
 constants calibrated once from a profile of the interpreter (44-62 already cite
 it), documented as a calibration rather than a proof. Recalibrating means a
 fixed micro-benchmark of one graph-op dispatch against one island-instruction
-dispatch on the current machine, whether a small `tools/` binary or one more
-bitwise-checked pair in `tune.cpp`'s own timing, not another corpus sweep.
+dispatch on the current machine, a small `tools/` binary rather than another
+corpus sweep.
 
 ## 4. Migration, smallest first
 

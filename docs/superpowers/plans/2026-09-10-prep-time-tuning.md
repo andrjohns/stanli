@@ -187,3 +187,15 @@ budget is one thousand gradient evaluations rather than a fraction of
 compile time, and a batch is at least 20 µs long. With those, tuning
 costs nothing on models whose decisions are far from the boundary and
 0.2 to 0.4 ms on the sub-2 ms models whose one decision is close.
+
+## Removed
+
+Removed: `tune.cpp`, `tune.hpp`, `carve_plan.hpp`, the plan, cache and
+override machinery in `island.cpp`, and the tests that existed only to
+serve them. It was off by default and stayed off: the agreement gate
+samples three points, not a per-instruction contract between an island
+and the graph kernel it replaces, and nothing was building toward closing
+that gap. What would make tuning worth having again is not more machinery
+on this side but a corpus-level fix to the estimate's own bias, so the
+boundary it draws needs a measurement to resolve less often. The last
+revision that carried this pass is `13cd4ee9`.
