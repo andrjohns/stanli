@@ -101,6 +101,7 @@ add_library(stanmath INTERFACE)
 target_include_directories(stanmath INTERFACE
   ${DEPS}/math
   ${DEPS}/stan/src
+  ${DEPS}/stan/lib/rapidjson_1.1.0
   ${_eigen}
   ${_boost}
   ${_sundials}/include

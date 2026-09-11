@@ -19,7 +19,7 @@ fetch() { # name url sha sparse-paths...
 }
 
 fetch math https://github.com/stan-dev/math.git "$MATH_SHA" stan lib
-fetch stan https://github.com/stan-dev/stan.git "$STAN_SHA" src/stan
+fetch stan https://github.com/stan-dev/stan.git "$STAN_SHA" src/stan lib/rapidjson_1.1.0
 
 # Do not fetch stanc3's moving `nightly` release here. It is replaced in
 # place, so its URL cannot identify the compiler bytes a release used.
