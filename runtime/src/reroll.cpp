@@ -39,6 +39,7 @@
 // never per-model: cross-lane reads (parameter recurrences), partial or
 // strided INDEX progressions, outputs escaping the lane, opcodes outside
 // the vocabulary.
+#include <stanli/builtin_registry.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/reroll.hpp>
 
@@ -188,6 +189,12 @@ bool ops_match(const Graph& g, const Op& a, const Op& b,
              b.idata[1] == a.idata[1];
     return b.idata[0] == a.idata[0] + lane_distance * g.slots[a.in[1]].len;
   }
+  // A gather's idata is an arbitrary index list, not a progression: any two
+  // gathers of the same width off the same base are the same template, and
+  // classification decides separately whether the lanes' concatenated
+  // indices are a shape it can pack.
+  if (a.opcode == OP_GATHER)
+    return a.in[0] == b.in[0] && a.n_idata == b.n_idata;
   if (has_op_trait(a.opcode, op_trait::kRerollIdataDensity))
     return a.n_idata == b.n_idata;
   if (a.n_idata != b.n_idata) return false;
@@ -226,6 +233,9 @@ uint64_t op_signature(const Graph& g, const Op& a) {
     h = mix_u64(h, (uint64_t)a.out);
     h = mix_u64(h, (uint64_t)a.n_idata);
   } else if (row_read) {
+    h = mix_u64(h, (uint64_t)a.in[0]);
+    h = mix_u64(h, (uint64_t)a.n_idata);
+  } else if (a.opcode == OP_GATHER) {
     h = mix_u64(h, (uint64_t)a.in[0]);
     h = mix_u64(h, (uint64_t)a.n_idata);
   } else if (!idx_family) {
@@ -1194,6 +1204,39 @@ static RerollStats reroll_impl(
               ok = false;
               prefix = std::min(prefix, br_row < Luse ? br_row : (int64_t)0);
             }
+          } else if (t.opcode == OP_GATHER && t.n_in == 1) {
+            // A per-lane gather of an invariant base: lowering's read-side
+            // selector ladder does not cover a fixed index alongside a
+            // range on another axis (`m[i, 2:K]`), so a partial row falls
+            // to a plain per-lane gather instead of a strided window. Safe
+            // to pack only when every lane's gathered elements together are
+            // an exact permutation of one contiguous span of the base:
+            // sort the concatenation and classify it with the same
+            // primitive lowering's own selector classifier uses. A repeated
+            // or non-contiguous union is not this disposition; nothing else
+            // here combines OP_GATHER lanes into one op yet.
+            const int64_t io_ok = std::min(br_internal, br_nonterm);
+            if (ap.ins[0].kind != InKind::kInvariant || io_ok < Luse) {
+              ok = false;
+              prefix = std::min(prefix, io_ok);
+            } else {
+              std::vector<int64_t> offsets;
+              offsets.reserve((size_t)(Luse * t.n_idata));
+              for (int64_t l = 0; l < Luse; ++l) {
+                const Op& o = op_at(p, l);
+                for (int64_t k = 0; k < o.n_idata; ++k)
+                  offsets.push_back(o.idata[k]);
+              }
+              std::sort(offsets.begin(), offsets.end());
+              const FlatOffsetRun run = classify_flat_offsets(offsets);
+              if (run.kind == BuiltinSliceMap::Kind::Contiguous) {
+                ap.slice_start = (int)run.offset;
+                ap.width = t.n_idata;
+              } else {
+                ok = false;
+                prefix = 0;  // not a contiguous permutation: not ours to pack
+              }
+            }
           } else if (has_op_trait(t.opcode, op_trait::kRerollAnyDensity)) {
             // Two fusable dispositions: every lane's out IS a target term
             // (one summed vector density), or NO lane's out is a term and
@@ -1508,7 +1551,7 @@ static RerollStats reroll_impl(
           rd.opcode = ap.slice_start >= 0 ? OP_SLICE : OP_GATHER;
           rd.n_in = 1;
           rd.in[0] = resolve(t.in[0]);
-          rd.out = g.add_slot(Luse, false);
+          rd.out = g.add_slot(Luse * ap.width, false);
           std::vector<int> idata;
           if (ap.slice_start >= 0)
             idata.push_back(ap.slice_start);

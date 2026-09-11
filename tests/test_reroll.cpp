@@ -1886,6 +1886,56 @@ static void test_row_lane_shared_read() {
   }
 }
 
+// Gap 1 (docs/superpowers/plans/2026-09-11-lane-layout-unification.md): a
+// partial row read that lowering hands reroll as one OP_GATHER per lane
+// (`m[i, 2:K]` on a column-major parameter matrix, a fixed row alongside a
+// range on the other axis) rather than a strided window. Twelve lanes, each
+// gathering two of the base's three columns skipping column 0: the twelve
+// lanes' gathered offsets are, as a set, one contiguous span of the base
+// (columns 1 and 2 for every row), so the fused form is one OP_SLICE.
+static void test_gather_lane_partial_row() {
+  const int N = 12, C = 3;
+  Graph g;
+  Fills fills;
+  const int m = g.add_slot(N * C, true);  // column-major, a parameter
+  const int mu = g.add_slot(1, true);
+  const int sigma = g.add_slot(1, true);
+  std::vector<int> terms;
+  for (int i = 0; i < N; ++i) {
+    const int w = g.add_slot(2, false);
+    g.add_op(OP_GATHER, {m}, w, {i + N, i + 2 * N});
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {w, mu, sigma}, lp);
+    g.ops[(size_t)id].variant = 0x07;
+    terms.push_back(lp);
+  }
+  Graph ref = g;
+  reduce_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  const RerollStats st = reroll(g, f2, tt, {});
+  expect("gap1 regions==1", st.regions == 1);
+  expect("gap1 ops==2", g.ops.size() == 2);  // SLICE + NORMAL_LPDF
+  int slices = 0, gathers = 0;
+  for (const Op& op : g.ops) {
+    slices += op.opcode == OP_SLICE;
+    gathers += op.opcode == OP_GATHER;
+  }
+  expect("gap1 is a slice, not a gather", slices == 1 && gathers == 0);
+  expect("gap1 one term", tt.size() == 1);
+  for (const Op& op : g.ops)
+    if (op.opcode == OP_SLICE)
+      expect("gap1 slice reads columns 1 and 2 of every row",
+             op.idata[0] == N && g.slots[(size_t)op.out].len == 2 * N);
+  reduce_into_result(g, tt);
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("gap1 sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("gap1 v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
 // ---- end to end through compile_model ------------------------------------
 
 static std::string slurp(const char* p) {
@@ -2257,6 +2307,7 @@ int main() {
   test_row_store_lanes();
   test_row_lanes_bail();
   test_row_lane_shared_read();
+  test_gather_lane_partial_row();
   test_e2e_fixtures();
   test_signature_soundness();
   test_prefilter_output_matches();
