@@ -25,11 +25,18 @@
 // terms for its OP_SUM_VEC; element stores marching through one vector at
 // a constant stride collapse into a single vector store -- or into the
 // fused value vector itself -- with every later reference renamed.
-// A lane may also be one row of a container: a SLICE or SLICE_STRIDED
-// reading row `lane` of an invariant base, lanes covering every row,
-// elides to the base the same way, constants and lpmf outcomes pack in the
-// base's storage order, and row stores covering every row make the fused
-// value the container.
+// A lane may also be C elements wide. LaneLayout names the region's packing
+// convention (row-major or column-major, whichever its first wide row op
+// commits to): a SLICE or SLICE_STRIDED reading row `lane` of an invariant
+// base, lanes covering every row, elides to the base the same way a plain
+// OP_INDEX does; a row that does not cover the base, or an OP_GATHER whose
+// lanes' indices are together one affine run, packs through one OP_SLICE or
+// OP_GATHER instead; constants and lpmf outcomes pack in the region's
+// convention; an invariant operand as wide as the row tiles via OP_REP_MAT;
+// a density whose row-wide lp feeds another op folds back with one
+// OP_SUM_ROWS per lane (repacked first when the convention is column-major,
+// since OP_SUM_ROWS needs each lane's elements contiguous); and row stores
+// covering every row make the fused value the container.
 //
 // Failed classifications report the longest still-classifiable lane
 // prefix and retry with it. This is what handles block-structured data
@@ -75,10 +82,15 @@ struct PosIn {
 // at flat position `lane_stride*l + elem_stride*k`. Row-major rows
 // (lane_stride=C, elem_stride=1) and column-major rows (lane_stride=1,
 // elem_stride=L) are the two conventions a region may commit to; every
-// wide row op in one region must agree on which.
+// wide row op in one region must agree on which. A position's own read
+// of the base is either an elision (the fused consumer reads the base
+// directly, no op) or a slice (one OP_SLICE at `offset`, a window that
+// does not cover the whole base); `kNone` means neither applies.
 struct LaneLayout {
   int64_t lane_stride = 0;
   int64_t elem_stride = 1;
+  enum class Kind { kNone, kElide, kSlice } kind = Kind::kNone;
+  int64_t offset = 0;  // meaningful only for kSlice
 
   int64_t flat_at(int64_t l, int64_t k) const {
     return lane_stride * l + elem_stride * k;
@@ -88,8 +100,7 @@ struct LaneLayout {
 struct Pos {
   std::vector<PosIn> ins;
   int64_t width = 1;            // elements per lane through this position
-  bool index_elision = false;   // OP_INDEX, idata==lane, base len==lanes
-  bool row_elision = false;     // SLICE of row `lane`, lanes cover the base
+  LaneLayout read;              // OP_INDEX/row elision or slice of the base
   bool row_store = false;       // SET_SLICE of row `lane`, lanes cover it
   int store_src = -1;           // the store's base at lane 0
   bool hoist = false;           // all inputs + idata invariant: emit once
@@ -102,7 +113,6 @@ struct Pos {
                                 //   OP_SUM_ROWS; ap.width becomes 1 after
   bool term_widen = false;      // widenable, every lane's out a target term
                                 //   -> widen + OP_SUM_VEC, swap the terms
-  int slice_start = -1;         // OP_INDEX over a contiguous window
   std::vector<int> gather_idx;  // OP_INDEX with a data-driven index
   int store_vec = -1;           // element write filling a window of this
   int store_start = 0;          //   vector, starting here,
@@ -853,13 +863,6 @@ static RerollStats reroll_impl(
         bool any_term_widen = false;
         layout_set = false;
         const size_t region_end = i + (size_t)P * (size_t)Luse;
-        const auto adopt_layout = [&](int64_t width, bool strided) {
-          if (width == 1) return true;
-          if (layout_set) return layout_cols == strided;
-          layout_set = true;
-          layout_cols = strided;
-          return true;
-        };
         const auto row_operands_ok = [&](Pos& ap, const Op& t) {
           for (int j = 0; j < t.n_in; ++j) {
             PosIn& in = ap.ins[j];
@@ -1035,11 +1038,12 @@ static RerollStats reroll_impl(
               ok = false;
               prefix = std::min(prefix, io_ok);
             } else if (br_prog == Luse && blen == Luse) {
-              ap.index_elision = true;  // reads the whole base, in order
+              ap.read.kind = LaneLayout::Kind::kElide;  // whole base, in order
             } else if (br_iinv == Luse) {
               ap.hoist = true;  // same element every lane
             } else if (br_run == Luse && t.idata[0] + Luse <= blen) {
-              ap.slice_start = t.idata[0];  // contiguous window -> OP_SLICE
+              ap.read.kind = LaneLayout::Kind::kSlice;  // contiguous window
+              ap.read.offset = t.idata[0];
             } else if (in_range) {
               // Arbitrary data-driven index (`alpha[county_idx[n]]`, the
               // hierarchical idiom) -> one OP_GATHER over the lane indices.
@@ -1095,7 +1099,7 @@ static RerollStats reroll_impl(
               // while nobody writes it after the run, so a later writer
               // forces the store form.
               const Pos& prod = pos[(size_t)ap.ins[1].producer_pos];
-              if (prod.index_elision) {
+              if (prod.read.kind == LaneLayout::Kind::kElide) {
                 const int base = op_at(ap.ins[1].producer_pos, 0).in[0];
                 if (any_at_or_after(writers[(size_t)base], region_end,
                                     st.list_steps))
@@ -1148,7 +1152,15 @@ static RerollStats reroll_impl(
             const bool covering =
                 br_row == Luse && Luse == rows && blen == rows * w;
             bool clean = shape && covering && !root_set.count(vec) &&
-                         !term_set.count(vec) && adopt_layout(w, strided);
+                         !term_set.count(vec);
+            if (clean && w != 1) {
+              if (layout_set)
+                clean = layout_cols == strided;
+              else {
+                layout_set = true;
+                layout_cols = strided;
+              }
+            }
             const PosIn& val = ap.ins[1];
             if (val.kind == InKind::kLaneLocal) {
               const Pos& prod = pos[(size_t)val.producer_pos];
@@ -1159,7 +1171,7 @@ static RerollStats reroll_impl(
             bool written_after = false;
             if (clean && val.kind == InKind::kLaneLocal) {
               const Pos& prod = pos[(size_t)val.producer_pos];
-              if (prod.index_elision || prod.row_elision) {
+              if (prod.read.kind == LaneLayout::Kind::kElide) {
                 const int base = op_at(val.producer_pos, 0).in[0];
                 if (any_at_or_after(writers[(size_t)base], region_end,
                                     st.list_steps))
@@ -1211,10 +1223,24 @@ static RerollStats reroll_impl(
             if (ap.ins[0].kind != InKind::kInvariant || io_ok < Luse) {
               ok = false;
               prefix = std::min(prefix, io_ok);
-            } else if (br_row == Luse && Luse == rows && blen == rows * w &&
-                       adopt_layout(w, strided)) {
-              ap.row_elision = true;
-              ap.width = w;
+            } else if (br_row == Luse && Luse == rows && blen == rows * w) {
+              bool layout_ok = w == 1;
+              if (!layout_ok) {
+                if (layout_set) {
+                  layout_ok = layout_cols == strided;
+                } else {
+                  layout_set = true;
+                  layout_cols = strided;
+                  layout_ok = true;
+                }
+              }
+              if (layout_ok) {
+                ap.read.kind = LaneLayout::Kind::kElide;
+                ap.width = w;
+              } else {
+                ok = false;
+                prefix = std::min(prefix, br_row < Luse ? br_row : (int64_t)0);
+              }
             } else {
               ok = false;
               prefix = std::min(prefix, br_row < Luse ? br_row : (int64_t)0);
@@ -1245,7 +1271,8 @@ static RerollStats reroll_impl(
               std::sort(offsets.begin(), offsets.end());
               const FlatOffsetRun run = classify_flat_offsets(offsets);
               if (run.kind == BuiltinSliceMap::Kind::Contiguous) {
-                ap.slice_start = (int)run.offset;
+                ap.read.kind = LaneLayout::Kind::kSlice;
+                ap.read.offset = run.offset;
                 ap.width = t.n_idata;
               } else {
                 ok = false;
@@ -1389,11 +1416,11 @@ static RerollStats reroll_impl(
                 ++ops_out;
                 added += Luse * tile_width;
               }
-            if (ap.index_elision || ap.row_elision) {
+            if (ap.read.kind == LaneLayout::Kind::kElide) {
               continue;
             } else if (ap.hoist) {
               ++ops_out;
-            } else if (ap.slice_start >= 0) {
+            } else if (ap.read.kind == LaneLayout::Kind::kSlice) {
               ++ops_out;
               added += Luse * ap.width;
               lane_elems += 2 * ap.width;
@@ -1487,18 +1514,15 @@ static RerollStats reroll_impl(
 
       // ---- rewrite the classified prefix [i, i + P*Luse) ----
       std::vector<int> pos_out((size_t)P, -1);
-      // Element k of lane l in a vector of `w`-wide lanes, per the region's
-      // committed convention.
-      const auto flat_at = [&](int64_t w, int64_t l, int64_t k) {
+      const auto packed_const = [&](const PosIn& in, int64_t w) {
+        // Element k of lane l in a vector of `w`-wide lanes, per the
+        // region's committed convention.
         const LaneLayout lay =
             layout_cols ? LaneLayout{1, Luse} : LaneLayout{w, 1};
-        return lay.flat_at(l, k);
-      };
-      const auto packed_const = [&](const PosIn& in, int64_t w) {
         std::vector<double> packed((size_t)(Luse * w));
         for (int64_t l = 0; l < Luse; ++l)
           for (int64_t k = 0; k < w; ++k)
-            packed[(size_t)flat_at(w, l, k)] =
+            packed[(size_t)lay.flat_at(l, k)] =
                 in.values[(size_t)(l * in.width + (in.width == 1 ? 0 : k))];
         const int cs = g.add_slot(Luse * w, false);
         fills.emplace_back(cs, std::move(packed));
@@ -1507,7 +1531,7 @@ static RerollStats reroll_impl(
       for (int p = 0; p < P; ++p) {
         const Op& t = op_at(p, 0);
         Pos& ap = pos[(size_t)p];
-        if (ap.index_elision || ap.row_elision) {
+        if (ap.read.kind == LaneLayout::Kind::kElide) {
           pos_out[(size_t)p] = resolve(t.in[0]);
           continue;
         }
@@ -1574,18 +1598,19 @@ static RerollStats reroll_impl(
           pos_out[(size_t)p] = replacement;
           continue;
         }
-        if (ap.slice_start >= 0 || !ap.gather_idx.empty()) {
+        const bool is_slice = ap.read.kind == LaneLayout::Kind::kSlice;
+        if (is_slice || !ap.gather_idx.empty()) {
           // One vector read replaces the lanes' scalar reads. Both kernels
           // scatter their adjoints back into the base, gather in ascending
           // lane order so repeated indices accumulate like the var path.
           Op rd;
-          rd.opcode = ap.slice_start >= 0 ? OP_SLICE : OP_GATHER;
+          rd.opcode = is_slice ? OP_SLICE : OP_GATHER;
           rd.n_in = 1;
           rd.in[0] = resolve(t.in[0]);
           rd.out = g.add_slot(Luse * ap.width, false);
           std::vector<int> idata;
-          if (ap.slice_start >= 0)
-            idata.push_back(ap.slice_start);
+          if (is_slice)
+            idata.push_back((int)ap.read.offset);
           else
             idata = std::move(ap.gather_idx);
           g.idata_pool.push_back(std::move(idata));
@@ -1601,17 +1626,19 @@ static RerollStats reroll_impl(
         // its own operands still pack at the row width.
         const int64_t eff_width = ap.rows > 1 ? ap.rows : ap.width;
         if (eff_width > 1 && !ap.outcome_idata.empty()) {
+          const LaneLayout lay =
+              layout_cols ? LaneLayout{1, Luse} : LaneLayout{eff_width, 1};
           std::vector<int> packed(ap.outcome_idata.size());
           for (int64_t l = 0; l < Luse; ++l)
             for (int64_t k = 0; k < eff_width; ++k)
-              packed[(size_t)flat_at(eff_width, l, k)] =
+              packed[(size_t)lay.flat_at(l, k)] =
                   ap.outcome_idata[(size_t)(l * eff_width + k)];
           ap.outcome_idata = std::move(packed);
         }
         // A wide shared operand tiled to the region's packing order: mode
         // {width, count, 1} tail-to-tail (row-major) or {count, width, 2}
-        // each element repeated (column-major), matching whichever
-        // convention flat_at already committed the region to.
+        // each element repeated (column-major), matching the same
+        // LaneLayout convention.
         const auto tile_wide_op = [&](int base) {
           Op rep;
           rep.opcode = OP_REP_MAT;

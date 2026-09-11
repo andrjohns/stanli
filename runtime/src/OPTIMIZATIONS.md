@@ -212,6 +212,21 @@ usual, and one summing op replaces the N per-lane target entries. A
 density whose inputs are the same buffer in every lane stays one scalar
 op instead.
 
+A lane may also be C elements wide (`LaneLayout`, the row-major/column-major
+convention one region's wide row ops must agree on). A row read covering
+its base elides to it the same way a scalar `OP_INDEX` does; a partial row
+or a per-lane gather packs through one `OP_SLICE` or `OP_GATHER` once its
+lanes' offsets are, together, one affine run (the same classifier
+`builtin_index_map` uses for a static selector, extracted so there is one
+place that decides what an affine window is); an invariant operand as wide
+as the row tiles via `OP_REP_MAT` instead of blocking the region; and a row
+density whose result feeds another op (a mixture over rows) folds back with
+one `OP_SUM_ROWS` per lane, repacking first when the region's convention is
+column-major, since `OP_SUM_ROWS` needs each lane's elements contiguous.
+Partition's `indexed_read` and its own wide-operand check share the same
+affine classifier and the same tiling, so a lane found by structure there
+or by period here is priced and packed the same way.
+
 Fixed-width row reductions get one deliberately narrower pre-pass. The LDA
 shape fills every element of a short `gamma` vector, then contributes
 `log_sum_exp(gamma)` once per document. Because K=2 is below the ordinary
@@ -308,7 +323,11 @@ A bucket is rewritten in one of these forms:
 - One template, one bucket: each input becomes a slice when the lanes
   read a contiguous range, a gather when they do not, and a shared
   operand when every lane reads the same slot. Contiguity is a cost
-  question here, not a legality one.
+  question here, not a legality one, decided by the same affine-run
+  classifier reroll.cpp's row lanes use. An operand as wide as the
+  lane but shared by every lane instead tiles via `OP_REP_MAT`
+  (reroll.cpp's tiling exactly), hoisted once instead when every input
+  is shared, not only this one.
 - Density lanes whose outcomes ride along as immediates concatenate
   those immediates into the layout the vector kernel unpacks, group by
   group for the binomial family's `n`/`y` pairs and flat for everything
@@ -329,9 +348,11 @@ A bucket is rewritten in one of these forms:
   two scalars that refinement holds still.
 
 Fusing is not always a win, so each bucket is costed before it is
-emitted, in the currencies the island carver uses: about 5 ns per graph
-op against about 1 ns per element moved, with a density element charged
-six op dispatches. Two measured pessimizations live in that model rather
+emitted, in the currencies the island carver uses (`pass_util.hpp`'s
+`kOpCost`, `kDensityElem`, `kPartitionMargin`, the same ones reroll.cpp's
+own region pricing uses): about 5 ns per graph op against about 1 ns per
+element moved, with a density element charged six op dispatches. Two
+measured pessimizations live in that model rather
 than in the shipped graph. Lanes identical down to their immediates and
 their external slots are one op once CSE runs, so fusing them re-expands
 what CSE would collapse and the bucket is charged for every duplicate it

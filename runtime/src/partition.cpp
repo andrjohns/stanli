@@ -38,6 +38,7 @@
 #include <stanli/partition.hpp>
 
 #include "pass_util.hpp"
+#include "reroll_profile.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -48,9 +49,9 @@
 namespace stanli {
 namespace {
 
-constexpr int64_t kMinLanes = 4;
-// The shared currencies live in pass_util.hpp: reroll's own cost model uses
+// The floor and the cost currencies are shared with reroll.cpp, which uses
 // the same ones.
+constexpr int64_t kMinLanes = detail::kMinLanes;
 constexpr int64_t kOpCost = kLaneOpCost;
 constexpr int64_t kPartitionMargin = kLanePartitionMargin;
 constexpr int64_t kDensityElem = kLaneDensityElem;
@@ -980,19 +981,22 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
     for (int p = 0; p < k; ++p) {
       const Op& t = op_at(p, 0);
       Pos& ap = pos[(size_t)p];
-      if (ap.emit == Emit::kElide) {
-        ap.out = t.in[0];
-        continue;
-      }
-      if (ap.emit == Emit::kSlice || ap.emit == Emit::kGather) {
-        Op rd;
-        rd.opcode = ap.emit == Emit::kSlice ? OP_SLICE : OP_GATHER;
-        rd.n_in = 1;
-        rd.in[0] = t.in[0];
-        rd.out = g.add_slot(L * ap.width, false);
-        attach_idata(rd, std::move(ap.idx));
-        ap.out = rd.out;
-        out_ops.push_back(rd);
+      // The base's own read, materialized (a slice or a gather) or not
+      // (elision: the fused consumer reads the base directly).
+      if (ap.emit == Emit::kElide || ap.emit == Emit::kSlice ||
+          ap.emit == Emit::kGather) {
+        if (ap.emit == Emit::kElide) {
+          ap.out = t.in[0];
+        } else {
+          Op rd;
+          rd.opcode = ap.emit == Emit::kSlice ? OP_SLICE : OP_GATHER;
+          rd.n_in = 1;
+          rd.in[0] = t.in[0];
+          rd.out = g.add_slot(L * ap.width, false);
+          attach_idata(rd, std::move(ap.idx));
+          ap.out = rd.out;
+          out_ops.push_back(rd);
+        }
         continue;
       }
       Op op = t;  // opcode, variant and immediates carry over
