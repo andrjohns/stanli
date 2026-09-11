@@ -124,19 +124,16 @@ int main(int argc, char** argv) {
     stan::model::gradient(model, q, f, grad, logger);
     sink += f;
   };
-  // Warm up by time, not by count: 1000 evaluations is nothing on a scalar
-  // model and 90 seconds on an ODE one.
+  // Warm by elapsed time, the rule bench_cmdstan_grad uses.
   int warmup_evals = 0;
   const Time warmup_start = prep_now();
   {
     auto w0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < 1000; ++i) {
+    do {
       one();
       ++warmup_evals;
-      if (std::chrono::steady_clock::now() - w0 >
-          std::chrono::milliseconds(200))
-        break;
-    }
+    } while (std::chrono::steady_clock::now() - w0 <
+             std::chrono::milliseconds(200));
   }
   const int64_t warmup_ns = prep_ns(warmup_start);
   const int64_t driver_ns = prep_ns(driver_start);
