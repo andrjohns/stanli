@@ -68,8 +68,19 @@ struct PosIn {
   int64_t width = 1;
 };
 
-// How L lanes of C elements sit in one L*C vector.
-enum class Layout { kAny, kRows, kCols };
+// How L lanes of C elements sit in one L*C vector: element k of lane l is
+// at flat position `lane_stride*l + elem_stride*k`. Row-major rows
+// (lane_stride=C, elem_stride=1) and column-major rows (lane_stride=1,
+// elem_stride=L) are the two conventions a region may commit to; every
+// wide row op in one region must agree on which.
+struct LaneLayout {
+  int64_t lane_stride = 0;
+  int64_t elem_stride = 1;
+
+  int64_t flat_at(int64_t l, int64_t k) const {
+    return lane_stride * l + elem_stride * k;
+  }
+};
 
 struct Pos {
   std::vector<PosIn> ins;
@@ -810,7 +821,8 @@ static RerollStats reroll_impl(
 
       // ---- classify, shrinking to the reported prefix on failure ----
       std::vector<Pos> pos;
-      Layout layout = Layout::kAny;
+      bool layout_set = false;   // has the region committed to a convention
+      bool layout_cols = false;  // column-major, once committed
       int64_t Luse = doomed ? 0 : L;
       bool classified = false;
       for (int attempt = 0;
@@ -824,13 +836,13 @@ static RerollStats reroll_impl(
         bool any_store = false;
         bool any_elt_density = false;
         bool any_term_widen = false;
-        layout = Layout::kAny;
+        layout_set = false;
         const size_t region_end = i + (size_t)P * (size_t)Luse;
         const auto adopt_layout = [&](int64_t width, bool strided) {
           if (width == 1) return true;
-          const Layout want = strided ? Layout::kCols : Layout::kRows;
-          if (layout != Layout::kAny && layout != want) return false;
-          layout = want;
+          if (layout_set) return layout_cols == strided;
+          layout_set = true;
+          layout_cols = strided;
           return true;
         };
         const auto row_operands_ok = [&](const Pos& ap, const Op& t) {
@@ -1327,9 +1339,12 @@ static RerollStats reroll_impl(
 
       // ---- rewrite the classified prefix [i, i + P*Luse) ----
       std::vector<int> pos_out((size_t)P, -1);
-      // Element k of lane l in a vector of `w`-wide lanes.
+      // Element k of lane l in a vector of `w`-wide lanes, per the region's
+      // committed convention.
       const auto flat_at = [&](int64_t w, int64_t l, int64_t k) {
-        return layout == Layout::kCols ? l + Luse * k : l * w + k;
+        const LaneLayout lay =
+            layout_cols ? LaneLayout{1, Luse} : LaneLayout{w, 1};
+        return lay.flat_at(l, k);
       };
       const auto packed_const = [&](const PosIn& in, int64_t w) {
         std::vector<double> packed((size_t)(Luse * w));
