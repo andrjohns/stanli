@@ -82,10 +82,16 @@ extern "C" {
 
 stanli_model* stanli_model_new(const char* tmir_sexp, const char* data_json,
                                char* err, size_t err_len) {
+  return stanli_model_new_seeded(tmir_sexp, data_json, 1, err, err_len);
+}
+
+stanli_model* stanli_model_new_seeded(const char* tmir_sexp,
+                                      const char* data_json, uint32_t seed,
+                                      char* err, size_t err_len) {
   try {
     auto m = std::make_unique<stanli_model>();
     stanli::DataMap data = stanli::DataMap::from_json(data_json);
-    m->cm = stanli::compile_model(tmir_sexp, data);
+    m->cm = stanli::compile_model(tmir_sexp, data, seed);
     m->ex = std::make_unique<stanli::Executor>(std::move(m->cm.graph));
     m->cm.bind(*m->ex);
     for (const auto& v : m->cm.views) m->n_con += v.len;
@@ -147,6 +153,14 @@ extern "C" void stanli_stanc_free(char* p);
 stanli_model* stanli_model_new_from_stan(const char* stan_code,
                                          const char* data_json, char* err,
                                          size_t err_len) {
+  return stanli_model_new_from_stan_seeded(stan_code, data_json, 1, err,
+                                           err_len);
+}
+
+stanli_model* stanli_model_new_from_stan_seeded(const char* stan_code,
+                                                const char* data_json,
+                                                uint32_t seed, char* err,
+                                                size_t err_len) {
 #ifdef STANLI_EMBED_STANC
   char* res = stanli_stanc_tmir(stan_code);
   if (std::strncmp(res, "OK", 2) != 0) {
@@ -154,12 +168,14 @@ stanli_model* stanli_model_new_from_stan(const char* stan_code,
     stanli_stanc_free(res);
     return nullptr;
   }
-  stanli_model* m = stanli_model_new(res + 2, data_json, err, err_len);
+  stanli_model* m =
+      stanli_model_new_seeded(res + 2, data_json, seed, err, err_len);
   stanli_stanc_free(res);
   return m;
 #else
   (void)stan_code;
   (void)data_json;
+  (void)seed;
   put_err(err, err_len, "this build does not embed stanc3");
   return nullptr;
 #endif
@@ -849,6 +865,10 @@ int64_t stanli_wa_n_columns(const stanli_model* m) { return m->wa_n; }
 
 const char* stanli_warnings(const stanli_model* m) {
   return m->warnings.c_str();
+}
+
+int stanli_transformed_data_rng(const stanli_model* m) {
+  return m->cm.transformed_data_draws ? 1 : 0;
 }
 
 int64_t stanli_wa_n_generated_start(const stanli_model* m) {

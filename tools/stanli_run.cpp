@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
 #else
     const std::string mir = run_stanc(stanc, model);
 #endif
-    stanli::CompiledModel cm = stanli::compile_model(mir, data);
+    stanli::CompiledModel cm = stanli::compile_model(mir, data, cfg.seed);
     stanli::Executor ex(std::move(cm.graph));
     cm.bind(ex);
     // STANLI_PROFILE=1: per-opcode accounting for the whole sampling run,
