@@ -49,7 +49,7 @@ fi
 (cd "$SRC" && dune runtest -j "$BUILD_JOBS" --profile release \
    src/stanc_embed)
 if [ "$OCAML_OS_TYPE" = Win32 ]; then
-  python tools/stanc_embed/build_windows.py "$SRC" "$BUILD_JOBS"
+  "${PYTHON:-python}" tools/stanc_embed/build_windows.py "$SRC" "$BUILD_JOBS"
   OBJ="$SRC/_build/stanc_embed.static.o"
 else
   if ! (cd "$SRC" && dune build -j "$BUILD_JOBS" --profile release \

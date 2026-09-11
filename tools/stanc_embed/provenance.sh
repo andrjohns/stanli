@@ -167,15 +167,30 @@ stancjs_artifact_matches() {
     [[ "$(_stanc_embed_stamp_value "$stamp" dune_subst)" == 1 ]]
 }
 
+# What the portable JavaScript compiler is built from: the overlay sources
+# and the two scripts build_web.sh runs. The native embed's build scripts
+# live in the same directory but never feed this artifact, so they are
+# listed out, as [stanli_windows_cli_inputs] does for the executable:
+# editing the native build must not invalidate a JS artifact it never
+# touched.
+stanli_stancjs_inputs() {
+  (
+    cd "$_stanli_embed_repo_root"
+    {
+      find compiler/js compiler/ocaml -maxdepth 1 -type f -print
+      printf '%s\n' \
+        tools/stanc_embed/install_overlay.sh \
+        tools/stanc_embed/provenance.sh
+    } | LC_ALL=C sort
+  )
+}
+
 stanli_stancjs_inputs_sha256() {
   (
     cd "$_stanli_embed_repo_root"
     while IFS= read -r input; do
       printf '%s\n%s\n' "$input" "$(_stanc_embed_sha256_file "$input")"
-    done < <(
-      find compiler/js compiler/ocaml tools/stanc_embed \
-        -maxdepth 1 -type f -print | LC_ALL=C sort
-    )
+    done < <(stanli_stancjs_inputs)
   ) | _stanc_embed_sha256_stream
 }
 

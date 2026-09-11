@@ -9,7 +9,7 @@
 #   tools/dev_setup.sh --all         everything
 #   tools/dev_setup.sh --no-build    stop before cmake (CI builds separately)
 #
-# Core needs: git, curl, python, and opam (the OCaml 5.5.0 switch for the
+# Core needs: git, curl, python3 (or python), and opam (the OCaml 5.5.0 switch for the
 # pinned stanc is built automatically). The default C++ build additionally
 # needs CMake plus clang/clang++. Windows uses MSYS2's UCRT64 libraries on
 # x86_64 and CLANGARM64 on ARM64.
@@ -45,7 +45,7 @@ for arg in "$@"; do
     --conformance) WANT_CONFORMANCE=1 ;;
     --all) WANT_EMBED=1; WANT_CORPUS=1; WANT_CONFORMANCE=1 ;;
     --no-build) WANT_BUILD=0 ;;
-    -h|--help) sed -n '2,/^set -/{ /^set -/d; p; }' tools/dev_setup.sh; exit 0 ;;
+    -h|--help) sed -n '2,/^set -/{ /^set -/d; p; }' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)"; exit 2 ;;
   esac
 done
@@ -82,9 +82,10 @@ case "$(uname -s)" in
       have "$1" && "$1" --version 2>/dev/null | grep -qi clang
     }
     missing=()
-    for tool in git curl python opam; do
+    for tool in git curl opam; do
       have "$tool" || missing+=("$tool")
     done
+    have python3 || have python || missing+=(python3)
     if [ "$WANT_BUILD" = 1 ]; then
       have cmake || missing+=(cmake)
       is_clang "${CC:-clang}" || missing+=("${CC:-clang} (Clang C compiler)")
@@ -107,6 +108,11 @@ case "$(uname -s)" in
     fi
     ;;
 esac
+
+# One interpreter for everything below. Linux and macOS ship python3 and
+# usually no python; MSYS2 ships both. PYTHON in the environment overrides.
+PYTHON=${PYTHON:-$(command -v python3 || command -v python)}
+[ -n "$PYTHON" ] || { echo "no python3 or python on PATH" >&2; exit 1; }
 
 # --- vendored headers -------------------------------------------------------
 step "fetching pinned deps (Stan Math and Stan)"
@@ -204,7 +210,7 @@ if [ "$WANT_CORPUS" = 1 ]; then
   fi
 
   step "corpus scoreboard"
-  python tools/corpus.py deps/posteriordb || true
+  "$PYTHON" tools/corpus.py deps/posteriordb || true
 fi
 
 # --- Stan conformance reference stack (optional) ---------------------------
@@ -220,7 +226,7 @@ if [ "$WANT_CONFORMANCE" = 1 ]; then
   ./harnesses/conformance/fetch_cmdstan.sh
 
   step "conformance reference client ($CONFORMANCE_VENV)"
-  [ -f "$VENV_PYTHON" ] || python -m venv "$CONFORMANCE_VENV"
+  [ -f "$VENV_PYTHON" ] || "$PYTHON" -m venv "$CONFORMANCE_VENV"
   "$VENV_PYTHON" -m pip install -q --disable-pip-version-check \
     -r harnesses/conformance/requirements.txt
   echo "reference client ready under $("$VENV_PYTHON" -V)"
@@ -259,8 +265,8 @@ fi
 step "done"
 echo "dev build:   build/            (tests: ctest --test-dir build)"
 echo "bench build: build-rel/        (tools/bench_grad.cpp)"
-echo "corpus:      python tools/corpus.py deps/posteriordb"
-echo "verify:      python tools/verify_sample.py deps/cmdstan deps/posteriordb MODEL..."
+echo "corpus:      ${PYTHON##*/} tools/corpus.py deps/posteriordb"
+echo "verify:      ${PYTHON##*/} tools/verify_sample.py deps/cmdstan deps/posteriordb MODEL..."
 if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
      "$STANC3_SRC_SHA"; then
   echo "wheel:       tools/build_wheel.sh"
