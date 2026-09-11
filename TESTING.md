@@ -66,6 +66,7 @@ below give the details and known exceptions.
 | sampler trace | Is NUTS configured comparably to CmdStan? | Diagnostic summaries remain within limits chosen for large configuration errors | manually after sampler changes |
 | AddressSanitizer | Does ASan detect invalid memory access while CTest runs? | No sanitizer diagnostics | after merge and nightly |
 | WebAssembly replay | Does the browser runtime reproduce the recorded corpus? | Same numerical gates; 118 of 119 compiling posteriordb models fit in wasm32 | manually |
+| browser compiler on Safari 17 | Do the js_of_ocaml bundles keep `static` on the same line as the class element it modifies? | No line in either bundle ends in `static` | every pull request |
 | documentation and formatting | Do generated claims match their artifacts, and is C/C++ formatting current? | Exact generated-file and formatter checks | every pull request |
 
 ## MIR loop-vectorization measurement
