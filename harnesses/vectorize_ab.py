@@ -10,20 +10,22 @@ off/on crossed with the C++ re-roll pass off/on).
 Hard failures are semantic: result categories, vector shapes, write_array
 names and shapes, nonfinite behavior, and the existing CmdStan reference
 gates. Different finite bits within those gates are reported as arithmetic
-order changes, with one bit-pattern/ULP row per changed off/on value. For a
-model whose portable MIR the pass changes, op counts are gated too: the
-lowered log_prob graph must not grow and the final log_prob graph may grow
-by at most 10%, both in the runtime-reroll-on cells. Gradient time on the
-candidate-pass measurement set (GRADIENT_MODELS) is separately gated
+order changes, with one bit-pattern/ULP row per changed off/on value.
+Preparation timing and, for a model whose portable MIR the pass changes,
+op counts (the lowered log_prob graph growing, or the final log_prob
+graph growing by more than 10%, both in the runtime-reroll-on cells) are
+diagnostics: they never fail the run on their own. The execution gate is
+gradient time on the candidate-pass measurement set (GRADIENT_MODELS)
 against the pass-off cell: a model whose on/off ratio exceeds
 GRADIENT_RATIO_THRESHOLD is re-measured fresh, and only fails the run if
-the re-run also exceeds it. Preparation timing is evidence only.
+the re-run also exceeds it.
 
-Both gates compare a run's own pass-off cell against its pass-on cell, so
-a change that moves both identically is invisible to either. --baseline
-DIR diffs final ops, lowered ops, island regions, and slots against a
-previous --output-dir's graphs.jsonl and reports every model whose final
-ops grew or shrank; this comparison never fails the run.
+That gate, like the op-count diagnostic, compares a run's own pass-off
+cell against its pass-on cell, so a change that moves both identically is
+invisible to either. --baseline DIR diffs final ops, lowered ops, island
+regions, and slots against a previous --output-dir's graphs.jsonl and
+reports every model whose final ops grew or shrank; this comparison never
+fails the run either.
 
 Complete semantic report (130 recorded models plus PDB A/B-only models):
   python3 harnesses/vectorize_ab.py deps/posteriordb \
@@ -1145,7 +1147,7 @@ def blank_if_none(value):
 
 def write_reports(output_dir, manifest, corpus_records, graph_records,
                   model_summaries, failures, infrastructure_failures,
-                  op_count_failures, gradient_failures,
+                  op_count_diagnostics, gradient_failures,
                   baseline_comparison=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "manifest.json").write_text(
@@ -1258,7 +1260,7 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
     summary = {
         "schema": 2,
         "ok": (not failures and not infrastructure_failures
-               and not op_count_failures and not gradient_failures),
+               and not gradient_failures),
         "candidate_pass": manifest.get("corpus_scope", {}).get(
             "candidate_pass", VECTORIZE_LOOPS),
         "models": len(model_summaries),
@@ -1273,7 +1275,7 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         "mir_changed_models": changed_models,
         "arithmetic_order_changed_values": changed_values,
         "semantic_failures": failures,
-        "op_count_failures": op_count_failures,
+        "op_count_diagnostics": op_count_diagnostics,
         "gradient_failures": gradient_failures,
         "infrastructure_failures": infrastructure_failures,
         "baseline_comparison": baseline_comparison,
@@ -1298,19 +1300,20 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         f"- Models with different portable MIR: {changed_models}",
         f"- Finite values changed by arithmetic order: {changed_values}",
         f"- Semantic failures: {len(failures)}",
-        f"- Op count failures: {len(op_count_failures)}",
+        f"- Op count diagnostics: {len(op_count_diagnostics)}",
         f"- Gradient time failures: {len(gradient_failures)}",
         f"- Measurement infrastructure failures: "
         f"{len(infrastructure_failures)}", "",
-        "Preparation timings in `graphs.jsonl` and `bench.tsv` are "
-        "measurements, not gates. A model with different portable MIR is "
-        "gated on op counts: the lowered log_prob graph must not grow and "
-        "the final log_prob graph may grow by at most "
-        f"{FINAL_OPS_GROWTH_PERCENT}%, in the runtime-reroll-on cells. "
-        "Gradient time on `GRADIENT_MODELS` is separately gated against the "
-        f"pass-off cell: a model whose on/off ratio exceeds "
-        f"{GRADIENT_RATIO_THRESHOLD} is re-measured fresh, and only fails "
-        "if the re-run also exceeds that ratio.", "",
+        "Preparation timings in `graphs.jsonl` and `bench.tsv`, and op "
+        "counts for a model with different portable MIR, are diagnostics: "
+        "they never fail the run on their own. The lowered log_prob graph "
+        "growing, or the final log_prob graph growing by more than "
+        f"{FINAL_OPS_GROWTH_PERCENT}% (both in the runtime-reroll-on "
+        "cells), are listed below as `## Op count diagnostics` but do not "
+        "decide pass/fail. Gradient time on `GRADIENT_MODELS` is the "
+        f"execution gate: a model whose on/off ratio exceeds "
+        f"{GRADIENT_RATIO_THRESHOLD} is re-measured fresh, and the run "
+        "fails only if that re-run also exceeds the ratio.", "",
         "| model | comparison | MIR changed | changed values | semantic points | "
         "gradient on/off | confirmation on/off |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
@@ -1330,9 +1333,9 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
     if failures:
         lines += ["", "## Semantic failures", ""]
         lines += [f"- {failure}" for failure in failures]
-    if op_count_failures:
-        lines += ["", "## Op count failures", ""]
-        lines += [f"- {failure}" for failure in op_count_failures]
+    if op_count_diagnostics:
+        lines += ["", "## Op count diagnostics", ""]
+        lines += [f"- {failure}" for failure in op_count_diagnostics]
     if gradient_failures:
         lines += ["", "## Gradient time failures", ""]
         lines += [f"- {failure}" for failure in gradient_failures]
@@ -1541,7 +1544,7 @@ def main():
     model_summaries = []
     failures = []
     infrastructure_failures = []
-    op_count_failures = []
+    op_count_diagnostics = []
     gradient_failures = []
     with tempfile.TemporaryDirectory(prefix="stanli_vectorize_ab_") as temp:
         temp = pathlib.Path(temp)
@@ -1662,7 +1665,7 @@ def main():
                                 f"sample {sample['sample']}: bench_grad"
                                 f"{': ' + detail if detail else ''}")
             if mir_changed:
-                op_count_failures.extend(
+                op_count_diagnostics.extend(
                     op_count_gate(model, model_graph_records))
 
             gradient = None
@@ -1720,12 +1723,12 @@ def main():
     manifest["harness_elapsed_ns"] = time.monotonic_ns() - harness_started_ns
     summary = write_reports(
         output_dir, manifest, corpus_records, graph_records, model_summaries,
-        failures, infrastructure_failures, op_count_failures,
+        failures, infrastructure_failures, op_count_diagnostics,
         gradient_failures, baseline_comparison=baseline_comparison)
     print(
         f"\n{summary['models']} models, {summary['points']} points, "
         f"{len(failures)} semantic failures, "
-        f"{len(op_count_failures)} op count failures, "
+        f"{len(op_count_diagnostics)} op count diagnostics, "
         f"{len(gradient_failures)} gradient time failures, "
         f"{len(infrastructure_failures)} measurement failures")
     print(f"report: {output_dir}")

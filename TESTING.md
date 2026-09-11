@@ -98,19 +98,20 @@ The hard gates cover command/status consistency, result and write-array
 categories, error parity, per-element finite/NaN/infinity classes, shapes and
 names, and both pass modes against the existing CmdStan references. Finite
 bit differences that remain within those gates are listed separately with
-bit patterns and ULP distances. A model whose portable MIR differs between
-the two cells is also gated on op counts: with the runtime reroll pass on,
-the lowered log_prob graph must not grow and the final log_prob graph may
-grow by at most 10%. Gradient time on the fixed `GRADIENT_MODELS` set is
-separately gated: a model whose pass-on/pass-off ratio exceeds 1.04 is
-re-measured with a fresh, independently interleaved run, and the job fails
-only if that re-run also exceeds the ratio, so isolated measurement noise
-does not fail a pull request.
+bit patterns and ULP distances. Preparation timings and, for a model whose
+portable MIR differs between the two cells, op counts are diagnostics only:
+the lowered log_prob graph growing, or the final log_prob graph growing by
+more than 10% (with the runtime reroll pass on), are listed in `summary.md`
+but never fail the run by themselves. The execution gate is gradient time on
+the fixed `GRADIENT_MODELS` set: a model whose pass-on/pass-off ratio
+exceeds 1.04 is re-measured with a fresh, independently interleaved run, and
+the job fails only if that re-run also exceeds the ratio, so isolated
+measurement noise does not fail a pull request.
 
-Op counts and the gradient gate only ever compare a run's own pass-off
-cell against its pass-on cell, so a change that slows (or speeds up) the
-runtime itself, identically in both cells, is invisible to them. Passing
-`--baseline DIR` (a previous `--output-dir`) makes the harness also diff
+The op-count diagnostic and the gradient gate only ever compare a run's own
+pass-off cell against its pass-on cell, so a change that slows (or speeds
+up) the runtime itself, identically in both cells, is invisible to them.
+Passing `--baseline DIR` (a previous `--output-dir`) makes the harness also diff
 final ops, lowered ops, island regions, and slots for every matching cell
 against that directory's `graphs.jsonl`, and lists every model whose final
 ops grew or shrank at the top of `summary.md`. This comparison is

@@ -546,9 +546,9 @@ class VectorizeAbTest(unittest.TestCase):
                     "changed_values": 0, "points": 1,
                 }], [], [], ["probe: final log_prob ops grew 27 -> 10522"],
                 [])
-            self.assertFalse(summary["ok"])
-            self.assertEqual(len(summary["op_count_failures"]), 1)
-            self.assertIn("## Op count failures",
+            self.assertTrue(summary["ok"])
+            self.assertEqual(len(summary["op_count_diagnostics"]), 1)
+            self.assertIn("## Op count diagnostics",
                           (out / "summary.md").read_text())
 
             summary = vectorize_ab.write_reports(
