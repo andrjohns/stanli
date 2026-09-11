@@ -273,6 +273,127 @@ static void test_gauss_mix_shape() {
     expect_close(("gmix v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
+// Gap 3 (docs/superpowers/plans/2026-09-11-lane-layout-unification.md): the
+// gauss_mix idiom above, but each lane's density result is a row rather than
+// a scalar, the way a per-subject mixture over several binary items looks
+// (log_mix(theta, bernoulli_logit_lpmf(y[i,:] | eta1), bernoulli_logit_lpmf
+// (y[i,:] | eta2))). bernoulli_logit has an elementwise form that costs per
+// element what its summed one does, so widening it costs nothing extra: an
+// OP_SUM_ROWS after each row-wide elementwise call folds it back to one lp
+// per lane before OP_LOG_MIX ever sees it, unchanged from the scalar case.
+static void test_row_mixture_shape() {
+  const int L = 12, C = 4;
+  Graph g;
+  Fills fills;
+  const int base = g.add_slot(L * C, true);  // row-major, a parameter
+  const int theta = g.add_slot(1, true);
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int row = g.add_slot(C, false);
+    g.add_op(OP_SLICE, {base}, row, {l * C});
+    std::vector<int> outcomes1(C), outcomes2(C);
+    for (int k = 0; k < C; ++k) {
+      outcomes1[(size_t)k] = (l + k) % 2;
+      outcomes2[(size_t)k] = (l + k + 1) % 2;
+    }
+    const int lp1 = g.add_slot(1, false);
+    const int i1 = g.add_op(OP_BERNOULLI_LOGIT_LPMF, {row}, lp1, outcomes1);
+    g.ops[(size_t)i1].variant = 0x81;
+    const int lp2 = g.add_slot(1, false);
+    const int i2 = g.add_op(OP_BERNOULLI_LOGIT_LPMF, {row}, lp2, outcomes2);
+    g.ops[(size_t)i2].variant = 0x81;
+    const int t = g.add_slot(1, false);
+    g.add_op(OP_LOG_MIX, {theta, lp1, lp2}, t);
+    terms.push_back(t);
+  }
+  Graph ref = g;
+  reduce_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  const detail::ProfiledRerollStats profiled =
+      detail::reroll_profiled(g, f2, tt, {});
+  const RerollStats st = profiled.work;
+  expect("row mix regions==1", st.regions == 1);
+  expect("row mix element-density dispositions",
+         profiled.dispositions.element_density == 2);
+  expect("row mix term-widen disposition",
+         profiled.dispositions.term_widen == 1);
+  // 2 elementwise BERNOULLI_LOGIT + 2 SUM_ROWS + 1 widened LOG_MIX + 1
+  // SUM_VEC; the row itself elides.
+  expect("row mix ops==6", g.ops.size() == 6);
+  int densities = 0, sum_rows = 0;
+  for (const Op& op : g.ops) {
+    densities += op.opcode == OP_BERNOULLI_LOGIT_LPMF;
+    sum_rows += op.opcode == OP_SUM_ROWS;
+  }
+  expect("row mix two densities, two sum_rows",
+         densities == 2 && sum_rows == 2);
+  expect("row mix one term", tt.size() == 1);
+  reduce_into_result(g, tt);
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("row mix sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("row mix v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// The same gap, column-major (a matrix row: OP_SLICE_STRIDED, the shape a
+// real `y[i, :]` compiles to). The elementwise density packs in column-major
+// order (element k of lane l at l + Luse*k); OP_SUM_ROWS needs lane l's
+// elements contiguous, so this must repack before it, not just widen.
+static void test_row_mixture_shape_column_major() {
+  const int L = 12, C = 4;
+  Graph g;
+  Fills fills;
+  const int base = g.add_slot(L * C, true);  // column-major, a parameter
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int row = g.add_slot(C, false);
+    g.add_op(OP_SLICE_STRIDED, {base}, row, {l, L});
+    std::vector<int> outcomes(C);
+    for (int k = 0; k < C; ++k) outcomes[(size_t)k] = (l + k) % 2;
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_BERNOULLI_LOGIT_LPMF, {row}, lp, outcomes);
+    g.ops[(size_t)id].variant = 0x81;
+    const int zero = g.add_slot(1, false);
+    fills.emplace_back(zero, std::vector<double>{0.0});
+    const int t = g.add_slot(1, false);
+    g.add_op(OP_ADD, {lp, zero}, t);
+    terms.push_back(t);
+  }
+  Graph ref = g;
+  reduce_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  const detail::ProfiledRerollStats profiled =
+      detail::reroll_profiled(g, f2, tt, {});
+  const RerollStats st = profiled.work;
+  expect("row mix col-major regions==1", st.regions == 1);
+  expect("row mix col-major element-density disposition",
+         profiled.dispositions.element_density == 1);
+  // BERNOULLI_LOGIT + one repacking OP_GATHER + OP_SUM_ROWS + widened ADD
+  // (the zero it adds is a fresh constant per lane, so the chain does not
+  // stay scalar) + OP_SUM_VEC.
+  expect("row mix col-major ops==5", g.ops.size() == 5);
+  int gathers = 0, sum_rows = 0;
+  for (const Op& op : g.ops) {
+    gathers += op.opcode == OP_GATHER;
+    sum_rows += op.opcode == OP_SUM_ROWS;
+  }
+  expect("row mix col-major repacks before summing",
+         gathers == 1 && sum_rows == 1);
+  expect("row mix col-major one term", tt.size() == 1);
+  reduce_into_result(g, tt);
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("row mix col-major sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("row mix col-major v" + std::to_string(i)).c_str(), got[i],
+                 want[i]);
+}
+
 // Logistic was historically omitted from the hand-maintained density
 // allowlist even though it has the same density_fwd_v elementwise kernel as
 // normal. Its lane-local lps must fuse behind bit 6, not merely acquire a
@@ -2359,6 +2480,8 @@ int main() {
   test_ark_shape();
   test_bail_recurrence();
   test_gauss_mix_shape();
+  test_row_mixture_shape();
+  test_row_mixture_shape_column_major();
   test_logistic_elt_shape();
   test_elt_lpmf_shape();
   test_elt_scalar_density_hoists();

@@ -97,6 +97,9 @@ struct Pos {
   bool elt_density = false;     // density, every lane's out consumed only
                                 //   inside its own lane -> variant bit 6,
                                 //   out[n] = lane n's lp
+  int64_t rows = 1;             // elt_density with ap.width > 1: outcome
+                                //   elements reduced back per lane by
+                                //   OP_SUM_ROWS; ap.width becomes 1 after
   bool term_widen = false;      // widenable, every lane's out a target term
                                 //   -> widen + OP_SUM_VEC, swap the terms
   int slice_start = -1;         // OP_INDEX over a contiguous window
@@ -1282,9 +1285,8 @@ static RerollStats reroll_impl(
                 ok = false;
                 prefix = 0;
               }
-            } else if (ap.width > 1 &&
-                       (!all_terms || (idata_density && !row_outcomes) ||
-                        !row_operands_ok(ap, t))) {
+            } else if (ap.width > 1 && ((idata_density && !row_outcomes) ||
+                                        !row_operands_ok(ap, t))) {
               ok = false;
               prefix = 0;
             } else if (all_terms) {
@@ -1312,6 +1314,10 @@ static RerollStats reroll_impl(
             } else {
               ap.elt_density = true;
               any_elt_density = true;
+              if (ap.width > 1) {
+                ap.rows = ap.width;
+                ap.width = 1;
+              }
             }
           } else if (all_inputs_invariant) {
             const int64_t io_ok = std::min(br_internal, br_nonterm);
@@ -1377,10 +1383,11 @@ static RerollStats reroll_impl(
           int64_t ops_out = 0, added = 0, lane_elems = 0;
           for (int p = 0; p < P; ++p) {
             const Pos& ap = pos[(size_t)p];
+            const int64_t tile_width = ap.rows > 1 ? ap.rows : ap.width;
             for (const PosIn& in : ap.ins)
               if (in.tile_wide) {
                 ++ops_out;
-                added += Luse * ap.width;
+                added += Luse * tile_width;
               }
             if (ap.index_elision || ap.row_elision) {
               continue;
@@ -1399,10 +1406,17 @@ static RerollStats reroll_impl(
               lane_elems += ap.width * kLaneDensityElem;
             } else if (ap.elt_density) {
               const uint16_t opcode = op_at(p, 0).opcode;
-              ops_out += ap.width > 1 ? 2 : 1;
-              lane_elems += ap.width * kLaneDensityElem;
-              if (ap.width > 1 && lane_elt_costs_per_element(opcode))
-                added += Luse * ap.width * kLaneDensityElem;
+              ops_out += ap.rows > 1 ? 2 : 1;
+              lane_elems += ap.rows * kLaneDensityElem;
+              if (ap.rows > 1 && lane_elt_costs_per_element(opcode))
+                added += Luse * ap.rows * kLaneDensityElem;
+              if (ap.rows > 1 && layout_cols) {
+                // The column-major repack ahead of OP_SUM_ROWS: one gather,
+                // priced like any other.
+                ++ops_out;
+                added += 2 * Luse * ap.rows;
+                lane_elems += 2 * ap.rows;
+              }
             } else if (ap.term_widen) {
               ops_out += 2;
               lane_elems += 2 * ap.width;
@@ -1582,12 +1596,16 @@ static RerollStats reroll_impl(
           continue;
         }
         Op op = t;  // opcode, variant, idata carry over
-        if (ap.width > 1 && !ap.outcome_idata.empty()) {
+        // elt_density with ap.rows > 1 sets ap.width to 1 for downstream
+        // consumers (its own output is one lp per lane, after OP_SUM_ROWS);
+        // its own operands still pack at the row width.
+        const int64_t eff_width = ap.rows > 1 ? ap.rows : ap.width;
+        if (eff_width > 1 && !ap.outcome_idata.empty()) {
           std::vector<int> packed(ap.outcome_idata.size());
           for (int64_t l = 0; l < Luse; ++l)
-            for (int64_t k = 0; k < ap.width; ++k)
-              packed[(size_t)flat_at(ap.width, l, k)] =
-                  ap.outcome_idata[(size_t)(l * ap.width + k)];
+            for (int64_t k = 0; k < eff_width; ++k)
+              packed[(size_t)flat_at(eff_width, l, k)] =
+                  ap.outcome_idata[(size_t)(l * eff_width + k)];
           ap.outcome_idata = std::move(packed);
         }
         // A wide shared operand tiled to the region's packing order: mode
@@ -1599,10 +1617,10 @@ static RerollStats reroll_impl(
           rep.opcode = OP_REP_MAT;
           rep.n_in = 1;
           rep.in[0] = base;
-          rep.out = g.add_slot(Luse * ap.width, false);
+          rep.out = g.add_slot(Luse * eff_width, false);
           std::vector<int> ridata =
-              layout_cols ? std::vector<int>{(int)Luse, (int)ap.width, 2}
-                          : std::vector<int>{(int)ap.width, (int)Luse, 1};
+              layout_cols ? std::vector<int>{(int)Luse, (int)eff_width, 2}
+                          : std::vector<int>{(int)eff_width, (int)Luse, 1};
           g.idata_pool.push_back(std::move(ridata));
           rep.idata = g.idata_pool.back().data();
           rep.n_idata = (int64_t)g.idata_pool.back().size();
@@ -1623,7 +1641,7 @@ static RerollStats reroll_impl(
               if (g.slots[op.in[j]].len != 1) all_scalar = false;
               break;
             case InKind::kConstLanes:
-              op.in[j] = packed_const(ap.ins[j], ap.width);
+              op.in[j] = packed_const(ap.ins[j], eff_width);
               all_scalar = false;
               break;
             case InKind::kBad:
@@ -1678,15 +1696,49 @@ static RerollStats reroll_impl(
           return mul.out;
         };
         if (ap.elt_density) {
-          // One density op with variant bit 6: out[n] is lane n's lp, read
-          // by the lanes' (widened) consumers. An all-scalar real-arg
-          // density classified as hoist instead, so a vector input or a
-          // per-lane outcome exists here and the out is genuinely len-N.
+          // One density op with variant bit 6: out[n] is lane n's lp (or,
+          // when ap.rows > 1, out holds Luse*rows per-element lps that
+          // OP_SUM_ROWS folds back to one lp per lane), read by the lanes'
+          // (widened) consumers. An all-scalar real-arg density classified
+          // as hoist instead, so a vector input or a per-lane outcome
+          // exists here.
           op.variant = (uint8_t)(op.variant | 0x40u);
-          op.out = g.add_slot(Luse, false);
+          op.out = g.add_slot(Luse * ap.rows, false);
           attach_idata(op, std::move(ap.outcome_idata));
-          pos_out[(size_t)p] = op.out;
+          int result_slot = op.out;
           result.push_back(op);
+          if (ap.rows > 1) {
+            // The density's real args pack in the region's committed order.
+            // OP_SUM_ROWS needs lane l's `rows` elements contiguous
+            // (l*rows+k); row-major packing already has that, but
+            // column-major (l + Luse*k) does not, so repack it first.
+            if (layout_cols) {
+              Op perm;
+              perm.opcode = OP_GATHER;
+              perm.n_in = 1;
+              perm.in[0] = result_slot;
+              perm.out = g.add_slot(Luse * ap.rows, false);
+              std::vector<int> idx;
+              idx.reserve((size_t)(Luse * ap.rows));
+              for (int64_t l = 0; l < Luse; ++l)
+                for (int64_t k = 0; k < ap.rows; ++k)
+                  idx.push_back((int)(l + Luse * k));
+              g.idata_pool.push_back(std::move(idx));
+              perm.idata = g.idata_pool.back().data();
+              perm.n_idata = (int64_t)g.idata_pool.back().size();
+              result.push_back(perm);
+              result_slot = perm.out;
+            }
+            Op rows;
+            rows.opcode = OP_SUM_ROWS;
+            rows.n_in = 1;
+            rows.in[0] = result_slot;
+            rows.out = g.add_slot(Luse, false);
+            attach_idata(rows, std::vector<int>{(int)ap.rows});
+            result.push_back(rows);
+            result_slot = rows.out;
+          }
+          pos_out[(size_t)p] = result_slot;
           continue;
         }
         if (ap.term_widen) {
