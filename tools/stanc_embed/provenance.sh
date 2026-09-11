@@ -168,17 +168,18 @@ stancjs_artifact_matches() {
 }
 
 # What the portable JavaScript compiler is built from: the overlay sources
-# and the two scripts build_web.sh runs. The native embed's build scripts
-# live in the same directory but never feed this artifact, so they are
-# listed out, as [stanli_windows_cli_inputs] does for the executable:
-# editing the native build must not invalidate a JS artifact it never
-# touched.
+# and the scripts build_web.sh runs. The native embed's build scripts live
+# in the same directory but never feed this artifact, so they are listed
+# out, as [stanli_windows_cli_inputs] does for the executable: editing the
+# native build must not invalidate a JS artifact it never touched. A new
+# script build_web.sh starts running belongs in this list.
 stanli_stancjs_inputs() {
   (
     cd "$_stanli_embed_repo_root"
     {
       find compiler/js compiler/ocaml -maxdepth 1 -type f -print
       printf '%s\n' \
+        tools/stanc_embed/fix_static_newline.sh \
         tools/stanc_embed/install_overlay.sh \
         tools/stanc_embed/provenance.sh
     } | LC_ALL=C sort
