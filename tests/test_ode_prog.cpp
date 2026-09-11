@@ -73,8 +73,8 @@ void check_generated_local(const std::string& name, const stanli::RhsProgram& p,
     std::vector<stan::math::var> outputs(p.out_regs.size());
     std::vector<stan::math::var> registers;
     run_rhs_into<stan::math::var>(p, t, y_vars.data(), theta_vars.data(),
-                                  theta_vars.size(), x_r.data(),
-                                  outputs.data(), registers);
+                                  theta_vars.size(), x_r.data(), outputs.data(),
+                                  registers);
     for (size_t output = 0; output < outputs.size(); ++output)
       want_values[output] = outputs[output].val();
     for (size_t output = 0; output < outputs.size(); ++output) {
@@ -239,8 +239,8 @@ void check(const std::string& name, const stanli::mir::FunDef& f,
     std::vector<double> registers;
     run_rhs<double>(p, t, y.data(), th.data(), x_r.data(), got, registers);
     std::vector<double> got_into(p.out_regs.size());
-    run_rhs_into<double>(p, t, y.data(), th.data(), x_r.data(),
-                         got_into.data(), registers);
+    run_rhs_into<double>(p, t, y.data(), th.data(), x_r.data(), got_into.data(),
+                         registers);
     if (got_into != got) {
       ++failures;
       std::printf("FAIL %s: caller-owned output differs\n", name.c_str());

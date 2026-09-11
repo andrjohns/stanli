@@ -94,7 +94,9 @@ struct RhsWorkspace {
   std::tuple<std::vector<double>, std::vector<stan::math::var>> registers;
 
   template <typename T>
-  std::vector<T>& get() { return std::get<std::vector<T>>(registers); }
+  std::vector<T>& get() {
+    return std::get<std::vector<T>>(registers);
+  }
 };
 
 namespace detail {

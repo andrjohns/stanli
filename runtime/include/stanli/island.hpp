@@ -129,8 +129,8 @@ std::shared_ptr<const Program> specialize_softmax3(const IslandProg& p,
 // inside the caller's nested_rev_autodiff). The register file is reused
 // by the caller, which owns its lifetime.
 template <typename T>
-void run_island(const IslandProg& p, const T* const* in, T* out,
-                T* reg, EvalState* state = nullptr) {
+void run_island(const IslandProg& p, const T* const* in, T* out, T* reg,
+                EvalState* state = nullptr) {
   for (size_t k = 0; k < p.ins.size(); ++k) {
     const int input = p.ins[k].input >= 0 ? p.ins[k].input : (int)k;
     for (int i = 0; i < p.ins[k].len; ++i)
