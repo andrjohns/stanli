@@ -95,19 +95,19 @@ Every commit keeps the corpus harness at zero semantic (bitwise-result)
 failures: none of this changes which arithmetic a chosen form runs, only which
 form is chosen, so the risk is a performance regression, never correctness.
 
-**(a) One boundary for join everywhere -- held.** Change `c.accepted` to
-`graph_cost(i, j) >= island_cost + boundary` and thread that into `resolve()`'s
-recording (1105-1151, 1248-1263); a7e4b82a fixed only the recording, this fixes
-the decision. Measured with `STANLI_DEBUG_ISLAND=1`: `sw_skewnormal`'s 170-op
-island (graph=1059, island=985, boundary=217) currently accepts (1059 >= 985);
-with boundary, 1202 > 1059, flips to leave. `s2_mm`'s 285-op island (graph=1749,
-island=1658, boundary=215) flips the same way (1873 > 1749); `hmm_gaussian` and
-`iohmm_reg` do not flip, their margins dwarf their boundaries. Not a uniform
-fix: `sw_skewnormal` measures 5% slower than predicted (this flip corrects it)
-but `s2_mm` and `s2_mm_weights` measure 1.2x faster in production despite this
-arithmetic, a real loss, not a false negative on paper. Held at the
-coordinator's call until that conflict has a better answer than picking one;
-(b), (c), (d) land first under the current boundary-free acceptance rule.
+**(a) One boundary for join everywhere -- resolved by recalibration, kept
+neither way.** Charging the boundary in `c.accepted` flips `sw_skewnormal`
+correctly (it measures 5% slower carved) but `s2_mm`/`s2_mm_weights` measure
+1.2x faster despite the same arithmetic saying otherwise, so neither keeping
+nor adding the charge was right. Tried recalibrating the constants instead
+(`tools/bench_carver_costs.cpp`, median of seven runs: graph/island ratio
+1.458, live-in 0.131, live-out 0.684, each rounded to 1 with a floor of one):
+committed as `2e0580a0`, corpus run (`ab_recal` vs `ab_final9`) showed 46 of
+254 models losing their island outright, `iohmm_reg` 1.82x slower per
+gradient (prep 16.18x), `hmm_gaussian` 1.46x, `s2_mm`/`s2_mm_weights` 1.16x,
+none of that within the 2% keep-or-revert ceiling, so reverted in `3b14b3ee`.
+The estimate keeps its current constants and boundary-free acceptance test;
+neither a boundary-consistent rule nor these measured constants beat it.
 
 **(b) Floors as bounds.** Rewrite `join_cost_floor`, `split_cost_floor`,
 `split_has_multiple_pieces` to visibly bound `cost(join)`/`cost(split)` from
