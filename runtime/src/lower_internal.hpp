@@ -1302,6 +1302,8 @@ struct Lowering {
   void sync_data_local(const std::string& name, const mir::Expr& rhs,
                        const Val& v);
 
+  void assign_plain(const mir::Stmt& s);
+
   void sync_indexed_data_local(const std::string& name, const Val& v) {
     td.env().erase(name);
     if (!v.si.param_free) return;

@@ -1148,6 +1148,11 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(${STANLI_SIGNATURE_TEST} PROPERTIES
       LABELS "signature_refs")
   endforeach()
+  add_test(NAME test_zero_length_whole_assignment_resize
+           COMMAND ${Python3_EXECUTABLE}
+                   tests/test_zero_length_whole_assignment_resize.py
+                   --build ${CMAKE_CURRENT_BINARY_DIR}
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   # Friendly local entry points. These deliberately invoke CTest rather than
   # duplicating discovery in a shell script, so a developer runs exactly the
   # same per-file tests and labels as CI. STANLI_LIT_JOBS is a cache setting

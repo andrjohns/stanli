@@ -794,6 +794,49 @@ Lowering::Val Lowering::lower_runtime_int_sum(const mir::Expr& e,
                 static_cast<int64_t>(range.hi) * len);
   return result;
 }
+void Lowering::assign_plain(const mir::Stmt& s) {
+  Val rhs = lower_expr(s.rhs);
+  auto old = scope.find(s.lhs);
+  if (old != scope.end()) {
+    require_binding(rhs, g.slots[old->second.slot].len, old->second.si, s.lhs,
+                    s.raw);
+    const bool param_free = rhs.si.param_free;
+    rhs.autodiff = old->second.autodiff;
+    rhs.si = old->second.si;
+    rhs.si.param_free = param_free;
+  } else {
+    auto dl = decls.find(s.lhs);
+    if (dl != decls.end()) {
+      if (dl->second.deferred_shape) {
+        dl->second.len = g.slots[rhs.slot].len;
+        dl->second.si = rhs.si;
+        dl->second.deferred_shape = false;
+      } else if (dl->second.len == 0 &&
+                 (g.slots[rhs.slot].len != 0 ||
+                  (is_matrix(dl->second.si) && is_matrix(rhs.si) &&
+                   (dl->second.si.rows != rhs.si.rows ||
+                    dl->second.si.cols != rhs.si.cols)))) {
+        // stanc3's --O1 inliner declares a function's return
+        // variable zero-length (`array[real, 0]`, `vector[0]`)
+        // because the returned size is the callee's business, and
+        // C++ assignment resizes. Slots do not, so the first
+        // whole-variable assignment defines the shape instead.
+        dl->second.len = g.slots[rhs.slot].len;
+        dl->second.si = rhs.si;
+      } else {
+        SlotInfo expected = dl->second.si;
+        require_binding(rhs, dl->second.len, expected, s.lhs, s.raw);
+        const bool pf = rhs.si.param_free;
+        rhs.si = expected;
+        rhs.si.param_free = pf;
+      }
+      rhs.autodiff = dl->second.autodiff;
+    }
+  }
+  rhs.layout = owning_layout(rhs.si);
+  scope[s.lhs] = rhs;
+  sync_data_local(s.lhs, s.rhs, rhs);
+}
 void Lowering::lower_stmt_impl(const mir::Stmt& s) {
   switch (s.kind) {
     case mir::Stmt::Decl:
@@ -915,6 +958,10 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
         const bool whole = std::all_of(
             s.lhs_idx.begin(), s.lhs_idx.end(),
             [](const mir::Expr& ix) { return ix.name == "IndexAll"; });
+        if (whole && bound == scope.end() && declared->second.len == 0) {
+          assign_plain(s);
+          return;
+        }
         BuiltinIndexMap map;
         bool empty_selection = false;
         SlotInfo expected_view;
@@ -1108,49 +1155,7 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
         sync_indexed_data_local(s.lhs, nv);
         return;
       }
-      {
-        Val rhs = lower_expr(s.rhs);
-        auto old = scope.find(s.lhs);
-        if (old != scope.end()) {
-          require_binding(rhs, g.slots[old->second.slot].len, old->second.si,
-                          s.lhs, s.raw);
-          const bool param_free = rhs.si.param_free;
-          rhs.autodiff = old->second.autodiff;
-          rhs.si = old->second.si;
-          rhs.si.param_free = param_free;
-        } else {
-          auto dl = decls.find(s.lhs);
-          if (dl != decls.end()) {
-            if (dl->second.deferred_shape) {
-              dl->second.len = g.slots[rhs.slot].len;
-              dl->second.si = rhs.si;
-              dl->second.deferred_shape = false;
-            } else if (dl->second.len == 0 &&
-                       (g.slots[rhs.slot].len != 0 ||
-                        (is_matrix(dl->second.si) && is_matrix(rhs.si) &&
-                         (dl->second.si.rows != rhs.si.rows ||
-                          dl->second.si.cols != rhs.si.cols)))) {
-              // stanc3's --O1 inliner declares a function's return
-              // variable zero-length (`array[real, 0]`, `vector[0]`)
-              // because the returned size is the callee's business, and
-              // C++ assignment resizes. Slots do not, so the first
-              // whole-variable assignment defines the shape instead.
-              dl->second.len = g.slots[rhs.slot].len;
-              dl->second.si = rhs.si;
-            } else {
-              SlotInfo expected = dl->second.si;
-              require_binding(rhs, dl->second.len, expected, s.lhs, s.raw);
-              const bool pf = rhs.si.param_free;
-              rhs.si = expected;
-              rhs.si.param_free = pf;
-            }
-            rhs.autodiff = dl->second.autodiff;
-          }
-        }
-        rhs.layout = owning_layout(rhs.si);
-        scope[s.lhs] = rhs;
-        sync_data_local(s.lhs, s.rhs, rhs);
-      }
+      assign_plain(s);
       return;
     }
     case mir::Stmt::TargetPE: {
