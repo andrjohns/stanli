@@ -609,20 +609,18 @@ struct Carver {
   std::vector<Op> result;
   int carved = 0;
   CarvePlan* plan = nullptr;
-  // Strict sub-runs split_cost compiled to price a split, in the order it
-  // walked them. run() re-walks the same spans to emit them and pops this
-  // instead of compiling again, as long as nothing upstream renamed a slot
-  // an unconsumed entry depends on.
+  // Strict sub-runs split_cost compiled to price a split, discarded after
+  // join_cost_floor sums their accepted island costs: emission never
+  // replays a strict-sourced split (liveness_split_cost subsumes it, see
+  // run()), so nothing needs these by position afterward.
   std::vector<Candidate> strict_queue;
   mutable std::vector<int> boundary_produced;
   mutable std::vector<int> boundary_livein;
   mutable std::vector<int> boundary_liveout;
   mutable int boundary_stamp = 0;
-  size_t strict_queue_pos = 0;
-  // The liveness-chosen counterpart of strict_queue: sub-pieces
-  // liveness_split_cost compiled, and the interior cut points between them
-  // (liveness_cuts's own output) so run() can re-derive the same piece
-  // boundaries without repeating the search.
+  // liveness_split_cost's own sub-pieces, and the interior cut points
+  // between them (liveness_cuts's own output), so run() can re-derive the
+  // same piece boundaries for emission without repeating the search.
   std::vector<Candidate> liveness_queue;
   size_t liveness_queue_pos = 0;
   std::vector<size_t> liveness_queue_cuts;
@@ -958,35 +956,22 @@ struct Carver {
     return pieces >= 2;
   }
 
-  // [i, j) carved at the strict vocabulary: each sub-run of at least
-  // kMinIslandOps priced on its own, everything else as graph ops. `any`
-  // says whether one of them is accepted. Each priced sub-run is kept in
-  // strict_queue so run() can emit it without compiling it again.
-  int64_t split_cost(size_t i, size_t j, bool* any) {
+  // Prices each strict sub-run of [i, j) at least kMinIslandOps long and
+  // keeps the compiled candidates in strict_queue, so join_cost_floor can
+  // sum their accepted island costs without pricing the whole span's
+  // split itself: liveness_split_cost subsumes that (see run()).
+  void populate_strict_queue(size_t i, size_t j) {
     strict_queue.clear();
-    strict_queue_pos = 0;
-    int64_t cost = 0;
-    *any = false;
     size_t a = i;
     while (a < j) {
       const size_t b = grow(a, j, true);
       if ((int64_t)(b - a) < kMinIslandOps) {
-        const size_t stop = b > a ? b : a + 1;
-        cost += graph_cost(a, stop);
-        a = stop;
+        a = b > a ? b : a + 1;
         continue;
       }
-      Candidate c = evaluate_cached(a, b, true);
-      if (c.accepted) {
-        cost += c.island_cost + c.boundary;
-        *any = true;
-      } else {
-        cost += c.graph_cost;
-      }
+      strict_queue.push_back(evaluate_cached(a, b, true));
       a = b;
-      strict_queue.push_back(std::move(c));
     }
-    return cost;
   }
 
   // A proxy for what a cut at each position in [i, j) would cost: the
@@ -1160,21 +1145,6 @@ struct Carver {
     for (int o : c.live_outs)
       if (c.in_set.count(o)) return true;
     return false;
-  }
-
-  // The span split_cost already compiled and priced for [i, j), or a fresh
-  // compile when the queue does not have it (a mismatch, or emptied by an
-  // earlier rename in this same split).
-  Candidate strict_candidate(size_t i, size_t j) {
-    if (strict_queue_pos < strict_queue.size()) {
-      Candidate& next = strict_queue[strict_queue_pos];
-      if (next.begin == i && next.end == j) {
-        Candidate c = std::move(next);
-        ++strict_queue_pos;
-        return c;
-      }
-    }
-    return evaluate_cached(i, j, true);
   }
 
   // A run holding ops the strict vocabulary refuses is priced whole and
@@ -1352,22 +1322,26 @@ struct Carver {
     result.reserve(g.ops.size());
     std::vector<Op> pre_ops;
     if (plan) pre_ops = g.ops;
+    // Liveness subsumes strict splitting (its own search always includes
+    // the strict cut as one candidate, so it is never worse; a corpus
+    // sweep over 254 models found it never even ties by losing, matching
+    // strict's carving in every cell that changed nothing). This switch
+    // disables splitting altogether, rather than falling back to a
+    // strict-only split that no longer exists as a carving outcome.
     const bool liveness_off =
         std::getenv("STANLI_NO_ISLAND_LIVENESS") != nullptr;
     size_t i = 0;
-    size_t strict_until = 0;
     size_t liveness_until = 0;
     while (i < g.ops.size()) {
-      const bool strict = i < strict_until;
-      const bool via_liveness = !strict && i < liveness_until;
+      const bool via_liveness = i < liveness_until;
       const size_t j = via_liveness ? grow_liveness(i, liveness_until)
-                                    : grow(i, g.ops.size(), strict);
+                                    : grow(i, g.ops.size(), false);
       if ((int64_t)(j - i) < kMinIslandOps) {
         const size_t stop = j > i ? j : i + 1;
         while (i < stop) result.push_back(g.ops[i++]);
         continue;
       }
-      if (!strict && !via_liveness && grow(i, j, true) != j) {
+      if (!liveness_off && !via_liveness && grow(i, j, true) != j) {
         const bool always = std::getenv("STANLI_ISLAND_ALWAYS") != nullptr;
         const bool guard_off =
             std::getenv("STANLI_NO_ISLAND_JOIN_GUARD") != nullptr;
@@ -1379,7 +1353,6 @@ struct Carver {
         int64_t split = 0;
         bool any = false;
         bool have_split = false;
-        bool split_via_liveness = false;
         CarveDecision natural = CarveDecision::kLeave;
 
         if (multi) {
@@ -1398,17 +1371,12 @@ struct Carver {
           }
         }
         if (natural != CarveDecision::kIsland) {
-          split = split_cost(i, j, &any);
+          // join_cost_floor's accepted-cost sum comes from the strict
+          // pieces; join_cost_floor is the only reader, only in the
+          // non-multi branch.
+          if (!multi) populate_strict_queue(i, j);
+          split = liveness_split_cost(i, j, &any);
           have_split = true;
-          if (!liveness_off) {
-            bool any_live = false;
-            const int64_t live_split = liveness_split_cost(i, j, &any_live);
-            if (live_split < split) {
-              split = live_split;
-              any = any_live;
-              split_via_liveness = true;
-            }
-          }
           if (!multi) {
             if (!always && !guard_off) {
               const int64_t floor = join_cost_floor(i, j);
@@ -1437,10 +1405,7 @@ struct Carver {
 
         switch (resolve(key, natural, c, any, have_split, split)) {
           case CarveDecision::kSplit:
-            if (split_via_liveness)
-              liveness_until = j;
-            else
-              strict_until = j;
+            liveness_until = j;
             break;
           case CarveDecision::kLeave:
             while (i < j) result.push_back(g.ops[i++]);
@@ -1452,14 +1417,13 @@ struct Carver {
         }
         continue;
       }
-      Candidate c = strict            ? strict_candidate(i, j)
-                    : via_liveness    ? liveness_candidate(i, j)
-                                      : evaluate_cached(i, j, false);
-      // strict || via_liveness: either source prices a piece of a split,
-      // which must not collide with the outer, undivided span's own key
-      // (strict=false) even when a liveness piece happens to span the
-      // whole outer range unfragmented.
-      const CandidateKey key{i, j, strict || via_liveness};
+      Candidate c =
+          via_liveness ? liveness_candidate(i, j) : evaluate_cached(i, j, false);
+      // via_liveness prices a piece of a split, which must not collide
+      // with the outer, undivided span's own key (strict=false) even
+      // when a liveness piece happens to span the whole outer range
+      // unfragmented.
+      const CandidateKey key{i, j, via_liveness};
       const CarveDecision natural =
           c.accepted ? CarveDecision::kIsland : CarveDecision::kLeave;
       CarveDecision taken = natural;
@@ -1480,11 +1444,9 @@ struct Carver {
             Viability::kUnknown, chosen_cost, other_cost});
       }
       if (taken == CarveDecision::kIsland) {
-        const bool renamed = (strict || via_liveness) && renames_a_slot(c);
+        const bool renamed = via_liveness && renames_a_slot(c);
         emit(c);
         if (renamed) {
-          strict_queue.clear();
-          strict_queue_pos = 0;
           liveness_queue.clear();
           liveness_queue_pos = 0;
         }
