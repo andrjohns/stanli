@@ -509,6 +509,25 @@ jobs:
           python3 tools/verify_refs.py deps/posteriordb \
             --check build-rel/stanli_check --jobs 4
 
+      # Report-only: never fails the job. A missing or unreachable baseline
+      # (first run, expired retention, rate limit) leaves the directory
+      # absent and the harness skips the comparison.
+      - name: Fetch the main-branch vectorization baseline
+        if: matrix.runtime == 'linux-x86_64' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        continue-on-error: true
+        run: |
+          rm -rf /tmp/vectorize-baseline
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --branch main \
+            --workflow wheels.yml --status success \
+            --json databaseId --jq '.[0].databaseId' || true)
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              -n mir-vectorization-measurements -D /tmp/vectorize-baseline \
+              || true
+          fi
+
       # This does not select the candidate source pass for any producer. The
       # test-only OCaml probe emits both inputs, and stanli_check consumes the
       # saved portable MIR directly so every point reuses the exact bytes.
@@ -550,12 +569,17 @@ jobs:
               dogs_log grsm_latent_reg_irt s2_car s2_nlf surgical_model
               sw_nonlinear)
           fi
+          baseline_args=()
+          if [ -f /tmp/vectorize-baseline/graphs.jsonl ]; then
+            baseline_args=(--baseline /tmp/vectorize-baseline)
+          fi
           python3 harnesses/vectorize_ab.py deps/posteriordb \
             --compiler deps/stanc3/stanli-vectorize-probe \
             --check build-rel/stanli_check \
             --bench build-rel/bench_grad --dump build-rel/dump_ops \
             --timeout 30 --gradient-timeout 20 --prep-samples 2 \
-            --output-dir build-rel/vectorize-ab "${models[@]}"
+            --output-dir build-rel/vectorize-ab "${models[@]}" \
+            "${baseline_args[@]}"
 
       - name: Publish MIR vectorization measurements
         if: >-

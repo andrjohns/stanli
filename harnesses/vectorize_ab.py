@@ -19,6 +19,12 @@ against the pass-off cell: a model whose on/off ratio exceeds
 GRADIENT_RATIO_THRESHOLD is re-measured fresh, and only fails the run if
 the re-run also exceeds it. Preparation timing is evidence only.
 
+Both gates compare a run's own pass-off cell against its pass-on cell, so
+a change that moves both identically is invisible to either. --baseline
+DIR diffs final ops, lowered ops, island regions, and slots against a
+previous --output-dir's graphs.jsonl and reports every model whose final
+ops grew or shrank; this comparison never fails the run.
+
 Complete semantic report (130 recorded models plus PDB A/B-only models):
   python3 harnesses/vectorize_ab.py deps/posteriordb \
     --output-dir build/vectorize-ab
@@ -887,6 +893,126 @@ def op_count_gate(model, records):
     return failures
 
 
+BASELINE_FIELDS = ("final_ops", "lower_ops", "regions", "final_slots")
+
+
+def cell_summary(record):
+    rows = [row for sample in record["samples"] for row in sample["rows"]
+            if row.get("graph") == "log_prob"]
+    stages = {row["stage"]: row for row in rows}
+    graph = record.get("graph") or {}
+    return {
+        "final_ops": graph.get("ops"),
+        "final_slots": graph.get("slots"),
+        "lower_ops": stages.get("lower", {}).get("ops"),
+        "regions": stages.get("island", {}).get("regions"),
+        "island_ns": stages.get("island", {}).get("ns"),
+        "prep_ns": stages.get("total", {}).get("ns"),
+    }
+
+
+def cells_from_records(records):
+    return {
+        (record["model"], record["source_pass"], record["runtime_reroll"]):
+            cell_summary(record)
+        for record in records
+    }
+
+
+def load_cells(output_dir):
+    path = pathlib.Path(output_dir) / "graphs.jsonl"
+    if not path.is_file():
+        return None
+    records = []
+    with path.open() as stream:
+        for line in stream:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return cells_from_records(records)
+
+
+def diff_baseline(before, after):
+    changes = []
+    for key in sorted(set(before) & set(after)):
+        b, a = before[key], after[key]
+        if all(b.get(field) == a.get(field) for field in BASELINE_FIELDS):
+            continue
+        model, source_pass, runtime_reroll = key
+        changes.append({
+            "model": model,
+            "source_pass": source_pass,
+            "runtime_reroll": runtime_reroll,
+            "before": {field: b.get(field) for field in BASELINE_FIELDS},
+            "after": {field: a.get(field) for field in BASELINE_FIELDS},
+        })
+    return changes
+
+
+def baseline_comparison_report(baseline_dir, before_cells, after_cells):
+    if before_cells is None:
+        return {
+            "baseline_dir": str(baseline_dir),
+            "available": False,
+            "reason": "no graphs.jsonl in the baseline directory",
+        }
+    changes = diff_baseline(before_cells, after_cells)
+    grew, shrank = set(), set()
+    for change in changes:
+        before_ops = change["before"]["final_ops"]
+        after_ops = change["after"]["final_ops"]
+        if not (isinstance(before_ops, int) and isinstance(after_ops, int)):
+            continue
+        if after_ops > before_ops:
+            grew.add(change["model"])
+        elif after_ops < before_ops:
+            shrank.add(change["model"])
+    return {
+        "baseline_dir": str(baseline_dir),
+        "available": True,
+        "cells_compared": len(set(before_cells) & set(after_cells)),
+        "changed_cells": len(changes),
+        "final_ops_grew_models": sorted(grew),
+        "final_ops_shrank_models": sorted(shrank),
+        "changes": changes,
+    }
+
+
+def render_baseline_comparison(comparison):
+    if comparison is None:
+        return []
+    lines = ["## Baseline comparison", "",
+             f"Baseline: `{comparison['baseline_dir']}`"]
+    if not comparison["available"]:
+        lines += [f"Not available: {comparison['reason']}", ""]
+        return lines
+    lines += [
+        f"Cells compared: {comparison['cells_compared']}. "
+        f"Cells changed: {comparison['changed_cells']}. "
+        f"Models whose final log_prob ops grew: "
+        f"{len(comparison['final_ops_grew_models'])}. "
+        f"Shrank: {len(comparison['final_ops_shrank_models'])}.",
+        "",
+    ]
+    if comparison["changes"]:
+        lines += [
+            "| model | cell | final ops | lower ops | regions | "
+            "final slots |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for change in comparison["changes"]:
+            cell = f"{change['source_pass']}/{change['runtime_reroll']}"
+            b, a = change["before"], change["after"]
+            lines.append(
+                f"| `{change['model']}` | {cell} | "
+                f"{b['final_ops']} -> {a['final_ops']} | "
+                f"{b['lower_ops']} -> {a['lower_ops']} | "
+                f"{b['regions']} -> {a['regions']} | "
+                f"{b['final_slots']} -> {a['final_slots']} |")
+        lines.append("")
+    return lines
+
+
 def parse_bench_output(stdout):
     """Parse only bench_grad's final four-field numeric row."""
     lines = stdout.rstrip().splitlines()
@@ -1019,7 +1145,8 @@ def blank_if_none(value):
 
 def write_reports(output_dir, manifest, corpus_records, graph_records,
                   model_summaries, failures, infrastructure_failures,
-                  op_count_failures, gradient_failures):
+                  op_count_failures, gradient_failures,
+                  baseline_comparison=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -1149,13 +1276,15 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         "op_count_failures": op_count_failures,
         "gradient_failures": gradient_failures,
         "infrastructure_failures": infrastructure_failures,
+        "baseline_comparison": baseline_comparison,
         "per_model": model_summaries,
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
-    lines = [
-        "# MIR source-pass A/B measurement", "",
+    lines = ["# MIR source-pass A/B measurement", ""]
+    lines += render_baseline_comparison(baseline_comparison)
+    lines += [
         f"Outcome: **{'PASS' if summary['ok'] else 'FAIL'}**", "",
         f"- Candidate pass: `{summary['candidate_pass']}`",
         f"- Models: {summary['models']}",
@@ -1233,6 +1362,10 @@ def main():
                         default=REPO / "build-rel" / "dump_ops")
     parser.add_argument("--output-dir", type=pathlib.Path,
                         default=REPO / "build" / "vectorize-ab")
+    parser.add_argument(
+        "--baseline", type=pathlib.Path, default=None,
+        help="a previous --output-dir to diff final ops, lowered ops, "
+             "island regions, and slots against, report-only")
     parser.add_argument("--max-rel", type=float, default=1e-9)
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--prep-samples", type=int, default=1)
@@ -1361,6 +1494,8 @@ def main():
         "points": list(POINTS),
         "max_rel": args.max_rel,
         "prep_samples": args.prep_samples,
+        "baseline_dir": str(args.baseline.resolve())
+        if args.baseline is not None else None,
         "gradient": {
             "rounds": args.gradient_rounds,
             "process_order": ["off", "on", "on", "off"],
@@ -1575,11 +1710,18 @@ def main():
                 f"{changed_values} arithmetic-order value changes"
                 f"{ratio_text}")
 
+    baseline_comparison = None
+    if args.baseline is not None:
+        baseline_dir = args.baseline.resolve()
+        baseline_comparison = baseline_comparison_report(
+            baseline_dir, load_cells(baseline_dir),
+            cells_from_records(graph_records))
+
     manifest["harness_elapsed_ns"] = time.monotonic_ns() - harness_started_ns
     summary = write_reports(
         output_dir, manifest, corpus_records, graph_records, model_summaries,
         failures, infrastructure_failures, op_count_failures,
-        gradient_failures)
+        gradient_failures, baseline_comparison=baseline_comparison)
     print(
         f"\n{summary['models']} models, {summary['points']} points, "
         f"{len(failures)} semantic failures, "

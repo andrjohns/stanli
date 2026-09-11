@@ -355,6 +355,101 @@ class VectorizeAbTest(unittest.TestCase):
         self.assertIn(f"{grown['on_over_off']:.4f}", failures[0])
         self.assertIn(f"{confirmed['on_over_off']:.4f}", failures[0])
 
+    def _write_graphs_jsonl(self, directory, records):
+        with (pathlib.Path(directory) / "graphs.jsonl").open("w") as stream:
+            for record in records:
+                stream.write(json.dumps(record) + "\n")
+
+    def _cell_record(self, model, source_pass, runtime_reroll, final_ops,
+                     lower_ops, regions, final_slots=100):
+        return {
+            "model": model,
+            "source_pass": source_pass,
+            "runtime_reroll": runtime_reroll,
+            "graph": {"ops": final_ops, "slots": final_slots},
+            "samples": [{"sample": 1, "rows": [
+                {"graph": "log_prob", "stage": "lower", "ops": lower_ops},
+                {"graph": "log_prob", "stage": "island", "regions": regions,
+                 "ns": 10},
+            ]}],
+        }
+
+    def test_load_cells_returns_none_without_graphs_jsonl(self):
+        with tempfile.TemporaryDirectory() as empty:
+            self.assertIsNone(vectorize_ab.load_cells(empty))
+
+    def test_baseline_diff_flags_a_runtime_wide_regression(self):
+        # Both the off and on cells grow identically: invisible to the
+        # on/off gate, which is exactly what a baseline comparison is for.
+        before = [
+            self._cell_record("M0_model", "off", "on", 34, 1013, 0),
+            self._cell_record("M0_model", "on", "on", 34, 1013, 0),
+            self._cell_record("stable_model", "off", "on", 20, 50, 0),
+            self._cell_record("stable_model", "on", "on", 20, 50, 0),
+        ]
+        after = [
+            self._cell_record("M0_model", "off", "on", 62, 1013, 0),
+            self._cell_record("M0_model", "on", "on", 62, 1013, 0),
+            self._cell_record("stable_model", "off", "on", 20, 50, 0),
+            self._cell_record("stable_model", "on", "on", 20, 50, 0),
+        ]
+        with tempfile.TemporaryDirectory() as before_dir, \
+                tempfile.TemporaryDirectory() as after_dir:
+            self._write_graphs_jsonl(before_dir, before)
+            self._write_graphs_jsonl(after_dir, after)
+            before_cells = vectorize_ab.load_cells(before_dir)
+            after_cells = vectorize_ab.load_cells(after_dir)
+            comparison = vectorize_ab.baseline_comparison_report(
+                before_dir, before_cells, after_cells)
+        self.assertTrue(comparison["available"])
+        self.assertEqual(comparison["cells_compared"], 4)
+        self.assertEqual(comparison["changed_cells"], 2)
+        self.assertEqual(comparison["final_ops_grew_models"], ["M0_model"])
+        self.assertEqual(comparison["final_ops_shrank_models"], [])
+        cells = {(c["source_pass"], c["runtime_reroll"])
+                for c in comparison["changes"]}
+        self.assertEqual(cells, {("off", "on"), ("on", "on")})
+
+    def test_baseline_comparison_reports_missing_baseline(self):
+        comparison = vectorize_ab.baseline_comparison_report(
+            "/no/such/dir", None, {})
+        self.assertFalse(comparison["available"])
+        self.assertIn("reason", comparison)
+
+    def test_baseline_comparison_is_first_in_summary_md(self):
+        graph = self._cell_record("probe", "off", "on", 5, 5, 0)
+        graph["samples"][0]["elapsed_ns"] = 1
+        with tempfile.TemporaryDirectory() as temp:
+            out = pathlib.Path(temp)
+            comparison = {
+                "baseline_dir": "/baseline",
+                "available": True,
+                "cells_compared": 1,
+                "changed_cells": 1,
+                "final_ops_grew_models": ["probe"],
+                "final_ops_shrank_models": [],
+                "changes": [{
+                    "model": "probe", "source_pass": "off",
+                    "runtime_reroll": "on",
+                    "before": {"final_ops": 5, "lower_ops": 5,
+                              "regions": 0, "final_slots": 100},
+                    "after": {"final_ops": 9, "lower_ops": 5,
+                             "regions": 0, "final_slots": 100},
+                }],
+            }
+            vectorize_ab.write_reports(
+                out, {"schema": 1}, [], [graph], [{
+                    "model": "probe", "mir_changed": False,
+                    "changed_values": 0, "points": 1,
+                }], [], [], [], [], baseline_comparison=comparison)
+            text = (out / "summary.md").read_text()
+        title_index = text.index("# MIR source-pass A/B measurement")
+        baseline_index = text.index("## Baseline comparison")
+        outcome_index = text.index("Outcome:")
+        self.assertLess(title_index, baseline_index)
+        self.assertLess(baseline_index, outcome_index)
+        self.assertIn("probe", text[baseline_index:outcome_index])
+
     def test_op_count_gate_compares_reroll_on_cells(self):
         def cell(source_pass, runtime_reroll, final_ops, lowered_ops):
             return {

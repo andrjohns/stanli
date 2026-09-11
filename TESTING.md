@@ -107,6 +107,21 @@ re-measured with a fresh, independently interleaved run, and the job fails
 only if that re-run also exceeds the ratio, so isolated measurement noise
 does not fail a pull request.
 
+Op counts and the gradient gate only ever compare a run's own pass-off
+cell against its pass-on cell, so a change that slows (or speeds up) the
+runtime itself, identically in both cells, is invisible to them. Passing
+`--baseline DIR` (a previous `--output-dir`) makes the harness also diff
+final ops, lowered ops, island regions, and slots for every matching cell
+against that directory's `graphs.jsonl`, and lists every model whose final
+ops grew or shrank at the top of `summary.md`. This comparison is
+report-only and never fails the run. On post-submit pushes to main, the
+"Fetch the main-branch vectorization baseline" workflow step downloads the
+`mir-vectorization-measurements` artifact from the most recent successful
+run on main and passes it as `--baseline`; when no such artifact is found
+(the first run, or one past its retention window) the step leaves the
+baseline directory absent and the harness skips the comparison rather than
+failing.
+
 The output directory contains `manifest.json`, `corpus.jsonl`,
 `graphs.jsonl`, `bench.tsv`, `summary.json`, and `summary.md`. The manifest
 records source pins, producer provenance, tool hashes, platform, toolchain,
