@@ -726,8 +726,10 @@ def summarize_reroll(records):
             wa_total = prep_row(sample["rows"], "write_array", "total")
             log_evidence = reroll_fields(sample["rows"], "log_prob")
             log_evidence["final_ops"] = log_total.get("ops")
+            log_evidence["final_slots"] = log_total.get("slots")
             wa_evidence = reroll_fields(sample["rows"], "write_array")
             wa_evidence["final_ops"] = wa_total.get("ops")
+            wa_evidence["final_slots"] = wa_total.get("slots")
             samples.append({
                 "sample": sample["sample"],
                 "log_prob": log_evidence,
@@ -941,7 +943,7 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         "driver_total_ns", "compile_ns", "log_prob_total_ns",
         "write_array_total_ns", "gradient_n", "gradient_ns", "forward_ns",
         "n_params", "log_prob_ops", "log_prob_scalar_out",
-        "write_array_ops",
+        "write_array_ops", "log_prob_slots", "write_array_slots",
     ]
     for graph in ("log_prob", "write_array"):
         columns.extend(f"{graph}_reroll_{field}" for field in REROLL_FIELDS)
@@ -1013,6 +1015,8 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
                     "log_prob_ops": summary.get("ops", ""),
                     "log_prob_scalar_out": summary.get("scalar_out", ""),
                     "write_array_ops": tsv_value(wa_total, "ops"),
+                    "log_prob_slots": tsv_value(log_total, "slots"),
+                    "write_array_slots": tsv_value(wa_total, "slots"),
                 }
                 for graph in ("log_prob", "write_array"):
                     reroll = prep_row(rows, graph, "reroll")

@@ -218,7 +218,9 @@ class VectorizeAbTest(unittest.TestCase):
         }])
         sample = evidence[0]["samples"][0]
         self.assertEqual(sample["log_prob"]["final_ops"], 7)
+        self.assertEqual(sample["log_prob"]["final_slots"], 8)
         self.assertEqual(sample["write_array"]["final_ops"], 5)
+        self.assertEqual(sample["write_array"]["final_slots"], 6)
         self.assertEqual(sample["write_array"]["element_store"], 2)
 
     def test_dump_summary_is_parsed(self):
@@ -350,6 +352,8 @@ class VectorizeAbTest(unittest.TestCase):
             self.assertTrue(json.loads((out / "summary.json").read_text())["ok"])
             header = (out / "bench.tsv").read_text().splitlines()[0]
             self.assertIn("write_array_ops", header)
+            self.assertIn("log_prob_slots", header)
+            self.assertIn("write_array_slots", header)
             self.assertIn("log_prob_reroll_packed_rows", header)
             self.assertIn("write_array_reroll_element_store", header)
             summary = vectorize_ab.write_reports(
