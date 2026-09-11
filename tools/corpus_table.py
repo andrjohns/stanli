@@ -14,7 +14,7 @@ Usage: python3 tools/corpus_table.py docs/corpus-bench.tsv
 Prints markdown to stdout; benchmarks.md is edited by hand around it.
 
 --o1vec renders docs/corpus-bench-o1vec.tsv instead: gradient and compile
-time only, no sampling columns, plus a 2000-gradient speedup that adds
+time only, no sampling columns, plus a compile+sample speedup that adds
 2,000 synthetic gradient evaluations to each side's compile time. Usage:
 python3 tools/corpus_table.py docs/corpus-bench-o1vec.tsv --o1vec
 """
@@ -146,15 +146,11 @@ def render_o1vec(rows, col):
     done.sort(key=grad_ratio, reverse=True)
     stuck.sort(key=grad_ratio, reverse=True)
 
-    print("| model | params | stanli gradient | CmdStan gradient |"
-          " gradient speedup | stanli compile | CmdStan compile |"
-          " 2000-gradient speedup |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| model | gradient speedup | stanli compile | CmdStan compile |"
+          " compile+sample speedup |")
+    print("| --- | ---: | ---: | ---: | ---: |")
     for r in done:
         print(f"| `{col(r, 'model')}` "
-              f"| {col(r, 'params')} "
-              f"| {fmt_ns(col(r, 'stanli_ns_grad'))} "
-              f"| {fmt_ns(col(r, 'cmdstan_ns_grad'))} "
               f"| {ratio(col(r, 'stanli_ns_grad'), col(r, 'cmdstan_ns_grad'))} "
               f"| {fmt_prep_s(col(r, 'stanli_prep_s'))} "
               f"| {fmt_cmdstan_s(col(r, 'cmdstan_build_s'))} "
