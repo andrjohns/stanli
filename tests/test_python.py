@@ -299,6 +299,27 @@ def test_model_seed_draws_transformed_data():
     assert plain._m == handle
 
 
+def test_rebuild_refreshes_sized_parameters():
+    # Transformed data can size a parameter, so a rebuild under the run seed
+    # can change the free vector and the columns, not only the draws. The
+    # object must describe the model it now holds: the metadata after the
+    # forwarded rebuild equals a fresh construction under that seed.
+    src = ("transformed data { int k = 1 + poisson_rng(2.0); }\n"
+           "parameters { vector[k] mu; }\nmodel { mu ~ normal(0, 1); }\n")
+    first = stanli.Model(stan_code=src, seed=1)
+    other = next(s for s in range(2, 64)
+                 if stanli.Model(stan_code=src, seed=s).n_unconstrained
+                 != first.n_unconstrained)
+    fresh = stanli.Model(stan_code=src, seed=other)
+    first.sample(chains=1, seed=other, warmup=10, samples=10, refresh=0)
+    assert first.n_unconstrained == fresh.n_unconstrained
+    assert first.constrained_names == fresh.constrained_names
+    q = np.zeros(fresh.n_unconstrained)
+    assert first.log_prob_grad(q)[0] == fresh.log_prob_grad(q)[0]
+    fit = first.sample(chains=1, seed=other, warmup=10, samples=10, refresh=0)
+    assert all(name in fit.names for name in fresh.constrained_names)
+
+
 def test_log_prob_grad():
     m = stanli.Model(stan_file=FIXTURES / "es.stan",
                      data=FIXTURES / "eight_schools.json")

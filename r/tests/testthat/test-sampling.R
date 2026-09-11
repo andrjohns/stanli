@@ -78,6 +78,31 @@ test_that("a run seed rebuilds transformed data the way CmdStan seeds it", {
   expect_identical(fit$model$ptr, plain$ptr)
 })
 
+test_that("a run-seed rebuild refreshes the free vector and the columns", {
+  skip_without_runtime()
+  # Transformed data can size a parameter, so the rebuild can change the
+  # free vector and the columns, not only the draws. The model the fit
+  # carries must describe what it now holds; the caller's object is a value
+  # and keeps its own seed.
+  code <- "
+    transformed data { int k = 1 + poisson_rng(2.0); }
+    parameters { vector[k] mu; }
+    model { mu ~ normal(0, 1); }"
+  first <- stanli_model(code = code, seed = 1)
+  other <- 2
+  while (stanli_model(code = code, seed = other)$n_unconstrained ==
+         first$n_unconstrained) other <- other + 1
+  fresh <- stanli_model(code = code, seed = other)
+  fit <- sample_model(first, chains = 1, seed = other, warmup = 10,
+                      samples = 10, refresh = 0)
+  expect_equal(fit$model$n_unconstrained, fresh$n_unconstrained)
+  expect_identical(fit$model$columns, fresh$columns)
+  expect_identical(dimnames(fit$draws)[[3]], fresh$columns)
+  q <- rep(0, fresh$n_unconstrained)
+  expect_equal(log_prob_grad(fit$model, q)$lp, log_prob_grad(fresh, q)$lp)
+  expect_equal(first$seed, 1)
+})
+
 test_that("unconstrain turns constrained starting values into the free vector", {
   skip_without_runtime()
   # A model whose free order differs from its serial order: the simplex has

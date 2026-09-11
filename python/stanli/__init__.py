@@ -898,7 +898,10 @@ class Model:
     so the same seed reproduces the same transformed data. ``sample`` and
     ``optimize`` forward their own seed here when transformed data drew
     from it, rebuilding the model for that run, so one seed governs a whole
-    run as it does in CmdStan.
+    run as it does in CmdStan. The rebuild replaces this object's model:
+    afterwards ``log_prob_grad``, ``n_unconstrained`` and
+    ``constrained_names`` all describe the model as built under the run
+    seed. A model whose transformed data never draws is never rebuilt.
     """
 
     def __init__(self, stan_file=None, data=None, stan_code=None, mir=None,
@@ -908,17 +911,27 @@ class Model:
                 raise ValueError("provide stan_file, stan_code, or mir")
             stan_code = _read_utf8_file(stan_file)
         self._source = (mir, stan_code, _data_to_json(data))
-        self._seed = seed
-        self._m = self._construct(seed)
-        self.n_unconstrained = _lib.stanli_n_unconstrained(self._m)
-        n_con = _lib.stanli_n_constrained(self._m)
-        self.constrained_names = [
-            _bracket(_lib.stanli_constrained_name(self._m, i).decode())
-            for i in range(n_con)
-        ]
+        self._m = None
+        self._adopt(self._construct(seed), seed)
         note = _lib.stanli_warnings(self._m)
         if note:
             warnings.warn(note.decode(), RuntimeWarning, stacklevel=2)
+
+    def _adopt(self, m, seed):
+        # Everything this object caches about its model is derived from the
+        # handle, so a rebuild under another seed must refresh all of it:
+        # transformed data can size a parameter (`int k = poisson_rng(3);`
+        # then `vector[k] mu;`), which changes the free vector length and
+        # the column names along with the draws.
+        if self._m:
+            _lib.stanli_model_free(self._m)
+        self._m, self._seed = m, seed
+        self.n_unconstrained = _lib.stanli_n_unconstrained(m)
+        n_con = _lib.stanli_n_constrained(m)
+        self.constrained_names = [
+            _bracket(_lib.stanli_constrained_name(m, i).decode())
+            for i in range(n_con)
+        ]
 
     def _construct(self, seed):
         mir, stan_code, data_json = self._source
@@ -949,9 +962,7 @@ class Model:
         # happened and the seed differs; every other model is left alone.
         if seed == self._seed or not _lib.stanli_transformed_data_rng(self._m):
             return
-        m = self._construct(seed)
-        _lib.stanli_model_free(self._m)
-        self._m, self._seed = m, seed
+        self._adopt(self._construct(seed), seed)
 
     def __del__(self):
         if getattr(self, "_m", None):

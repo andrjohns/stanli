@@ -54,7 +54,10 @@ read_utf8_file <- function(path) {
 #'   draw from it once, here, the way CmdStan's generated constructor does.
 #'   [sample_model()] and [optimize_model()] forward their own `seed` here
 #'   when transformed data drew from it, rebuilding the model for that run,
-#'   so one seed governs a whole run as it does in CmdStan.
+#'   so one seed governs a whole run as it does in CmdStan. The rebuilt
+#'   model is the one the fit carries as `fit$model`; the object passed in
+#'   is unchanged. A model whose transformed data never draws is never
+#'   rebuilt.
 #' @return An object of class `stanli_model` whose `columns` name every
 #'   output the way the posterior package reads them, `theta[1,2]` for an
 #'   indexed value. Warns, naming the part and the
@@ -87,16 +90,26 @@ stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL,
     mir <- stanc_mir(code)
     is_mir <- TRUE
   }
-  ptr <- .Call("stanli_r_model_new", if (is_mir) mir else code, data_json,
-               is_mir, as.numeric(seed))
-  note <- .Call("stanli_r_warnings", ptr)
+  model <- build_model(if (is_mir) mir else code, data_json, is_mir, seed)
+  note <- .Call("stanli_r_warnings", model$ptr)
   if (nzchar(note)) warning(note, call. = FALSE)
+  model
+}
+
+# The whole object, from its source: everything a `stanli_model` carries
+# besides the source is derived from the handle, so a rebuild under another
+# seed must recompute all of it. Transformed data can size a parameter
+# (`int k = poisson_rng(3);` then `vector[k] mu;`), which changes the free
+# vector length and the columns along with the draws.
+build_model <- function(code, data_json, is_mir, seed) {
+  ptr <- .Call("stanli_r_model_new", code, data_json, is_mir,
+               as.numeric(seed))
   structure(list(ptr = ptr,
                  n_unconstrained = .Call("stanli_r_n_unconstrained", ptr),
                  columns = stan_variable_names(
                    .Call("stanli_r_column_names", ptr)),
-                 source = list(code = if (is_mir) mir else code,
-                               data_json = data_json, is_mir = is_mir),
+                 source = list(code = code, data_json = data_json,
+                               is_mir = is_mir),
                  seed = seed),
             class = "stanli_model")
 }
@@ -104,15 +117,14 @@ stanli_model <- function(file = NULL, code = NULL, data = NULL, mir = NULL,
 # CmdStan builds the model under the run seed, so transformed data that
 # draws from it follows that seed. Rebuild for this run only when a draw
 # happened and the seed differs; every other model is returned unchanged.
+# The rebuilt model is what the run uses and what the fit carries as
+# `fit$model`; the caller's own object is a value and keeps its seed.
 with_run_seed <- function(model, seed) {
   if (seed == model$seed ||
       !.Call("stanli_r_transformed_data_rng", model$ptr))
     return(model)
-  model$ptr <- .Call("stanli_r_model_new", model$source$code,
-                     model$source$data_json, model$source$is_mir,
-                     as.numeric(seed))
-  model$seed <- seed
-  model
+  build_model(model$source$code, model$source$data_json,
+              model$source$is_mir, seed)
 }
 
 stan_variable_names <- function(x) {
