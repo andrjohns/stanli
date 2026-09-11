@@ -775,13 +775,14 @@ cost, and a cost-neutral correction for calls to graph kernels. This is the
 same layout the native island backward allocates and clears, rather than a
 fixed weight per forward register.
 
-`tools/bench_carver_costs.cpp` measures the constants behind that estimate
-(a graph op against one island instruction, a live-in element, a live-out
-element) so they stay a calibration anyone can re-run rather than a claim.
-A recalibration to its measured values (graph/island 1.458, live-in 0.131,
-live-out 0.684, each rounded to 1) was tried and reverted: a 254-model
-corpus run lost 46 islands outright, `iohmm_reg` measured 1.82x slower per
-gradient, and the estimate's current constants (5, 2, 3) were kept.
+The constants behind that estimate (5, 2, 3) are calibrated on corpus
+timing, not on instruction dispatch. A micro-benchmark of one graph op
+against one island instruction and of a live-in and a live-out element
+measured ratios of 1.458, 0.131 and 0.684, and setting the constants to
+those values (rounded to 1) lost 46 islands across a 254-model corpus run
+and made `iohmm_reg` 1.82x slower per gradient; the constants stand for what
+an island saves beyond dispatch, and the only recalibration that holds is a
+corpus sweep.
 
 On `iohmm_reg`, 95,424 forward register ids contain only 39,000 distinct
 adjoint classes, while 4,488 checkpoint registers are value-only. Correct

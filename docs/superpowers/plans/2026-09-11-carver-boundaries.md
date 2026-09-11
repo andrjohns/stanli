@@ -98,7 +98,7 @@ neither way.** Charging the boundary in `c.accepted` flips `sw_skewnormal`
 correctly (it measures 5% slower carved) but `s2_mm`/`s2_mm_weights` measure
 1.2x faster despite the same arithmetic saying otherwise, so neither keeping
 nor adding the charge was right. Tried recalibrating the constants instead
-(`tools/bench_carver_costs.cpp`, median of seven runs: graph/island ratio
+(a dispatch micro-benchmark, since removed, median of seven runs: graph/island ratio
 1.458, live-in 0.131, live-out 0.684, each rounded to 1 with a floor of one):
 committed as `2e0580a0`, corpus run (`ab_recal` vs `ab_final9`) showed 46 of
 254 models losing their island outright, `iohmm_reg` 1.82x slower per
