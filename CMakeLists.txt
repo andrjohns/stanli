@@ -825,6 +825,12 @@ target_link_libraries(bench_executor_clone PRIVATE stanli)
 add_test(NAME test_bench_opcost_smoke COMMAND bench_opcost --smoke)
 set_tests_properties(test_bench_opcost_smoke PROPERTIES
   PASS_REGULAR_EXPRESSION "sink=")
+# Developer-only: one pool lease + gradient from the three thread states a
+# caller can be in, for judging what the pool's autodiff-tape policy costs.
+add_executable(bench_pool EXCLUDE_FROM_ALL
+  tools/bench_pool.cpp tests/tbb_stub.cpp)
+target_link_libraries(bench_pool PRIVATE stanli)
+add_dependencies(bench_pool stanli_mir_fixtures)
 # Developer-only ODE RHS generated-adjoint spike.  Not a test and not installed.
 add_executable(bench_rhs_adjoint EXCLUDE_FROM_ALL
   tools/bench_rhs_adjoint.cpp tests/tbb_stub.cpp)
