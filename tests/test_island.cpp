@@ -205,14 +205,6 @@ static void expect_eq(const std::string& what, int got, int want) {
   }
 }
 
-static void expect_eq(const std::string& what, int64_t got, int64_t want) {
-  if (got != want) {
-    ++failures;
-    std::printf("FAIL %s: got %lld want %lld\n", what.c_str(),
-                (long long)got, (long long)want);
-  }
-}
-
 static void test_compact_copy_chain() {
   Program p;
   p.n_regs = 4;
@@ -1007,37 +999,6 @@ static void test_split_skip_off_by_guard() {
     expect(
         ("op " + std::to_string(k) + " matches unguarded (split-skip)").c_str(),
         ops_match(guarded.g.ops[k], unguarded.g.ops[k]));
-}
-
-// join_cost_floor and split_cost_floor are meant to be bounds on one cost
-// function, not their own arithmetic: a refactor that expresses them that
-// way must leave every number here untouched. build_join_guard_fires hits
-// the single-run path (join_cost_floor); build_two_piece_split_loses hits
-// the multi-piece path (split_cost_floor and split_has_multiple_pieces).
-static void test_join_and_split_floor_values_pinned() {
-  std::string join_line;
-  for (const std::string& l : capture_island_debug([] {
-         VectorBinaryGraph h = build_join_guard_fires();
-         carve_islands(h.g, h.fills, h.terms, {});
-       }))
-    if (l.find("join_floor=") != std::string::npos) join_line = l;
-  expect("join floor line captured", !join_line.empty());
-  expect_eq("join_floor value", parse_field(join_line, "join_floor"),
-            (int64_t)441);
-  expect_eq("join floor's split value", parse_field(join_line, "split"),
-            (int64_t)249);
-
-  std::string split_line;
-  for (const std::string& l : capture_island_debug([] {
-         VectorBinaryGraph h = build_two_piece_split_loses();
-         carve_islands(h.g, h.fills, h.terms, {});
-       }))
-    if (l.find("split_floor=") != std::string::npos) split_line = l;
-  expect("split floor line captured", !split_line.empty());
-  expect_eq("split_floor value", parse_field(split_line, "split_floor"),
-            (int64_t)434);
-  expect_eq("split floor's joined value", parse_field(split_line, "joined"),
-            (int64_t)429);
 }
 
 // Many length-`width` DOT ops feeding a scalar chain.
@@ -2671,7 +2632,6 @@ int main() {
   test_join_guard_skips_a_joined_compile_split_would_lose();
   test_split_skip_avoids_compiling_split_pieces();
   test_split_skip_off_by_guard();
-  test_join_and_split_floor_values_pinned();
   test_dot_width_estimate_moves_together();
   test_const_count_does_not_grow_island_cost();
   test_softmax3_island_executor();

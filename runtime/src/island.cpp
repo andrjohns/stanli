@@ -889,31 +889,6 @@ struct Carver {
     }
   }
 
-  // The strict-vocabulary pieces of [i, j) at least kMinIslandOps long: the
-  // candidate boundary set join_cost_floor, split_cost_floor, and
-  // split_has_multiple_pieces all bound cost(split, i, j, B) against.
-  std::vector<std::pair<size_t, size_t>> strict_pieces(size_t i,
-                                                        size_t j) const {
-    std::vector<std::pair<size_t, size_t>> pieces;
-    size_t a = i;
-    while (a < j) {
-      const size_t b = grow(a, j, true);
-      if ((int64_t)(b - a) >= kMinIslandOps) pieces.emplace_back(a, b);
-      a = b > a ? b : a + 1;
-    }
-    return pieces;
-  }
-
-  int64_t pieces_boundary(
-      const std::vector<std::pair<size_t, size_t>>& pieces) const {
-    int64_t sum = 0;
-    for (const auto& p : pieces) sum += joined_boundary(p.first, p.second);
-    return sum;
-  }
-
-  // A lower bound on cost(join, i, j): the strict pieces' already-priced
-  // cost, plus the vector ops swapped from graph to island form, plus the
-  // whole span's own boundary.
   int64_t join_cost_floor(size_t i, size_t j) const {
     int64_t scalar = 0;
     for (const Candidate& sc : strict_queue)
@@ -923,18 +898,20 @@ struct Carver {
     return scalar - vector_graph + vector_range + joined_boundary(i, j);
   }
 
-  // A bound on cost(split, i, j, B_strict): the joined candidate's own
-  // priced cost, with the vector ops swapped from island to graph form and
-  // the joined boundary traded for each strict piece's own.
   int64_t split_cost_floor(const Candidate& joined, size_t i, size_t j) const {
     int64_t vector_graph, vector_range;
     vector_op_costs(i, j, &vector_graph, &vector_range);
-    return joined.island_cost - vector_range + vector_graph +
-           pieces_boundary(strict_pieces(i, j));
+    int64_t boundary_sum = 0;
+    size_t a = i;
+    while (a < j) {
+      const size_t b = grow(a, j, true);
+      if ((int64_t)(b - a) >= kMinIslandOps)
+        boundary_sum += joined_boundary(a, b);
+      a = b > a ? b : a + 1;
+    }
+    return joined.island_cost - vector_range + vector_graph + boundary_sum;
   }
 
-  // The same B_strict as strict_pieces, without paying for a piece past the
-  // second: called only for the yes/no of |B_strict| >= 2.
   bool split_has_multiple_pieces(size_t i, size_t j) const {
     int pieces = 0;
     size_t a = i;
