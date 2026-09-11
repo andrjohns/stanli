@@ -511,6 +511,35 @@ inline double pow_zero_base_partial(uint8_t law, double seed, double base,
   return 0.0;
 }
 
+// Which DIV reverse-mode grouping an instruction carries: a Program::Instr's
+// `len` (scalar) or a RANGE's `law` (ranged), the same slots PowZeroBaseLaw
+// rides for POW.
+enum DivLaw : uint8_t {
+  // -(u*a)/(b*b): stan-math's own var/var operator/, so a Program this
+  // grouping runs over stays bitwise identical to running it under
+  // stan-math autodiff instead -- the contract ode_prog.cpp's generated
+  // right-hand side needs against its own var interpreter fallback.
+  kDivReplayGrouping = 0,
+  // da=u/b; db=-out*da: the graph elementwise division kernel's grouping.
+  // Set by the island carver so a carved DIV agrees with the graph kernel
+  // it replaces at magnitudes where squaring b would overflow or underflow
+  // and the quotient itself would not.
+  kDivSafeGrouping = 1,
+};
+
+inline void div_partials_replay(double u, double a, double b, double* da,
+                                double* db) {
+  *da = u / b;
+  *db = -(u * a) / (b * b);
+}
+
+inline void div_partials(double u, double b, double out, double* da,
+                         double* db) {
+  const double ret = u / b;
+  *da = ret;
+  *db = -out * ret;
+}
+
 // Scalar unary math, one line each: opcode, kernel, registration, lowering
 // entry and interpreter branch all come from here. `x` is the argument, `y`
 // the already-computed output and `seed` the upstream adjoint. Keeping the

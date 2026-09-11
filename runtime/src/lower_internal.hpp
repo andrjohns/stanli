@@ -820,6 +820,7 @@ struct Lowering {
   std::map<ObservationKey, DataMap::Entry> observations;
   std::vector<int> target_terms;
   std::vector<int> jac_slots;
+  std::vector<int> extra_roots;
   std::map<std::string, const mir::FunDef*> fun_defs;
   // A generic UDF keeps one scalar template type per formal. Locals and its
   // return use the promoted type, but a direct formal reference keeps its own.
@@ -1268,6 +1269,8 @@ struct Lowering {
   }
   void sync_data_local(const std::string& name, const mir::Expr& rhs,
                        const Val& v);
+
+  void assign_plain(const mir::Stmt& s);
 
   void sync_indexed_data_local(const std::string& name, const Val& v) {
     td.env().erase(name);

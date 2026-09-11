@@ -407,6 +407,20 @@ struct Build {
                int len = 0) {
     p.code.push_back(Program::Instr{c, d, a, b, cc, len});
   }
+  int emit_wide(Program::Code c, int a, int b, int cc, int law, int width,
+                uint8_t bcast) {
+    const int d = alloc(width);
+    emit_wide_to(c, d, a, b, cc, law, width, bcast);
+    return d;
+  }
+  void emit_wide_to(Program::Code c, int d, int a, int b, int cc, int law,
+                    int width, uint8_t bcast) {
+    Program::Instr I(Program::RANGE, d, a, b, cc, width);
+    I.sub = static_cast<uint8_t>(c);
+    I.bcast = bcast;
+    I.law = static_cast<uint8_t>(law);
+    p.code.push_back(I);
+  }
   // A DENSITY laid out the way island.cpp and mir_prog.hpp lay one out:
   // three arguments or fewer ride in the instruction, a fourth goes in a
   // contiguous block.
@@ -717,6 +731,65 @@ static void test_ranged() {
     Build b({0.3, 0.7, 1.4, 0.2}, 4);
     const int d = b.emit(Program::MOVR, 0, 0, 0, 4, 4);
     check("movr", b.done({d, d + 1, d + 2, d + 3}, {1.1, 0.4, 2.0, 0.7}));
+  }
+}
+
+// Ranged elementwise instructions: every code, every broadcast pattern, in
+// place, and with the operands and the output overwritten afterwards.
+static void test_elementwise_width() {
+  struct Spec {
+    Program::Code code;
+    int n_in;
+  };
+  const Spec specs[] = {{Program::ADD, 2},          {Program::SUB, 2},
+                        {Program::MUL, 2},          {Program::DIV, 2},
+                        {Program::POW, 2},          {Program::FMAX, 2},
+                        {Program::FMIN, 2},         {Program::LSE2, 2},
+                        {Program::LOG_DIFF_EXP, 2}, {Program::FMA, 3},
+                        {Program::LOG_MIX, 3},      {Program::NEG, 1},
+                        {Program::EXP, 1},          {Program::LOG, 1},
+                        {Program::SQRT, 1},         {Program::SQUARE, 1},
+                        {Program::INV, 1},          {Program::FABS, 1},
+                        {Program::INV_LOGIT, 1},    {Program::LOG1M, 1},
+                        {Program::LOG1P_EXP, 1},    {Program::TANH, 1}};
+  // Three length-4 operand ranges at 0, 4 and 8. Every a exceeds every b,
+  // so log_diff_exp stays finite whichever operand broadcasts.
+  const std::vector<double> in = {0.72, 0.85, 0.9, 0.93, 0.31, 0.4,
+                                  0.55, 0.65, 0.6, 0.35, 0.8,  0.45};
+  const std::vector<double> seed = {1.1, 0.4, 2.0, 0.7};
+  for (const Spec& s : specs) {
+    const std::string name = program_code_spec(s.code).name;
+    for (int bcast = 0; bcast < (1 << s.n_in); ++bcast) {
+      Build b(in, 12);
+      const int d = b.emit_wide(s.code, 0, 4, 8, 0, 4, (uint8_t)bcast);
+      check(name + " width bcast=" + std::to_string(bcast),
+            b.done({d, d + 1, d + 2, d + 3}, seed));
+    }
+    {
+      Build b(in, 12);
+      b.emit_wide_to(s.code, 0, 0, 4, 8, 0, 4, 0);
+      check(name + " width in place", b.done({0, 1, 2, 3}, seed));
+    }
+    if (s.n_in >= 2) {
+      Build b(in, 12);
+      b.emit_wide_to(s.code, 4, 0, 4, 8, 0, 4, 0);
+      check(name + " width in place b", b.done({4, 5, 6, 7}, seed));
+    }
+    if (s.n_in >= 3) {
+      Build b(in, 12);
+      b.emit_wide_to(s.code, 8, 0, 4, 8, 0, 4, 0);
+      check(name + " width in place c", b.done({8, 9, 10, 11}, seed));
+    }
+    for (int bcast = 0; bcast < (1 << s.n_in); ++bcast) {
+      Build b(in, 12);
+      const int d = b.emit_wide(s.code, 0, 4, 8, 0, 4, (uint8_t)bcast);
+      const int copy = b.emit(Program::MOVR, d, 0, 0, 4, 4);
+      b.emit_to(Program::MOVR, 0, 8, 0, 0, 4);
+      b.emit_to(Program::MOVR, 4, 8, 0, 0, 4);
+      b.emit_to(Program::MOVR, d, 8, 0, 0, 4);
+      check(name + " width overwritten bcast=" + std::to_string(bcast),
+            b.done({copy, copy + 1, copy + 2, copy + 3}, seed));
+    }
   }
 }
 
@@ -1536,6 +1609,7 @@ int main() {
   test_ranged_saveout_partial_later_write_refuses();
   test_accumulate_into_one_register();
   test_ranged();
+  test_elementwise_width();
   test_zero_length_output();
   test_softmax3_activation();
   test_softmax3_double_exact();

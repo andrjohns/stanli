@@ -551,15 +551,13 @@ void Lowering::lower_read_param(const mir::Stmt& s) {
   if (!in_write_array)
     out.views.push_back(parameter_view(s, con.slot, con_len));
 }
-// Scalar terms reduce through chained ADD_N ops (6-input limit per op).
-int Lowering::reduce_terms(std::vector<int> terms) {
-  // The target is a scalar, and every consumer of a term reads one value
-  // from it. A container term is therefore not a shape to accommodate but
-  // a lowering bug -- one whose symptom, before this check, was a model
-  // that sampled a wrong posterior without saying anything.
-  for (int t : terms)
-    if (g.slots[t].len != 1) fail("target term is not a scalar");
-  if (terms.empty()) return const_slot(0.0);
+namespace {
+
+// The grouping loop behind reduce_terms: chunks of up to 6 terms fold
+// through one ADD_N each until one remains. emit_chunk does the actual op
+// emission.
+template <typename EmitChunk>
+int reduce_terms_grouped(std::vector<int> terms, EmitChunk emit_chunk) {
   while (terms.size() > 1) {
     std::vector<int> next;
     for (size_t i = 0; i < terms.size(); i += 6) {
@@ -569,12 +567,30 @@ int Lowering::reduce_terms(std::vector<int> terms) {
         continue;
       }
       std::vector<int> chunk(terms.begin() + i, terms.begin() + i + n);
-      next.push_back(emit_raw(OP_ADD_N, chunk, 1, {}).slot);
+      next.push_back(emit_chunk(chunk));
     }
     terms = std::move(next);
   }
-  return terms[0];
+  return terms.empty() ? -1 : terms[0];
 }
+
+}  // namespace
+
+// Scalar terms reduce through chained ADD_N ops (6-input limit per op).
+int Lowering::reduce_terms(std::vector<int> terms) {
+  // The target is a scalar, and every consumer of a term reads one value
+  // from it. A container term is therefore not a shape to accommodate but
+  // a lowering bug -- one whose symptom, before this check, was a model
+  // that sampled a wrong posterior without saying anything.
+  for (int t : terms)
+    if (g.slots[t].len != 1) fail("target term is not a scalar");
+  if (terms.empty()) return const_slot(0.0);
+  return reduce_terms_grouped(std::move(terms),
+                              [&](const std::vector<int>& chunk) {
+                                return emit_raw(OP_ADD_N, chunk, 1, {}).slot;
+                              });
+}
+
 // Shared tail of both lowerings: inplace/store-forward/reroll always run;
 // the rest is gated by plan so write_array can skip the passes that assume
 // a scalar log-density result. Ordering constraints between the stages
@@ -717,6 +733,7 @@ CompiledModel::WriteArray Lowering::run_write_array(const mir::Program& p) {
   }
   std::vector<int> roots = jac_slots;
   for (const auto& v : out.views) roots.push_back(v.slot);
+  roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());
   prep.graph(prep_graph, "lower", lower_time, g, out.fills, target_terms.size(),
              out.views.size(), PrepTrace::Extra::Truncated,
              !wa.truncated.empty());
@@ -766,6 +783,7 @@ CompiledModel Lowering::run(const mir::Program& p) {
   // of the arena, so no op consumes them and the pass cannot infer them.
   std::vector<int> roots = jac_slots;
   for (const auto& v : out.views) roots.push_back(v.slot);
+  roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());
 
   run_passes(roots, PassPlan{true, true, true, true, true});
 

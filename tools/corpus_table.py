@@ -12,6 +12,11 @@ stopped them. Missing numbers sort to the bottom because missing is not slow.
 
 Usage: python3 tools/corpus_table.py docs/corpus-bench.tsv
 Prints markdown to stdout; benchmarks.md is edited by hand around it.
+
+--o1vec renders docs/corpus-bench-o1vec.tsv instead: gradient and compile
+time only, no sampling columns, plus a compile+sample speedup that adds
+2,000 synthetic gradient evaluations to each side's compile time. Usage:
+python3 tools/corpus_table.py docs/corpus-bench-o1vec.tsv --o1vec
 """
 import csv
 import sys
@@ -23,6 +28,7 @@ WHY = {
     "stanli_sample_timeout": "stanli sampling hit the 900 s cap",
     "cmdstan_sample_timeout": "CmdStan sampling hit the 900 s cap",
     "stanli_eval_fail": "stanli's gradient probe threw at the benchmark point",
+    "stanli_prep_fail": "stanli's compile-and-bind step failed",
     "stanc_fail": "stanc could not compile the model",
     "cmdstan_build_fail": "CmdStan could not build the model",
     "cmdstan_grad_build_fail": "the CmdStan gradient driver would not link",
@@ -43,6 +49,11 @@ def fmt_ns(v):
 
 def fmt_s(v):
     return f"{float(v):.2f} s" if v else "-"
+
+
+def fmt_prep_s(v):
+    """stanli's prep column is recorded to 0.001 s, so keep that precision."""
+    return f"{float(v):.3f} s" if v else "-"
 
 
 def fmt_cmdstan_s(v):
@@ -77,12 +88,25 @@ def fmt_first_run_ratio(value):
     return f"~{round(value, -1):.0f}x"
 
 
-def main():
-    rows = []
-    with open(sys.argv[1], newline="") as f:
+def two_k_grad_ratio(r, col):
+    """Compile time plus 2,000 gradients: the cost of a first short run."""
+    prep = col(r, "stanli_prep_s")
+    s_grad = col(r, "stanli_ns_grad")
+    build = col(r, "cmdstan_build_s")
+    c_grad = col(r, "cmdstan_ns_grad")
+    if not prep or not s_grad or not build or not c_grad:
+        return None
+    stanli_total = float(prep) + 2000 * float(s_grad) / 1e9
+    cmdstan_total = float(build) + 2000 * float(c_grad) / 1e9
+    return cmdstan_total / stanli_total
+
+
+def load_rows(path):
+    with open(path, newline="") as f:
         reader = csv.reader(f, delimiter="\t")
         header = next(reader)
         idx = {name: k for k, name in enumerate(header)}
+        rows = []
         for c in reader:
             if len(c) < len(header):
                 c += [""] * (len(header) - len(c))
@@ -91,6 +115,62 @@ def main():
     def col(r, name):
         return r[idx[name]].strip()
 
+    return rows, col
+
+
+def render_o1vec(rows, col):
+    relevant_notes = {"stanc_fail", "stanli_eval_fail", "stanli_prep_fail",
+                       "cmdstan_build_fail", "cmdstan_grad_build_fail",
+                       "cmdstan_grad_fail"}
+
+    def grad_ratio(r):
+        a, b = col(r, "stanli_ns_grad"), col(r, "cmdstan_ns_grad")
+        return float(b) / float(a) if a and b else -1.0
+
+    def why(r):
+        """Why this row is incomplete, or "" if it is not."""
+        reasons = [WHY.get(n, n) for n in col(r, "note").split(",")
+                   if n in relevant_notes]
+        if not col(r, "stanli_prep_s"):
+            reasons.append("no stanli compile time")
+        if not col(r, "stanli_ns_grad"):
+            reasons.append("no stanli gradient")
+        if not col(r, "cmdstan_build_s"):
+            reasons.append("no CmdStan compile time")
+        if not col(r, "cmdstan_ns_grad") and "eval_fail" not in col(r, "note"):
+            reasons.append("no CmdStan gradient")
+        return "; ".join(dict.fromkeys(reasons))
+
+    done = [r for r in rows if not why(r)]
+    stuck = [r for r in rows if why(r)]
+    done.sort(key=grad_ratio, reverse=True)
+    stuck.sort(key=grad_ratio, reverse=True)
+
+    print("| model | gradient speedup | stanli compile | CmdStan compile |"
+          " compile+sample speedup |")
+    print("| --- | ---: | ---: | ---: | ---: |")
+    for r in done:
+        print(f"| `{col(r, 'model')}` "
+              f"| {ratio(col(r, 'stanli_ns_grad'), col(r, 'cmdstan_ns_grad'))} "
+              f"| {fmt_prep_s(col(r, 'stanli_prep_s'))} "
+              f"| {fmt_cmdstan_s(col(r, 'cmdstan_build_s'))} "
+              f"| {fmt_first_run_ratio(two_k_grad_ratio(r, col))} |")
+
+    if not stuck:
+        return
+    print()
+    print("| model | stanli gradient | CmdStan gradient | gradient speedup |"
+          " what stopped it |")
+    print("| --- | ---: | ---: | ---: | --- |")
+    for r in stuck:
+        print(f"| `{col(r, 'model')}` "
+              f"| {fmt_ns(col(r, 'stanli_ns_grad'))} "
+              f"| {fmt_ns(col(r, 'cmdstan_ns_grad'))} "
+              f"| {ratio(col(r, 'stanli_ns_grad'), col(r, 'cmdstan_ns_grad'))} "
+              f"| {why(r)} |")
+
+
+def render_main(rows, col):
     def grad_ratio(r):
         a, b = col(r, "stanli_ns_grad"), col(r, "cmdstan_ns_grad")
         return float(b) / float(a) if a and b else -1.0
@@ -152,6 +232,16 @@ def main():
               f"| {fmt_ns(col(r, 'cmdstan_ns_grad'))} "
               f"| {ratio(col(r, 'stanli_ns_grad'), col(r, 'cmdstan_ns_grad'))} "
               f"| {why(r)} |")
+
+
+def main():
+    o1vec = "--o1vec" in sys.argv
+    path = [a for a in sys.argv[1:] if a != "--o1vec"][0]
+    rows, col = load_rows(path)
+    if o1vec:
+        render_o1vec(rows, col)
+    else:
+        render_main(rows, col)
 
 
 if __name__ == "__main__":

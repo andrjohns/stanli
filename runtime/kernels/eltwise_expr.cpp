@@ -189,11 +189,13 @@ void div_bwd(KernelCtx& ctx) {
   }
   CMapA out_v(ctx.out.data, ctx.out.len);
   if (!s0 && !s1) {
-    // rev elt_divide: ret_div = dout/b; a.adj += ret_div;
-    // b.adj -= out * ret_div (same grouping, same reuse).
-    Arr ret_div = dout_a(ctx) / in_a(ctx, 1);
-    if (ctx.in_adj[0].data) dx_a(ctx, 0) += ret_div;
-    if (ctx.in_adj[1].data) dx_a(ctx, 1) -= out_v * ret_div;
+    for (int64_t i = 0; i < ctx.out.len; ++i) {
+      double da, db;
+      div_partials(ctx.out_adj_vec.data[i], ctx.in[1].data[i], ctx.out.data[i],
+                   &da, &db);
+      if (ctx.in_adj[0].data) ctx.in_adj[0].data[i] += da;
+      if (ctx.in_adj[1].data) ctx.in_adj[1].data[i] += db;
+    }
     return;
   }
   if (ctx.in_adj[0].data) {

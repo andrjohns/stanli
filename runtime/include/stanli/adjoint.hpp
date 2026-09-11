@@ -48,6 +48,10 @@ struct AdjInstr {
   // Rides in the padding after `code`, as the graph's density ops carry
   // their activity in Op::variant.
   uint8_t mask = 0xf;
+  // RANGE only: the rule and its broadcast bits, as the forward instruction
+  // carries them; `len` is then the width and `mask` the rule's law.
+  uint8_t sub = 0;
+  uint8_t bcast = 0;
   int32_t dst = 0, a = 0, b = 0, c = 0;
   int32_t len = 0;
   int32_t vd = 0, va = 0, vb = 0, vc = 0;
@@ -82,8 +86,9 @@ struct AdjProgram {
 // may not have an adjoint cell of its own.
 // `fwd` supplies normalized CALL payloads: one per CALL instruction, with a
 // pre-resolved kernel backward and precomputed value/adjoint ranges.
-void run_adjoint(const Program& fwd, const AdjProgram& ap, const double* val,
-                 double* adj);
+__attribute__((aligned(64))) void run_adjoint(const Program& fwd,
+                                              const AdjProgram& ap,
+                                              const double* val, double* adj);
 
 }  // namespace stanli
 
