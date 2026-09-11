@@ -918,7 +918,6 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
         BuiltinIndexMap map;
         bool empty_selection = false;
         SlotInfo expected_view;
-        bool has_expected_view = false;
         if (!runtime) {
           const SlotInfo& lhs_si =
               bound != scope.end() ? bound->second.si : declared->second.si;
@@ -952,6 +951,8 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
               map.offset = a.off;
               map.stride = a.stride;
               map.count = a.len;
+              expected_view = indexed_view(lhs_si, s.lhs_idx.size(), map.count,
+                                           s.rhs.type_);
             } else if (is_matrix(lhs_si)) {
               const int64_t i = eval_int(s.lhs_idx[0].args[0]);
               check_index(i, lhs_si.rows, "assignment index", s.raw);
@@ -960,16 +961,20 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
                 check_index(j, lhs_si.cols, "assignment index", s.raw);
                 map.offset = (j - 1) * lhs_si.rows + (i - 1);
                 map.count = 1;
+                expected_view = view_of("UReal");
               } else {
                 map.offset = i - 1;
                 map.stride = lhs_si.rows;
                 map.count = lhs_si.cols;
+                expected_view = view_of("URowVector");
+                expected_view.param_free = lhs_si.param_free;
               }
             } else {
               const int64_t i = eval_int(s.lhs_idx[0].args[0]);
               check_index(i, lhs_len, "assignment index", s.raw);
               map.offset = i - 1;
               map.count = 1;
+              expected_view = view_of("UReal");
             }
             map.kind = map.stride != 1 && map.count != 1
                            ? BuiltinSliceMap::Kind::Strided
@@ -991,47 +996,39 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
                                                  "assignment index", s.raw));
               drops.push_back(s.lhs_idx[d].name == "IndexSingle");
             }
-            if (std::any_of(selected.begin(), selected.end(),
-                            [](const std::vector<int64_t>& positions) {
-                              return positions.empty();
-                            })) {
-              empty_selection = true;
+            try {
+              map = builtin_index_map(shape, selected, drops,
+                                      SliceStorageOrder::OuterMajor);
+            } catch (const std::invalid_argument& error) {
+              fail(std::string("unsupported indexed assignment: ") +
+                       error.what(),
+                   s.raw);
+            }
+            if (s.rhs.type_ == "UReal" || s.rhs.type_ == "UInt") {
+              expected_view = view_of(s.rhs.type_);
+            } else if (s.rhs.type_ == "UVector" ||
+                       s.rhs.type_ == "URowVector") {
+              expected_view = view_of(s.rhs.type_);
+              expected_view.param_free = lhs_si.param_free;
+            } else if (s.rhs.type_ == "UMatrix") {
+              if (map.dimensions.size() != 2)
+                fail("unsupported indexed assignment: matrix shape", s.raw);
+              expected_view = matrix_view(map.dimensions[0], map.dimensions[1],
+                                          lhs_si.param_free);
             } else {
-              try {
-                map = builtin_index_map(shape, selected, drops,
-                                        SliceStorageOrder::OuterMajor);
-              } catch (const std::invalid_argument& error) {
-                fail(std::string("unsupported indexed assignment: ") +
-                         error.what(),
-                     s.raw);
-              }
-              if (s.rhs.type_ == "UReal" || s.rhs.type_ == "UInt") {
-                expected_view = view_of(s.rhs.type_);
-              } else if (s.rhs.type_ == "UVector" ||
-                         s.rhs.type_ == "URowVector") {
-                expected_view = view_of(s.rhs.type_);
-                expected_view.param_free = lhs_si.param_free;
-              } else if (s.rhs.type_ == "UMatrix") {
-                if (map.dimensions.size() != 2)
-                  fail("unsupported indexed assignment: matrix shape", s.raw);
-                expected_view = matrix_view(
-                    map.dimensions[0], map.dimensions[1], lhs_si.param_free);
-              } else {
-                const ViewKind leaf =
-                    s.rhs.unsized.leaf == mir::UnsizedLeaf::Matrix
-                        ? ViewKind::Matrix
-                    : s.rhs.unsized.leaf == mir::UnsizedLeaf::Vector
-                        ? ViewKind::Vector
-                    : s.rhs.unsized.leaf == mir::UnsizedLeaf::RowVector
-                        ? ViewKind::RowVector
-                        : ViewKind::Flat;
-                expected_view =
-                    array_view(map.dimensions, leaf, lhs_si.param_free);
-              }
-              has_expected_view = true;
+              const ViewKind leaf =
+                  s.rhs.unsized.leaf == mir::UnsizedLeaf::Matrix
+                      ? ViewKind::Matrix
+                  : s.rhs.unsized.leaf == mir::UnsizedLeaf::Vector
+                      ? ViewKind::Vector
+                  : s.rhs.unsized.leaf == mir::UnsizedLeaf::RowVector
+                      ? ViewKind::RowVector
+                      : ViewKind::Flat;
+              expected_view =
+                  array_view(map.dimensions, leaf, lhs_si.param_free);
             }
           }
-          if (!empty_selection && map.count == 0) empty_selection = true;
+          empty_selection = map.count == 0;
         }
         Val prev_v{-1, false, {}};
         if (bound != scope.end()) {
@@ -1060,6 +1057,11 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
           sync_indexed_data_local(s.lhs, nv);
           return;
         }
+        const int prev = prev_v.slot;
+        if (whole)
+          require_binding(rhs_v, g.slots[prev].len, prev_v.si, s.lhs, s.raw);
+        else
+          require_binding(rhs_v, map.count, expected_view, s.lhs, s.raw);
         if (empty_selection) {
           extra_roots.push_back(rhs_v.slot);
           scope[s.lhs] = prev_v;
@@ -1067,14 +1069,7 @@ void Lowering::lower_stmt_impl(const mir::Stmt& s) {
           return;
         }
         observe_indexed_rhs(s.rhs, rhs_v);
-        const int prev = prev_v.slot;
         const SlotInfo out_si = prev_v.si;
-        if (whole)
-          require_binding(rhs_v, g.slots[prev].len, prev_v.si, s.lhs, s.raw);
-        else if (has_expected_view)
-          require_binding(rhs_v, map.count, expected_view, s.lhs, s.raw);
-        else if (g.slots[rhs_v.slot].len != map.count)
-          fail("indexed assignment size mismatch for " + s.lhs, s.raw);
         std::vector<int64_t> descending;
         const std::vector<int64_t>* cells = &map.gather;
         if (map.kind == BuiltinSliceMap::Kind::Strided && map.stride <= 0) {
