@@ -40,8 +40,10 @@ struct CandidateRecord {
   Viability island_viable = Viability::kUnknown;
   Viability split_viable = Viability::kUnknown;
   // The two costs the estimate compared to reach `taken`: island-vs-leave is
-  // island_cost + boundary versus graph_cost, join-vs-split is the joined
-  // cost versus the split cost. 0 when the natural path never priced a side.
+  // island_cost versus graph_cost -- the same comparison c.accepted made,
+  // with no boundary on either side -- and island-vs-split is island_cost
+  // + boundary (the joined cost) versus the split cost. 0 when the natural
+  // path never priced a side.
   int64_t chosen_cost = 0;
   int64_t other_cost = 0;
 };

@@ -1121,16 +1121,23 @@ struct Carver {
                    : Viability::kUnknown;
     int64_t chosen_cost = 0, other_cost = 0;
     if (c) {
-      const int64_t island_side = c->island_cost + c->boundary;
+      // island_cost alone is what c->accepted compared against graph_cost;
+      // island_cost+boundary (what split_wins compares split against) only
+      // enters where a split was actually priced as the alternative.
       if (taken == CarveDecision::kIsland) {
-        chosen_cost = island_side;
-        other_cost = split_viable == Viability::kYes ? split : c->graph_cost;
+        if (split_viable == Viability::kYes) {
+          chosen_cost = c->island_cost + c->boundary;
+          other_cost = split;
+        } else {
+          chosen_cost = c->island_cost;
+          other_cost = c->graph_cost;
+        }
       } else if (taken == CarveDecision::kSplit) {
         chosen_cost = split;
-        other_cost = island_side;
+        other_cost = c->island_cost + c->boundary;
       } else {
         chosen_cost = c->graph_cost;
-        other_cost = island_side;
+        other_cost = c->island_cost;
       }
     } else if (taken == CarveDecision::kSplit && have_split) {
       chosen_cost = split;
@@ -1244,11 +1251,12 @@ struct Carver {
           taken = ov->second == CarveDecision::kIsland
                       ? (c.compiled ? CarveDecision::kIsland : natural)
                       : CarveDecision::kLeave;
-        const int64_t island_side = c.island_cost + c.boundary;
+        // No split candidate exists here, so this is always island versus
+        // leave -- the same comparison c.accepted made, boundary-free.
         const int64_t chosen_cost =
-            taken == CarveDecision::kIsland ? island_side : c.graph_cost;
+            taken == CarveDecision::kIsland ? c.island_cost : c.graph_cost;
         const int64_t other_cost =
-            taken == CarveDecision::kIsland ? c.graph_cost : island_side;
+            taken == CarveDecision::kIsland ? c.graph_cost : c.island_cost;
         plan->decisions.push_back(CandidateRecord{
             key, taken, c.compiled ? Viability::kYes : Viability::kNo,
             Viability::kUnknown, chosen_cost, other_cost});

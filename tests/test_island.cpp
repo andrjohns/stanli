@@ -2216,6 +2216,39 @@ static void test_plan_records() {
             (int)before);
 }
 
+// The hmm candidate has no split alternative (test_plan_records already
+// pins split_viable == kUnknown for it), so its recorded chosen_cost and
+// other_cost are an island-vs-leave comparison and must carry no boundary
+// on either side -- the same comparison c.accepted made when it chose to
+// carve. The estimate's own diagnostic line gives graph_cost and
+// island_cost independently, with boundary broken out separately, to
+// check the record against.
+static void test_plan_records_boundary_free_leave_comparison() {
+  const std::string line = capture_estimate_line([] {
+    HmmGraph h = build_hmm(8);
+    carve_islands(h.g, h.fills, h.terms, {});
+  });
+  expect("boundary-free estimate line captured", !line.empty());
+  if (line.empty()) return;
+  const int64_t graph_cost = parse_field(line, "graph");
+  const int64_t island_cost = parse_field(line, "island");
+  const int64_t boundary = parse_field(line, "boundary");
+  expect("boundary-free fixture has nonzero boundary", boundary != 0);
+
+  HmmGraph h = build_hmm(8);
+  CarvePlan plan;
+  expect_eq("boundary-free carved",
+            carve_islands(h.g, h.fills, h.terms, {}, &plan), 1);
+  expect_eq("boundary-free one decision", (int)plan.decisions.size(), 1);
+  if (plan.decisions.empty()) return;
+  expect_eq("boundary-free split not priced",
+            (int)plan.decisions[0].split_viable, (int)Viability::kUnknown);
+  expect_eq("boundary-free chosen_cost is island_cost alone",
+            plan.decisions[0].chosen_cost, island_cost);
+  expect_eq("boundary-free other_cost is graph_cost",
+            plan.decisions[0].other_cost, graph_cost);
+}
+
 // Carving twice from the same pre-island baseline with the same plan (no
 // overrides) must compile nothing new the second time and produce the same
 // graph. `pristine` is a copy of the graph taken before the first carve, so
@@ -2612,6 +2645,7 @@ int main() {
   test_div_range_model_matches_uncarved();
   test_inplace_slice_cost_refuses_wide_state();
   test_plan_records();
+  test_plan_records_boundary_free_leave_comparison();
   test_replay_reproduces();
   test_cache_outlives_original_graph();
   test_override_leave();
