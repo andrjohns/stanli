@@ -138,6 +138,64 @@ static void test_contiguous_bucket() {
   expect_same_grad("contiguous", std::move(b.g), f2, tt, want);
 }
 
+// A lane may read a width-W window rather than one element, and a density's
+// two real-valued arguments may both be lane-local slices of their own
+// bases. When L such windows tile a base back to back the concatenation is
+// one contiguous run: covering the base exactly elides it (no op), a
+// partial run slices it. Both used to gather, since the width==1
+// restriction on the cheap forms did not see this width>1 case at all.
+static void test_wide_contiguous_read() {
+  const int L = 8, W = 3;
+  const auto build = [&](int64_t extra, int64_t start_skip) {
+    Lanes b;
+    const int64_t n = L * W + extra;
+    b.base = b.g.add_slot(n, true);             // the mean, a parameter
+    const int y_base = b.g.add_slot(n, false);  // the observation, data
+    std::vector<double> yv((size_t)n);
+    for (int64_t idx = 0; idx < n; ++idx) yv[(size_t)idx] = 0.1 * (double)idx;
+    b.fills.emplace_back(y_base, yv);
+    b.sigma = b.g.add_slot(1, true);
+    for (int l = 0; l < L; ++l) {
+      const int win = b.g.add_slot(W, false);
+      b.g.add_op(OP_SLICE, {b.base}, win, {(int)(start_skip + l * W)});
+      const int yw = b.g.add_slot(W, false);
+      b.g.add_op(OP_SLICE, {y_base}, yw, {(int)(start_skip + l * W)});
+      const int lp = b.g.add_slot(1, false);
+      const int id = b.g.add_op(OP_NORMAL_LPDF, {yw, win, b.sigma}, lp);
+      b.g.ops[(size_t)id].variant = 0x06;
+      b.terms.push_back(lp);
+    }
+    return b;
+  };
+  {  // both windows cover their base exactly: both elide
+    Lanes b = build(0, 0);
+    const std::vector<double> want = reference(b.g, b.fills, b.terms);
+
+    std::vector<int> tt = b.terms;
+    Fills f2 = b.fills;
+    const PartitionStats st = partition_lanes(b.g, f2, tt, {});
+    expect("wide elide one group", st.groups == 1 && st.lanes == L);
+    expect("wide elide one op", b.g.ops.size() == 1 && tt.size() == 1);
+    expect("wide elide reads the mean base directly",
+           b.g.ops.size() == 1 && b.g.ops[0].in[1] == b.base);
+    expect_same_grad("wide elide", std::move(b.g), f2, tt, want);
+  }
+  {  // an offset, partial run on both: slices, does not gather
+    Lanes b = build(2, 1);
+    const std::vector<double> want = reference(b.g, b.fills, b.terms);
+
+    std::vector<int> tt = b.terms;
+    Fills f2 = b.fills;
+    const PartitionStats st = partition_lanes(b.g, f2, tt, {});
+    expect("wide slice one group", st.groups == 1 && st.lanes == L);
+    expect("wide slice op count", b.g.ops.size() == 3 && tt.size() == 1);
+    expect(
+        "wide slice is a slice, not a gather",
+        count_opcode(b.g, OP_SLICE) == 2 && count_opcode(b.g, OP_GATHER) == 0);
+    expect_same_grad("wide slice", std::move(b.g), f2, tt, want);
+  }
+}
+
 // The same template, with an unrelated term computed between lanes 3 and 4.
 // Lanes are found by their delimiters, so the intruder neither joins the
 // bucket nor stops it, and it stays where it is.
@@ -962,6 +1020,7 @@ int main() {
     (void)warm.n_params();
   }
   test_contiguous_bucket();
+  test_wide_contiguous_read();
   test_logistic_direct_terms();
   test_interleaved_lanes();
   test_scattered_indices();

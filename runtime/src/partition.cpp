@@ -32,6 +32,7 @@
 // cumsum([0, ta - b_1, ...])[j] = j*t*a - sum_{i<=j} b_i. Buckets refine on
 // the subtracted vector -- the item -- and the slope is whichever of the two
 // scalars that refinement holds still.
+#include <stanli/builtin_registry.hpp>
 #include <stanli/density_registry.hpp>
 #include <stanli/optable.hpp>
 #include <stanli/partition.hpp>
@@ -739,7 +740,6 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
         const int64_t step = strided_read ? t.idata[1] : 1;
         ap.width = w;
         ap.idx.reserve((size_t)(L * w));
-        bool run = step == 1;
         for (int64_t l = 0; l < L; ++l) {
           const Op& o = op_at(p, l);
           const int64_t start = o.idata[0];
@@ -748,16 +748,22 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
             ok = false;
             break;
           }
-          if (start != t.idata[0] + l * w) run = false;
           for (int64_t e = 0; e < w; ++e)
             ap.idx.push_back((int)(start + e * step));
         }
         if (!ok) break;
-        if (run && w == 1 && t.idata[0] == 0 && blen == L) {
+        // Every lane's window, concatenated in lane order: one contiguous
+        // run (any width, not only w==1) is a slice, or the whole base for
+        // free; anything else is a gather, which is always correct here
+        // since these came from `ap.idx` regardless of source stride.
+        std::vector<int64_t> flat(ap.idx.begin(), ap.idx.end());
+        const FlatOffsetRun run = classify_flat_offsets(flat);
+        if (run.kind == BuiltinSliceMap::Kind::Contiguous && run.offset == 0 &&
+            (int64_t)ap.idx.size() == blen) {
           ap.emit = Emit::kElide;
-        } else if (run && w == 1) {
+        } else if (run.kind == BuiltinSliceMap::Kind::Contiguous) {
           ap.emit = Emit::kSlice;
-          ap.idx.assign(1, t.idata[0]);
+          ap.idx.assign(1, (int)run.offset);
         } else {
           ap.emit = Emit::kGather;
         }
