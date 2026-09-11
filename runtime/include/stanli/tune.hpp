@@ -42,10 +42,17 @@ struct TuneStats {
   double seconds = 0;
 };
 
+// Opt-in: STANLI_TUNE set to anything other than empty or "0". Off by
+// default because the agreement check samples three points rather than
+// proving every island instruction matches the graph kernel it replaces
+// on every input, so a flip changes behavior on a contract nothing has
+// actually established.
+bool tuning_enabled();
+
 // Times cm.choices against cm.graph in registration order, replacing
 // cm.graph with whichever alternative wins each round, then clears
-// cm.choices. The budget is one thousand times the duration of the first
-// evaluation of cm.graph.
+// cm.choices. The budget is one thousand times the duration of a second,
+// warm evaluation of cm.graph. A no-op unless tuning_enabled().
 TuneStats tune(CompiledModel& cm, Measurer* measurer = nullptr);
 
 }  // namespace stanli

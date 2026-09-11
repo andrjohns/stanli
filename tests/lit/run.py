@@ -29,8 +29,6 @@ import re
 import subprocess
 import tempfile
 
-os.environ.setdefault("STANLI_NO_TUNE", "1")
-
 PREFIX = "// STANLI-LIT: "
 EXPECT_PREFIX = "// STANLI-LIT-EXPECT: "
 DATA_PREFIX = "// STANLI-LIT-DATA: "

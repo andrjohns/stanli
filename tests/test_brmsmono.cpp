@@ -44,8 +44,6 @@ static std::string slurp(const std::string& p) {
 int main() {
   using namespace stanli;
 
-  test_setenv("STANLI_NO_TUNE", "1", 1);
-
   DataMap data = DataMap::from_json_file("tests/fixtures/brmsmono.json");
   const std::string mir = slurp("tests/fixtures/brmsmono.tmir.sexp");
   CompiledModel cm = compile_model(mir, data);

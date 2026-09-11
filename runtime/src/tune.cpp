@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <random>
 #include <vector>
@@ -32,6 +34,12 @@ double clock_resolution(Measurer& m, double* start) {
   }
   *start = times[63];
   return best > 0.0 ? best : 1e-6;
+}
+
+uint64_t bits_of(double x) {
+  uint64_t u;
+  std::memcpy(&u, &x, sizeof(u));
+  return u;
 }
 
 bool finite_result(double lp, const std::vector<double>& grad) {
@@ -67,11 +75,23 @@ double median_of(std::vector<double> v) {
   return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
 }
 
+double mad_of(const std::vector<double>& v, double median) {
+  std::vector<double> dev;
+  dev.reserve(v.size());
+  for (double x : v) dev.push_back(std::abs(x - median));
+  return median_of(dev);
+}
+
 }  // namespace
+
+bool tuning_enabled() {
+  const char* v = std::getenv("STANLI_TUNE");
+  return v && v[0] != '\0' && std::strcmp(v, "0") != 0;
+}
 
 TuneStats tune(CompiledModel& cm, Measurer* measurer) {
   TuneStats stats;
-  if (std::getenv("STANLI_NO_TUNE")) return stats;
+  if (!tuning_enabled()) return stats;
   stats.choices = static_cast<int>(cm.choices.size());
   if (cm.choices.empty()) return stats;
 
@@ -101,13 +121,22 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
       alt_grad(static_cast<size_t>(n));
 
   // The budget is amortized against real use: a graph that evaluates fewer
-  // than a thousand gradients over its lifetime isn't worth tuning for.
+  // than a thousand gradients over its lifetime isn't worth tuning for. A
+  // cold first call pays one-time setup (allocation, cache warmup) real
+  // calls never repeat, so it is thrown away; the timed call is the second,
+  // warm one.
+  double warm_lp = 0.0;
+  safe_eval(*cur_ex, points[0], &warm_lp, cur_grad);
   double first_lp = 0.0;
   const double t_first = m.now_seconds();
   safe_eval(*cur_ex, points[0], &first_lp, cur_grad);
   const double first_eval_time =
       std::max(m.now_seconds() - t_first, resolution);
   const double budget_seconds = 1000.0 * first_eval_time;
+
+  const auto over_budget = [&] {
+    return m.now_seconds() - t_start > budget_seconds;
+  };
 
   for (TuningChoice& choice : cm.choices) {
     if (choice.closeness > kTuneTrustRadius) {
@@ -119,7 +148,20 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
     }
 
     const double elapsed = m.now_seconds() - t_start;
+    if (elapsed > budget_seconds) {
+      ++stats.skipped_budget;
+      if (debug)
+        emit_diagnostic(
+            "tune: " + choice.what +
+            " skipped_budget before choice elapsed=" + std::to_string(elapsed));
+      break;
+    }
 
+    // The batch size is calibrated the same warm way: a cold throwaway call,
+    // then a timed one whose duration sets how many gradients make up one
+    // measured batch.
+    double warm_p0 = 0.0;
+    safe_eval(*cur_ex, points[0], &warm_p0, cur_grad);
     double p0_lp = 0.0;
     const double t_eval0 = m.now_seconds();
     const bool p0_ok = safe_eval(*cur_ex, points[0], &p0_lp, cur_grad);
@@ -153,18 +195,15 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
     auto alt_ex = std::make_unique<Executor>(g_alt);
     cm.bind(*alt_ex);
 
-    if (m.now_seconds() - t_start > budget_seconds) {
-      ++stats.skipped_budget;
-      if (debug)
-        emit_diagnostic("tune: " + choice.what +
-                        " skipped_budget after building alternative");
-      break;
-    }
-
     std::vector<int> usable;
     bool disagree = false;
+    bool budget_exhausted = false;
     int disagree_point = -1, disagree_component = -1;
     for (int k = 0; k < 3 && !disagree; ++k) {
+      if (over_budget()) {
+        budget_exhausted = true;
+        break;
+      }
       double cur_lp, alt_lp;
       bool cur_ok;
       if (k == 0 && p0_ok) {
@@ -177,15 +216,24 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
       }
       const bool alt_ok =
           safe_eval(*alt_ex, points[static_cast<size_t>(k)], &alt_lp, alt_grad);
-      if (!cur_ok || !alt_ok) continue;
-      if (cur_lp != alt_lp) {
+      // Exactly one side throwing or landing outside the finite range the
+      // other reached is itself a disagreement -- silently dropping such a
+      // point would let a form that fails where the other succeeds look
+      // untested rather than wrong.
+      if (cur_ok != alt_ok) {
+        disagree = true;
+        disagree_point = k;
+        break;
+      }
+      if (!cur_ok) continue;
+      if (bits_of(cur_lp) != bits_of(alt_lp)) {
         disagree = true;
         disagree_point = k;
         break;
       }
       for (int64_t j = 0; j < n; ++j) {
-        if (cur_grad[static_cast<size_t>(j)] !=
-            alt_grad[static_cast<size_t>(j)]) {
+        if (bits_of(cur_grad[static_cast<size_t>(j)]) !=
+            bits_of(alt_grad[static_cast<size_t>(j)])) {
           disagree = true;
           disagree_point = k;
           disagree_component = static_cast<int>(j);
@@ -194,6 +242,14 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
       }
       if (disagree) break;
       usable.push_back(k);
+    }
+
+    if (budget_exhausted) {
+      ++stats.skipped_budget;
+      if (debug)
+        emit_diagnostic("tune: " + choice.what +
+                        " skipped_budget during agreement check");
+      break;
     }
 
     if (disagree) {
@@ -218,6 +274,10 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
     int cur_faster = 0, alt_faster = 0;
     bool decided = false, alt_wins = false;
     for (int round = 1; round <= 7; ++round) {
+      if (over_budget()) {
+        budget_exhausted = true;
+        break;
+      }
       const int point =
           usable[static_cast<size_t>((round - 1) % (int)usable.size())];
       const bool current_first = round % 2 == 0;
@@ -240,8 +300,22 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
       else if (ct < at)
         ++cur_faster;
 
+      // The alternative wins only if it is faster by more than the round
+      // timings' own noise -- the larger of the two forms' median absolute
+      // deviations across the rounds run so far -- on top of the
+      // round-count rule below. Winning on 5% with no margin is a coin
+      // flip the sampled agreement check should not be allowed to spend a
+      // permanent behavior change on.
+      const auto clears_noise = [&] {
+        const double cur_med = median_of(cur_times);
+        const double alt_med = median_of(alt_times);
+        const double cur_mad = mad_of(cur_times, cur_med);
+        const double alt_mad = mad_of(alt_times, alt_med);
+        return cur_med - alt_med > std::max(cur_mad, alt_mad);
+      };
+
       if (round == 3) {
-        if (alt_faster == 3 && median_of(alt_times) < median_of(cur_times)) {
+        if (alt_faster == 3 && clears_noise()) {
           decided = true;
           alt_wins = true;
           break;
@@ -253,8 +327,23 @@ TuneStats tune(CompiledModel& cm, Measurer* measurer) {
         }
       }
     }
-    if (!decided)
-      alt_wins = alt_faster >= 5 && median_of(alt_times) < median_of(cur_times);
+
+    if (budget_exhausted) {
+      ++stats.skipped_budget;
+      if (debug)
+        emit_diagnostic("tune: " + choice.what +
+                        " skipped_budget during timing rounds");
+      break;
+    }
+
+    if (!decided) {
+      const double cur_med = median_of(cur_times);
+      const double alt_med = median_of(alt_times);
+      const double cur_mad = mad_of(cur_times, cur_med);
+      const double alt_mad = mad_of(alt_times, alt_med);
+      alt_wins =
+          alt_faster >= 5 && cur_med - alt_med > std::max(cur_mad, alt_mad);
+    }
 
     if (debug) {
       emit_diagnostic("tune: " + choice.what + (alt_wins ? " flip" : " keep") +

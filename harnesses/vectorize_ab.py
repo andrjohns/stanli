@@ -122,7 +122,6 @@ RUNTIME_ENV_KEYS = (
     "STANLI_NO_NATIVE_ADJ",
     "STANLI_NO_PARTITION",
     "STANLI_NO_REROLL",
-    "STANLI_NO_TUNE",
     "STANLI_PACKET_MATH",
     "STANLI_PROFILE",
     "STANLI_PROFILE_PREP",
@@ -748,7 +747,6 @@ def graph_cell(dump, bench, mir, data, source_mode, reroll_enabled,
     if not reroll_enabled:
         env["STANLI_NO_REROLL"] = "1"
     dump_env = dict(env)
-    dump_env["STANLI_NO_TUNE"] = "1"
     dump_proc = run_command([dump, mir, data, "-1"], timeout, dump_env)
     parsed_dump = (parse_dump(dump_proc["stdout"])
                    if dump_proc["returncode"] == 0 else {})

@@ -818,7 +818,7 @@ directions read one instruction at a time and decide what to do with it,
 where CmdStan's compiler has inlined the equivalent straight into the
 model's machine code.
 
-## Prep-time tuning (`tune.cpp`, disable: `STANLI_NO_TUNE=1`)
+## Prep-time tuning (`tune.cpp`, opt-in: `STANLI_TUNE=1`)
 
 The island carver decides island, split, or leave from a static cost
 estimate of the register-program interpreter. That estimate is a model,
@@ -829,14 +829,14 @@ records every candidate it priced and the decision it took
 losing alternative, times both forms on the real executor, and keeps
 whichever one ran faster.
 
-Before any timing happens, both forms must agree to the last bit on the
-log-density and every gradient component at three fixed points (the
-origin and two `mt19937_64`-seeded points); any disagreement keeps the
-carver's answer no matter how the timing would have gone. The gate is
-bitwise, not a tolerance, because a form that changes the answer is
-never a valid alternative regardless of speed, and a small difference
-here is the signature of a reassociation the carver's own vocabulary
-is not free to make.
+Before any timing happens, both forms must agree to the last bit --
+compared by bit pattern, so a signed zero or a differing NaN payload
+counts -- on the log-density and every gradient component at three
+fixed points (the origin and two `mt19937_64`-seeded points); one form
+throwing or landing outside the finite range the other reached at a
+point is itself a disagreement, not a point dropped as untested. Any
+disagreement keeps the carver's answer no matter how the timing would
+have gone.
 
 A decision is only a choice if it is worth pricing: `taken == kIsland`
 (the alternative is leave, always free to try) or `island_viable ==
@@ -851,18 +851,28 @@ most likely to be wrong; a decision past `kTuneTrustRadius` (0.25) is
 never timed at all, and a graph with no decision inside the radius
 keeps no replay state, since that margin is where the estimate is not
 trusted to rank two forms, a property of the estimate itself rather
-than of any model or machine. The budget itself is one thousand times the
-duration of the first gradient evaluation, amortizing the cost of
-tuning against the run it is tuning for; each choice is checked against
-it before it is tried and again once its alternative graph and executor
-are built, so a model with an expensive rebuild cannot run past the
-budget mid-choice. A batch floor of 20 us keeps a round from being too
-short for the clock to resolve. `STANLI_NO_TUNE=1` skips
-building a plan at all, which is what `stanli_check`, `dump_ops`, and
-the lit runner pin so their graphs stay deterministic across runs;
-`bench_grad`, `stanli_run`, and the bindings run what ships.
-`STANLI_DEBUG_TUNE=1` reports the reason for every skip and the timing
-that decided every flip or keep.
+than of any model or machine. The budget itself is one thousand times
+the duration of a second, warm evaluation of the graph (the first is
+thrown away so one-time setup cannot inflate it), amortizing the cost
+of tuning against the run it is tuning for; it is checked before every
+choice, before every agreement evaluation, and before every timing
+batch, so a slow point or a slow rebuild cannot run past it mid-choice
+-- exceeding it abandons the choice in progress rather than adopting
+it. A batch floor of 20 us keeps a round from being too short for the
+clock to resolve, and the alternative only wins a round-count decision
+if its median batch time also beats the current form's by more than
+the larger of the two forms' own round-to-round noise (their median
+absolute deviations), so a few percent of measurement jitter cannot
+buy a permanent flip.
+
+Tuning is opt-in (`STANLI_TUNE` set to anything but empty or `0`) and
+off by default: the agreement check above samples three points rather
+than proving an island instruction matches the graph kernel it replaces
+on every input, so until that is a contract rather than a sample, a
+flip changes behavior on a guarantee nothing has actually established.
+`bench_grad`, `stanli_run`, and the bindings run what ships, which is
+tuning off; `STANLI_DEBUG_TUNE=1` reports the reason for every skip and
+the timing that decided every flip or keep.
 
 | model | tune stage | compile, tuning on | compile, tuning off |
 | --- | --- | --- | --- |

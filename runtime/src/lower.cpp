@@ -796,7 +796,7 @@ void Lowering::run_passes(const std::vector<int>& roots, const PassPlan& plan) {
     // into island ops. Off under STANLI_NO_ISLAND.
     const auto island_time = prep.start();
     int islands = 0;
-    if (std::getenv("STANLI_NO_TUNE") || std::getenv("STANLI_NO_ISLAND")) {
+    if (!tuning_enabled() || std::getenv("STANLI_NO_ISLAND")) {
       islands = carve_islands(g, out.fills, target_terms, roots);
     } else {
       const size_t orig_slots = g.slots.size();
@@ -961,7 +961,6 @@ std::string report_request() {
 
 CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
                             unsigned seed) {
-  const bool no_tune = std::getenv("STANLI_NO_TUNE") != nullptr;
   const char* prep_env = std::getenv("STANLI_PROFILE_PREP");
   PrepTrace prep(prep_env && prep_env[0] != '0');
   PassDumper dumper(std::getenv("STANLI_DUMP_PASSES"),
@@ -1088,7 +1087,7 @@ CompiledModel compile_model(const std::string& mir_text, const DataMap& data,
   }
   if (!cm.interpreter_fallbacks.empty() && std::getenv("STANLI_NO_INTERPRETER"))
     throw CompileError(interpreter_error(cm));
-  if (!no_tune) {
+  {
     const auto tune_time = prep.start();
     const TuneStats ts = tune(cm);
     prep.tune_stage("log_prob", tune_time, ts.choices, ts.tried, ts.flipped,

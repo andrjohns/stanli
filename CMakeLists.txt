@@ -744,9 +744,6 @@ function(stanli_add_test NAME)
   # Tests run from the repo root so fixture paths are stable.
   add_test(NAME ${NAME} COMMAND ${NAME}
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-  if(NOT NAME STREQUAL "test_tune")
-    set_tests_properties(${NAME} PROPERTIES ENVIRONMENT "STANLI_NO_TUNE=1")
-  endif()
 endfunction()
 
 # The native sampler. With the embed object it is one self-contained

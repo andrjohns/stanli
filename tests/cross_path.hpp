@@ -139,7 +139,6 @@ class EnvScope {
   explicit EnvScope(const std::vector<std::string>& set) {
     for (const std::string& v : harness_vars()) test_unsetenv(v.c_str());
     for (const std::string& v : set) test_setenv(v.c_str(), "1", 1);
-    test_setenv("STANLI_NO_TUNE", "1", 1);
   }
   ~EnvScope() {
     for (const std::string& v : harness_vars()) test_unsetenv(v.c_str());

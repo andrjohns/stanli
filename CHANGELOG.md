@@ -2,22 +2,17 @@
 
 ## Unreleased
 
-### Prep time now tunes the island carver's close calls against real timing
+### Prep-time tuning of the island carver's close calls is opt-in
 
 The island carver picks island, split, or leave from a cost estimate, and
 near the boundary between two of those the estimate can be wrong in either
-direction. Compiling now replays a recorded decision the estimate already
-priced with its losing alternative and times both forms on the real
-executor, keeping whichever ran faster; a candidate only flips if both
-forms agree to the last bit on the log density and every gradient
-component first. Candidates are tried closest call first, and the time
-spent tuning is capped at a thousand times one gradient evaluation, so the
-cost is amortized against the run the tuning is for rather than fixed.
-`STANLI_NO_TUNE=1` disables it for a deterministic graph; `stanli_check`,
-`dump_ops`, and the lit runner pin it themselves so their output stays
-reproducible across runs, while `bench_grad`, `stanli_run`, and the
-language bindings tune by default. `STANLI_DEBUG_TUNE=1` reports why each
-candidate flipped, kept, or was skipped.
+direction. Compiling can now replay a recorded decision with its losing
+alternative and time both forms on the real executor, keeping whichever
+ran faster, gated on agreeing to the bit at three sampled points first.
+Set `STANLI_TUNE=1` to turn it on; it stays off by default until an
+island instruction's agreement with the graph kernel it replaces is a
+contract rather than something sampled at a few points. `STANLI_DEBUG_TUNE=1`
+reports why each candidate flipped, kept, or was skipped.
 
 ### The upstream loop vectorizer's new shapes lower without regressions
 
