@@ -679,7 +679,22 @@ add_custom_command(
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   COMMENT "Generating ${STANLI_FIXTURE_COUNT} legacy MIR fixtures"
   VERBATIM)
-add_custom_target(stanli_mir_fixtures ALL DEPENDS ${STANLI_MIR_FIXTURES})
+set(STANLI_TUNE_FIXTURE
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/tune_fixtures/tune_hmm.tmir.sexp")
+add_custom_command(
+  OUTPUT "${STANLI_TUNE_FIXTURE}"
+  COMMAND ${STANLI_FIXTURE_PYTHON}
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fixtures.py"
+          --stanc "${STANLI_STANC_EXECUTABLE}"
+          --source-dir tests/tune_fixtures --output-dir tests/tune_fixtures
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/tune_fixtures/tune_hmm.stan"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fixtures.py"
+          "${STANLI_STANC_EXECUTABLE}"
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Generating the tuner fixture MIR"
+  VERBATIM)
+add_custom_target(stanli_mir_fixtures ALL
+                  DEPENDS ${STANLI_MIR_FIXTURES} "${STANLI_TUNE_FIXTURE}")
 
 # Pull-request validation uses Clang so its cheap test translation units can
 # link to the optimized runtime objects below. Shipped platform builds may use
