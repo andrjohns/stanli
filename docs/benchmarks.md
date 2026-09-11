@@ -68,9 +68,10 @@ few vector operations and reuses the resulting autodiff graph. CmdStan builds
 and tears down scalar autodiff tape nodes on every gradient evaluation.
 
 **Dense kernels and sequential models land closer to parity.** If most of a
-gradient is one large matrix operation, both engines spend their time in the
-same stan-math kernel. HMM, ARMA, and GARCH recurrences depend on the previous
-step, so they cannot become independent vector lanes. stanli still wins on the
+gradient is one large matrix operation, both engines compute its value in
+the same stan-math kernel; where they differ is the adjoint, described
+below. HMM, ARMA, and GARCH recurrences depend on the previous step, so
+they cannot become independent vector lanes. stanli still wins on the
 measured examples, but by less.
 
 **The ODE models moved from stanli's weakest results to some of its
@@ -81,9 +82,26 @@ and the change coincided with 0.11.0's expanded function coverage inside ODE
 right-hand sides (see the changelog). Both engines still use the same Stan
 Math integrator.
 
-**Two Gaussian-process models are now the only gradient losses.** `gp_regr`
-and `gp_pois_regr`, at 0.51-0.59x CmdStan, are dominated by covariance-matrix
-construction, the same dense-kernel work described above.
+**Two Gaussian-process models are the only gradient losses, and the cause
+is how their adjoints are computed.** `gp_regr` and `gp_pois_regr` run at
+0.51-0.59x CmdStan on eleven data points. Both are a `gp_exp_quad_cov` call,
+a `cholesky_decompose`, and one density, so the forward pass is the same
+stan-math arithmetic in both engines. The difference is the backward pass.
+stanli's matrix kernels either carry a native pullback (the symmetric
+eigendecomposition does) or fall back to re-running the stan-math function
+under nested reverse mode inside the kernel's backward: promote the inputs
+to `var`, evaluate the function a second time, sweep its tape, copy the
+adjoints out, and free the tape. The covariance kernel and the Cholesky
+take that fallback. On `gp_regr` the per-op profile puts 3.0 us of a 6.4 us
+gradient in the covariance backward and 1.2 us in the Cholesky backward,
+against roughly 0.2 us of arithmetic for an 11x11 matrix; CmdStan's
+`gp_exp_quad_cov` vari computes the same adjoint in closed form over the
+distance matrix inside the model's single tape. The fixed cost of the
+fallback is a few microseconds per kernel call regardless of size, so it
+dominates at this N and fades as the matrix grows. Native pullbacks for the
+`gp_*_cov` family and for `cholesky_decompose` are the fix; the kernel's
+gradient stays bit-identical to CmdStan's, since both compute the same
+formula, only the tape mechanics go away.
 
 ## Parallel chains
 
