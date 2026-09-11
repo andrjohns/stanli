@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
   // divided by that difference. The body is short relative to the width
   // change so the boundary cost is a visible fraction of the total.
   const int body = 64;
-  const int narrow_in = 4, wide_in = 200;
+  const int narrow_in = 4, wide_in = 2000;
   Fills narrow_in_fills;
   Graph narrow_in_g = build_chain(body, narrow_in, 0, &narrow_in_fills);
   carve_always(&narrow_in_g, narrow_in_fills);
@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
       (wide_in_ns - narrow_in_ns) / (double)(wide_in - narrow_in);
 
   // The same for one live-out element.
-  const int narrow_out = 4, wide_out = 200;
+  const int narrow_out = 4, wide_out = 2000;
   Fills narrow_out_fills;
   Graph narrow_out_g = build_chain(body, 0, narrow_out, &narrow_out_fills);
   carve_always(&narrow_out_g, narrow_out_fills);
