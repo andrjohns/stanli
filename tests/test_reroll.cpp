@@ -558,6 +558,43 @@ static void test_data_index_gathers() {
     expect_close(("gather v" + std::to_string(i)).c_str(), got[i], want[i]);
 }
 
+// The cost model: the same shape as test_data_index_gathers, but at four
+// lanes (the pass's own floor) instead of nine. A gather prices at
+// 2*Luse*width against a scalar dispatch's kLaneOpCost=5; at four lanes
+// the two positions' eliminated dispatches (4*2*5=40) do not clear their
+// own cost (2*4*1 + 2*5 = 18) plus partition.cpp's 40-unit margin, so the
+// region stays scalar. test_data_index_gathers proves the identical shape
+// packs once there are enough lanes to amortize the fixed overhead.
+static void test_cost_model_declines_small_gather() {
+  const int L = 4, J = 4;
+  const int idx[L] = {3, 1, 0, 2};  // a permutation: forces OP_GATHER
+  Graph g;
+  Fills fills;
+  const int alpha = g.add_slot(J, true);
+  const int sigma = g.add_slot(1, true);
+  auto cslot = [&](double v) {
+    const int s = g.add_slot(1, false);
+    fills.emplace_back(s, std::vector<double>{v});
+    return s;
+  };
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int a = g.add_slot(1, false);
+    g.add_op(OP_INDEX, {alpha}, a, {idx[l]});
+    const int lp = g.add_slot(1, false);
+    const int id =
+        g.add_op(OP_NORMAL_LPDF, {cslot(0.3 * l - 1.0), a, sigma}, lp);
+    g.ops[id].variant = 0x06;
+    terms.push_back(lp);
+  }
+  const size_t before = g.ops.size();
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  const RerollStats st = reroll(g, f2, tt, {});
+  expect("small gather declines",
+         st.regions == 0 && g.ops.size() == before && tt.size() == (size_t)L);
+}
+
 // (d) STANLI_NO_REROLL disables the pass.
 static void test_env_disable() {
   test_setenv("STANLI_NO_REROLL", "1", 1);
@@ -585,8 +622,12 @@ static void test_env_disable() {
 
 // (e) first lane anomalous (its y is an op output, not a const): the pass
 // must skip lane 0 and still re-roll lanes 1..L-1 on the second attempt.
+// L is large enough that the remaining 1-position region clears reroll's
+// cost model (a bare term density needs Luse > 9 to beat 40's margin at
+// kLaneOpCost=5 per op); a smaller L here would report a correct decline,
+// not a bug, and is exactly what test_bail_recurrence-style cases are for.
 static void test_first_lane_anomalous() {
-  const int L = 8;
+  const int L = 16;
   Graph g;
   Fills fills;
   const int mu = g.add_slot(1, true);
@@ -1307,16 +1348,22 @@ static void test_write_fusion_bails() {
 // already run. Two disjoint comb runs model Mtbh's column fills: the first
 // store must copy its fill-backed base, while the second can reuse that fresh
 // result when the pass runs again.
+// Six lanes per region, not reroll's four-lane floor: two OP_INDEX/
+// OP_SET_INDEX_INPLACE positions priced honestly (reroll.cpp's cost model)
+// need more than the floor to beat staying scalar by more than a rounding
+// error, the same bar partition.cpp's bucket pricing applies.
 static void test_post_reroll_slice_inplace() {
+  const int kLanes = 6;
+  const int n = 2 * kLanes;
   Graph g;
   Fills fills;
-  const int a = g.add_slot(8, true), sigma = g.add_slot(1, true);
-  const int yh = g.add_slot(8, false);
-  fills.emplace_back(yh, std::vector<double>(8, -0.25));
-  const int yd = g.add_slot(8, false);
-  fills.emplace_back(yd, std::vector<double>(8, 0.75));
+  const int a = g.add_slot(n, true), sigma = g.add_slot(1, true);
+  const int yh = g.add_slot(n, false);
+  fills.emplace_back(yh, std::vector<double>((size_t)n, -0.25));
+  const int yd = g.add_slot(n, false);
+  fills.emplace_back(yd, std::vector<double>((size_t)n, 0.75));
 
-  for (int l = 0; l < 4; ++l) {
+  for (int l = 0; l < kLanes; ++l) {
     const int v = g.add_slot(1, false);
     g.add_op(OP_INDEX, {a}, v, {l});
     g.add_op(OP_SET_INDEX_INPLACE, {yh, v}, yh, {2 * l});
@@ -1324,9 +1371,9 @@ static void test_post_reroll_slice_inplace() {
   // A non-lane scalar op separates the two affine store regions.
   const int sep = g.add_slot(1, false);
   g.add_op(OP_SUM_VEC, {a}, sep);
-  for (int l = 0; l < 4; ++l) {
+  for (int l = 0; l < kLanes; ++l) {
     const int v = g.add_slot(1, false);
-    g.add_op(OP_INDEX, {a}, v, {4 + l});
+    g.add_op(OP_INDEX, {a}, v, {kLanes + l});
     g.add_op(OP_SET_INDEX_INPLACE, {yh, v}, yh, {1 + 2 * l});
   }
   const int lp = g.add_slot(1, false);
@@ -2189,6 +2236,7 @@ int main() {
   test_bail_escaping_density();
   test_partial_range_slices();
   test_data_index_gathers();
+  test_cost_model_declines_small_gather();
   test_env_disable();
   test_first_lane_anomalous();
   test_block_structured();

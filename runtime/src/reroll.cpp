@@ -1307,8 +1307,82 @@ static RerollStats reroll_impl(
         }
         if (ok && (any_term_density || any_store || any_elt_density ||
                    any_term_widen)) {
-          classified = true;
-          break;
+          // Price the fused form against staying scalar, in partition.cpp's
+          // currencies: kLaneOpCost per graph-op dispatch this region would
+          // eliminate, against kLaneOpCost per op it introduces plus
+          // kLaneDensityElem-scale per-element cost wherever a position
+          // actually copies or scatters elements (a slice, a gather, or a
+          // density with no native elementwise form), plus a charge for
+          // lanes CSE would already have merged into fewer than Luse ops.
+          // Elision, hoisting and a plain vector op or density call are not
+          // charged beyond their one dispatch: the scalar path would pay
+          // the same per-element work in Luse separate calls, so only the
+          // eliminated dispatches and the genuine copies are the region's
+          // net win.
+          int64_t ops_out = 0, added = 0, lane_elems = 0;
+          for (int p = 0; p < P; ++p) {
+            const Pos& ap = pos[(size_t)p];
+            if (ap.index_elision || ap.row_elision) {
+              continue;
+            } else if (ap.hoist) {
+              ++ops_out;
+            } else if (ap.slice_start >= 0) {
+              ++ops_out;
+              added += Luse * ap.width;
+              lane_elems += 2 * ap.width;
+            } else if (!ap.gather_idx.empty()) {
+              ++ops_out;
+              added += 2 * Luse * ap.width;
+              lane_elems += 2 * ap.width;
+            } else if (ap.term_density) {
+              ++ops_out;
+              lane_elems += ap.width * kLaneDensityElem;
+            } else if (ap.elt_density) {
+              const uint16_t opcode = op_at(p, 0).opcode;
+              ops_out += ap.width > 1 ? 2 : 1;
+              lane_elems += ap.width * kLaneDensityElem;
+              if (ap.width > 1 && lane_elt_costs_per_element(opcode))
+                added += Luse * ap.width * kLaneDensityElem;
+            } else if (ap.term_widen) {
+              ops_out += 2;
+              lane_elems += 2 * ap.width;
+            } else if (ap.store_vec >= 0) {
+              const bool whole = ap.row_store ||
+                                 (ap.store_stride == 1 && ap.store_start == 0 &&
+                                  Luse == g.slots[(size_t)ap.store_vec].len);
+              if (!whole || ap.store_written_after) {
+                ++ops_out;
+                lane_elems += 2 * ap.width;
+              }
+            } else {
+              ++ops_out;
+              lane_elems += 2 * ap.width;
+            }
+          }
+          std::unordered_set<uint64_t> lane_hash;
+          for (int64_t l = 0; l < Luse; ++l) {
+            uint64_t h = 1469598103934665603ull;
+            const auto mix = [&h](int64_t v) {
+              h = (h ^ (uint64_t)v) * 1099511628211ull;
+            };
+            for (int p = 0; p < P; ++p) {
+              const Op& o = op_at(p, l);
+              const Pos& ap = pos[(size_t)p];
+              for (int j = 0; j < o.n_in; ++j)
+                mix(ap.ins[(size_t)j].kind == InKind::kLaneLocal ? -1
+                                                                 : o.in[j]);
+              for (int64_t m = 0; m < o.n_idata; ++m) mix(o.idata[m]);
+            }
+            lane_hash.insert(h);
+          }
+          const int64_t distinct = (int64_t)lane_hash.size();
+          added += ops_out * kLaneOpCost + (Luse - distinct) * lane_elems;
+          if (distinct * (int64_t)P * kLaneOpCost >
+              added + kLanePartitionMargin) {
+            classified = true;
+            break;
+          }
+          ok = false;
         }
         if (ok) prefix = 0;                     // classifiable but useless
         if (prefix >= Luse) prefix = Luse - 1;  // guarantee progress

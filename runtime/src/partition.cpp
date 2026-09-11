@@ -49,15 +49,11 @@ namespace stanli {
 namespace {
 
 constexpr int64_t kMinLanes = 4;
-// island.cpp's currencies: ~5 ns per graph op against ~1 ns per element
-// moved. A bucket must beat its gathers by more than a rounding error, or it
-// churns the graph for nothing.
-constexpr int64_t kOpCost = 5;
-constexpr int64_t kPartitionMargin = 8 * kOpCost;
-// A density element costs about six op dispatches to evaluate. It is the
-// term that decides whether re-evaluating a lane the CSE pass would have
-// collapsed, or trading a vector density call for W elementwise ones, pays.
-constexpr int64_t kDensityElem = 6;
+// The shared currencies live in pass_util.hpp: reroll's own cost model uses
+// the same ones.
+constexpr int64_t kOpCost = kLaneOpCost;
+constexpr int64_t kPartitionMargin = kLanePartitionMargin;
+constexpr int64_t kDensityElem = kLaneDensityElem;
 // Splitting is bounded work, not a retry loop: each one costs a re-pass over
 // a bucket, and a graph that presents thousands of interleaved writers must
 // not turn that into a quadratic term.
@@ -95,20 +91,8 @@ bool has_int_groups(uint16_t opcode) {
 int64_t group_len(const int* p) { return p[0] == -1 ? 2 : 1 + p[0]; }
 int group_elem(const int* p, int64_t e) { return p[0] == -1 ? p[1] : p[1 + e]; }
 
-// These kernels have an elementwise form that costs per element what their
-// summed one does (densities_lpmf.cpp), so widening a lane costs them
-// nothing. Every other density trades one vectorized call for W recorder
-// calls.
 bool elt_costs_per_element(uint16_t opcode) {
-  switch (opcode) {
-    case OP_BERNOULLI_LPMF:
-    case OP_BERNOULLI_LOGIT_LPMF:
-    case OP_BINOMIAL_LPMF:
-    case OP_BINOMIAL_LOGIT_LPMF:
-      return false;
-    default:
-      return true;
-  }
+  return lane_elt_costs_per_element(opcode);
 }
 
 // Outcome elements per lane, or 0 when the immediates are not a layout this
