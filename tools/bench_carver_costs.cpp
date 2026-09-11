@@ -33,8 +33,7 @@ using Clock = std::chrono::steady_clock;
 // changes only how many elements cross the region's boundary, not how
 // many distinct live-in slots the compiler has to track, so it stays
 // under the carver's own live-in slot limit regardless of width.
-Graph build_chain(int n, int live_in_width, int live_out_width,
-                  Fills* fills) {
+Graph build_chain(int n, int live_in_width, int live_out_width, Fills* fills) {
   Graph g;
   const int p = g.add_slot(1, true);
   std::vector<int> c(n);
@@ -46,8 +45,7 @@ Graph build_chain(int n, int live_in_width, int live_out_width,
   int wide_out = -1;
   if (live_out_width > 0) {
     const int tmpl = g.add_slot(live_out_width, false);
-    fills->emplace_back(tmpl, std::vector<double>((size_t)live_out_width,
-                                                  0.0));
+    fills->emplace_back(tmpl, std::vector<double>((size_t)live_out_width, 0.0));
     wide_out = tmpl;
   }
   const int half = n / 2;
@@ -70,8 +68,8 @@ Graph build_chain(int n, int live_in_width, int live_out_width,
     t = nt;
     if (live_in_width > 0) {
       const int idx = g.add_slot(1, false);
-      g.add_op(stanli::OP_INDEX, {wide_in}, idx, {(k - half - 1) %
-                                                  live_in_width});
+      g.add_op(stanli::OP_INDEX, {wide_in}, idx,
+               {(k - half - 1) % live_in_width});
       const int nt2 = g.add_slot(1, false);
       g.add_op(stanli::OP_ADD, {t, idx}, nt2);
       t = nt2;
@@ -109,8 +107,8 @@ double time_gradient_ns(Graph g, int rounds) {
     for (;;) {
       const auto t0 = Clock::now();
       for (int i = 0; i < batch; ++i) ex.gradient(grad.data());
-      elapsed = std::chrono::duration<double, std::nano>(Clock::now() - t0)
-                    .count();
+      elapsed =
+          std::chrono::duration<double, std::nano>(Clock::now() - t0).count();
       if (elapsed > 100000.0) break;
       batch *= 2;
     }
@@ -190,14 +188,13 @@ int main(int argc, char** argv) {
   std::printf("%-32s %10.3f ns\n", "one graph-op dispatch", graph_ns);
   std::printf("%-32s %10.3f ns\n", "one island instruction", island_ns);
   std::printf("%-32s %10.3f  (kOpCost assumes 5)\n", "graph/island ratio",
-             graph_ns / island_ns);
-  std::printf("%-32s %10.3f ns\n", "boundary per live-in element",
-             live_in_ns);
+              graph_ns / island_ns);
+  std::printf("%-32s %10.3f ns\n", "boundary per live-in element", live_in_ns);
   std::printf("%-32s %10.3f  (kValueRegWeight*2 assumes 4)\n",
-             "live-in / island-instr ratio", live_in_ns / island_ns);
+              "live-in / island-instr ratio", live_in_ns / island_ns);
   std::printf("%-32s %10.3f ns\n", "boundary per live-out element",
-             live_out_ns);
+              live_out_ns);
   std::printf("%-32s %10.3f  ((kOpCost + 3) assumes 8)\n",
-             "live-out / island-instr ratio", live_out_ns / island_ns);
+              "live-out / island-instr ratio", live_out_ns / island_ns);
   return 0;
 }

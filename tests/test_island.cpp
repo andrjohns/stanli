@@ -208,8 +208,8 @@ static void expect_eq(const std::string& what, int got, int want) {
 static void expect_eq(const std::string& what, int64_t got, int64_t want) {
   if (got != want) {
     ++failures;
-    std::printf("FAIL %s: got %lld want %lld\n", what.c_str(),
-                (long long)got, (long long)want);
+    std::printf("FAIL %s: got %lld want %lld\n", what.c_str(), (long long)got,
+                (long long)want);
   }
 }
 
@@ -1094,8 +1094,8 @@ static void test_liveness_prefers_the_cheap_cut_over_the_expensive_one() {
                                            // slice-update chain
   bool saw_accepted_piece = false;
   for (const std::string& l : capture_island_debug([&] {
-         VectorBinaryGraph h = build_wide_then_narrow(width, n_updates,
-                                                       chain_len);
+         VectorBinaryGraph h =
+             build_wide_then_narrow(width, n_updates, chain_len);
          carve_islands(h.g, h.fills, h.terms, {});
        })) {
     if (l.rfind("island-liveness? ops=", 0) != 0) continue;

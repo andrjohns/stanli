@@ -793,8 +793,7 @@ struct Carver {
       return c;
     }
     if (std::getenv("STANLI_DEBUG_ISLAND"))
-      emit_diagnostic(std::string(label) +
-                      "? ops=" + std::to_string(j - i) +
+      emit_diagnostic(std::string(label) + "? ops=" + std::to_string(j - i) +
                       " graph=" + std::to_string(c.graph_cost) +
                       " island=" + std::to_string(c.island_cost) +
                       " boundary=" + std::to_string(c.boundary));
@@ -850,7 +849,7 @@ struct Carver {
   // candidate boundary set join_cost_floor, split_cost_floor, and
   // split_has_multiple_pieces all bound cost(split, i, j, B) against.
   std::vector<std::pair<size_t, size_t>> strict_pieces(size_t i,
-                                                        size_t j) const {
+                                                       size_t j) const {
     std::vector<std::pair<size_t, size_t>> pieces;
     size_t a = i;
     while (a < j) {
