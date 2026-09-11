@@ -162,17 +162,16 @@ struct Graph;  // graph.hpp
 // an entry in plan->overrides forces that candidate's decision, and
 // plan->cache (created on first use) makes a replay skip recompiling a
 // candidate it has already priced. plan->pre_island_ops receives the op
-// list the carve replaced, for restore_pre_island below.
+// list the carve replaced, for a caller that wants to replay with a
+// different override: copy the graph before this call and carve the copy
+// again, rather than splicing pre_island_ops back into any graph -- its
+// Op entries point into the pools of whichever graph produced them, and
+// nothing rebinds those pointers to a different graph's pools.
 int carve_islands(Graph& g,
                   const std::vector<std::pair<int, std::vector<double>>>& fills,
                   const std::vector<int>& target_terms,
                   const std::vector<int>& extra_roots,
                   CarvePlan* plan = nullptr);
-
-// Put plan.pre_island_ops back as g.ops, undoing a carve so it can be
-// replayed with different overrides. g's slots and payload pools are left
-// as they are.
-void restore_pre_island(Graph& g, const CarvePlan& plan);
 
 // A straight-line run of a retained loop body compiled to one program. The
 // loop executor seeds the live-in registers from its own slot bindings, runs

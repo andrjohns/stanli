@@ -552,11 +552,18 @@ bool may_forward_adjacent_copy_destination(const Program& p) {
   return false;
 }
 
-// One run compiled, with the estimate's verdict on it.
+// One run compiled, with the estimate's verdict on it. Holds what emit()
+// and a cache replay need by value -- never the Compiler that built it,
+// which carries references into the Carver that compiled this candidate
+// (its graph, its const_slots, its last_use). A cached Candidate can
+// outlive that Carver, and a Compiler reference member surviving the same
+// way would leave the cache pointing at a destroyed graph the moment a
+// caller carves a copy and drops the original.
 struct Candidate {
   size_t begin;
   size_t end;
-  Compiler cc;
+  IslandProg prog;
+  std::vector<int> live_in_slots;
   std::vector<int> live_outs;
   std::unordered_set<int> in_set;
   std::unique_ptr<IslandProg> destination_source;
@@ -573,9 +580,9 @@ struct Candidate {
 };
 
 // A deep-enough copy for a cache entry to be reused without emit() (which
-// moves cc.prog) consuming the cached original.
+// moves prog) consuming the cached original.
 Candidate clone_candidate(const Candidate& c) {
-  Candidate out{c.begin, c.end, c.cc};
+  Candidate out{c.begin, c.end, c.prog, c.live_in_slots};
   out.live_outs = c.live_outs;
   out.in_set = c.in_set;
   out.destination_source =
@@ -681,10 +688,8 @@ struct Carver {
 
   // Compile and price [i, j) without touching the graph.
   Candidate evaluate(size_t i, size_t j) {
-    Candidate c{
-        i, j,
-        Compiler{g, const_slots, last_use, pinned, {}, {}, {}, 0, 0, 0, true}};
-    Compiler& cc = c.cc;
+    Candidate c{i, j};
+    Compiler cc{g, const_slots, last_use, pinned, {}, {}, {}, 0, 0, 0, true};
     bool compiled = true;
     for (size_t u = i; u < j && compiled; ++u) {
       cc.op_index = u;
@@ -754,6 +759,8 @@ struct Carver {
     }
     c.compiled = compiled;
     c.graph_cost = graph_cost(i, j);
+    c.prog = std::move(cc.prog);
+    c.live_in_slots = std::move(cc.live_in_slots);
     if (!compiled) return c;
     // Is the island cheaper than the ops it replaces? The graph's side is
     // graph_cost above; the island's is its register file plus its two
@@ -776,23 +783,23 @@ struct Carver {
     // pays the same kOpCost the graph side is charged -- without which a
     // region of nothing but CALLs reads as a win and measures a loss
     // (dugongs_model, 0.63x, the first sweep after the vocabulary widened).
-    const int64_t n_calls = (int64_t)cc.prog.calls.size();
+    const int64_t n_calls = (int64_t)c.prog.calls.size();
     // A rare program the generator refuses keeps the replay. Preserve its
     // old one-cell-per-value charge rather than treating an absent compact
     // adjoint program as a zero-sized file.
-    const int64_t adj_regs = cc.prog.adj.empty() ? (int64_t)cc.prog.n_regs
-                                                 : (int64_t)cc.prog.adj.n_regs;
+    const int64_t adj_regs = c.prog.adj.empty() ? (int64_t)c.prog.n_regs
+                                                : (int64_t)c.prog.adj.n_regs;
     // An instruction whose rule runs once per element (RANGE and the other
     // ranged opcodes) counts its width; everything else counts 1.
     int64_t instrs = 0;
-    for (const auto& I : cc.prog.code)
+    for (const auto& I : c.prog.code)
       instrs += touches_width(I.code) ? I.len : 1;
-    for (const auto& I : cc.prog.adj.code)
+    for (const auto& I : c.prog.adj.code)
       instrs += touches_width(I.code) ? I.len : 1;
-    c.island_cost = kValueRegWeight * ((int64_t)cc.prog.n_regs -
+    c.island_cost = kValueRegWeight * ((int64_t)c.prog.n_regs -
                                        cc.n_call_scratch - cc.n_const_regs) +
                     adj_regs + instrs + (kOpCost - 1) * 2 * n_calls;
-    for (const auto& li : cc.prog.ins) c.boundary += 2 * li.len;
+    for (const auto& li : c.prog.ins) c.boundary += 2 * li.len;
     for (int o : c.live_outs) c.boundary += kOpCost + 3 * g.slots[o].len;
     if (std::getenv("STANLI_ISLAND_ALWAYS")) {
       c.accepted = true;
@@ -986,7 +993,6 @@ struct Carver {
   }
 
   void emit(Candidate& c) {
-    Compiler& cc = c.cc;
     const size_t j = c.end;
     if (c.destination_source && c.priced_gen) {
       IslandProg optimized = std::move(*c.destination_source);
@@ -1000,7 +1006,7 @@ struct Carver {
         const bool usable =
             optimized_gen && (optimized.calls.empty() || optimized.native_adj);
         if (usable) {
-          cc.prog = std::move(optimized);
+          c.prog = std::move(optimized);
         } else if (std::getenv("STANLI_DEBUG_ISLAND")) {
           emit_diagnostic(
               "island: destination forwarding kept the priced program "
@@ -1012,20 +1018,20 @@ struct Carver {
     for (int o : c.live_outs) packed += g.slots[o].len;
     std::shared_ptr<const Program> optimized;
     if (!std::getenv("STANLI_NO_ISLAND_SOFTMAX3"))
-      optimized = specialize_softmax3(cc.prog);
+      optimized = specialize_softmax3(c.prog);
     const bool specialized = static_cast<bool>(optimized);
     Op is;
     is.opcode = OP_ISLAND;
-    is.variant = specialized             ? kIslandSoftmax3Variant
-                 : cc.prog.calls.empty() ? 0
-                                         : kIslandCallVariant;
-    is.n_in = (int)cc.live_in_slots.size();
-    for (int k = 0; k < is.n_in; ++k) is.in[k] = cc.live_in_slots[k];
+    is.variant = specialized            ? kIslandSoftmax3Variant
+                 : c.prog.calls.empty() ? 0
+                                        : kIslandCallVariant;
+    is.n_in = (int)c.live_in_slots.size();
+    for (int k = 0; k < is.n_in; ++k) is.in[k] = c.live_in_slots[k];
     is.out = g.add_slot(packed, false);
     slot_active.resize(g.slots.size(), 1);
     if (specialized) {
       auto specialized_prog = std::make_shared<Softmax3IslandProg>();
-      static_cast<IslandProg&>(*specialized_prog) = std::move(cc.prog);
+      static_cast<IslandProg&>(*specialized_prog) = std::move(c.prog);
       specialized_prog->optimized_double = std::move(optimized);
       // Erase the converted base pointer, not the derived pointer: readers
       // shared with OP_ISLAND recover IslandProg directly from udata.
@@ -1033,7 +1039,7 @@ struct Carver {
       is.udata = prog.get();
       g.udata_pool.push_back(std::move(prog));
     } else {
-      auto prog = std::make_shared<IslandProg>(std::move(cc.prog));
+      auto prog = std::make_shared<IslandProg>(std::move(c.prog));
       is.udata = prog.get();
       g.udata_pool.push_back(std::move(prog));
     }
@@ -1288,10 +1294,6 @@ int carve_islands(Graph& g,
   if (plan && !plan->cache) plan->cache = std::make_shared<CarveCache>();
   Carver carver(g, fills, target_terms, extra_roots, plan);
   return carver.run();
-}
-
-void restore_pre_island(Graph& g, const CarvePlan& plan) {
-  g.ops = plan.pre_island_ops;
 }
 
 bool segment_supports(const Graph& g, const Op& op) {

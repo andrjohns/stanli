@@ -2231,7 +2231,6 @@ static void test_replay_reproduces() {
             carve_islands(h.g, h.fills, h.terms, {}, &plan), 1);
   const int compiles_after_first = plan.cache->compiles;
 
-  restore_pre_island(pristine, plan);
   expect_eq("replay second carved",
             carve_islands(pristine, h.fills, h.terms, {}, &plan), 1);
   expect_eq("replay compiles unchanged", plan.cache->compiles,
@@ -2245,6 +2244,40 @@ static void test_replay_reproduces() {
            ops_match(pristine.ops[k], h.g.ops[k]));
 }
 
+// The same replay, with the graph that built the cache entry destroyed
+// before the second carve reuses it. A cached Candidate that kept the
+// Compiler which built it would carry that Compiler's references into the
+// destroyed graph and its Carver; this only has a value-held IslandProg and
+// live-in list to reuse, so the second carve never reads through them.
+static void test_cache_outlives_original_graph() {
+  Graph pristine;
+  Fills fills;
+  std::vector<int> terms;
+  CarvePlan plan;
+  int compiles_after_first = 0;
+  {
+    HmmGraph h = build_hmm(8);
+    pristine = h.g;
+    fills = h.fills;
+    terms = h.terms;
+    expect_eq("cache outlives first carved",
+              carve_islands(h.g, h.fills, h.terms, {}, &plan), 1);
+    compiles_after_first = plan.cache->compiles;
+  }  // h.g, its idata_pool and its Carver are gone.
+
+  expect_eq("cache outlives second carved",
+            carve_islands(pristine, fills, terms, {}, &plan), 1);
+  expect_eq("cache outlives reused cache entry", plan.cache->compiles,
+            compiles_after_first);
+
+  HmmGraph ref = build_hmm(8);
+  const std::vector<double> want = run_grad(std::move(ref.g), ref.fills);
+  const std::vector<double> got = run_grad(std::move(pristine), fills);
+  expect("cache outlives sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("cache outlives v" + std::to_string(i), got[i], want[i]);
+}
+
 // Overriding the hmm's one candidate to kLeave reproduces the uncarved graph
 // and its gradient.
 static void test_override_leave() {
@@ -2252,6 +2285,7 @@ static void test_override_leave() {
   const std::vector<double> want = run_grad(std::move(ref.g), ref.fills);
 
   HmmGraph h = build_hmm(8);
+  Graph pristine = h.g;
   CarvePlan plan;
   expect_eq("override leave first carve",
             carve_islands(h.g, h.fills, h.terms, {}, &plan), 1);
@@ -2259,24 +2293,23 @@ static void test_override_leave() {
   if (plan.decisions.empty()) return;
   const CandidateKey key = plan.decisions[0].key;
 
-  restore_pre_island(h.g, plan);
   plan.overrides[key] = CarveDecision::kLeave;
   plan.decisions.clear();
-  const int carved = carve_islands(h.g, h.fills, h.terms, {}, &plan);
+  const int carved = carve_islands(pristine, h.fills, h.terms, {}, &plan);
   expect_eq("override leave carves none", carved, 0);
 
   bool has_island = false;
-  for (const Op& op : h.g.ops)
+  for (const Op& op : pristine.ops)
     if (op.opcode == OP_ISLAND) has_island = true;
   expect("override leave no island", !has_island);
   expect_eq("override leave op count matches pre_island_ops",
-            (int)h.g.ops.size(), (int)plan.pre_island_ops.size());
-  const size_t n = std::min(h.g.ops.size(), plan.pre_island_ops.size());
+            (int)pristine.ops.size(), (int)plan.pre_island_ops.size());
+  const size_t n = std::min(pristine.ops.size(), plan.pre_island_ops.size());
   for (size_t k = 0; k < n; ++k)
     expect(("override leave op " + std::to_string(k) + " matches").c_str(),
-           ops_match(h.g.ops[k], plan.pre_island_ops[k]));
+           ops_match(pristine.ops[k], plan.pre_island_ops[k]));
 
-  const std::vector<double> got = run_grad(std::move(h.g), h.fills);
+  const std::vector<double> got = run_grad(std::move(pristine), h.fills);
   expect("override leave sizes", got.size() == want.size());
   for (size_t i = 0; i < want.size() && i < got.size(); ++i)
     expect_close("override leave v" + std::to_string(i), got[i], want[i]);
@@ -2289,6 +2322,7 @@ static void test_override_island_on_refused() {
   Fills fills;
   std::vector<int> terms;
   Graph g = build_wide_state(fills, terms);
+  Graph pristine = g;
   CarvePlan plan;
   const int carved = carve_islands(g, fills, terms, {}, &plan);
   expect_eq("refused none carved without override", carved, 0);
@@ -2300,13 +2334,12 @@ static void test_override_island_on_refused() {
          plan.decisions[0].island_viable == Viability::kYes);
   const CandidateKey key = plan.decisions[0].key;
 
-  restore_pre_island(g, plan);
   plan.overrides[key] = CarveDecision::kIsland;
   plan.decisions.clear();
-  const int carved2 = carve_islands(g, fills, terms, {}, &plan);
+  const int carved2 = carve_islands(pristine, fills, terms, {}, &plan);
   expect_eq("refused override carves one", carved2, 1);
   bool has_island = false;
-  for (const Op& op : g.ops)
+  for (const Op& op : pristine.ops)
     if (op.opcode == OP_ISLAND) has_island = true;
   expect("refused override emits island", has_island);
 }
@@ -2340,7 +2373,6 @@ static void test_override_join_split() {
 
   {
     VectorBinaryGraph split = build_two_piece_split_loses();
-    restore_pre_island(split.g, plan);
     plan.overrides[outer_key] = CarveDecision::kSplit;
     plan.decisions.clear();
     const int carved =
@@ -2361,7 +2393,6 @@ static void test_override_join_split() {
 
   {
     VectorBinaryGraph joined = build_two_piece_split_loses();
-    restore_pre_island(joined.g, plan);
     plan.overrides[outer_key] = CarveDecision::kIsland;
     plan.decisions.clear();
     const int carved =
@@ -2492,6 +2523,7 @@ static void test_resolve_records_split_cost_when_priced() {
 
   test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
   VectorBinaryGraph base = build_two_piece_split_loses();
+  Graph pristine = base.g;
   CarvePlan plan;
   const int carved = carve_islands(base.g, base.fills, base.terms, {}, &plan);
   test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
@@ -2508,11 +2540,10 @@ static void test_resolve_records_split_cost_when_priced() {
   expect("priced-split eligible", desired_decision(natural, &alt));
   expect("priced-split alternative split", alt == CarveDecision::kSplit);
 
-  restore_pre_island(base.g, plan);
   plan.overrides[natural.key] = CarveDecision::kSplit;
   plan.decisions.clear();
   test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
-  const int forced = carve_islands(base.g, base.fills, base.terms, {}, &plan);
+  const int forced = carve_islands(pristine, base.fills, base.terms, {}, &plan);
   test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
   expect_eq("priced-split forced carved two", forced, 2);
   expect("priced-split forced records the outer key first",
@@ -2582,6 +2613,7 @@ int main() {
   test_inplace_slice_cost_refuses_wide_state();
   test_plan_records();
   test_replay_reproduces();
+  test_cache_outlives_original_graph();
   test_override_leave();
   test_override_island_on_refused();
   test_override_join_split();
