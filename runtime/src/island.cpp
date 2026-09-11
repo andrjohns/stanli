@@ -45,28 +45,22 @@ constexpr int kMaxLiveIns = 6;
 // What one value register costs against one element of graph traffic. The
 // value file is written by the forward and read by the backward. The compact
 // adjoint file is charged separately below: copied registers share a cell,
-// and checkpoint registers have no adjoint cell at all. Also the per-element
-// weight of a value crossing an island boundary as a live-in.
+// and checkpoint registers have no adjoint cell at all.
 //
-// Recalibrated from tools/bench_carver_costs.cpp (median of seven runs on
-// this machine: 0.131 island instructions per live-in element), rounded to
-// the nearest integer with a floor of one, since a zero weight would drop
-// the term instead of shrinking it. It was 4 while the backward replayed
-// the program under var, where a register meant an allocated vari and a
-// virtual chain() call; the generated adjoint (adjoint.hpp) is what makes
-// it a memory cost again.
-constexpr int kValueRegWeight = 1;
-// The per-element weight of a value crossing an island boundary as a
-// live-out, on top of the flat kOpCost extraction charge below.
-// Recalibrated the same way (median 0.684, rounds to one).
-constexpr int kLiveOutWeight = 1;
+// It was 4 while the backward replayed the program under var, where a
+// register meant an allocated vari and a virtual chain() call. That term
+// dominated the estimate and is what refused thirteen of the fourteen
+// regions the carver could compile; the generated adjoint (adjoint.hpp)
+// is what makes it a memory cost again.
+constexpr int kValueRegWeight = 2;
 // And what one graph op costs against one element. An op that writes a
 // scalar still pays a dispatch, a context load and a scratch-partials
-// backward. Recalibrated the same way (median 1.458, rounds to one):
-// leaving this out entirely is why regions like `garch11` -- 1,797 scalar
-// ops whose elements moved barely outnumber them -- used to read as a
-// wash to an estimate that could only see elements.
-constexpr int kOpCost = 1;
+// backward; measured at ~5 ns against ~1 ns for an island instruction
+// (docs/benchmarks.md). Leaving this out is why regions like `garch11`
+// -- 1,797 scalar ops whose elements moved barely outnumber them -- read
+// as a wash to an estimate that could only see elements, and measured
+// 1.28x once they were compiled.
+constexpr int kOpCost = 5;
 
 // What a graph op costs on top of the elements it moves. The executor's
 // per-op profile puts a scalar op at the dispatch alone, a scalar density
@@ -813,9 +807,8 @@ struct Carver {
     c.island_cost = kValueRegWeight * ((int64_t)c.prog.n_regs -
                                        cc.n_call_scratch - cc.n_const_regs) +
                     adj_regs + instrs + (kOpCost - 1) * 2 * n_calls;
-    for (const auto& li : c.prog.ins) c.boundary += kValueRegWeight * li.len;
-    for (int o : c.live_outs)
-      c.boundary += kOpCost + kLiveOutWeight * g.slots[o].len;
+    for (const auto& li : c.prog.ins) c.boundary += 2 * li.len;
+    for (int o : c.live_outs) c.boundary += kOpCost + 3 * g.slots[o].len;
     if (std::getenv("STANLI_ISLAND_ALWAYS")) {
       c.accepted = true;
       return c;
@@ -877,7 +870,7 @@ struct Carver {
           continue;
         if (boundary_livein[(size_t)s] != stamp) {
           boundary_livein[(size_t)s] = stamp;
-          boundary += kValueRegWeight * g.slots[s].len;
+          boundary += 2 * g.slots[s].len;
         }
       }
       if (op.out >= 0) boundary_produced[(size_t)op.out] = stamp;
@@ -889,7 +882,7 @@ struct Carver {
       const auto lit = last_use.find(o);
       const bool read_after = lit != last_use.end() && lit->second >= j;
       if (read_after || root_set.count(o) || term_set.count(o))
-        boundary += kOpCost + kLiveOutWeight * g.slots[o].len;
+        boundary += kOpCost + 3 * g.slots[o].len;
     }
     return boundary;
   }
