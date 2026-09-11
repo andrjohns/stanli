@@ -247,6 +247,34 @@ candidate-free million-op LDA shape from 1.16 s to about 3.4 ms. The exact
 candidate-index, packed-row, and use-list work counters live in `RerollStats`
 and have deterministic scaling tests.
 
+A classified region still prices itself before committing, in the same
+currencies `partition.cpp` uses (`pass_util.hpp`'s `kLaneOpCost`,
+`kLaneDensityElem`, `kLanePartitionMargin`): elision and hoisting free, a
+slice or gather at their element count, a store only when it is not the
+whole-vector or write-chained form, and a CSE-collapse charge
+(`(Luse - distinct) * lane_elems`) for lanes distinguishable only by an
+immediate CSE would otherwise merge. A region that fails to clear its own
+cost declines through the same shrink-and-retry path a hard classification
+failure already takes.
+
+This matters most exactly where it looks least intuitive: a discrete
+idata-density region whose lanes carry mostly repeated outcomes (a
+capture-recapture model where most subjects share one of a handful of
+encounter histories) prices as `distinct` near 1 against `Luse` in the
+hundreds, so the vector form's per-element cost dominates the comparison and
+the region declines. Measured, not assumed: on `M0_model` and `Mt_model`
+(posteriordb), packing the shared-history subjects into one wide density call
+runs at 4600-4800 ns per gradient; declining it and letting each subject's
+identical scalar density collapse under CSE, feeding a short `ADD_N`
+reduction tree instead, runs at 1000-1100 ns, 4.3-4.6x faster, at 5 interleaved
+rounds each of N=50,000 gradient evaluations. `dogs_hierarchical`'s decline
+splits one 750-dog density into two 375-dog ones (a smaller regime of the
+same effect, its outcomes vary more so `distinct` stays close to `Luse`) and
+is cost-neutral, 11.1-11.8 us either way at 8 interleaved rounds of N=30,000.
+Prep time (compiling and binding the larger declined graph) grows by roughly
+a millisecond on both models, negligible against thousands of gradient
+evaluations per chain.
+
 ## Lane partitioning (`partition.cpp`, disable: `STANLI_NO_PARTITION=1`)
 
 Re-rolling asks whether a template repeats with period P, which requires
