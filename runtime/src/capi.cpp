@@ -21,6 +21,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -636,7 +637,7 @@ int stanli_sample_multi_write_array(
             wa_ex.run_forward_only(stanli::EvalState{&rng});
             int64_t at = 0;
             for (const auto& col : m->wa_cols) {
-              const double* p = wa_ex.value_ptr(col.slot);
+              const double* p = std::as_const(wa_ex).value_ptr(col.slot);
               for (int64_t i = 0; i < col.len; ++i) out[at++] = p[i];
             }
           } else {
@@ -645,7 +646,7 @@ int stanli_sample_multi_write_array(
             main_ex.run_forward_only();
             int64_t at = 0;
             for (const auto& v : m->cm.views) {
-              const double* p = main_ex.value_ptr(v.slot);
+              const double* p = std::as_const(main_ex).value_ptr(v.slot);
               for (int64_t i = 0; i < v.len; ++i)
                 out[at++] = p[v.storage_index(i)];
             }
@@ -900,7 +901,7 @@ int stanli_wa_row(stanli_model* m, const double* q, double* out) {
       m->wa_ex->run_forward_only(stanli::EvalState{&m->wa_rng});
       int64_t at = 0;
       for (const auto& c : m->wa_cols) {
-        const double* p = m->wa_ex->value_ptr(c.slot);
+        const double* p = std::as_const(*m->wa_ex).value_ptr(c.slot);
         for (int64_t i = 0; i < c.len; ++i) out[at++] = p[i];
       }
       return 0;
@@ -921,7 +922,7 @@ int stanli_constrain(stanli_model* m, const double* q, double* out) {
   }
   int64_t k = 0;
   for (const auto& v : m->cm.views) {
-    const double* p = m->ex->value_ptr(v.slot);
+    const double* p = std::as_const(*m->ex).value_ptr(v.slot);
     for (int64_t i = 0; i < v.len; ++i) out[k++] = p[v.storage_index(i)];
   }
   return 0;
