@@ -13,8 +13,11 @@ gates. Different finite bits within those gates are reported as arithmetic
 order changes, with one bit-pattern/ULP row per changed off/on value. For a
 model whose portable MIR the pass changes, op counts are gated too: the
 lowered log_prob graph must not grow and the final log_prob graph may grow
-by at most 10%, both in the runtime-reroll-on cells. Preparation and
-gradient timings are evidence only.
+by at most 10%, both in the runtime-reroll-on cells. Gradient time on the
+candidate-pass measurement set (GRADIENT_MODELS) is separately gated
+against the pass-off cell: a model whose on/off ratio exceeds
+GRADIENT_RATIO_THRESHOLD is re-measured fresh, and only fails the run if
+the re-run also exceeds it. Preparation timing is evidence only.
 
 Complete semantic report (130 recorded models plus PDB A/B-only models):
   python3 harnesses/vectorize_ab.py deps/posteriordb \
@@ -103,6 +106,8 @@ FINAL_OPS_GROWTH_PERCENT = 10
 # Stan evaluates; the loop form evaluates nothing. The final graph is
 # unchanged, so only the lowered-ops half of the gate is waived.
 LOWERED_GROWTH_EXPECTED = frozenset(("s2_logistic_normal",))
+
+GRADIENT_RATIO_THRESHOLD = 1.04
 
 RUNTIME_ENV_KEYS = (
     "STANLI_DEBUG_ALGEBRA",
@@ -920,13 +925,31 @@ def gradient_benchmark(bench, mirs, data, rounds, calibration_n,
     }
 
 
+def gradient_ratio_exceeds(gradient):
+    ratio = gradient.get("on_over_off") if gradient else None
+    return isinstance(ratio, (int, float)) and ratio > GRADIENT_RATIO_THRESHOLD
+
+
+def gradient_gate(model, gradient, confirmation):
+    if not gradient_ratio_exceeds(gradient):
+        return []
+    if not confirmation or not confirmation.get("ok") \
+            or not gradient_ratio_exceeds(confirmation):
+        return []
+    return [
+        f"{model}: gradient on/off {gradient['on_over_off']:.4f} exceeds "
+        f"{GRADIENT_RATIO_THRESHOLD}, confirmed by a fresh re-run at "
+        f"{confirmation['on_over_off']:.4f}"
+    ]
+
+
 def tsv_value(row, key):
     return row.get(key, "") if row else ""
 
 
 def write_reports(output_dir, manifest, corpus_records, graph_records,
                   model_summaries, failures, infrastructure_failures,
-                  op_count_failures):
+                  op_count_failures, gradient_failures):
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -1031,7 +1054,7 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
     summary = {
         "schema": 2,
         "ok": (not failures and not infrastructure_failures
-               and not op_count_failures),
+               and not op_count_failures and not gradient_failures),
         "candidate_pass": manifest.get("corpus_scope", {}).get(
             "candidate_pass", VECTORIZE_LOOPS),
         "models": len(model_summaries),
@@ -1047,6 +1070,7 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         "arithmetic_order_changed_values": changed_values,
         "semantic_failures": failures,
         "op_count_failures": op_count_failures,
+        "gradient_failures": gradient_failures,
         "infrastructure_failures": infrastructure_failures,
         "per_model": model_summaries,
     }
@@ -1069,30 +1093,43 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         f"- Finite values changed by arithmetic order: {changed_values}",
         f"- Semantic failures: {len(failures)}",
         f"- Op count failures: {len(op_count_failures)}",
+        f"- Gradient time failures: {len(gradient_failures)}",
         f"- Measurement infrastructure failures: "
         f"{len(infrastructure_failures)}", "",
-        "Preparation timings and gradient timings in `graphs.jsonl` and "
-        "`bench.tsv` are measurements, not gates. Op counts are gated only "
-        "for models with different portable MIR: lowered log_prob ops must "
-        "not grow and final log_prob ops may grow by at most "
-        f"{FINAL_OPS_GROWTH_PERCENT}%, in the runtime-reroll-on cells.", "",
+        "Preparation timings in `graphs.jsonl` and `bench.tsv` are "
+        "measurements, not gates. A model with different portable MIR is "
+        "gated on op counts: the lowered log_prob graph must not grow and "
+        "the final log_prob graph may grow by at most "
+        f"{FINAL_OPS_GROWTH_PERCENT}%, in the runtime-reroll-on cells. "
+        "Gradient time on `GRADIENT_MODELS` is separately gated against the "
+        f"pass-off cell: a model whose on/off ratio exceeds "
+        f"{GRADIENT_RATIO_THRESHOLD} is re-measured fresh, and only fails "
+        "if the re-run also exceeds that ratio.", "",
         "| model | comparison | MIR changed | changed values | semantic points | "
-        "gradient on/off |",
-        "| --- | --- | ---: | ---: | ---: | ---: |",
+        "gradient on/off | confirmation on/off |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in model_summaries:
         ratio = item.get("gradient", {}).get("on_over_off")
         ratio_text = f"{ratio:.4f}" if ratio is not None else ""
+        confirmation_ratio = (item.get("gradient_confirmation") or {}).get(
+            "on_over_off")
+        confirmation_text = (f"{confirmation_ratio:.4f}"
+                             if confirmation_ratio is not None else "")
         lines.append(
             f"| `{item['model']}` | {item.get('reference_kind', '')} | "
             f"{int(item['mir_changed'])} | "
-            f"{item['changed_values']} | {item['points']} | {ratio_text} |")
+            f"{item['changed_values']} | {item['points']} | {ratio_text} | "
+            f"{confirmation_text} |")
     if failures:
         lines += ["", "## Semantic failures", ""]
         lines += [f"- {failure}" for failure in failures]
     if op_count_failures:
         lines += ["", "## Op count failures", ""]
         lines += [f"- {failure}" for failure in op_count_failures]
+    if gradient_failures:
+        lines += ["", "## Gradient time failures", ""]
+        lines += [f"- {failure}" for failure in gradient_failures]
     if infrastructure_failures:
         lines += ["", "## Measurement infrastructure failures", ""]
         lines += [f"- {failure}" for failure in infrastructure_failures]
@@ -1254,7 +1291,8 @@ def main():
             "target_seconds": args.gradient_target_seconds,
             "maximum_iterations": args.gradient_max_n,
             "process_timeout_seconds": args.gradient_timeout,
-            "gating": False,
+            "gating": True,
+            "ratio_threshold": GRADIENT_RATIO_THRESHOLD,
         },
         "stanc3": {
             "repository": stanc_repo,
@@ -1292,6 +1330,7 @@ def main():
     failures = []
     infrastructure_failures = []
     op_count_failures = []
+    gradient_failures = []
     with tempfile.TemporaryDirectory(prefix="stanli_vectorize_ab_") as temp:
         temp = pathlib.Path(temp)
         for model in selected:
@@ -1415,6 +1454,7 @@ def main():
                     op_count_gate(model, model_graph_records))
 
             gradient = None
+            gradient_confirmation = None
             if model in gradient_models:
                 gradient = gradient_benchmark(
                     tools["bench"], mirs, data, args.gradient_rounds,
@@ -1424,6 +1464,17 @@ def main():
                 if not gradient["ok"]:
                     infrastructure_failures.append(
                         f"{model}: gradient benchmark")
+                elif gradient_ratio_exceeds(gradient):
+                    gradient_confirmation = gradient_benchmark(
+                        tools["bench"], mirs, data, args.gradient_rounds,
+                        args.gradient_calibration_n,
+                        args.gradient_target_seconds, args.gradient_max_n,
+                        args.gradient_timeout)
+                    if not gradient_confirmation["ok"]:
+                        infrastructure_failures.append(
+                            f"{model}: gradient confirmation benchmark")
+                    gradient_failures.extend(gradient_gate(
+                        model, gradient, gradient_confirmation))
 
             model_summary = {
                 "model": model,
@@ -1436,6 +1487,8 @@ def main():
             }
             if gradient is not None:
                 model_summary["gradient"] = gradient
+            if gradient_confirmation is not None:
+                model_summary["gradient_confirmation"] = gradient_confirmation
             model_summaries.append(model_summary)
             ratio = gradient.get("on_over_off") if gradient else None
             ratio_text = f", gradient on/off {ratio:.4f}" \
@@ -1448,11 +1501,13 @@ def main():
     manifest["harness_elapsed_ns"] = time.monotonic_ns() - harness_started_ns
     summary = write_reports(
         output_dir, manifest, corpus_records, graph_records, model_summaries,
-        failures, infrastructure_failures, op_count_failures)
+        failures, infrastructure_failures, op_count_failures,
+        gradient_failures)
     print(
         f"\n{summary['models']} models, {summary['points']} points, "
         f"{len(failures)} semantic failures, "
         f"{len(op_count_failures)} op count failures, "
+        f"{len(gradient_failures)} gradient time failures, "
         f"{len(infrastructure_failures)} measurement failures")
     print(f"report: {output_dir}")
     return 0 if summary["ok"] else 1

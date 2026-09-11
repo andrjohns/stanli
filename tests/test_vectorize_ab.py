@@ -278,6 +278,45 @@ class VectorizeAbTest(unittest.TestCase):
         self.assertEqual(measured["iterations"], 5000)
         self.assertEqual(measured["on_over_off"], 2.0)
 
+    def test_gradient_ratio_exceeds_threshold(self):
+        threshold = vectorize_ab.GRADIENT_RATIO_THRESHOLD
+        self.assertFalse(vectorize_ab.gradient_ratio_exceeds(
+            {"ok": True, "on_over_off": threshold}))
+        self.assertFalse(vectorize_ab.gradient_ratio_exceeds(
+            {"ok": True, "on_over_off": threshold - 0.001}))
+        self.assertTrue(vectorize_ab.gradient_ratio_exceeds(
+            {"ok": True, "on_over_off": threshold + 0.001}))
+        self.assertFalse(vectorize_ab.gradient_ratio_exceeds(
+            {"ok": True, "on_over_off": None}))
+        self.assertFalse(vectorize_ab.gradient_ratio_exceeds(None))
+
+    def test_gradient_gate_requires_a_confirming_rerun(self):
+        threshold = vectorize_ab.GRADIENT_RATIO_THRESHOLD
+        grown = {"ok": True, "on_over_off": threshold + 0.05}
+        calm = {"ok": True, "on_over_off": 1.0}
+        confirmed = {"ok": True, "on_over_off": threshold + 0.03}
+        unavailable = {"ok": False, "on_over_off": threshold + 0.05}
+
+        # No initial excursion: never asks for a re-run and never fails.
+        self.assertEqual(vectorize_ab.gradient_gate("m", calm, None), [])
+
+        # Initial excursion but no re-run recorded yet: report only.
+        self.assertEqual(vectorize_ab.gradient_gate("m", grown, None), [])
+
+        # Re-run comes back calm: the excursion was noise, no failure.
+        self.assertEqual(vectorize_ab.gradient_gate("m", grown, calm), [])
+
+        # A re-run that could not be measured is not treated as confirming.
+        self.assertEqual(
+            vectorize_ab.gradient_gate("m", grown, unavailable), [])
+
+        # Both the initial measurement and the fresh re-run exceed: fail.
+        failures = vectorize_ab.gradient_gate("m", grown, confirmed)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("m", failures[0])
+        self.assertIn(f"{grown['on_over_off']:.4f}", failures[0])
+        self.assertIn(f"{confirmed['on_over_off']:.4f}", failures[0])
+
     def test_op_count_gate_compares_reroll_on_cells(self):
         def cell(source_pass, runtime_reroll, final_ops, lowered_ops):
             return {
@@ -342,7 +381,7 @@ class VectorizeAbTest(unittest.TestCase):
                 [graph], [{
                     "model": "probe", "mir_changed": False,
                     "changed_values": 0, "points": 1,
-                }], [], [], [])
+                }], [], [], [], [])
             self.assertTrue(summary["ok"])
             expected = {
                 "manifest.json", "corpus.jsonl", "graphs.jsonl",
@@ -360,10 +399,22 @@ class VectorizeAbTest(unittest.TestCase):
                 out, {"schema": 1}, [], [graph], [{
                     "model": "probe", "mir_changed": True,
                     "changed_values": 0, "points": 1,
-                }], [], [], ["probe: final log_prob ops grew 27 -> 10522"])
+                }], [], [], ["probe: final log_prob ops grew 27 -> 10522"],
+                [])
             self.assertFalse(summary["ok"])
             self.assertEqual(len(summary["op_count_failures"]), 1)
             self.assertIn("## Op count failures",
+                          (out / "summary.md").read_text())
+
+            summary = vectorize_ab.write_reports(
+                out, {"schema": 1}, [], [graph], [{
+                    "model": "probe", "mir_changed": False,
+                    "changed_values": 0, "points": 1,
+                }], [], [], [], ["probe: gradient on/off 1.09 exceeds 1.04, "
+                                 "confirmed at 1.07"])
+            self.assertFalse(summary["ok"])
+            self.assertEqual(len(summary["gradient_failures"]), 1)
+            self.assertIn("## Gradient time failures",
                           (out / "summary.md").read_text())
 
 

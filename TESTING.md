@@ -101,15 +101,18 @@ bit differences that remain within those gates are listed separately with
 bit patterns and ULP distances. A model whose portable MIR differs between
 the two cells is also gated on op counts: with the runtime reroll pass on,
 the lowered log_prob graph must not grow and the final log_prob graph may
-grow by at most 10%.
+grow by at most 10%. Gradient time on the fixed `GRADIENT_MODELS` set is
+separately gated: a model whose pass-on/pass-off ratio exceeds 1.04 is
+re-measured with a fresh, independently interleaved run, and the job fails
+only if that re-run also exceeds the ratio, so isolated measurement noise
+does not fail a pull request.
 
 The output directory contains `manifest.json`, `corpus.jsonl`,
 `graphs.jsonl`, `bench.tsv`, `summary.json`, and `summary.md`. The manifest
 records source pins, producer provenance, tool hashes, platform, toolchain,
 environment policy, and corpus scope. Compiler wall time, preparation
-timings, executor arena slot counts, separate log-density/write-array
-reroll dispositions, and auto-calibrated ABBA gradient timings are
-descriptive measurements; their ratios do not decide pass/fail. Missing or
+timings, executor arena slot counts, and separate log-density/write-array
+reroll dispositions are descriptive measurements only. Missing or
 malformed measurement output does fail the run because it would make the
 report incomplete. The report labels
 CmdStan-referenced and A/B-only models separately; the latter have off/on
