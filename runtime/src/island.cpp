@@ -27,6 +27,7 @@
 #include <stanli/optable.hpp>
 #include <stanli/program_density.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -618,6 +619,13 @@ struct Carver {
   mutable std::vector<int> boundary_liveout;
   mutable int boundary_stamp = 0;
   size_t strict_queue_pos = 0;
+  // The liveness-chosen counterpart of strict_queue: sub-pieces
+  // liveness_split_cost compiled, and the interior cut points between them
+  // (liveness_cuts's own output) so run() can re-derive the same piece
+  // boundaries without repeating the search.
+  std::vector<Candidate> liveness_queue;
+  size_t liveness_queue_pos = 0;
+  std::vector<size_t> liveness_queue_cuts;
 
   Carver(Graph& graph,
          const std::vector<std::pair<int, std::vector<double>>>& fills,
@@ -686,8 +694,10 @@ struct Carver {
     return cost;
   }
 
-  // Compile and price [i, j) without touching the graph.
-  Candidate evaluate(size_t i, size_t j) {
+  // Compile and price [i, j) without touching the graph. label tags the
+  // debug line so a liveness-piece compile does not read as the whole
+  // span's own join-vs-leave estimate to a caller counting those lines.
+  Candidate evaluate(size_t i, size_t j, const char* label = "island") {
     Candidate c{i, j};
     Compiler cc{g, const_slots, last_use, pinned, {}, {}, {}, 0, 0, 0, true};
     bool compiled = true;
@@ -806,7 +816,8 @@ struct Carver {
       return c;
     }
     if (std::getenv("STANLI_DEBUG_ISLAND"))
-      emit_diagnostic("island? ops=" + std::to_string(j - i) +
+      emit_diagnostic(std::string(label) +
+                      "? ops=" + std::to_string(j - i) +
                       " graph=" + std::to_string(c.graph_cost) +
                       " island=" + std::to_string(c.island_cost) +
                       " boundary=" + std::to_string(c.boundary));
@@ -830,15 +841,16 @@ struct Carver {
 
   // evaluate(), through plan->cache when a plan is given. strict names which
   // vocabulary priced [i, j) and so which CandidateKey to use.
-  Candidate evaluate_cached(size_t i, size_t j, bool strict) {
-    if (!plan) return evaluate(i, j);
+  Candidate evaluate_cached(size_t i, size_t j, bool strict,
+                            const char* label = "island") {
+    if (!plan) return evaluate(i, j, label);
     const CandidateKey key{i, j, strict};
     std::vector<int> sig = op_signature(i, j);
     auto it = plan->cache->entries.find(key);
     if (it != plan->cache->entries.end() && it->second.op_signature == sig)
       return clone_candidate(
           *std::static_pointer_cast<Candidate>(it->second.candidate));
-    Candidate c = evaluate(i, j);
+    Candidate c = evaluate(i, j, label);
     plan->cache->entries[key] = CarveCache::Entry{
         std::make_shared<Candidate>(clone_candidate(c)), std::move(sig)};
     ++plan->cache->compiles;
@@ -889,6 +901,31 @@ struct Carver {
     }
   }
 
+  // The strict-vocabulary pieces of [i, j) at least kMinIslandOps long: the
+  // candidate boundary set join_cost_floor, split_cost_floor, and
+  // split_has_multiple_pieces all bound cost(split, i, j, B) against.
+  std::vector<std::pair<size_t, size_t>> strict_pieces(size_t i,
+                                                        size_t j) const {
+    std::vector<std::pair<size_t, size_t>> pieces;
+    size_t a = i;
+    while (a < j) {
+      const size_t b = grow(a, j, true);
+      if ((int64_t)(b - a) >= kMinIslandOps) pieces.emplace_back(a, b);
+      a = b > a ? b : a + 1;
+    }
+    return pieces;
+  }
+
+  int64_t pieces_boundary(
+      const std::vector<std::pair<size_t, size_t>>& pieces) const {
+    int64_t sum = 0;
+    for (const auto& p : pieces) sum += joined_boundary(p.first, p.second);
+    return sum;
+  }
+
+  // A lower bound on cost(join, i, j): the strict pieces' already-priced
+  // cost, plus the vector ops swapped from graph to island form, plus the
+  // whole span's own boundary.
   int64_t join_cost_floor(size_t i, size_t j) const {
     int64_t scalar = 0;
     for (const Candidate& sc : strict_queue)
@@ -898,20 +935,18 @@ struct Carver {
     return scalar - vector_graph + vector_range + joined_boundary(i, j);
   }
 
+  // A bound on cost(split, i, j, B_strict): the joined candidate's own
+  // priced cost, with the vector ops swapped from island to graph form and
+  // the joined boundary traded for each strict piece's own.
   int64_t split_cost_floor(const Candidate& joined, size_t i, size_t j) const {
     int64_t vector_graph, vector_range;
     vector_op_costs(i, j, &vector_graph, &vector_range);
-    int64_t boundary_sum = 0;
-    size_t a = i;
-    while (a < j) {
-      const size_t b = grow(a, j, true);
-      if ((int64_t)(b - a) >= kMinIslandOps)
-        boundary_sum += joined_boundary(a, b);
-      a = b > a ? b : a + 1;
-    }
-    return joined.island_cost - vector_range + vector_graph + boundary_sum;
+    return joined.island_cost - vector_range + vector_graph +
+           pieces_boundary(strict_pieces(i, j));
   }
 
+  // The same B_strict as strict_pieces, without paying for a piece past the
+  // second: called only for the yes/no of |B_strict| >= 2.
   bool split_has_multiple_pieces(size_t i, size_t j) const {
     int pieces = 0;
     size_t a = i;
@@ -952,6 +987,169 @@ struct Carver {
       strict_queue.push_back(std::move(c));
     }
     return cost;
+  }
+
+  // A proxy for what a cut at each position in [i, j) would cost: the
+  // summed length of slots produced before that position and still read at
+  // or after it, the same quantity joined_boundary charges per crossing
+  // value. Index k of the result is position i + k. A slot written more
+  // than once in [i, j) (an in-place chain reusing one slot id) is charged
+  // once, at its first write, the same convention joined_boundary uses;
+  // otherwise every rewrite would double- or triple-book the same value.
+  std::vector<int64_t> live_pressure(size_t i, size_t j) const {
+    std::vector<int64_t> diff(j - i + 2, 0);
+    std::unordered_set<int> charged;
+    for (size_t u = i; u < j; ++u) {
+      const int o = g.ops[u].out;
+      if (o < 0 || !charged.insert(o).second) continue;
+      const auto it = last_use.find(o);
+      const size_t lu = it != last_use.end() ? it->second : u;
+      if (lu < u + 1) continue;
+      const int64_t len = g.slots[(size_t)o].len;
+      diff[u + 1 - i] += len;
+      diff[std::min(lu + 1, j) - i] -= len;
+    }
+    std::vector<int64_t> pressure(j - i + 1, 0);
+    int64_t running = 0;
+    for (size_t p = i; p <= j; ++p) {
+      running += diff[p - i];
+      pressure[p - i] = running;
+    }
+    return pressure;
+  }
+
+  // The single interior point of [i, j) with the least crossing traffic
+  // (live_pressure's proxy), or i when the span cannot hold two pieces of
+  // at least kMinIslandOps.
+  size_t best_cut_point(size_t i, size_t j) const {
+    if (j - i < (size_t)(2 * kMinIslandOps)) return i;
+    const std::vector<int64_t> pressure = live_pressure(i, j);
+    size_t best = i + (size_t)kMinIslandOps;
+    int64_t best_val = pressure[best - i];
+    for (size_t p = best + 1; p <= j - (size_t)kMinIslandOps; ++p) {
+      if (pressure[p - i] < best_val) {
+        best_val = pressure[p - i];
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  // Priced form of a liveness carving. Two totals are kept apart: decide
+  // is the boundary-free accepted?island:graph convention c.accepted
+  // itself uses, comparable between a whole span and a fragment of it
+  // without a boundary-only piece looking artificially worse than
+  // interpreting it; report is split_cost's own convention (boundary
+  // added for an accepted piece), the figure this carving competes with
+  // strict's on. pieces is the full partition in order (gaps included,
+  // unpriced), and queue holds the compiled Candidate for each piece at
+  // least kMinIslandOps long, aligned with pieces by position.
+  struct LivenessPricing {
+    int64_t decide = 0;
+    int64_t report = 0;
+    bool any = false;
+    std::vector<std::pair<size_t, size_t>> pieces;
+    std::vector<Candidate> queue;
+  };
+
+  // [i, j) split at cut and priced on each side; the caller keeps this
+  // only if it beats every other candidate, including whole.
+  LivenessPricing price_cut(size_t i, size_t cut, size_t j) {
+    LivenessPricing left = price_liveness(i, cut);
+    LivenessPricing right = price_liveness(cut, j);
+    LivenessPricing out;
+    out.decide = left.decide + right.decide;
+    out.report = left.report + right.report;
+    out.any = left.any || right.any;
+    out.pieces = std::move(left.pieces);
+    out.pieces.insert(out.pieces.end(), right.pieces.begin(),
+                      right.pieces.end());
+    out.queue = std::move(left.queue);
+    for (auto& rc : right.queue) out.queue.push_back(std::move(rc));
+    return out;
+  }
+
+  // [i, j) priced whole, against splitting it at the least-crossing-
+  // traffic interior point (best_cut_point), and against splitting it
+  // where the strict vocabulary itself would have cut (grow(i, j, true)):
+  // never fragments where the whole span is cheaper on the boundary-free
+  // decide figure, so a liveness carving is at worst the whole span, and
+  // it can still recover a strict cut the pressure proxy missed.
+  LivenessPricing price_liveness(size_t i, size_t j) {
+    LivenessPricing whole;
+    whole.pieces.emplace_back(i, j);
+    if ((int64_t)(j - i) < kMinIslandOps) {
+      whole.decide = whole.report = graph_cost(i, j);
+      return whole;
+    }
+    Candidate c = evaluate_cached(i, j, false, "island-liveness");
+    whole.decide = c.accepted ? c.island_cost : c.graph_cost;
+    whole.report = c.accepted ? c.island_cost + c.boundary : c.graph_cost;
+    whole.any = c.accepted;
+    whole.queue.push_back(std::move(c));
+
+    std::optional<LivenessPricing> pressure_result;
+    const size_t pressure_cut = best_cut_point(i, j);
+    if (pressure_cut != i) pressure_result = price_cut(i, pressure_cut, j);
+
+    // Unlike the pressure cut, a strict cut may leave a piece under
+    // kMinIslandOps on either side; price_liveness already prices such a
+    // piece as a plain graph-cost gap, the same as strict_pieces would. An
+    // op the strict vocabulary refuses at i itself (grow returns i) is
+    // skipped by one, the same advance strict_pieces makes, so recursion
+    // gets a chance to find the strict-compatible run just past it.
+    std::optional<LivenessPricing> strict_result;
+    size_t strict_cut = grow(i, j, true);
+    if (strict_cut == i) strict_cut = i + 1;
+    if (strict_cut != j && strict_cut != pressure_cut)
+      strict_result = price_cut(i, strict_cut, j);
+
+    LivenessPricing* best = &whole;
+    if (pressure_result && pressure_result->decide < best->decide)
+      best = &*pressure_result;
+    if (strict_result && strict_result->decide < best->decide)
+      best = &*strict_result;
+    return std::move(*best);
+  }
+
+  // [i, j) carved at liveness-chosen boundaries instead of the strict
+  // vocabulary: every piece compiles at the run's own (non-strict)
+  // vocabulary, since a liveness cut never lands on an op the run's
+  // vocabulary already refused. Mirrors split_cost, queuing into
+  // liveness_queue and remembering the cuts in liveness_queue_cuts so
+  // run() can re-derive the same pieces without searching again. Returns
+  // the report figure, comparable with split_cost's own return.
+  int64_t liveness_split_cost(size_t i, size_t j, bool* any) {
+    LivenessPricing p = price_liveness(i, j);
+    liveness_queue = std::move(p.queue);
+    liveness_queue_pos = 0;
+    liveness_queue_cuts.clear();
+    for (size_t k = 1; k < p.pieces.size(); ++k)
+      liveness_queue_cuts.push_back(p.pieces[k].first);
+    *any = p.any;
+    return p.report;
+  }
+
+  // grow's counterpart for the liveness cut list liveness_split_cost just
+  // priced: the next stored cut past a, or end if none remains.
+  size_t grow_liveness(size_t a, size_t end) const {
+    auto it = std::upper_bound(liveness_queue_cuts.begin(),
+                               liveness_queue_cuts.end(), a);
+    return it != liveness_queue_cuts.end() ? std::min(*it, end) : end;
+  }
+
+  // The span liveness_split_cost already compiled and priced for [i, j),
+  // strict_candidate's counterpart for the liveness queue.
+  Candidate liveness_candidate(size_t i, size_t j) {
+    if (liveness_queue_pos < liveness_queue.size()) {
+      Candidate& next = liveness_queue[liveness_queue_pos];
+      if (next.begin == i && next.end == j) {
+        Candidate c = std::move(next);
+        ++liveness_queue_pos;
+        return c;
+      }
+    }
+    return evaluate_cached(i, j, false, "island-liveness");
   }
 
   // A live-out that is also a live-in of the same candidate gets a fresh
@@ -1154,17 +1352,22 @@ struct Carver {
     result.reserve(g.ops.size());
     std::vector<Op> pre_ops;
     if (plan) pre_ops = g.ops;
+    const bool liveness_off =
+        std::getenv("STANLI_NO_ISLAND_LIVENESS") != nullptr;
     size_t i = 0;
     size_t strict_until = 0;
+    size_t liveness_until = 0;
     while (i < g.ops.size()) {
       const bool strict = i < strict_until;
-      const size_t j = grow(i, g.ops.size(), strict);
+      const bool via_liveness = !strict && i < liveness_until;
+      const size_t j = via_liveness ? grow_liveness(i, liveness_until)
+                                    : grow(i, g.ops.size(), strict);
       if ((int64_t)(j - i) < kMinIslandOps) {
         const size_t stop = j > i ? j : i + 1;
         while (i < stop) result.push_back(g.ops[i++]);
         continue;
       }
-      if (!strict && grow(i, j, true) != j) {
+      if (!strict && !via_liveness && grow(i, j, true) != j) {
         const bool always = std::getenv("STANLI_ISLAND_ALWAYS") != nullptr;
         const bool guard_off =
             std::getenv("STANLI_NO_ISLAND_JOIN_GUARD") != nullptr;
@@ -1176,6 +1379,7 @@ struct Carver {
         int64_t split = 0;
         bool any = false;
         bool have_split = false;
+        bool split_via_liveness = false;
         CarveDecision natural = CarveDecision::kLeave;
 
         if (multi) {
@@ -1194,12 +1398,18 @@ struct Carver {
           }
         }
         if (natural != CarveDecision::kIsland) {
-          if (multi) {
-            split = split_cost(i, j, &any);
-            have_split = true;
-          } else {
-            split = split_cost(i, j, &any);
-            have_split = true;
+          split = split_cost(i, j, &any);
+          have_split = true;
+          if (!liveness_off) {
+            bool any_live = false;
+            const int64_t live_split = liveness_split_cost(i, j, &any_live);
+            if (live_split < split) {
+              split = live_split;
+              any = any_live;
+              split_via_liveness = true;
+            }
+          }
+          if (!multi) {
             if (!always && !guard_off) {
               const int64_t floor = join_cost_floor(i, j);
               if (floor > split) {
@@ -1227,7 +1437,10 @@ struct Carver {
 
         switch (resolve(key, natural, c, any, have_split, split)) {
           case CarveDecision::kSplit:
-            strict_until = j;
+            if (split_via_liveness)
+              liveness_until = j;
+            else
+              strict_until = j;
             break;
           case CarveDecision::kLeave:
             while (i < j) result.push_back(g.ops[i++]);
@@ -1239,9 +1452,14 @@ struct Carver {
         }
         continue;
       }
-      Candidate c =
-          strict ? strict_candidate(i, j) : evaluate_cached(i, j, false);
-      const CandidateKey key{i, j, strict};
+      Candidate c = strict            ? strict_candidate(i, j)
+                    : via_liveness    ? liveness_candidate(i, j)
+                                      : evaluate_cached(i, j, false);
+      // strict || via_liveness: either source prices a piece of a split,
+      // which must not collide with the outer, undivided span's own key
+      // (strict=false) even when a liveness piece happens to span the
+      // whole outer range unfragmented.
+      const CandidateKey key{i, j, strict || via_liveness};
       const CarveDecision natural =
           c.accepted ? CarveDecision::kIsland : CarveDecision::kLeave;
       CarveDecision taken = natural;
@@ -1262,11 +1480,13 @@ struct Carver {
             Viability::kUnknown, chosen_cost, other_cost});
       }
       if (taken == CarveDecision::kIsland) {
-        const bool renamed = strict && renames_a_slot(c);
+        const bool renamed = (strict || via_liveness) && renames_a_slot(c);
         emit(c);
         if (renamed) {
           strict_queue.clear();
           strict_queue_pos = 0;
+          liveness_queue.clear();
+          liveness_queue_pos = 0;
         }
         i = j;
       } else {

@@ -205,6 +205,14 @@ static void expect_eq(const std::string& what, int got, int want) {
   }
 }
 
+static void expect_eq(const std::string& what, int64_t got, int64_t want) {
+  if (got != want) {
+    ++failures;
+    std::printf("FAIL %s: got %lld want %lld\n", what.c_str(),
+                (long long)got, (long long)want);
+  }
+}
+
 static void test_compact_copy_chain() {
   Program p;
   p.n_regs = 4;
@@ -999,6 +1007,248 @@ static void test_split_skip_off_by_guard() {
     expect(
         ("op " + std::to_string(k) + " matches unguarded (split-skip)").c_str(),
         ops_match(guarded.g.ops[k], unguarded.g.ops[k]));
+}
+
+// join_cost_floor and split_cost_floor are meant to be bounds on one cost
+// function, not their own arithmetic: a refactor that expresses them that
+// way must leave every number here untouched. build_join_guard_fires hits
+// the single-run path (join_cost_floor); build_two_piece_split_loses hits
+// the multi-piece path (split_cost_floor and split_has_multiple_pieces).
+static void test_join_and_split_floor_values_pinned() {
+  std::string join_line;
+  for (const std::string& l : capture_island_debug([] {
+         VectorBinaryGraph h = build_join_guard_fires();
+         carve_islands(h.g, h.fills, h.terms, {});
+       }))
+    if (l.find("join_floor=") != std::string::npos) join_line = l;
+  expect("join floor line captured", !join_line.empty());
+  expect_eq("join_floor value", parse_field(join_line, "join_floor"),
+            (int64_t)441);
+  expect_eq("join floor's split value", parse_field(join_line, "split"),
+            (int64_t)249);
+
+  std::string split_line;
+  for (const std::string& l : capture_island_debug([] {
+         VectorBinaryGraph h = build_two_piece_split_loses();
+         carve_islands(h.g, h.fills, h.terms, {});
+       }))
+    if (l.find("split_floor=") != std::string::npos) split_line = l;
+  expect("split floor line captured", !split_line.empty());
+  expect_eq("split_floor value", parse_field(split_line, "split_floor"),
+            (int64_t)434);
+  expect_eq("split floor's joined value", parse_field(split_line, "joined"),
+            (int64_t)429);
+}
+
+// A wide-state chain (every one of its ops must carry the whole `width`-
+// element state across, the same shape test_inplace_slices_carved shows
+// is a profitable island on its own) collapsing to a scalar, then a
+// plain scalar chain of comparable length (build_split_wins's own
+// profitable shape): the cheap crossing is the collapse point, and any
+// cut inside the wide chain is expensive by construction, since it drags
+// the whole state across instead of the one reduced scalar. A single
+// two-element ADD at the very front is the only op the strict vocabulary
+// refuses, so liveness must judge everything after it unaided.
+static VectorBinaryGraph build_wide_then_narrow(int width, int n_updates,
+                                                int chain_len) {
+  VectorBinaryGraph h;
+  Graph& g = h.g;
+  const int slice_rhs = g.add_slot(2, true);
+  const int q = g.add_slot(1, true);
+  const int vec = g.add_slot(width, true);
+
+  const int marker_a = g.add_slot(2, false);
+  h.fills.emplace_back(marker_a, std::vector<double>{0.3, 0.7});
+  const int marker_w = g.add_slot(2, false);
+  g.add_op(OP_ADD, {marker_a, marker_a}, marker_w);
+  const int marker_e = g.add_slot(1, false);
+  g.add_op(OP_INDEX, {marker_w}, marker_e, {0});
+
+  for (int k = 0; k < n_updates; ++k)
+    g.add_op(OP_SET_SLICE_INPLACE, {vec, slice_rhs}, vec, {k % (width - 2)});
+  const int reduced = g.add_slot(1, false);
+  g.add_op(OP_LOG_SUM_EXP, {vec}, reduced);
+
+  int t = g.add_slot(1, false);
+  g.add_op(OP_ADD, {reduced, marker_e}, t);
+  for (int i = 0; i < chain_len; ++i) {
+    const int m = g.add_slot(1, false);
+    g.add_op(OP_MUL, {t, q}, m);
+    t = g.add_slot(1, false);
+    g.add_op(OP_INV_LOGIT, {m}, t);
+  }
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_MUL, {t, t}, lp);
+  g.result_slot = lp;
+  h.terms.push_back(lp);
+  return h;
+}
+
+// Liveness must not fragment the wide-state chain, where every position
+// is expensive to cut, when the cheap cut right after its own reduction
+// to a scalar is available: no accepted (graph >= island) liveness piece
+// may be shorter than the wide chain while starting inside it.
+static void test_liveness_prefers_the_cheap_cut_over_the_expensive_one() {
+  const int width = 40, n_updates = 36, chain_len = 40;
+  const int64_t wide_ops = 2 + n_updates;  // the two marker ops, then the
+                                           // slice-update chain
+  bool saw_accepted_piece = false;
+  for (const std::string& l : capture_island_debug([&] {
+         VectorBinaryGraph h = build_wide_then_narrow(width, n_updates,
+                                                       chain_len);
+         carve_islands(h.g, h.fills, h.terms, {});
+       })) {
+    if (l.rfind("island-liveness? ops=", 0) != 0) continue;
+    const int64_t ops = parse_field(l, "ops");
+    const int64_t graph = parse_field(l, "graph");
+    const int64_t island = parse_field(l, "island");
+    const int64_t boundary = parse_field(l, "boundary");
+    if (graph < island) continue;  // refused, not a real carving option
+    saw_accepted_piece = true;
+    // A width-element value crossing the boundary costs at least
+    // 2 * width in the live-in charge alone (joined_boundary); a piece
+    // shorter than the wide chain with a boundary anywhere near that
+    // would mean a fragment of the wide chain itself was carved,
+    // dragging most of its state across instead of the one reduced
+    // scalar the cheap cut after it carries.
+    expect("accepted liveness piece is not an expensive wide-chain fragment",
+           ops >= wide_ops || boundary < (int64_t)width);
+  }
+  expect("at least one accepted liveness piece appeared", saw_accepted_piece);
+
+  VectorBinaryGraph ref = build_wide_then_narrow(width, n_updates, chain_len);
+  const std::vector<double> want = run_grad(std::move(ref.g), ref.fills);
+  VectorBinaryGraph isl = build_wide_then_narrow(width, n_updates, chain_len);
+  carve_islands(isl.g, isl.fills, isl.terms, {});
+  const std::vector<double> got = run_grad_twice(std::move(isl.g), isl.fills);
+  expect("wide-then-narrow sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("wide-then-narrow v" + std::to_string(i), got[i], want[i]);
+}
+
+// A scalar fan (strict-admissible on its own) reduced to one value,
+// immediately followed by a length-2 vector op the strict vocabulary
+// refuses, then a plain scalar chain: the strict cut and the pressure
+// minimum both land right after the fan's own reduction, since nothing
+// is live across that point but the one reduced value.
+static VectorBinaryGraph build_fan_reduce_forced_then_chain(int width,
+                                                            int chain_len) {
+  VectorBinaryGraph h;
+  Graph& g = h.g;
+  const int p = g.add_slot(1, true);
+  std::vector<int> c(width);
+  for (int k = 0; k < width; ++k) {
+    c[k] = g.add_slot(1, false);
+    h.fills.emplace_back(c[k], std::vector<double>{0.3 + 0.01 * (double)k});
+  }
+  std::vector<int> t(width);
+  for (int k = 0; k < width; ++k) {
+    t[k] = g.add_slot(1, false);
+    g.add_op(OP_MUL, {p, c[k]}, t[k]);
+  }
+  int acc = t[0];
+  for (int k = 1; k < width; ++k) {
+    const int nacc = g.add_slot(1, false);
+    g.add_op(OP_ADD, {acc, t[k]}, nacc);
+    acc = nacc;
+  }
+  const int v = g.add_slot(2, true);
+  const int cc = g.add_slot(2, false);
+  h.fills.emplace_back(cc, std::vector<double>{0.4, 0.6});
+  const int w = g.add_slot(2, false);
+  g.add_op(OP_ADD, {v, cc}, w);
+  const int e = g.add_slot(1, false);
+  g.add_op(OP_INDEX, {w}, e, {0});
+  int chain = g.add_slot(1, false);
+  g.add_op(OP_ADD, {acc, e}, chain);
+  for (int k = 0; k < chain_len; ++k) {
+    const int nchain = g.add_slot(1, false);
+    g.add_op(OP_ADD, {chain, c[k % width]}, nchain);
+    chain = nchain;
+  }
+  const int lp = g.add_slot(1, false);
+  g.add_op(OP_MUL, {chain, chain}, lp);
+  g.result_slot = lp;
+  h.terms.push_back(lp);
+  return h;
+}
+
+// With nothing but the strict-forced boundary to recommend itself as a
+// cut, liveness's pressure search agrees with it: the two carvings must
+// match op for op.
+static void test_liveness_cut_coincides_with_strict_cut() {
+  VectorBinaryGraph with_liveness = build_fan_reduce_forced_then_chain(40, 60);
+  const int carved_with =
+      carve_islands(with_liveness.g, with_liveness.fills,
+                    with_liveness.terms, {});
+
+  test_setenv("STANLI_NO_ISLAND_LIVENESS", "1", 1);
+  VectorBinaryGraph without_liveness =
+      build_fan_reduce_forced_then_chain(40, 60);
+  const int carved_without = carve_islands(
+      without_liveness.g, without_liveness.fills, without_liveness.terms, {});
+  test_unsetenv("STANLI_NO_ISLAND_LIVENESS");
+
+  expect_eq("coincide carved count matches strict-only", carved_with,
+            carved_without);
+  expect_eq("coincide op count matches strict-only",
+            (int)with_liveness.g.ops.size(),
+            (int)without_liveness.g.ops.size());
+  const size_t n = std::min(with_liveness.g.ops.size(),
+                            without_liveness.g.ops.size());
+  for (size_t k = 0; k < n; ++k)
+    expect(("coincide op " + std::to_string(k) + " matches strict-only")
+              .c_str(),
+           ops_match(with_liveness.g.ops[k], without_liveness.g.ops[k]));
+}
+
+// Forcing the split alternative on build_two_piece_split_loses: strict
+// can only offer two separately-boundaried islands (the shape
+// test_resolve_records_split_cost_when_priced already carves), but
+// liveness recognizes the whole 74-op span compiles as one piece under
+// the run's own (non-strict) vocabulary and prices that instead, paying
+// one boundary rather than two.
+static void test_liveness_finds_a_cheaper_split_than_strict() {
+  const CandidateKey key = [] {
+    VectorBinaryGraph h = build_two_piece_split_loses();
+    CarvePlan plan;
+    carve_islands(h.g, h.fills, h.terms, {}, &plan);
+    return plan.decisions.empty() ? CandidateKey{} : plan.decisions[0].key;
+  }();
+
+  test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
+  test_setenv("STANLI_NO_ISLAND_LIVENESS", "1", 1);
+  VectorBinaryGraph strict_base = build_two_piece_split_loses();
+  Graph strict_pristine = strict_base.g;
+  CarvePlan strict_plan;
+  strict_plan.overrides[key] = CarveDecision::kSplit;
+  const int strict_forced = carve_islands(
+      strict_pristine, strict_base.fills, strict_base.terms, {}, &strict_plan);
+  test_unsetenv("STANLI_NO_ISLAND_LIVENESS");
+  VectorBinaryGraph live_base = build_two_piece_split_loses();
+  Graph live_pristine = live_base.g;
+  CarvePlan live_plan;
+  live_plan.overrides[key] = CarveDecision::kSplit;
+  const int live_forced = carve_islands(live_pristine, live_base.fills,
+                                        live_base.terms, {}, &live_plan);
+  test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
+
+  expect_eq("strict-only split carves two", strict_forced, 2);
+  expect_eq("liveness split carves one", live_forced, 1);
+  expect("strict-only recorded a decision", !strict_plan.decisions.empty());
+  expect("liveness recorded a decision", !live_plan.decisions.empty());
+  if (strict_plan.decisions.empty() || live_plan.decisions.empty()) return;
+  expect("liveness split cost beats strict-only split cost",
+         live_plan.decisions[0].chosen_cost <
+             strict_plan.decisions[0].chosen_cost);
+
+  const std::vector<double> want =
+      run_grad(std::move(strict_pristine), strict_base.fills);
+  const std::vector<double> got =
+      run_grad_twice(std::move(live_pristine), live_base.fills);
+  expect("cheaper-split sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close("cheaper-split v" + std::to_string(i), got[i], want[i]);
 }
 
 // Many length-`width` DOT ops feeding a scalar chain.
@@ -2578,7 +2828,11 @@ static void test_resolve_records_split_cost_when_priced() {
   test_setenv("STANLI_NO_ISLAND_JOIN_GUARD", "1", 1);
   const int forced = carve_islands(pristine, base.fills, base.terms, {}, &plan);
   test_unsetenv("STANLI_NO_ISLAND_JOIN_GUARD");
-  expect_eq("priced-split forced carved two", forced, 2);
+  // The liveness alternative recognizes fragmenting this region does not
+  // pay for itself and prices it as one unsplit piece, the same total ops
+  // a join would give; forcing kSplit still exercises the split path, it
+  // just no longer means two islands here.
+  expect_eq("priced-split forced carved", forced, 1);
   expect("priced-split forced records the outer key first",
          !plan.decisions.empty());
   if (plan.decisions.empty()) return;
@@ -2632,6 +2886,10 @@ int main() {
   test_join_guard_skips_a_joined_compile_split_would_lose();
   test_split_skip_avoids_compiling_split_pieces();
   test_split_skip_off_by_guard();
+  test_join_and_split_floor_values_pinned();
+  test_liveness_prefers_the_cheap_cut_over_the_expensive_one();
+  test_liveness_cut_coincides_with_strict_cut();
+  test_liveness_finds_a_cheaper_split_than_strict();
   test_dot_width_estimate_moves_together();
   test_const_count_does_not_grow_island_cost();
   test_softmax3_island_executor();
