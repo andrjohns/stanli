@@ -124,6 +124,7 @@ struct PosIn {
   InKind kind = InKind::kInvariant;
   int producer = -1;           // kLaneLocal: position within the lane
   std::vector<double> values;  // kConstLanes: one value per lane
+  bool tile_wide = false;      // kInvariant/shared, len == width: OP_REP_MAT
 };
 
 enum class Emit {
@@ -650,9 +651,13 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
       Pos& ap = pos[(size_t)p];
       ap.ins.resize((size_t)t.n_in);
       const bool is_term = term_set.count(t.out) != 0;
-      bool all_shared = true;    // this op computes one value for every lane
-      int64_t width = 0;         // per-lane elements of the varying inputs
-      bool wide_shared = false;  // a shared input the kernels cannot broadcast
+      bool all_shared = true;  // this op computes one value for every lane
+      int64_t width = 0;       // per-lane elements of the varying inputs
+      // A shared or invariant input the kernels cannot broadcast (len != 1):
+      // a candidate to tile via OP_REP_MAT once `width` is known, resolved
+      // after this loop and after the all-shared hoist below, so a fully
+      // shared position still hoists first regardless of its width.
+      std::vector<int> wide_candidates;
 
       for (int j = 0; j < t.n_in && ok; ++j) {
         PosIn& in = ap.ins[(size_t)j];
@@ -662,7 +667,7 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
           in.producer = local->second;
           const Pos& prod = pos[(size_t)local->second];
           if (prod.shared) {
-            if (g.slots[(size_t)t.in[j]].len != 1) wide_shared = true;
+            if (g.slots[(size_t)t.in[j]].len != 1) wide_candidates.push_back(j);
           } else {
             all_shared = false;
             if (width && width != prod.width) ok = false;
@@ -678,7 +683,7 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
           if (store_delim && p == k - 1 && j == 0) continue;
           if (!settled(t.in[j])) ok = false;
           if (t.in[j] >= 0 && g.slots[(size_t)t.in[j]].len != 1)
-            wide_shared = true;
+            wide_candidates.push_back(j);
           continue;
         }
         std::vector<double> vals;
@@ -799,8 +804,19 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
         ap.shared = true;
         continue;
       }
+      // A wide candidate that matches the position's own width tiles via
+      // OP_REP_MAT (mode chosen by the fused vector's packing order at
+      // emission); anything else is a width the kernels cannot broadcast
+      // and cannot pack.
+      bool wide_shared = false;
+      for (int j : wide_candidates) {
+        if (g.slots[(size_t)t.in[j]].len == width)
+          ap.ins[(size_t)j].tile_wide = true;
+        else
+          wide_shared = true;
+      }
       if (wide_shared) {
-        ok = false;  // the kernels broadcast len-1 arguments, nothing wider
+        ok = false;
         break;
       }
       // L lanes computing the identical scalar, each one a term: the const
@@ -884,6 +900,11 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
     int64_t added = 0, ops_out = 0, lane_elems = 0;
     for (int p = 0; p < k; ++p) {
       const Pos& ap = pos[(size_t)p];
+      for (const PosIn& in : ap.ins)
+        if (in.tile_wide) {
+          ++ops_out;
+          added += L * ap.width;
+        }
       switch (ap.emit) {
         case Emit::kElide:
           break;
@@ -975,13 +996,30 @@ PartitionStats partition_lanes(Graph& g, Fills& fills,
         continue;
       }
       Op op = t;  // opcode, variant and immediates carry over
+      // A wide shared operand tiled tail-to-tail across the fused vector's
+      // lane-major order: mode {width, count, 1} (rep_matrix's column-vector
+      // case, elementwise.cpp's rep_mat_fwd). partition's fused reads are
+      // always lane-major (an explicit index list or a lane-major base), so
+      // this is the only mode a bucket ever needs.
+      const auto tile_wide = [&](int base) {
+        Op rep;
+        rep.opcode = OP_REP_MAT;
+        rep.n_in = 1;
+        rep.in[0] = base;
+        rep.out = g.add_slot(L * ap.width, false);
+        attach_idata(rep, std::vector<int>{(int)ap.width, (int)L, 1});
+        out_ops.push_back(rep);
+        return rep.out;
+      };
       for (int j = 0; j < t.n_in; ++j) {
         const PosIn& in = ap.ins[(size_t)j];
         switch (in.kind) {
           case InKind::kInvariant:
+            if (in.tile_wide) op.in[j] = tile_wide(t.in[j]);
             break;
           case InKind::kLaneLocal:
             op.in[j] = pos[(size_t)in.producer].out;
+            if (in.tile_wide) op.in[j] = tile_wide(op.in[j]);
             break;
           case InKind::kConstLanes: {
             const int cs = g.add_slot(L, false);

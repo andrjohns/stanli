@@ -1830,7 +1830,11 @@ static void test_row_lanes_bail() {
     expect("lane reduction not fused",
            st.regions == 0 && g.ops.size() == before);
   }
-  {  // an invariant vector operand as wide as the lane
+  {  // An invariant vector operand as wide as the lane tiles via OP_REP_MAT
+     // (gap 2, lane-layout-unification.md) instead of blocking the region.
+     // The row read is OP_SLICE_STRIDED (column-major), so the tile must
+     // repeat each of mu's elements Luse times consecutively, not mu itself
+     // Luse times end to end.
     const int L = 6, C = 4;
     Graph g;
     Fills fills;
@@ -1848,11 +1852,34 @@ static void test_row_lanes_bail() {
       g.ops[(size_t)id].variant = 0x81;
       terms.push_back(lp);
     }
-    const size_t before = g.ops.size();
+    Graph ref = g;
+    reduce_into_result(ref, terms);
+    const std::vector<double> want = run_grad(std::move(ref), fills);
+
     std::vector<int> tt = terms;
-    const RerollStats st = reroll(g, fills, tt, {});
-    expect("lane-wide invariant operand not fused",
-           st.regions == 0 && g.ops.size() == before);
+    Fills f2 = fills;
+    const RerollStats st = reroll(g, f2, tt, {});
+    expect("lane-wide invariant operand regions==1", st.regions == 1);
+    expect("lane-wide invariant operand ops==3", g.ops.size() == 3);
+    int rep_mats = 0, adds = 0, densities = 0;
+    for (const Op& op : g.ops) {
+      rep_mats += op.opcode == OP_REP_MAT;
+      adds += op.opcode == OP_ADD;
+      densities += op.opcode == OP_BERNOULLI_LOGIT_LPMF;
+    }
+    expect("lane-wide invariant operand tiles mu",
+           rep_mats == 1 && adds == 1 && densities == 1);
+    for (const Op& op : g.ops)
+      if (op.opcode == OP_REP_MAT)
+        expect("lane-wide invariant operand tiles column-major",
+               op.n_idata == 3 && op.idata[0] == L && op.idata[1] == C &&
+                   op.idata[2] == 2 && g.slots[(size_t)op.out].len == L * C);
+    expect("lane-wide invariant operand one term", tt.size() == 1);
+    reduce_into_result(g, tt);
+    const std::vector<double> got = run_grad(std::move(g), f2);
+    for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+      expect_close(("lane-wide invariant v" + std::to_string(i)).c_str(),
+                   got[i], want[i]);
   }
 }
 
@@ -1934,6 +1961,59 @@ static void test_gather_lane_partial_row() {
   expect("gap1 sizes", got.size() == want.size());
   for (size_t i = 0; i < want.size() && i < got.size(); ++i)
     expect_close(("gap1 v" + std::to_string(i)).c_str(), got[i], want[i]);
+}
+
+// Gap 2 (docs/superpowers/plans/2026-09-11-lane-layout-unification.md): a
+// vector operand shared by every lane, as wide as the row itself
+// (`y[i,:] ~ normal(mu, s)` with `mu` a parameter vector). Row-major
+// storage (a plain OP_SLICE row read): mu tiles tail-to-tail, mode
+// {width, count, 1}, not element-repeated.
+static void test_shared_vector_mean_row_major() {
+  const int L = 12, C = 4;
+  Graph g;
+  Fills fills;
+  const int base = g.add_slot(L * C, true);  // y, row-major, a parameter
+  const int mu = g.add_slot(C, true);
+  const int sigma = g.add_slot(1, true);
+  std::vector<int> terms;
+  for (int l = 0; l < L; ++l) {
+    const int row = g.add_slot(C, false);
+    g.add_op(OP_SLICE, {base}, row, {l * C});
+    const int lp = g.add_slot(1, false);
+    const int id = g.add_op(OP_NORMAL_LPDF, {row, mu, sigma}, lp);
+    g.ops[(size_t)id].variant = 0x07;
+    terms.push_back(lp);
+  }
+  Graph ref = g;
+  reduce_into_result(ref, terms);
+  const std::vector<double> want = run_grad(std::move(ref), fills);
+
+  std::vector<int> tt = terms;
+  Fills f2 = fills;
+  const RerollStats st = reroll(g, f2, tt, {});
+  expect("shared mean regions==1", st.regions == 1);
+  expect("shared mean ops==2", g.ops.size() == 2);  // OP_REP_MAT + NORMAL_LPDF
+  int rep_mats = 0, densities = 0;
+  for (const Op& op : g.ops) {
+    rep_mats += op.opcode == OP_REP_MAT;
+    densities += op.opcode == OP_NORMAL_LPDF;
+  }
+  expect("shared mean tiles mu", rep_mats == 1 && densities == 1);
+  for (const Op& op : g.ops)
+    if (op.opcode == OP_REP_MAT)
+      expect("shared mean tiles row-major",
+             op.n_idata == 3 && op.idata[0] == C && op.idata[1] == L &&
+                 op.idata[2] == 1 && op.in[0] == mu &&
+                 g.slots[(size_t)op.out].len == L * C);
+    else if (op.opcode == OP_NORMAL_LPDF)
+      expect("shared mean density reads the base directly", op.in[0] == base);
+  expect("shared mean one term", tt.size() == 1);
+  reduce_into_result(g, tt);
+  const std::vector<double> got = run_grad(std::move(g), f2);
+  expect("shared mean sizes", got.size() == want.size());
+  for (size_t i = 0; i < want.size() && i < got.size(); ++i)
+    expect_close(("shared mean v" + std::to_string(i)).c_str(), got[i],
+                 want[i]);
 }
 
 // ---- end to end through compile_model ------------------------------------
@@ -2308,6 +2388,7 @@ int main() {
   test_row_lanes_bail();
   test_row_lane_shared_read();
   test_gather_lane_partial_row();
+  test_shared_vector_mean_row_major();
   test_e2e_fixtures();
   test_signature_soundness();
   test_prefilter_output_matches();

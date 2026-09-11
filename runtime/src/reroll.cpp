@@ -67,6 +67,8 @@ struct PosIn {
   int producer_pos = -1;       // LANE_LOCAL: template position of producer
   std::vector<double> values;  // CONST_LANES: `width` values per lane
   int64_t width = 1;
+  bool tile_wide = false;  // INVARIANT, len == the position's own width:
+                           //   tile via OP_REP_MAT instead of rejecting
 };
 
 // How L lanes of C elements sit in one L*C vector: element k of lane l is
@@ -855,18 +857,28 @@ static RerollStats reroll_impl(
           layout_cols = strided;
           return true;
         };
-        const auto row_operands_ok = [&](const Pos& ap, const Op& t) {
+        const auto row_operands_ok = [&](Pos& ap, const Op& t) {
           for (int j = 0; j < t.n_in; ++j) {
-            const PosIn& in = ap.ins[j];
+            PosIn& in = ap.ins[j];
             switch (in.kind) {
               case InKind::kInvariant:
-                if (g.slots[t.in[j]].len != 1) return false;
-                break;
+                if (g.slots[t.in[j]].len == 1) break;
+                if (g.slots[t.in[j]].len == ap.width) {
+                  in.tile_wide = true;
+                  break;
+                }
+                return false;
               case InKind::kLaneLocal: {
                 const Pos& prod = pos[(size_t)in.producer_pos];
                 if (prod.hoist) {
-                  if (g.slots[op_at(in.producer_pos, 0).out].len != 1)
-                    return false;
+                  const int64_t len =
+                      g.slots[op_at(in.producer_pos, 0).out].len;
+                  if (len == 1) break;
+                  if (len == ap.width) {
+                    in.tile_wide = true;
+                    break;
+                  }
+                  return false;
                 } else if (prod.width != ap.width) {
                   return false;
                 }
@@ -1365,6 +1377,11 @@ static RerollStats reroll_impl(
           int64_t ops_out = 0, added = 0, lane_elems = 0;
           for (int p = 0; p < P; ++p) {
             const Pos& ap = pos[(size_t)p];
+            for (const PosIn& in : ap.ins)
+              if (in.tile_wide) {
+                ++ops_out;
+                added += Luse * ap.width;
+              }
             if (ap.index_elision || ap.row_elision) {
               continue;
             } else if (ap.hoist) {
@@ -1573,15 +1590,36 @@ static RerollStats reroll_impl(
                   ap.outcome_idata[(size_t)(l * ap.width + k)];
           ap.outcome_idata = std::move(packed);
         }
+        // A wide shared operand tiled to the region's packing order: mode
+        // {width, count, 1} tail-to-tail (row-major) or {count, width, 2}
+        // each element repeated (column-major), matching whichever
+        // convention flat_at already committed the region to.
+        const auto tile_wide_op = [&](int base) {
+          Op rep;
+          rep.opcode = OP_REP_MAT;
+          rep.n_in = 1;
+          rep.in[0] = base;
+          rep.out = g.add_slot(Luse * ap.width, false);
+          std::vector<int> ridata =
+              layout_cols ? std::vector<int>{(int)Luse, (int)ap.width, 2}
+                          : std::vector<int>{(int)ap.width, (int)Luse, 1};
+          g.idata_pool.push_back(std::move(ridata));
+          rep.idata = g.idata_pool.back().data();
+          rep.n_idata = (int64_t)g.idata_pool.back().size();
+          result.push_back(rep);
+          return rep.out;
+        };
         bool all_scalar = true;
         for (int j = 0; j < t.n_in; ++j) {
           switch (ap.ins[j].kind) {
             case InKind::kInvariant:
-              op.in[j] = resolve(t.in[j]);
+              op.in[j] = ap.ins[j].tile_wide ? tile_wide_op(resolve(t.in[j]))
+                                             : resolve(t.in[j]);
               if (g.slots[t.in[j]].len != 1) all_scalar = false;
               break;
             case InKind::kLaneLocal:
               op.in[j] = pos_out[(size_t)ap.ins[j].producer_pos];
+              if (ap.ins[j].tile_wide) op.in[j] = tile_wide_op(op.in[j]);
               if (g.slots[op.in[j]].len != 1) all_scalar = false;
               break;
             case InKind::kConstLanes:
