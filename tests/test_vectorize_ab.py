@@ -2,6 +2,7 @@
 """Unit tests for the measurement report parsers and artifact schema."""
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -166,10 +167,47 @@ class VectorizeAbTest(unittest.TestCase):
             ["probe"], 1, output=b"OK 1\n", stderr=b"last line\n")
         with mock.patch.object(vectorize_ab.subprocess, "run",
                                side_effect=timeout):
-            result = vectorize_ab.run_command(["probe"], 1)
+            result = vectorize_ab._run_command_fallback(["probe"], 1)
         self.assertTrue(result["timeout"])
         self.assertEqual(result["stdout"], "OK 1\n")
         self.assertEqual(result["stderr"], "last line\n")
+        self.assertIsNone(result["maxrss_bytes"])
+
+    def test_fallback_command_reports_no_maxrss(self):
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout="out\n", stderr="")
+        with mock.patch.object(vectorize_ab.subprocess, "run",
+                               return_value=completed):
+            result = vectorize_ab._run_command_fallback(["probe"], 1)
+        self.assertFalse(result["timeout"])
+        self.assertEqual(result["returncode"], 0)
+        self.assertIsNone(result["maxrss_bytes"])
+
+    def test_run_command_captures_output_and_returncode(self):
+        result = vectorize_ab.run_command(
+            [sys.executable, "-c",
+             "import sys; print('out'); print('err', file=sys.stderr); "
+             "sys.exit(3)"], 5)
+        self.assertFalse(result["timeout"])
+        self.assertEqual(result["returncode"], 3)
+        self.assertEqual(result["stdout"].strip(), "out")
+        self.assertEqual(result["stderr"].strip(), "err")
+        self.assertIn("maxrss_bytes", result)
+
+    def test_run_command_reports_maxrss_on_this_platform(self):
+        result = vectorize_ab.run_command(
+            [sys.executable, "-c", "pass"], 5)
+        if hasattr(os, "wait4"):
+            self.assertIsInstance(result["maxrss_bytes"], int)
+            self.assertGreater(result["maxrss_bytes"], 0)
+        else:
+            self.assertIsNone(result["maxrss_bytes"])
+
+    def test_run_command_times_out_and_kills_the_child(self):
+        result = vectorize_ab.run_command(
+            [sys.executable, "-c", "import time; time.sleep(2)"], 0.05)
+        self.assertTrue(result["timeout"])
+        self.assertIsNone(result["returncode"])
 
     def test_candidate_pass_selects_only_one_source_pass(self):
         completed = {
@@ -366,6 +404,7 @@ class VectorizeAbTest(unittest.TestCase):
             "samples": [{
                 "sample": 1,
                 "elapsed_ns": 4,
+                "maxrss_bytes": 12345,
                 "rows": [{
                     "graph": "log_prob", "stage": "reroll", "ns": 3,
                     "regions": 0, "packed_rows": 0, "term_density": 0,
@@ -389,12 +428,23 @@ class VectorizeAbTest(unittest.TestCase):
             }
             self.assertEqual({path.name for path in out.iterdir()}, expected)
             self.assertTrue(json.loads((out / "summary.json").read_text())["ok"])
-            header = (out / "bench.tsv").read_text().splitlines()[0]
+            bench_lines = (out / "bench.tsv").read_text().splitlines()
+            header = bench_lines[0]
             self.assertIn("write_array_ops", header)
             self.assertIn("log_prob_slots", header)
             self.assertIn("write_array_slots", header)
+            self.assertIn("prep_maxrss_bytes", header)
+            self.assertIn("gradient_maxrss_bytes", header)
             self.assertIn("log_prob_reroll_packed_rows", header)
             self.assertIn("write_array_reroll_element_store", header)
+            columns = header.split("\t")
+            preparation_row = next(
+                row for row in bench_lines[1:]
+                if row.split("\t")[columns.index("measurement")]
+                == "preparation")
+            self.assertEqual(
+                preparation_row.split("\t")[
+                    columns.index("prep_maxrss_bytes")], "12345")
             summary = vectorize_ab.write_reports(
                 out, {"schema": 1}, [], [graph], [{
                     "model": "probe", "mir_changed": True,

@@ -284,7 +284,7 @@ def execution_metadata(check):
     }
 
 
-def run_command(command, timeout, env=None):
+def _prepare_env(env):
     process_env = dict(os.environ)
     if env:
         for key, value in env.items():
@@ -292,6 +292,26 @@ def run_command(command, timeout, env=None):
                 process_env.pop(key, None)
             else:
                 process_env[key] = value
+    return process_env
+
+
+def _exit_code_from_status(status):
+    if os.WIFSIGNALED(status):
+        return -os.WTERMSIG(status)
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    return None
+
+
+def _maxrss_bytes(rusage):
+    if rusage is None or rusage.ru_maxrss <= 0:
+        return None
+    return rusage.ru_maxrss if sys.platform == "darwin" \
+        else rusage.ru_maxrss * 1024
+
+
+def _run_command_fallback(command, timeout, env=None):
+    process_env = _prepare_env(env)
     started = time.monotonic_ns()
     try:
         proc = subprocess.run(
@@ -303,6 +323,7 @@ def run_command(command, timeout, env=None):
             "stderr": proc.stderr,
             "timeout": False,
             "elapsed_ns": time.monotonic_ns() - started,
+            "maxrss_bytes": None,
         }
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout or ""
@@ -317,7 +338,50 @@ def run_command(command, timeout, env=None):
             "stderr": stderr,
             "timeout": True,
             "elapsed_ns": time.monotonic_ns() - started,
+            "maxrss_bytes": None,
         }
+
+
+def _run_command_wait4(command, timeout, env=None):
+    process_env = _prepare_env(env)
+    started = time.monotonic_ns()
+    deadline = time.monotonic() + timeout
+    with tempfile.TemporaryFile() as out_file, \
+            tempfile.TemporaryFile() as err_file:
+        proc = subprocess.Popen(
+            [str(part) for part in command], cwd=REPO, env=process_env,
+            stdout=out_file, stderr=err_file)
+        reaped, status, rusage = 0, None, None
+        while reaped == 0:
+            reaped, status, rusage = os.wait4(proc.pid, os.WNOHANG)
+            if reaped != 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
+        timed_out = reaped == 0
+        if timed_out:
+            proc.kill()
+            _, status, rusage = os.wait4(proc.pid, 0)
+        elapsed_ns = time.monotonic_ns() - started
+        proc.returncode = _exit_code_from_status(status)
+        returncode = None if timed_out else proc.returncode
+        out_file.seek(0)
+        err_file.seek(0)
+        stdout = out_file.read().decode(errors="replace")
+        stderr = err_file.read().decode(errors="replace")
+    return {
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "timeout": timed_out,
+        "elapsed_ns": elapsed_ns,
+        "maxrss_bytes": _maxrss_bytes(rusage),
+    }
+
+
+def run_command(command, timeout, env=None):
+    if hasattr(os, "wait4"):
+        return _run_command_wait4(command, timeout, env)
+    return _run_command_fallback(command, timeout, env)
 
 
 def metric(value):
@@ -770,6 +834,7 @@ def graph_cell(dump, bench, mir, data, source_mode, reroll_enabled,
             "returncode": proc["returncode"],
             "timeout": proc["timeout"],
             "elapsed_ns": proc["elapsed_ns"],
+            "maxrss_bytes": proc["maxrss_bytes"],
             "rows": rows,
             "profile_problems": profile_issues,
             "stdout": proc["stdout"].strip(),
@@ -868,6 +933,7 @@ def bench_run(bench, mir, data, iterations, timeout):
         "returncode": proc["returncode"],
         "timeout": proc["timeout"],
         "elapsed_ns": proc["elapsed_ns"],
+        "maxrss_bytes": proc["maxrss_bytes"],
         "result": parsed,
         "stderr_tail": proc["stderr"].strip().splitlines()[-1:][0]
         if proc["stderr"].strip() else "",
@@ -947,6 +1013,10 @@ def tsv_value(row, key):
     return row.get(key, "") if row else ""
 
 
+def blank_if_none(value):
+    return value if value is not None else ""
+
+
 def write_reports(output_dir, manifest, corpus_records, graph_records,
                   model_summaries, failures, infrastructure_failures,
                   op_count_failures, gradient_failures):
@@ -967,6 +1037,7 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
         "write_array_total_ns", "gradient_n", "gradient_ns", "forward_ns",
         "n_params", "log_prob_ops", "log_prob_scalar_out",
         "write_array_ops", "log_prob_slots", "write_array_slots",
+        "prep_maxrss_bytes", "gradient_maxrss_bytes",
     ]
     for graph in ("log_prob", "write_array"):
         columns.extend(f"{graph}_reroll_{field}" for field in REROLL_FIELDS)
@@ -999,6 +1070,8 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
                         "gradient_ns": result.get("gradient_ns", ""),
                         "forward_ns": result.get("forward_ns", ""),
                         "n_params": result.get("n_params", ""),
+                        "gradient_maxrss_bytes": blank_if_none(
+                            run.get("maxrss_bytes")),
                     })
                 for run in gradient["runs"]:
                     result = run.get("result") or {}
@@ -1015,6 +1088,8 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
                         "gradient_ns": result.get("gradient_ns", ""),
                         "forward_ns": result.get("forward_ns", ""),
                         "n_params": result.get("n_params", ""),
+                        "gradient_maxrss_bytes": blank_if_none(
+                            run.get("maxrss_bytes")),
                     })
         for record in graph_records:
             summary = record.get("graph", {}).get("summary", {})
@@ -1040,6 +1115,8 @@ def write_reports(output_dir, manifest, corpus_records, graph_records,
                     "write_array_ops": tsv_value(wa_total, "ops"),
                     "log_prob_slots": tsv_value(log_total, "slots"),
                     "write_array_slots": tsv_value(wa_total, "slots"),
+                    "prep_maxrss_bytes": blank_if_none(
+                        sample.get("maxrss_bytes")),
                 }
                 for graph in ("log_prob", "write_array"):
                     reroll = prep_row(rows, graph, "reroll")

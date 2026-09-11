@@ -111,10 +111,10 @@ The output directory contains `manifest.json`, `corpus.jsonl`,
 `graphs.jsonl`, `bench.tsv`, `summary.json`, and `summary.md`. The manifest
 records source pins, producer provenance, tool hashes, platform, toolchain,
 environment policy, and corpus scope. Compiler wall time, preparation
-timings, executor arena slot counts, and separate log-density/write-array
-reroll dispositions are descriptive measurements only. Missing or
-malformed measurement output does fail the run because it would make the
-report incomplete. The report labels
+timings, executor arena slot counts, each measured process's peak resident
+memory, and separate log-density/write-array reroll dispositions are
+descriptive measurements only. Missing or malformed measurement output does
+fail the run because it would make the report incomplete. The report labels
 CmdStan-referenced and A/B-only models separately; the latter have off/on
 category, error, shape, name, and value parity but no fabricated reference
 gate. [`tools/corpus.py`](tools/corpus.py) remains the source-only census
