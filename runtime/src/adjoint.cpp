@@ -634,9 +634,13 @@ __attribute__((noinline)) static void ranged_step(const AdjInstr& I,
     case Program::DIV:
       binary([&](int32_t k, int32_t ka, int32_t kb, int32_t) {
         const double u = take(k);
-        const double b = val[I.vb + kb];
-        adj[I.a + ka] += u / b;
-        adj[I.b + kb] -= u * val[I.va + ka] / (b * b);
+        double da, db;
+        if (law == kDivSafeGrouping)
+          div_partials(u, val[I.vb + kb], val[I.vd + k], &da, &db);
+        else
+          div_partials_replay(u, val[I.va + ka], val[I.vb + kb], &da, &db);
+        adj[I.a + ka] += da;
+        adj[I.b + kb] += db;
       });
       break;
     case Program::FMA:
@@ -834,11 +838,17 @@ __attribute__((aligned(64))) void run_adjoint(const Program& fwd,
         adj[I.b] += val[I.va] * t;
         adj[I.c] += t;
         break;
-      case Program::DIV:
+      case Program::DIV: {
         adj[I.dst] = 0.0;
-        adj[I.a] += t / val[I.vb];
-        adj[I.b] -= t * val[I.va] / (val[I.vb] * val[I.vb]);
+        double da, db;
+        if (static_cast<uint8_t>(I.len) == kDivSafeGrouping)
+          div_partials(t, val[I.vb], val[I.vd], &da, &db);
+        else
+          div_partials_replay(t, val[I.va], val[I.vb], &da, &db);
+        adj[I.a] += da;
+        adj[I.b] += db;
         break;
+      }
       case Program::POW:
         adj[I.dst] = 0.0;
         pow_rule(static_cast<uint8_t>(I.len), t, val[I.va], val[I.vb],

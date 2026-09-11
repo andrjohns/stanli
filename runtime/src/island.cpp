@@ -419,7 +419,8 @@ struct Compiler {
                           OP_DIV == OP_ADD + 3,
                       "binary code order");
         const auto c = (Program::Code)(Program::ADD + (op.opcode - OP_ADD));
-        return compile_elementwise(op, c, 0);
+        return compile_elementwise(op, c,
+                                   c == Program::DIV ? kDivSafeGrouping : 0);
       }
       case OP_ADD_N: {
         const int a0 = read_reg(op.in[0]);

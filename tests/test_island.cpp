@@ -1664,6 +1664,114 @@ static void check_pow_zero_law(const std::string& tag, uint8_t law,
   }
 }
 
+// The carver's DIV instructions carry kDivSafeGrouping (island.cpp's
+// compile_elementwise call for OP_DIV), which must round exactly as the
+// graph's own elementwise division kernel does, including at magnitudes
+// where squaring b would overflow or underflow and the quotient itself
+// would not.
+static void test_div_extreme_matches_graph_kernel() {
+  const double points[2][2] = {{1e200, 1e200}, {1e-200, 1e-200}};
+  for (const auto& pt : points) {
+    const double av = pt[0], bv = pt[1];
+    const std::string tag = "div extreme a=" + std::to_string(av);
+
+    {
+      const testutil::RunResult graph =
+          testutil::run_one_op(OP_DIV, {{av}, {bv}}, {true, true});
+
+      IslandProg p;
+      p.n_regs = 3;
+      p.code.push_back(
+          Program::Instr{Program::DIV, 2, 0, 1, 0, kDivSafeGrouping});
+      p.out_regs = {2};
+      expect((tag + " scalar gen_adjoint").c_str(), gen_adjoint(p));
+
+      std::vector<double> values(3);
+      values[0] = av;
+      values[1] = bv;
+      run_program(p, values);
+      expect_exact(tag + " scalar value", values[2], graph.value);
+
+      std::vector<double> adjoints((size_t)p.adj.n_regs, 0.0);
+      adjoints[(size_t)p.adj.adj_reg[2]] = 1.0;
+      run_adjoint(p, p.adj, values.data(), adjoints.data());
+      expect_exact(tag + " scalar da", adjoints[(size_t)p.adj.adj_reg[0]],
+                   graph.grad[0]);
+      expect_exact(tag + " scalar db", adjoints[(size_t)p.adj.adj_reg[1]],
+                   graph.grad[1]);
+    }
+
+    {
+      const testutil::RunResult graph =
+          testutil::run_op_sum(OP_DIV, 2, {{av, av}, {bv, bv}}, {true, true});
+
+      IslandProg p;
+      p.n_regs = 6;
+      Program::Instr I(Program::RANGE, 4, 0, 2, 0, 2);
+      I.sub = static_cast<uint8_t>(Program::DIV);
+      I.law = kDivSafeGrouping;
+      p.code.push_back(I);
+      p.out_regs = {4, 5};
+      expect((tag + " ranged gen_adjoint").c_str(), gen_adjoint(p));
+
+      std::vector<double> values(6);
+      values[0] = values[1] = av;
+      values[2] = values[3] = bv;
+      run_program(p, values);
+      expect_exact(tag + " ranged value 0", values[4], av / bv);
+      expect_exact(tag + " ranged value 1", values[5], av / bv);
+
+      std::vector<double> adjoints((size_t)p.adj.n_regs, 0.0);
+      adjoints[(size_t)p.adj.adj_reg[4]] = 1.0;
+      adjoints[(size_t)p.adj.adj_reg[5]] = 1.0;
+      run_adjoint(p, p.adj, values.data(), adjoints.data());
+      expect_exact(tag + " ranged da0", adjoints[(size_t)p.adj.adj_reg[0]],
+                   graph.grad[0]);
+      expect_exact(tag + " ranged da1", adjoints[(size_t)p.adj.adj_reg[1]],
+                   graph.grad[1]);
+      expect_exact(tag + " ranged db0", adjoints[(size_t)p.adj.adj_reg[2]],
+                   graph.grad[2]);
+      expect_exact(tag + " ranged db1", adjoints[(size_t)p.adj.adj_reg[3]],
+                   graph.grad[3]);
+    }
+  }
+}
+
+// The full reviewer reproducer: an unrolled multiply chain feeding a vector
+// division, at operand magnitudes that overflow b^2 under the old rule. The
+// default carver picks this region up (checked below), and whether it does
+// must not change the gradient.
+static void test_div_range_model_matches_uncarved() {
+  const std::string mir = slurp("tests/fixtures/div_range_extreme.tmir.sexp");
+  const std::vector<double> point = {1e200, 1e200, 1e200, 1e200, 11.0};
+
+  test_setenv("STANLI_NO_ISLAND", "1", 1);
+  CompiledModel off = compile_model(mir, DataMap());
+  test_unsetenv("STANLI_NO_ISLAND");
+  Executor off_ex(std::move(off.graph));
+  off.bind(off_ex);
+  expect("div range model params", off_ex.n_params() == (int64_t)point.size());
+  std::copy(point.begin(), point.end(), off_ex.params_data());
+  std::vector<double> off_grad(point.size());
+  const double off_lp = off_ex.gradient(off_grad.data());
+
+  CompiledModel on = compile_model(mir, DataMap());
+  bool carved = false;
+  for (const Op& op : on.graph.ops)
+    if (op.opcode == OP_ISLAND) carved = true;
+  expect("div range model carves by default", carved);
+  Executor on_ex(std::move(on.graph));
+  on.bind(on_ex);
+  std::copy(point.begin(), point.end(), on_ex.params_data());
+  std::vector<double> on_grad(point.size());
+  const double on_lp = on_ex.gradient(on_grad.data());
+
+  expect_exact("div range model lp", on_lp, off_lp);
+  for (size_t i = 0; i < point.size(); ++i)
+    expect_exact("div range model g" + std::to_string(i), on_grad[i],
+                 off_grad[i]);
+}
+
 static void test_pow_zero_base_carved() {
   check_pow_zero_law("pow zero scalar law", kPowZeroBaseScalar,
                      {8.0, 8.0, 0.0});
@@ -2469,6 +2577,8 @@ int main() {
   test_scalar_chain_carved();
   test_native_extras_carved();
   test_pow_zero_base_carved();
+  test_div_extreme_matches_graph_kernel();
+  test_div_range_model_matches_uncarved();
   test_inplace_slice_cost_refuses_wide_state();
   test_plan_records();
   test_replay_reproduces();
