@@ -892,9 +892,6 @@ target_link_libraries(dump_islands PRIVATE stanli)
 add_executable(dump_function_specs tools/dump_function_specs.cpp
   $<TARGET_OBJECTS:stanli_tbb_stub>)
 target_link_libraries(dump_function_specs PRIVATE stanli)
-add_executable(bench_carver_costs tools/bench_carver_costs.cpp
-  $<TARGET_OBJECTS:stanli_tbb_stub>)
-target_link_libraries(bench_carver_costs PRIVATE stanli)
 
 # --- generated signature models --------------------------------------------
 # The builtin and density signature models are build products, like the
