@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       stanr_ref:
-        description: stanr git revision to build against (default: the pin)
+        description: 'stanr git revision to build against (default: the pin)'
         required: false
         default: ''
       test_filter:
@@ -30,7 +30,7 @@ on:
         required: false
         default: stanli-backend
       parallel:
-        description: run testthat in parallel worker processes (TRUE/FALSE)
+        description: 'run testthat in parallel worker processes (TRUE/FALSE)'
         required: false
         default: 'TRUE'
 
