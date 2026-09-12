@@ -60,8 +60,6 @@ opam_confirm=yes
 opam_init_args=(--bare --no-setup)
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    # Reuse the Unix tools and Git on PATH instead of creating internal Cygwin.
-    opam_init_args+=(--cygwin-local-install --no-git-location)
     # Running pacman non-interactively requires unsafe-yes.
     opam_confirm=unsafe-yes
     ;;
