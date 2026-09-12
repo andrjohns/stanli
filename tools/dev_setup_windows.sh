@@ -44,3 +44,10 @@ done
 for tool in clang cmake python; do
   have "$tool" || pacman -S --needed --noconfirm "$msys_package_prefix-$tool"
 done
+
+# Clang does not install the LLVM binary utilities. CMake can otherwise find
+# llvm-objcopy from a different LLVM installation on the inherited Windows PATH.
+msys_objcopy="$msys_root/$msys_env/bin/llvm-objcopy.exe"
+[[ -x "$msys_objcopy" ]] ||
+  pacman -S --needed --noconfirm "$msys_package_prefix-llvm-tools"
+CMAKE_FLAGS+=("-DCMAKE_OBJCOPY:FILEPATH=$(cygpath -m "$msys_objcopy")")
