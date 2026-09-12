@@ -26,9 +26,6 @@ jobs:
             msystem: UCRT64
           - os: windows-11-arm
             msystem: CLANGARM64
-    defaults:
-      run:
-        shell: msys2 {0}
 
     steps:
       - uses: actions/checkout@v4
@@ -39,4 +36,4 @@ jobs:
           update: true
 
       - name: Set up, build, and test
-        run: bash ./tools/dev_setup.sh --embed
+        run: bash -x ./tools/dev_setup.sh --embed
