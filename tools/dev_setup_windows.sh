@@ -26,6 +26,9 @@ if have pacman; then
 else
   msys_root=$(cygpath -u 'C:/msys64')
 fi
+# MSYS2's own Bash resolves its installation root to /. Avoid //usr/...:
+# MSYS2 interprets a leading double slash as a UNC network path.
+msys_root=${msys_root%/}
 [[ -x "$msys_root/usr/bin/pacman.exe" ]] || windows_install MSYS2.MSYS2
 
 have opam || windows_install OCaml.opam
