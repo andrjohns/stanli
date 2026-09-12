@@ -1,0 +1,30 @@
+name: Windows dev setup
+
+on:
+  pull_request:
+  push:
+    branches: win-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dev-setup:
+    name: Dev setup (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install prerequisites, build, and test
+        shell: bash
+        run: bash -x tools/dev_setup.sh
