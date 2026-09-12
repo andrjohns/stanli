@@ -25,22 +25,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Ensure WinGet is available
+      - name: Install opam
         shell: powershell
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $windowsApps = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
-          $env:PATH = "$windowsApps;$env:PATH"
-          if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
-            Install-PackageProvider -Name NuGet -Force | Out-Null
-            Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery | Out-Null
-            Repair-WinGetPackageManager -AllUsers
+          $opamDir = Join-Path $env:RUNNER_TEMP 'opam-bin'
+          New-Item -ItemType Directory -Force -Path $opamDir | Out-Null
+          $opamExe = Join-Path $opamDir 'opam.exe'
+          # Upstream ships an x64 Windows binary, also used under emulation on ARM64.
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/ocaml/opam/releases/download/2.5.2/opam-2.5.2-x86_64-windows.exe' -OutFile $opamExe
+          if ((Get-FileHash -Algorithm SHA256 $opamExe).Hash -ne '51a530f538e86913489b061ac13c6084276e5dc916f5bd5c450883a826f8864c') {
+            throw 'opam download checksum mismatch'
           }
-          & winget.exe --version
+          & $opamExe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $windowsApps | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $opamDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install prerequisites, build, and test
         shell: bash
