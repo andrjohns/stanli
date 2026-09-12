@@ -107,6 +107,11 @@ target_include_directories(stanmath INTERFACE
   ${_sundials}/include
   ${_tbb}/include)
 target_compile_definitions(stanmath INTERFACE _REENTRANT BOOST_DISABLE_ASSERTS)
+# Match Stan Math's TBB configuration on Windows ARM64 for every consumer
+# of the vendored headers, including runtime, tool, test, and PCH targets.
+if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^([Aa][Rr][Mm]64|[Aa][Aa][Rr][Cc][Hh]64)$")
+  target_compile_definitions(stanmath INTERFACE TBB_USE_GCC_BUILTINS=1)
+endif()
 # Boost's default policy evaluates double in long double. On x86 that's the
 # hardware 80-bit type, which is what CmdStan's reference results are
 # computed with. Elsewhere long double is software binary128, whose epsilon
