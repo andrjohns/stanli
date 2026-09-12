@@ -777,6 +777,10 @@ if(NOT STANLI_STANC_EMBED_OBJ)
     endforeach()
   endif()
   if(STANLI_PORTABLE_COMPILER)
+    # Re-run the post-build copy when setup rebuilds the compiler, even if
+    # none of the checker's C++ sources changed.
+    set_property(TARGET stanli_check APPEND PROPERTY LINK_DEPENDS
+                 "${STANLI_PORTABLE_COMPILER}")
     add_custom_command(TARGET stanli_check POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
               "${STANLI_PORTABLE_COMPILER}"

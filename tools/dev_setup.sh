@@ -2,7 +2,7 @@
 # One-shot dev environment setup. Safe to re-run; every step is
 # idempotent and skipped once its output exists.
 #
-#   tools/dev_setup.sh               core: pinned stanc, cmake builds/tests
+#   tools/dev_setup.sh               core: pinned stanc, stanli-compile, cmake builds/tests
 #   tools/dev_setup.sh --embed       + in-process compiler
 #   tools/dev_setup.sh --corpus      + posteriordb and CmdStan rig
 #   tools/dev_setup.sh --conformance + the Stan conformance reference stack
@@ -139,7 +139,7 @@ cp deps/stanc3/stanc-pinned.src deps/stanc3/stanc.src
 }
 "./deps/stanc3/stanc$EXE_SUFFIX" --version
 
-# --- embedded stanc3 -------------------------------------------------------
+# --- stanli compiler ------------------------------------------------------
 if [ "$WANT_EMBED" = 1 ]; then
   step "building the embeddable stanc object"
   if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
@@ -152,6 +152,17 @@ if [ "$WANT_EMBED" = 1 ]; then
     echo "embedded compiler artifacts are absent or mismatched; rebuilding"
     tools/stanc_embed/build.sh deps/stanc3-src "$OPAM_SWITCH"
   fi
+else
+  step "building stanli-compile for the non-embedded checker"
+  # Build only the native CLI target; the JS overlay's default alias also
+  # builds JavaScript and needs js_of_ocaml. Dune handles incremental rebuilds.
+  tools/stanc_embed/install_overlay.sh js deps/stanc3-src
+  (cd deps/stanc3-src &&
+   opam exec --switch="$OPAM_SWITCH" -- dune build -j "$BUILD_JOBS" \
+     --profile release src/stanli_stancjs/stanli_compiler_cli.exe)
+  install -m 755 \
+    deps/stanc3-src/_build/default/src/stanli_stancjs/stanli_compiler_cli.exe \
+    "deps/stanc3/stanli-compile$EXE_SUFFIX"
 fi
 
 # --- cmake builds ----------------------------------------------------------
