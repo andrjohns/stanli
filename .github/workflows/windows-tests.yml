@@ -26,6 +26,14 @@ jobs:
             msystem: UCRT64
           - os: windows-11-arm
             msystem: CLANGARM64
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      OPAM_VERSION: 2.5.2
+      OPAMYES: '1'
+      CC: clang
+      CXX: clang++
 
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +42,43 @@ jobs:
         with:
           msystem: ${{ matrix.msystem }}
           update: true
+          install: git curl make patch diffutils unzip
+          pacboy: toolchain:p clang:p cmake:p python:p
 
+      # Install into the active MSYS2 tree so dev_setup can find opam without
+      # winget or a PATH refresh. Upstream ships one Windows opam executable;
+      # Windows runs it under x64 emulation on ARM64.
+      - name: Install opam
+        run: |
+          mkdir -p /usr/local/bin
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o /usr/local/bin/opam.exe \
+            "https://github.com/ocaml/opam/releases/download/$OPAM_VERSION/opam-$OPAM_VERSION-x86_64-windows.exe"
+          echo '51a530f538e86913489b061ac13c6084276e5dc916f5bd5c450883a826f8864c  /usr/local/bin/opam.exe' | sha256sum -c -
+          chmod +x /usr/local/bin/opam.exe
+          opam --version
+
+      - name: Restore pinned dependency sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/math
+            deps/stan
+          key: windows-test-deps-${{ hashFiles('deps/fetch.sh') }}
+
+      # This builds the pinned stanc and embedded compiler, builds the C++
+      # targets, and runs the full CTest suite, including source-level lit tests.
+      # Running from MSYS2 also covers detection of its existing pacman.
       - name: Set up, build, and test
-        run: bash -x ./tools/dev_setup.sh --embed
+        run: bash ./tools/dev_setup.sh --embed
+
+      - name: Upload test and configure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-logs-${{ matrix.os }}
+          path: |
+            build/Testing/Temporary/
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build-rel/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
