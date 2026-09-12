@@ -123,7 +123,8 @@ struct CompiledModel {
   // first-index-fast layout. Hosts must use this boundary instead of handing
   // arena storage directly to WaInterp: arrays use different physical order
   // on the two sides.
-  std::map<std::string, DataMap::Entry> constrained_env(Executor& ex) const {
+  std::map<std::string, DataMap::Entry> constrained_env(
+      const Executor& ex) const {
     std::map<std::string, DataMap::Entry> env;
     for (const auto& view : views) {
       DataMap::Entry value;
@@ -157,8 +158,7 @@ struct CompiledModel {
 
   void bind(Executor& ex) const {
     for (const auto& f : fills) {
-      double* p = ex.value_ptr(f.first);
-      for (size_t j = 0; j < f.second.size(); ++j) p[j] = f.second[j];
+      ex.set_values(f.first, f.second.data(), f.second.size());
     }
   }
 
@@ -192,8 +192,7 @@ struct CompiledModel {
 
     void bind(Executor& ex) const {
       for (const auto& f : fills) {
-        double* p = ex.value_ptr(f.first);
-        for (size_t j = 0; j < f.second.size(); ++j) p[j] = f.second[j];
+        ex.set_values(f.first, f.second.data(), f.second.size());
       }
     }
   };

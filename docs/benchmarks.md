@@ -1,7 +1,7 @@
 # How much faster is stanli?
 
-Across 119 posteriordb models, stanli evaluates a gradient **3.02x faster
-than CmdStan at the median**. It is at least as fast on 117 of the 119 models.
+Across 119 posteriordb models, stanli evaluates a gradient **2.10x faster
+than CmdStan at the median**. It is at least as fast on 119 of the 119 models.
 Because stanli does not build a native C++ binary for each model, the first
 complete run is typically faster by more than the gradient ratio alone
 suggests.
@@ -30,8 +30,8 @@ and leapfrog trajectories.
 
 ## Representative models
 
-Here is a deliberately mixed slice of the corpus, sorted from the largest
-gradient win to the losses. It includes IRT, regression, hierarchical,
+Here is a deliberately mixed slice of the corpus, spanning the range of measured
+gradient speedups. It includes IRT, regression, hierarchical,
 mixture, Gaussian-process, state-space, HMM, GARCH, and ODE models. Lower times
 are better; higher speedups are better.
 
@@ -49,14 +49,14 @@ are better; higher speedups are better.
 | `lotka_volterra` | 21.627 us | 40.781 us | 1.89x | 2.19 s | 10.5 s | ~4.8x |
 | `hmm_example` | 16.074 us | 26.172 us | 1.63x | 0.48 s | 4.9 s | ~10x |
 | `garch11` | 6.900 us | 7.938 us | 1.15x | 0.19 s | 3.3 s | ~17x |
-| `hierarchical_gp` | 36.712 us | 41.136 us | 1.12x | 15.74 s | 26.1 s | ~1.7x |
+| `hierarchical_gp` | 19.566 us | 41.136 us | 2.10x | 13.86 s | 26.1 s | ~1.9x |
 | `one_comp_mm_elim_abs` | 459.111 us | 462.810 us | 1.01x | 9.27 s | 14.5 s | ~1.6x |
 | `diamonds` | 31.069 us | 31.897 us | 1.03x | 49.65 s | 52.4 s | ~1.1x |
-| `gp_regr` | 5.536 us | 3.256 us | 0.59x | 0.08 s | 5.5 s | ~68x |
-| `gp_pois_regr` | 5.243 us | 2.667 us | 0.51x | 1.55 s | 7.1 s | ~4.6x |
+| `gp_regr` | 2.669 us | 3.256 us | 1.22x | 0.51 s | 5.5 s | ~11x |
+| `gp_pois_regr` | 2.274 us | 2.667 us | 1.17x | 0.77 s | 7.1 s | ~9.3x |
 
 Across all 117 models that completed a full run in both engines, the median
-source-to-CSV speedup is **about 8.5x**, including CmdStan's model build. 116 of 117
+source-to-CSV speedup is **about 8.6x**, including CmdStan's model build. 116 of 117
 finish at least as fast in stanli. As above, gradient speed is the controlled
 result; full-run speed also reflects the trajectory taken by each sampler.
 ## What tends to win, and where it does not
@@ -82,26 +82,17 @@ and the change coincided with 0.11.0's expanded function coverage inside ODE
 right-hand sides (see the changelog). Both engines still use the same Stan
 Math integrator.
 
-**Two Gaussian-process models are the only gradient losses, and the cause
-is how their adjoints are computed.** `gp_regr` and `gp_pois_regr` run at
-0.51-0.59x CmdStan on eleven data points. Both are a `gp_exp_quad_cov` call,
-a `cholesky_decompose`, and one density, so the forward pass is the same
-stan-math arithmetic in both engines. The difference is the backward pass.
-stanli's matrix kernels either carry a native pullback (the symmetric
-eigendecomposition does) or fall back to re-running the stan-math function
-under nested reverse mode inside the kernel's backward: promote the inputs
-to `var`, evaluate the function a second time, sweep its tape, copy the
-adjoints out, and free the tape. The covariance kernel and the Cholesky
-take that fallback. On `gp_regr` the per-op profile puts 3.0 us of a 6.4 us
-gradient in the covariance backward and 1.2 us in the Cholesky backward,
-against roughly 0.2 us of arithmetic for an 11x11 matrix; CmdStan's
-`gp_exp_quad_cov` vari computes the same adjoint in closed form over the
-distance matrix inside the model's single tape. The fixed cost of the
-fallback is a few microseconds per kernel call regardless of size, so it
-dominates at this N and fades as the matrix grows. Native pullbacks for the
-`gp_*_cov` family and for `cholesky_decompose` are the fix; the kernel's
-gradient stays bit-identical to CmdStan's, since both compute the same
-formula, only the tape mechanics go away.
+**The Gaussian-process models now use native covariance and Cholesky
+pullbacks.** `gp_regr` and `gp_pois_regr`, formerly the two gradient losses,
+now run at 1.22x and 1.17x the recorded CmdStan gradient throughput.
+`hierarchical_gp` runs at 2.10x. Fixed-coordinate exponentiated-quadratic
+covariances reuse their forward output to compute parameter derivatives;
+Cholesky reuses its saved factor and Stan Math's pullback. This removes
+nested-tape replay from these backward passes. Active coordinates, other
+covariance families, and unsafe numerical cases retain the existing GP
+fallback. The [implementation report](superpowers/plans/2026-09-11-shared-data-native-pullbacks.md)
+records matched before/after measurements and numerical checks; GP gradients
+can differ by rounding and are not claimed to be bitwise identical.
 
 ## Parallel chains
 
@@ -193,6 +184,7 @@ and seed 1.
 | `kidscore_momhs` | 1.515 us | 3.476 us | 2.29x | 0.06 s | 2.7 s | 3.1 s | ~51x |
 | `radon_county` | 34.568 us | 79.100 us | 2.29x | 2.01 s | 3.0 s | 7.5 s | ~3.7x |
 | `kidscore_momiq` | 1.520 us | 3.439 us | 2.26x | 0.13 s | 2.8 s | 3.3 s | ~25x |
+| `hierarchical_gp` | 19.566 us | 41.136 us | 2.10x | 13.86 s | 8.7 s | 26.1 s | ~1.9x |
 | `kilpisjarvi` | 317 ns | 663 ns | 2.09x | 0.71 s | 2.8 s | 4.5 s | ~6.3x |
 | `seeds_centered_model` | 705 ns | 1.472 us | 2.09x | 0.07 s | 3.7 s | 4.0 s | ~58x |
 | `hier_2pl` | 191.319 us | 398.265 us | 2.08x | 12.31 s | 6.5 s | 33.3 s | ~2.7x |
@@ -233,11 +225,12 @@ and seed 1.
 | `surgical_model` | 448 ns | 575 ns | 1.28x | 0.04 s | 3.3 s | 3.6 s | ~90x |
 | `Rate_2_model` | 130 ns | 165 ns | 1.27x | 0.02 s | 2.4 s | 2.6 s | ~130x |
 | `arma11` | 4.131 us | 5.232 us | 1.27x | 0.08 s | 2.8 s | 3.1 s | ~39x |
+| `gp_regr` | 2.669 us | 3.256 us | 1.22x | 0.51 s | 5.2 s | 5.5 s | ~11x |
 | `bones_model` | 41.373 us | 49.977 us | 1.21x | 0.70 s | 3.3 s | 4.7 s | ~6.7x |
+| `gp_pois_regr` | 2.274 us | 2.667 us | 1.17x | 0.77 s | 5.5 s | 7.1 s | ~9.3x |
 | `garch11` | 6.900 us | 7.938 us | 1.15x | 0.19 s | 2.8 s | 3.3 s | ~17x |
 | `kronecker_gp` | 191.553 us | 217.868 us | 1.14x | 388.59 s | 8.0 s | 454.8 s | ~1.2x |
 | `Survey_model` | 53.720 us | 60.638 us | 1.13x | 1.12 s | 2.8 s | 3.9 s | ~3.5x |
-| `hierarchical_gp` | 36.712 us | 41.136 us | 1.12x | 15.74 s | 8.7 s | 26.1 s | ~1.7x |
 | `nn_rbm1bJ10` | 168.674 us | 184.515 us | 1.09x | 426.60 s | 5.2 s | 458.2 s | ~1.1x |
 | `wells_interaction_c_model` | 18.831 us | 19.711 us | 1.05x | 0.26 s | 3.2 s | 3.7 s | ~14x |
 | `wells_dae_c_model` | 17.520 us | 18.332 us | 1.05x | 0.35 s | 3.2 s | 3.8 s | ~11x |
@@ -250,12 +243,10 @@ and seed 1.
 | `wells_dae_inter_model` | 19.546 us | 20.202 us | 1.03x | 0.32 s | 3.2 s | 3.8 s | ~12x |
 | `diamonds` | 31.069 us | 31.897 us | 1.03x | 49.65 s | 3.5 s | 52.4 s | ~1.1x |
 | `one_comp_mm_elim_abs` | 459.111 us | 462.810 us | 1.01x | 9.27 s | 3.3 s | 14.5 s | ~1.6x |
-| `gp_regr` | 5.536 us | 3.256 us | 0.59x | 0.08 s | 5.2 s | 5.5 s | ~68x |
-| `gp_pois_regr` | 5.243 us | 2.667 us | 0.51x | 1.55 s | 5.5 s | 7.1 s | ~4.6x |
 
-120 models; 119 with both gradients; median per-gradient speedup 3.02x; 117/119
+120 models; 119 with both gradients; median per-gradient speedup 2.10x; 119/119
 at or above CmdStan. 117 completed first runs; median source-to-CSV speedup
-about 8.5x; 116/117 at or above CmdStan including its model build.
+about 8.6x; 116/117 at or above CmdStan including its model build.
 
 The extreme `hmm_gaussian` first-run result is not a useful speed comparison:
 every post-warmup draw in CmdStan's retained seed-1 run was divergent, so the
@@ -347,6 +338,7 @@ main table.
 | `logearn_logheight_male` | 2.16x | 0.001 s | 2.9 s | ~260x |
 | `logearn_height_male` | 2.16x | 0.001 s | 2.9 s | ~260x |
 | `radon_county` | 2.12x | 0.007 s | 3.0 s | ~41x |
+| `hierarchical_gp` | 2.11x | 0.014 s | 8.6 s | ~160x |
 | `low_dim_gauss_mix` | 2.10x | 0.004 s | 3.1 s | ~33x |
 | `normal_mixture` | 2.08x | 0.003 s | 2.7 s | ~33x |
 | `low_dim_gauss_mix_collapse` | 2.05x | 0.004 s | 3.0 s | ~33x |
@@ -401,9 +393,10 @@ main table.
 | `eight_schools_centered` | 1.25x | 0.000 s | 2.8 s | ~3970x |
 | `bones_model` | 1.22x | 0.011 s | 3.4 s | ~37x |
 | `logistic_regression_rhs` | 1.19x | 0.012 s | 4.8 s | ~53x |
+| `gp_regr` | 1.19x | 0.000 s | 5.1 s | ~890x |
 | `Survey_model` | 1.13x | 0.006 s | 2.8 s | ~26x |
-| `hierarchical_gp` | 1.12x | 0.012 s | 8.6 s | ~100x |
 | `kronecker_gp` | 1.12x | 0.007 s | 9.0 s | ~24x |
+| `gp_pois_regr` | 1.11x | 0.000 s | 5.4 s | ~1090x |
 | `nn_rbm1bJ10` | 1.11x | 0.009 s | 5.2 s | ~16x |
 | `wells_dist100_model` | 1.06x | 0.001 s | 3.0 s | ~93x |
 | `nn_rbm1bJ100` | 1.05x | 3.018 s | 5.1 s | ~1.1x |
@@ -420,8 +413,6 @@ main table.
 | `arma11` | 0.94x | 0.003 s | 2.8 s | ~260x |
 | `garch11` | 0.94x | 0.003 s | 2.8 s | ~170x |
 | `blr` | 0.82x | 0.000 s | 3.0 s | ~2080x |
-| `gp_regr` | 0.57x | 0.000 s | 5.1 s | ~450x |
-| `gp_pois_regr` | 0.49x | 0.000 s | 5.4 s | ~510x |
 
 | model | stanli gradient | CmdStan gradient | gradient speedup | what stopped it |
 | --- | ---: | ---: | ---: | --- |
@@ -435,7 +426,14 @@ its own build and stanc flags described in the previous section.
 
 Measured 2026-09-11 on an Apple M3 Ultra (macOS arm64) with Apple clang 21,
 single-threaded, with both engines built at `-O3` and
-`-ffp-contract=off`. Both sides are one 120-model run each. The CmdStan
+`-ffp-contract=off`. The original columns come from one 120-model run per engine. The stanli
+rows for `gp_regr`, `gp_pois_regr`, and `hierarchical_gp` were refreshed on
+2026-09-11 at `de0bd757` using the Release candidate and the corpus harness's
+`--stanli-only` workflow, including fresh 1,000-warmup/1,000-draw runs. The
+same measured stanli preparation and gradient cells are used in the optimizer
+comparison, which uses the same stanli pipeline. CmdStan and unrelated model
+cells retain their prior measurements. `accel_gp` uses a spectral approximation
+and does not execute the affected pullbacks. The CmdStan
 columns were re-measured because the gradient driver's warmup changed on
 2026-08-29 from a fixed count to a fixed duration, and the earlier column
 overstated CmdStan's time on the smallest models. CmdStan's one-time `make

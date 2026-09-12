@@ -101,6 +101,7 @@ add_library(stanmath INTERFACE)
 target_include_directories(stanmath INTERFACE
   ${DEPS}/math
   ${DEPS}/stan/src
+  ${DEPS}/stan/lib/rapidjson_1.1.0
   ${_eigen}
   ${_boost}
   ${_sundials}/include
@@ -860,6 +861,11 @@ target_link_libraries(bench_program_call PRIVATE stanli)
 add_executable(bench_executor_clone EXCLUDE_FROM_ALL
   tools/bench_executor_clone.cpp tests/tbb_stub.cpp)
 target_link_libraries(bench_executor_clone PRIVATE stanli)
+if(NOT WIN32)
+  add_executable(bench_executor_data EXCLUDE_FROM_ALL
+    tools/bench_executor_data.cpp tests/tbb_stub.cpp)
+  target_link_libraries(bench_executor_data PRIVATE stanli)
+endif()
 add_test(NAME test_bench_opcost_smoke COMMAND bench_opcost --smoke)
 set_tests_properties(test_bench_opcost_smoke PROPERTIES
   PASS_REGULAR_EXPRESSION "sink=")
@@ -1000,6 +1006,7 @@ set(STANLI_TESTS
   test_mir test_mir_decode test_transforms test_eltwise test_scalar_binary
   test_lower
   test_lower_views
+  test_native_matrix_pullbacks
   test_lower_view_contract test_lower_array_contract test_data test_e2e
   test_reroll test_profile test_inplace test_pass_safety test_sampling
   test_ode_prog test_mir_program_conformance test_mir_checks

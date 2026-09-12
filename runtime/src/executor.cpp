@@ -377,14 +377,13 @@ Executor::Executor(Graph g) : graph_(std::move(g)) {
   bind_();
 }
 
-Executor::Executor(const Executor& src) : graph_(src.graph_) {
+Executor::Executor(const Executor& src)
+    : graph_(src.graph_),
+      data_(src.data_pointer_exposed_
+                ? std::make_shared<std::vector<double>>(*src.data_)
+                : src.data_) {
   ensure_registered();
   bind_();
-  // bind_ zeroes the arena. The source's arena is where compile_model's
-  // data and constant fills went, and the slot layout is a deterministic
-  // function of the graph, so the two arenas agree element for element.
-  // Copying into the existing buffer rather than assigning the vector
-  // keeps the contexts' interior pointers valid by construction.
   std::copy(src.values_.begin(), src.values_.end(), values_.begin());
 }
 
@@ -396,9 +395,15 @@ void Executor::bind_() {
       throw std::length_error("executor arena size overflow");
     return a + b;
   };
-  // Parameters first so the gradient vector is contiguous in declaration
-  // order; then everything else.
-  int64_t off = 0;
+  // Only parameters and written slots need private value storage. Classify
+  // both outputs, including inactive writes: activity is not immutability.
+  std::vector<char> written(graph_.slots.size(), 0);
+  for (const auto& op : graph_.ops) {
+    written[op.out] = 1;
+    if (op.out2 >= 0) written[op.out2] = 1;
+  }
+  int64_t off = 0, data_size = 0;
+  data_offsets_.assign(graph_.slots.size(), -1);
   for (auto& s : graph_.slots) {
     if (s.is_param) {
       s.offset = off;
@@ -406,21 +411,21 @@ void Executor::bind_() {
     }
   }
   n_params_ = off;
-  for (auto& s : graph_.slots) {
-    if (!s.is_param) {
+  for (size_t i = 0; i < graph_.slots.size(); ++i) {
+    auto& s = graph_.slots[i];
+    if (s.is_param) continue;
+    if (written[i]) {
       s.offset = off;
       off = checked_size(off, s.len);
+    } else {
+      s.offset = data_size;
+      data_offsets_[i] = data_size;
+      data_size = checked_size(data_size, s.len);
     }
   }
   values_.assign(off, 0.0);
-
-  // A slot carries adjoint if it is a parameter or an op writes it. Slots
-  // that are neither are data: kernels see a null adjoint Desc and skip them.
-  std::vector<char> written(graph_.slots.size(), 0);
-  for (const auto& op : graph_.ops) {
-    written[op.out] = 1;
-    if (op.out2 >= 0) written[op.out2] = 1;
-  }
+  if (!data_) data_ = std::make_shared<std::vector<double>>(data_size, 0.0);
+  assert(static_cast<int64_t>(data_->size()) == data_size);
 
   // Adjoint addresses never escape the executor, so unlike values they do
   // not need a hole for every externally addressable data slot or for slots
@@ -515,13 +520,13 @@ KernelCtx Executor::make_ctx_(const Op& op, int64_t scratch_offset,
   ctx.n_in = op.n_in;
   for (int i = 0; i < op.n_in; ++i) {
     const Slot& s = graph_.slots[op.in[i]];
-    ctx.in[i] = Desc{values_.data() + s.offset, s.len};
+    ctx.in[i] = Desc{slot_data_(op.in[i]), s.len};
   }
   const Slot& so = graph_.slots[op.out];
-  ctx.out = Desc{values_.data() + so.offset, so.len};
+  ctx.out = Desc{slot_data_(op.out), so.len};
   if (op.out2 >= 0) {
     const Slot& s2 = graph_.slots[op.out2];
-    ctx.out2 = Desc{values_.data() + s2.offset, s2.len};
+    ctx.out2 = Desc{slot_data_(op.out2), s2.len};
   }
   ctx.variant = op.variant;
   ctx.scratch = scratch_.empty() ? nullptr : scratch_.data() + scratch_offset;
@@ -546,6 +551,34 @@ KernelCtx Executor::make_ctx_(const Op& op, int64_t scratch_offset,
     ctx.out2_adj = adjoints_[adjoint_offsets[op.out2]];
   }
   return ctx;
+}
+
+void Executor::detach_data_() {
+  if (data_.unique()) return;
+  auto replacement = std::make_shared<std::vector<double>>(*data_);
+  data_ = std::move(replacement);
+  // Bound contexts hold input pointers. No output can belong to data_.
+  for (size_t k = 0; k < graph_.ops.size(); ++k)
+    for (int i = 0; i < graph_.ops[k].n_in; ++i) {
+      const int slot = graph_.ops[k].in[i];
+      if (data_offsets_[slot] >= 0) ctx_[k].in[i].data = slot_data_(slot);
+    }
+}
+
+double* Executor::value_ptr(int slot) {
+  if (data_offsets_[slot] >= 0) {
+    detach_data_();
+    data_pointer_exposed_ = true;
+  }
+  return slot_data_(slot);
+}
+
+void Executor::set_values(int slot, const double* data, size_t size) {
+  if (slot < 0 || static_cast<size_t>(slot) >= graph_.slots.size() ||
+      size > static_cast<uint64_t>(graph_.slots[slot].len))
+    throw std::out_of_range("executor fill exceeds slot");
+  if (data_offsets_[slot] >= 0) detach_data_();
+  if (size) std::copy_n(data, size, slot_data_(slot));
 }
 
 void Executor::set_profile(bool on) {
@@ -644,7 +677,7 @@ double Executor::forward() {
   run_forward_only();
   const Slot& r = graph_.slots[graph_.result_slot];
   assert(r.len == 1);
-  return values_[r.offset];
+  return slot_data_(graph_.result_slot)[0];
 }
 
 double Executor::gradient(double* grad_out) {

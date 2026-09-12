@@ -19,7 +19,7 @@ fetch() { # name url sha sparse-paths...
 }
 
 fetch math https://github.com/stan-dev/math.git "$MATH_SHA" stan lib
-fetch stan https://github.com/stan-dev/stan.git "$STAN_SHA" src/stan
+fetch stan https://github.com/stan-dev/stan.git "$STAN_SHA" src/stan lib/rapidjson_1.1.0
 
 # The adjoint ODE's backward quadrature callback accumulates into the CVODES
 # output vector without assigning it first, so it inherits whatever the
