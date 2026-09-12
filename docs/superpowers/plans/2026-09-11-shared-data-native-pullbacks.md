@@ -182,3 +182,31 @@ linked directly under ASan+UBSan; the retained reproduction script and clean
 output identify that final reader rather than the earlier prototype. No user
 changes in the original structured-loop checkout were modified, and no merge
 or publication was performed.
+
+## Published benchmark row refresh
+
+At `de0bd757`, refreshed `gp_regr`, `gp_pois_regr`, and `hierarchical_gp`
+with `harnesses/corpus_bench.py --stanli-only --filter MODEL --timeout 900`,
+using `build-candidate/bench_grad` and `build-candidate/stanli_run` for the
+harness's BENCH and RUN paths. Each row is one warmed arithmetic-mean gradient
+loop, one preparation measurement, and one 1,000-warmup/1,000-draw run (seed 1),
+following the published corpus workflow. This refresh is separate from the
+repeated matched A/B experiment above. The existing CmdStan cells are retained.
+
+| Model | Gradient | Preparation | Source-to-CSV | Gradient evaluations in sampling |
+| --- | ---: | ---: | ---: | ---: |
+| gp_regr | 2669 ns | 0.000389 s | 0.51 s | 11580 |
+| gp_pois_regr | 2274 ns | 0.000417 s | 0.77 s | 288594 |
+| hierarchical_gp | 19566 ns | 0.013501 s | 13.86 s | 491205 |
+
+The optimizer-comparison TSV reuses these same stanli gradient/preparation
+observations, since its stanli compiler pipeline is identical; its CmdStan
+measurements remain separate. `accel_gp` contains unused GP/Cholesky function
+definitions but executes its spectral approximation, so its row is unchanged.
+The gp_regr source-to-CSV observation increased from 0.08 to 0.51 seconds; it
+is retained rather than inferred from the improved fixed-point gradient time.
+
+Regenerated the full and representative tables and generated README/web
+fragments. Recomputed the corpus summaries from the TSV, correcting stale
+handwritten medians: 2.10x gradient throughput and about 8.6x source-to-CSV.
+Validation: `python3 tools/gen_docs.py --check` and `git diff --check`.

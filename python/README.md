@@ -218,19 +218,19 @@ point, both sides `-O3` with FP contraction pinned off:
 | `lotka_volterra` | 21.6 us | 40.8 us | **1.9x** |
 | `hmm_example` | 16.1 us | 26.2 us | **1.6x** |
 | `garch11` | 6.9 us | 7.9 us | **1.2x** |
-| `hierarchical_gp` | 36.7 us | 41.1 us | **1.1x** |
+| `hierarchical_gp` | 19.6 us | 41.1 us | **2.1x** |
 | `one_comp_mm_elim_abs` | 459.1 us | 462.8 us | **1.0x** |
 | `diamonds` | 31.1 us | 31.9 us | **1.0x** |
-| `gp_regr` | 5.5 us | 3.3 us | 0.59x |
-| `gp_pois_regr` | 5.2 us | 2.7 us | 0.51x |
+| `gp_regr` | 2.7 us | 3.3 us | **1.2x** |
+| `gp_pois_regr` | 2.3 us | 2.7 us | **1.2x** |
 <!--/gen-->
 
 The wins come from op granularity. CmdStan's var tape allocates, walks,
 and frees one node per scalar operation per leapfrog step; stanli pays
 a fixed cost per *op*, and a vectorized statement over N elements
 amortizes that to nothing. Across the whole posteriordb corpus the
-median is <!--gen:corpus_median-->2.09x<!--/gen--> and
-<!--gen:corpus_at_par-->117<!--/gen--> of
+median is <!--gen:corpus_median-->2.10x<!--/gen--> and
+<!--gen:corpus_at_par-->119<!--/gen--> of
 <!--gen:corpus_n_grad-->119<!--/gen--> models are at or above CmdStan.
 
 Repeated independent work produces the largest wins. Dense kernels and serial
