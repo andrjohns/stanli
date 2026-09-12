@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Windows prerequisites, sourced by dev_setup.sh from Git Bash or MSYS2 Bash.
 
+# Native OCaml uses COMSPEC to launch subprocesses. Git Bash can omit it;
+# restore it in Windows path syntax before invoking opam.
+export COMSPEC
+COMSPEC=$(cygpath -w "${COMSPEC:-${ComSpec:-$(command -v cmd.exe)}}")
+
 windows_refresh_path() {
   local installed_path
   installed_path=$(powershell.exe -NoProfile -NonInteractive -Command \
