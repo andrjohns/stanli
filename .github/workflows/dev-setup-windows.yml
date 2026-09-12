@@ -39,9 +39,9 @@ jobs:
           pacboy: clang:p cmake:p python:p
 
       - name: Set-up OCaml
-        uses: ocaml/setup-ocaml@v3
+        uses: andrjohns/setup-ocaml@winarm64
         with:
-          ocaml-compiler: 5.5
+          ocaml-compiler: "5.5.0"
           windows-environment: msys2
 
       - name: Install prerequisites, build, and test
