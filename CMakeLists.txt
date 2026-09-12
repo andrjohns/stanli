@@ -406,9 +406,9 @@ elseif(UNIX)
 endif()
 
 # In-process stanc3: link the OCaml-compiled embed object
-# (tools/stanc_embed/build.sh produces deps/stanc3/stanc_embed.o).
+# (tools/stanc_embed/build.sh produces stanc_embed.o, or stanc_embed.a on Windows).
 set(STANLI_STANC_EMBED_OBJ "" CACHE FILEPATH
-    "stanc_embed.o built by tools/stanc_embed/build.sh; enables in-process stanc")
+    "Embed object or archive built by tools/stanc_embed/build.sh; enables in-process stanc")
 set(STANLI_OCAML_STDLIB "" CACHE PATH
     "OCaml stdlib dir (opam switch lib/ocaml) for caml/*.h")
 # The embed object is a whole OCaml runtime, so it can only be linked into
@@ -416,8 +416,12 @@ set(STANLI_OCAML_STDLIB "" CACHE PATH
 # static library every target shares.
 function(stanli_embed_stanc TGT)
   if(STANLI_STANC_EMBED_OBJ)
-    target_sources(${TGT} PRIVATE
-      runtime/src/stanc_embed_c.cpp ${STANLI_STANC_EMBED_OBJ})
+    target_sources(${TGT} PRIVATE runtime/src/stanc_embed_c.cpp)
+    if(STANLI_STANC_EMBED_OBJ MATCHES "\\.a$")
+      target_link_libraries(${TGT} PRIVATE "${STANLI_STANC_EMBED_OBJ}")
+    else()
+      target_sources(${TGT} PRIVATE "${STANLI_STANC_EMBED_OBJ}")
+    endif()
     target_include_directories(${TGT} PRIVATE ${STANLI_OCAML_STDLIB})
     target_compile_definitions(${TGT} PRIVATE STANLI_EMBED_STANC)
     target_link_libraries(${TGT} PRIVATE ${CMAKE_DL_LIBS} pthread)
@@ -1048,6 +1052,9 @@ add_test(NAME test_function COMMAND test_function
 # standalone runs on older Python use the Tomli backport in requirements.txt.
 find_package(Python3 3.11 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+  add_test(NAME test_windows_embed
+           COMMAND ${Python3_EXECUTABLE} tests/test_windows_embed.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME test_corpus_bench
            COMMAND ${Python3_EXECUTABLE} tests/test_corpus_bench.py
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

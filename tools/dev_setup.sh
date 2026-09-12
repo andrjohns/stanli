@@ -143,7 +143,11 @@ cp deps/stanc3/stanc-pinned.src deps/stanc3/stanc.src
 
 # --- embedded stanc3 -------------------------------------------------------
 step "building the embeddable stanc object"
-if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
+EMBED_OBJECT=deps/stanc3/stanc_embed.o
+if [ "$EXE_SUFFIX" = .exe ]; then
+  EMBED_OBJECT=deps/stanc3/stanc_embed.a
+fi
+if stanc_embed_artifact_matches "$EMBED_OBJECT" \
      "$STANC3_SRC_SHA" &&
    [ -x deps/stanc3/stanli-vectorize-probe ] &&
    stanc_embed_artifact_matches deps/stanc3/stanli-vectorize-probe \
@@ -158,13 +162,13 @@ fi
 if [ "$WANT_BUILD" = 1 ]; then
   step "configuring and building with $BUILD_JOBS jobs (build/ dev, build-rel/ benchmarks)"
   EMBED_FLAGS=()
-  if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
+  if stanc_embed_artifact_matches "$EMBED_OBJECT" \
        "$STANC3_SRC_SHA"; then
     EMBED_FLAGS=(
-      "-DSTANLI_STANC_EMBED_OBJ=$REPO/deps/stanc3/stanc_embed.o"
+      "-DSTANLI_STANC_EMBED_OBJ=$REPO/$EMBED_OBJECT"
       "-DSTANLI_OCAML_STDLIB=$(opam var --switch="$OPAM_SWITCH" lib 2>/dev/null)/ocaml"
     )
-  elif [ -f deps/stanc3/stanc_embed.o ]; then
+  elif [ -f "$EMBED_OBJECT" ]; then
     echo "ignoring embedded object with absent or mismatched provenance" >&2
   fi
   cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -266,7 +270,7 @@ echo "dev build:   build/            (tests: ctest --test-dir build)"
 echo "bench build: build-rel/        (tools/bench_grad.cpp)"
 echo "corpus:      ${PYTHON##*/} tools/corpus.py deps/posteriordb"
 echo "verify:      ${PYTHON##*/} tools/verify_sample.py deps/cmdstan deps/posteriordb MODEL..."
-if stanc_embed_artifact_matches deps/stanc3/stanc_embed.o \
+if stanc_embed_artifact_matches "$EMBED_OBJECT" \
      "$STANC3_SRC_SHA"; then
   echo "wheel:       tools/build_wheel.sh"
 else

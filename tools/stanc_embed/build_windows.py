@@ -1,9 +1,10 @@
-"""Build a static OCaml embed object without partially linking Windows DLL imports."""
+"""Bundle Windows OCaml objects without GNU partial linking (unsupported by LLD)."""
 
 import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,41 @@ import tempfile
 
 def output(*args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
+
+
+def build_static_archive(destination, objects, archives, compiler, c_runtime):
+    """Keep members lazy so unused OCaml stubs do not add link dependencies."""
+    with tempfile.TemporaryDirectory(prefix="stanc-archive-") as tmp:
+        tmp = Path(tmp)
+        combined = tmp / "embed.a"
+        # L flattens input archives, including members with duplicate filenames.
+        subprocess.run(["llvm-ar", "qcLs", combined, *objects, *archives], check=True)
+
+        def symbols(option, *paths):
+            return {line.split()[0] for line in output(
+                "llvm-nm", "--extern-only", "--no-sort", "--format=posix", option,
+                *(str(path) for path in paths)).splitlines() if line.split()}
+
+        defined = symbols("--defined-only", combined, c_runtime)
+        undefined = symbols("--undefined-only", combined)
+        imports = sorted(name for name in undefined
+                         if name.startswith("__imp_") and name[6:] in defined
+                         and name not in defined)
+        # C stubs can reference native OCaml definitions through DLL-import
+        # pointers. Each pointer needs its own member: extracting one must not
+        # pull in every otherwise-unused stub and its external dependencies.
+        definitions = [("static_symtable", "0")]
+        definitions.extend((name, name[6:]) for name in imports)
+        import_objects = []
+        for index, (name, target) in enumerate(definitions):
+            assembly = tmp / f"import_{index}.s"
+            obj = assembly.with_suffix(".o")
+            assembly.write_text('.section .rdata,"dr"\n.balign 8\n'
+                                f'.globl {name}\n{name}:\n.quad {target}\n')
+            subprocess.run([*compiler, "-c", assembly, "-o", obj], check=True)
+            import_objects.append(obj.name)
+        subprocess.run(["llvm-ar", "qs", combined, *import_objects], cwd=tmp, check=True)
+        shutil.copyfile(combined, destination)
 
 
 def main():
@@ -51,34 +87,15 @@ def main():
     compiler = os.environ.get("CC", "clang")
     c_runtime = Path(output(compiler, "-print-file-name=libmsvcrt.a"))
 
-    destination = source / "_build/stanc_embed.static.o"
+    destination = source / "_build/stanc_embed.static.a"
     with tempfile.TemporaryDirectory(prefix="stanc-static-") as tmp:
         tmp = Path(tmp)
         command = ["-output-obj" if arg == "-output-complete-obj" else arg
                    for arg in command]
         command[command.index("-o") + 1] = str(tmp / "ocaml.o")
         subprocess.run(command, cwd=workdir, check=True)
-        combined = tmp / "combined.o"
-        subprocess.run(["ld", "-r", "-u", "caml_startup", "-o", combined,
-                        tmp / "ocaml.o", *archives, runtime_support], check=True)
-
-        defined = {line.split()[0] for line in output(
-            "nm", "--no-sort", "--format=posix", "--defined-only",
-            str(combined), str(c_runtime)).splitlines() if line.split()}
-        undefined = [line.split()[0] for line in output(
-            "nm", "--no-sort", "--format=posix", "--undefined-only", str(combined)).splitlines()]
-        # Prebuilt OCaml C stubs use DLL-import declarations. Bind their import
-        # pointers to definitions in this static object, for both code and data.
-        imports = sorted(name for name in undefined
-                         if name.startswith("__imp_") and name[6:] in defined
-                         and name not in defined)
-        assembly = ('.section .rdata,"dr"\n.balign 8\n'
-                    '.globl static_symtable\nstatic_symtable:\n.quad 0\n') + "".join(
-            f".globl {name}\n{name}:\n.quad {name[6:]}\n" for name in imports)
-        (tmp / "imports.s").write_text(assembly)
-        subprocess.run([compiler, "-c", tmp / "imports.s", "-o", tmp / "imports.o"], check=True)
-        subprocess.run(["ld", "-r", "--disable-auto-import", "-o", destination,
-                        combined, tmp / "imports.o"], check=True)
+        build_static_archive(destination, [tmp / "ocaml.o", runtime_support],
+                             archives, [compiler], c_runtime)
 
 
 if __name__ == "__main__":

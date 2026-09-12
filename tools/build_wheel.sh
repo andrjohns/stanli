@@ -21,6 +21,9 @@ if [ -z "$STANC3_SRC_REPO" ]; then
   exit 1
 fi
 EMBED_OBJECT=deps/stanc3/stanc_embed.o
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) EMBED_OBJECT=deps/stanc3/stanc_embed.a ;;
+esac
 if [ -f "$EMBED_OBJECT" ] &&
    ! stanc_embed_artifact_matches "$EMBED_OBJECT" "$STANC3_SRC_SHA"; then
   echo "$EMBED_OBJECT has absent or mismatched provenance" >&2

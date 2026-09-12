@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the embeddable stanc object: copies the shim into a stanc3 checkout,
-# builds with dune (-output-complete-obj), and drops stanc_embed.o into
-# deps/stanc3/.
+# builds with dune, and drops stanc_embed.o (stanc_embed.a on Windows)
+# into deps/stanc3/.
 # Usage: tools/stanc_embed/build.sh /path/to/stanc3-src [opam-switch]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -50,7 +50,7 @@ fi
    src/stanc_embed)
 if [ "$OCAML_OS_TYPE" = Win32 ]; then
   "${PYTHON:-python}" tools/stanc_embed/build_windows.py "$SRC" "$BUILD_JOBS"
-  OBJ="$SRC/_build/stanc_embed.static.o"
+  OBJ="$SRC/_build/stanc_embed.static.a"
 else
   if ! (cd "$SRC" && dune build -j "$BUILD_JOBS" --profile release \
       src/stanc_embed/stanc_embed.exe.o 2>&1 | tail -5); then
@@ -78,6 +78,9 @@ PROBE=$(find "$SRC/_build" \
 # reject a cache entry left behind by an earlier encoder or build recipe. Each
 # stamp moves last and therefore commits the artifact beside it.
 OUT=deps/stanc3/stanc_embed.o
+if [ "$OCAML_OS_TYPE" = Win32 ]; then
+  OUT=deps/stanc3/stanc_embed.a
+fi
 PROBE_OUT=deps/stanc3/stanli-vectorize-probe
 TMP_OBJECT="${OUT}.tmp.$$"
 TMP_STAMP="${OUT}.stamp.tmp.$$"
