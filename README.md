@@ -397,6 +397,11 @@ MinGW `RelWithDebInfo` builds use `-g1` to reduce object and `.exe.debug` sizes,
 retaining source lines and backtraces. Use `-DCMAKE_BUILD_TYPE=Debug` for full
 variable and type information.
 
+Full native Windows setup runs after pushes to `main` and on manual dispatch,
+covering x64 embedding and ARM64 standalone deployment. Pull requests run the
+fast setup contract tests in the existing static checks and retain Windows
+compiler parity coverage, without waiting for these full native builds.
+
 Windows CI saves the OCaml toolchain and validated compiler artifacts before
 building C++, then saves the C++ cache before running the full test suite.
 Its toolchain cache is keyed on the compiler versions and source pin, so

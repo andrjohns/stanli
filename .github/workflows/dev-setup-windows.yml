@@ -1,11 +1,6 @@
 name: Windows dev setup
 
 on:
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - 'LICENSE'
   push:
     branches: main
     paths-ignore:
@@ -17,10 +12,11 @@ on:
 permissions:
   contents: read
 
-# Keep main's cache-producing runs; cancel superseded commits on a PR.
+# Full native setup is postsubmit; PRs keep the fast setup contract checks.
+# Let cache-producing runs finish so later main builds can reuse their work.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   dev-setup:
