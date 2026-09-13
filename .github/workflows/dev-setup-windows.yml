@@ -41,9 +41,12 @@ jobs:
           - os: windows-latest
             msystem: UCRT64
             setup_args: ''
+            ocaml_packages: ''
           - os: windows-11-arm
             msystem: CLANGARM64
             setup_args: --no-embed
+            # OCaml runs as x64 on ARM; these live outside the OPAMROOT cache.
+            ocaml_packages: mingw-w64-x86_64-gcc
     steps:
       - uses: actions/checkout@v7
 
@@ -54,7 +57,7 @@ jobs:
           update: true
           # Keep the action-installed opam on PATH in the MSYS2 shell.
           path-type: inherit
-          install: git make curl
+          install: git make curl ${{ matrix.ocaml_packages }}
           pacboy: clang:p llvm-tools:p cmake:p python:p ccache:p
 
       - name: Check setup script contracts before the expensive build
@@ -108,20 +111,7 @@ jobs:
       - name: Validate the restored OCaml switch
         if: steps.opam-cache.outputs.cache-matched-key != ''
         shell: msys2 {0}
-        run: |
-          source tools/stanc_embed/provenance.sh
-          switch=$(stanc_embed_read_setup OPAM_SWITCH)
-          if _stanc_embed_switch_exists "$switch"; then
-            actual=$(_stanc_embed_ocaml_version "$switch" || true)
-            expected=$(stanc_embed_read_setup OCAML_VERSION)
-            if [ "$actual" != "$expected" ]; then
-              # The v1 migration fallback did not encode the OCaml version.
-              # This is a restored cache on a disposable runner, not a user's
-              # installation. Recreate only the incompatible named switch.
-              echo "Cached OCaml $actual does not match $expected; recreating $switch"
-              opam switch remove "$switch" --yes
-            fi
-          fi
+        run: bash tools/stanc_embed/validate_cached_switch.sh
 
       - name: Restore built Stan compilers and source state
         id: stanc-cache

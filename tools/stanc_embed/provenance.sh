@@ -44,7 +44,9 @@ _stanc_embed_switch_exists() {
 
 _stanc_embed_ocaml_version() {
   local opam_switch=${1:?opam switch}
-  opam exec --switch="$opam_switch" -- ocamlc -version | tr -d '\r'
+  local version
+  version=$(opam exec --switch="$opam_switch" -- ocamlc -version) || return $?
+  printf '%s\n' "$version" | tr -d '\r'
 }
 
 _stanc_embed_ocaml_target() {

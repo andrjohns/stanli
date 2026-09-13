@@ -130,7 +130,9 @@ jobs:
       - name: Check static packaging inputs
         run: test -s LICENSE && test -s THIRD_PARTY_LICENSES.md
       - name: Check development setup contracts
-        run: python3 tests/test_dev_setup.py
+        run: |
+          python3 tests/test_dev_setup.py
+          bash tests/test_cached_ocaml_switch.sh
       - name: Check the Windows C ABI exports
         run: python3 tests/test_windows_exports.py
       - name: Check portable build parallelism

@@ -405,7 +405,11 @@ compiler parity coverage, without waiting for these full native builds.
 Windows CI saves the OCaml toolchain and validated compiler artifacts before
 building C++, then saves the C++ cache before running the full test suite.
 Its toolchain cache is keyed on the compiler versions and source pin, so
-unrelated workflow edits do not force an OCaml rebuild. CI uses `--no-build`
+unrelated workflow edits do not force an OCaml rebuild. ARM runners install the
+x64 MinGW dependencies used by OCaml before validating its restored cache. A
+failed compiler launch preserves the cache and reports the error; only a
+successfully reported incompatible version triggers switch replacement.
+CI uses `--no-build`
 for compiler preparation and `--no-test` to save the completed build before
 the separate test step; ordinary setup still builds and tests in one command.
 
