@@ -370,16 +370,25 @@ workflows.
 One-shot setup (fetches pinned deps, builds, runs tests):
 
 ```
-./tools/dev_setup.sh               # core build + tests + source-pinned stanc3 and stanli-compile
-./tools/dev_setup.sh --embed       # use the in-process compiler instead
+./tools/dev_setup.sh               # core build + tests + source-pinned stanc3, embedded in the tools/library
+./tools/dev_setup.sh --no-embed    # use standalone stanli-compile (required on Windows ARM64)
 ./tools/dev_setup.sh --corpus      # + posteriordb and CmdStan
 ./tools/dev_setup.sh --conformance # + the Stan conformance reference stack
 ./tools/dev_setup.sh --all
 ```
 
 On Windows, run `bash tools/dev_setup.sh` from Git Bash or MSYS2 Bash.
-Without `--embed`, setup builds `stanli-compile` and CMake places it beside
-`stanli_check`. `--embed` is unsupported on Windows ARM64.
+Embedding is the default, keeping the tools self-contained and compilation
+in-process. `--embed` explicitly selects that default. Windows ARM64 requires
+`--no-embed`: its OCaml compiler runs under x64 emulation, while Stanli's
+numerical runtime is native ARM64. `--all` respects `--no-embed` in either order.
+With `--no-embed`, setup builds `stanli-compile` from the same Stanli pipeline
+and CMake copies it beside both `stanli_check` and `stanli_run`, including in
+`cmake --install` deployments. Keep those executables together when moving an
+installation. The tools also accept `--stanli-compile PATH`; stock stanc is
+used only when explicitly requested with `--stanc PATH` (or `STANC` for
+`stanli_run`). `--conformance` stages the standalone compiler with the Python
+library when embedding is disabled.
 Setup reuses the installation providing `pacman` on `PATH`, or checks
 `C:/msys64` and installs `MSYS2.MSYS2` with winget if absent. It prepends
 the UCRT64 directories on x86_64 or CLANGARM64 directories on ARM64 to `PATH`.

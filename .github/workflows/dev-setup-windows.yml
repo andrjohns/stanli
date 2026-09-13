@@ -2,12 +2,25 @@ name: Windows dev setup
 
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
   push:
     branches: main
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Keep main's cache-producing runs; cancel superseded commits on a PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   dev-setup:
@@ -16,14 +29,24 @@ jobs:
     timeout-minutes: 120
     env:
       OPAMROOT: C:\opam
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPRESS: '1'
+      CCACHE_MAXSIZE: 2G
+      # Match the existing native CI cache's treatment of regenerated PCHs.
+      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             msystem: UCRT64
+            setup_args: ''
           - os: windows-11-arm
             msystem: CLANGARM64
+            setup_args: --no-embed
     steps:
       - uses: actions/checkout@v7
 
@@ -35,7 +58,20 @@ jobs:
           # Keep the action-installed opam on PATH in the MSYS2 shell.
           path-type: inherit
           install: git make curl
-          pacboy: clang:p llvm-tools:p cmake:p python:p
+          pacboy: clang:p llvm-tools:p cmake:p python:p ccache:p
+
+      - name: Identify the C++ toolchain
+        id: toolchain
+        shell: msys2 {0}
+        run: |
+          echo "id=$(clang++ --version | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache C++ compilation
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: windows-dev-ccache-v1-${{ matrix.os }}-${{ matrix.msystem }}-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/workflows/dev-setup-windows.yml', 'CMakeLists.txt', 'runtime/**', 'tests/**', 'tools/**', 'deps/fetch.sh') }}
+          restore-keys: windows-dev-ccache-v1-${{ matrix.os }}-${{ matrix.msystem }}-${{ steps.toolchain.outputs.id }}-
 
       - name: Install opam and configure PATH
         shell: pwsh
@@ -57,5 +93,10 @@ jobs:
           key: windows-opam-v1-${{ matrix.os }}-${{ matrix.msystem }}-${{ hashFiles('.github/workflows/dev-setup-windows.yml', 'tools/dev_setup.sh', 'tools/dev_setup_windows.sh', 'harnesses/conformance/build_stanc.sh') }}
 
       - name: Install prerequisites, build, and test
-        run: bash tools/dev_setup.sh ${{ matrix.os == 'windows-latest' && '--embed' || '' }}
+        run: bash tools/dev_setup.sh ${{ matrix.setup_args }}
         shell: pwsh
+
+      - name: C++ cache statistics
+        if: always()
+        shell: msys2 {0}
+        run: ccache --show-stats

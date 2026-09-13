@@ -18,7 +18,7 @@ case "$(powershell.exe -NoProfile -NonInteractive -Command \
   '(Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture' | tr -d '\r')" in
   12)
     if [ "$WANT_EMBED" = 1 ]; then
-      echo "--embed is unsupported on Windows ARM64: OCaml runs under x64 emulation and cannot build native ARM64 objects." >&2
+      echo "Embedding is unsupported on Windows ARM64: OCaml runs under x64 emulation and cannot build native ARM64 objects. Rerun with --no-embed." >&2
       exit 1
     fi
     msys_env=clangarm64; msys_package_prefix=mingw-w64-clang-aarch64

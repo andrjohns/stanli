@@ -2,8 +2,9 @@
 # One-shot dev environment setup. Safe to re-run; every step is
 # idempotent and skipped once its output exists.
 #
-#   tools/dev_setup.sh               core: pinned stanc, stanli-compile, cmake builds/tests
-#   tools/dev_setup.sh --embed       + in-process compiler
+#   tools/dev_setup.sh               core: pinned stanc, embedded compiler, cmake builds/tests
+#   tools/dev_setup.sh --no-embed    use standalone stanli-compile (Windows ARM64 requires this)
+#   tools/dev_setup.sh --embed       explicitly select the default embedded compiler
 #   tools/dev_setup.sh --corpus      + posteriordb and CmdStan rig
 #   tools/dev_setup.sh --conformance + the Stan conformance reference stack
 #   tools/dev_setup.sh --all         everything
@@ -20,7 +21,7 @@
 #   deps/cmdstan checkout as --corpus and the same stanc3 source tree and
 #   opam switch as core, so with either of those already done most of
 #   it is a no-op.
-# --embed builds and links the in-process compiler; unsupported on Windows ARM64.
+# Embedding is the default; use --no-embed on Windows ARM64.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -35,16 +36,17 @@ source tools/stanc_embed/provenance.sh
 source tools/build_jobs.sh
 BUILD_JOBS=$(stanli_detect_build_jobs)
 
-WANT_EMBED=0
+WANT_EMBED=1
 WANT_CORPUS=0
 WANT_CONFORMANCE=0
 WANT_BUILD=1
 for arg in "$@"; do
   case "$arg" in
     --embed) WANT_EMBED=1 ;;
+    --no-embed) WANT_EMBED=0 ;;
     --corpus) WANT_CORPUS=1 ;;
     --conformance) WANT_CONFORMANCE=1 ;;
-    --all) WANT_EMBED=1; WANT_CORPUS=1; WANT_CONFORMANCE=1 ;;
+    --all) WANT_CORPUS=1; WANT_CONFORMANCE=1 ;;
     --no-build) WANT_BUILD=0 ;;
     -h|--help) sed -n '2,/^set -/{ /^set -/d; p; }' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)"; exit 2 ;;
@@ -153,7 +155,7 @@ if [ "$WANT_EMBED" = 1 ]; then
     tools/stanc_embed/build.sh deps/stanc3-src "$OPAM_SWITCH"
   fi
 else
-  step "building stanli-compile for the non-embedded checker"
+  step "building stanli-compile for the non-embedded tools"
   # Build only the native CLI target; the JS overlay's default alias also
   # builds JavaScript and needs js_of_ocaml. Dune handles incremental rebuilds.
   tools/stanc_embed/install_overlay.sh js deps/stanc3-src
@@ -257,6 +259,10 @@ if [ "$WANT_CONFORMANCE" = 1 ]; then
     mkdir -p python/stanli/_bin
     cp "$LIB" python/stanli/_bin/
     install -m 755 deps/stanc3/stanc-pinned "python/stanli/_bin/stanc$EXE_SUFFIX"
+    if [ "$WANT_EMBED" = 0 ]; then
+      install -m 755 "deps/stanc3/stanli-compile$EXE_SUFFIX" \
+        "python/stanli/_bin/stanli-compile$EXE_SUFFIX"
+    fi
   else
     step "--no-build: stage python/stanli/_bin before running the harness"
     echo "  cmake --build build-rel --target stanli_shared"
@@ -267,6 +273,9 @@ if [ "$WANT_CONFORMANCE" = 1 ]; then
       echo "  cp build-rel/libstanli.* python/stanli/_bin/"
     fi
     echo "  cp deps/stanc3/stanc-pinned python/stanli/_bin/stanc$EXE_SUFFIX"
+    if [ "$WANT_EMBED" = 0 ]; then
+      echo "  cp deps/stanc3/stanli-compile$EXE_SUFFIX python/stanli/_bin/"
+    fi
   fi
 fi
 
