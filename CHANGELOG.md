@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### The browser's sampling diagnostics box starts collapsed
+
+The diagnostics report on the demo page now sits in a disclosure box, closed
+by default and opened with the same arrow as the generated-quantities
+table. In the NUTS vs WALNUTS comparison the two reports differed in
+height, so the summary tables and plots below them no longer lined up
+across columns; with both boxes closed the columns match. The closed line
+still carries the report's verdict ("No problems detected", "2 diagnostic
+checks failed", or "unavailable" for WALNUTS), in red when a check failed.
+
 ## 0.13.0
 
 ### The upstream loop vectorizer's new shapes lower without regressions
