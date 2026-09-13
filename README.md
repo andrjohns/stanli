@@ -397,6 +397,13 @@ MinGW `RelWithDebInfo` builds use `-g1` to reduce object and `.exe.debug` sizes,
 retaining source lines and backtraces. Use `-DCMAKE_BUILD_TYPE=Debug` for full
 variable and type information.
 
+Windows CI saves the OCaml toolchain and validated compiler artifacts before
+building C++, then saves the C++ cache before running the full test suite.
+Its toolchain cache is keyed on the compiler versions and source pin, so
+unrelated workflow edits do not force an OCaml rebuild. CI uses `--no-build`
+for compiler preparation and `--no-test` to save the completed build before
+the separate test step; ordinary setup still builds and tests in one command.
+
 `--conformance` is what makes the differential Stan language sweep runnable
 here rather than only in the nightly; see
 [harnesses/conformance/README.md](harnesses/conformance/README.md).

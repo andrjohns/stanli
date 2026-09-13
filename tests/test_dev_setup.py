@@ -74,7 +74,7 @@ printf '\n' >> "$SETUP_TEST_LOG"
 mkdir -p build-rel
 echo library > build-rel/libstanli.so
 """)
-        self.script("fake-bin/ctest", "true\n")
+        self.script("fake-bin/ctest", "echo ctest >> \"$SETUP_TEST_LOG\"\n")
         self.log = self.root / "cmake.log"
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
                         STANLI_JOBS="1", SETUP_TEST_LOG="cmake.log")
@@ -130,6 +130,15 @@ echo library > build-rel/libstanli.so
         self.setup("--no-embed", "--no-build")
         self.assertFalse(self.log.exists())
         self.assertTrue((self.root / "deps/stanc3/stanli-compile").is_file())
+
+    def test_separate_compiler_build_and_test_phases(self):
+        self.setup("--no-build")
+        self.assertFalse(self.log.exists())
+        self.setup("--no-test")
+        self.assert_mode(True)
+        self.assertNotIn("ctest", self.log.read_text())
+        self.setup()
+        self.assertIn("ctest", self.log.read_text())
 
     def test_arm64_requires_explicit_no_embed(self):
         self.script("fake-bin/uname", "echo MINGW64_NT\n")

@@ -9,6 +9,7 @@
 #   tools/dev_setup.sh --conformance + the Stan conformance reference stack
 #   tools/dev_setup.sh --all         everything
 #   tools/dev_setup.sh --no-build    stop before cmake (CI builds separately)
+#   tools/dev_setup.sh --no-test     build without ctest (CI tests separately)
 #
 # Core needs: git, curl, python3 (or python), and opam (the OCaml 5.5.0 switch for the
 # pinned stanc is built automatically). The default C++ build additionally
@@ -40,6 +41,7 @@ WANT_EMBED=1
 WANT_CORPUS=0
 WANT_CONFORMANCE=0
 WANT_BUILD=1
+WANT_TEST=1
 for arg in "$@"; do
   case "$arg" in
     --embed) WANT_EMBED=1 ;;
@@ -48,6 +50,7 @@ for arg in "$@"; do
     --conformance) WANT_CONFORMANCE=1 ;;
     --all) WANT_CORPUS=1; WANT_CONFORMANCE=1 ;;
     --no-build) WANT_BUILD=0 ;;
+    --no-test) WANT_TEST=0 ;;
     -h|--help) sed -n '2,/^set -/{ /^set -/d; p; }' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)"; exit 2 ;;
   esac
@@ -187,8 +190,12 @@ if [ "$WANT_BUILD" = 1 ]; then
   cmake --build build-rel --parallel "$BUILD_JOBS" \
     --target bench_grad stanli_run
 
-  step "running tests"
-  ctest --test-dir build --parallel "$BUILD_JOBS" --output-on-failure
+  if [ "$WANT_TEST" = 1 ]; then
+    step "running tests"
+    ctest --test-dir build --parallel "$BUILD_JOBS" --output-on-failure
+  else
+    step "--no-test: skipping ctest"
+  fi
 else
   step "--no-build: skipping cmake and tests"
 fi
