@@ -16,6 +16,12 @@ SOURCE = Path(__file__).resolve().parents[1]
 
 class DevSetupTest(unittest.TestCase):
     def setUp(self):
+        # Windows CreateProcess searches System32 before PATH for a bare
+        # executable name. Its bash.exe is the WSL launcher, not MSYS2 Bash.
+        # Resolve the shell from the development environment's PATH first.
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "MSYS2/Git Bash or a Unix Bash must be on PATH")
+        self.bash = str(Path(bash).resolve())
         self.temp = tempfile.TemporaryDirectory(prefix="stanli setup ")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -90,7 +96,7 @@ echo library > build-rel/libstanli.so
 
     def setup(self, *args, code=0):
         self.log.unlink(missing_ok=True)
-        result = subprocess.run(["bash", "tools/dev_setup.sh", *args],
+        result = subprocess.run([self.bash, "tools/dev_setup.sh", *args],
                                 cwd=self.root, env=self.env,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)

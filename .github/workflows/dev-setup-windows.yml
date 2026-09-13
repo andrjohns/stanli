@@ -61,6 +61,10 @@ jobs:
           install: git make curl
           pacboy: clang:p llvm-tools:p cmake:p python:p ccache:p
 
+      - name: Check setup script contracts before the expensive build
+        shell: msys2 {0}
+        run: python tests/test_dev_setup.py
+
       - name: Identify compiler cache inputs
         id: toolchain
         shell: msys2 {0}
